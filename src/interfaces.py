@@ -215,12 +215,3 @@ class ILogger(ABC):
         pass
 
 
-# Additional data class needed for cluster instances
-@dataclass
-class ClusterInstance:
-    """Represents a created cluster instance"""
-    cluster_id: str
-    config: ClusterConfig
-    nodes: List[NodeInfo]
-    creation_time: float
-    is_ready: bool = False

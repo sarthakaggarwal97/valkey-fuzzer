@@ -262,3 +262,13 @@ class DSLConfig:
     """DSL-based test configuration"""
     config_text: str
     parsed_scenario: Optional[Scenario] = None
+
+
+@dataclass
+class ClusterInstance:
+    """Represents a created cluster instance"""
+    cluster_id: str
+    config: ClusterConfig
+    nodes: List[NodeInfo]
+    creation_time: float
+    is_ready: bool = False
