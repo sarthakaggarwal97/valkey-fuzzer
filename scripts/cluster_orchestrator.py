@@ -1,6 +1,6 @@
 import os
 import time
-import redis
+import valkey
 import subprocess
 import shutil
 import uuid
@@ -213,7 +213,7 @@ class ConfigurationManager:
                     break
                 
                 try:
-                    client = redis.Redis(
+                    client = valkey.Valkey(
                         host='127.0.0.1',
                         port=node.port,
                         socket_timeout=1,
@@ -224,7 +224,7 @@ class ConfigurationManager:
                         print(f"Node {node.node_id} is active")
                         ready = True
                         break
-                except (redis.ConnectionError, redis.TimeoutError):
+                except (valkey.ConnectionError, valkey.TimeoutError):
                     pass
                 
                 time.sleep(0.5)
@@ -278,11 +278,11 @@ class ConfigurationManager:
 class ClusterManager:
     
     def __init__(self):
-        self.connections: Dict[str, redis.Redis] = {}
+        self.connections: Dict[str, valkey.Valkey] = {}
     
-    def get_client(self, node: NodeInfo) -> redis.Redis:
+    def get_client(self, node: NodeInfo) -> valkey.Valkey:
         if node.node_id not in self.connections:
-            self.connections[node.node_id] = redis.Redis(
+            self.connections[node.node_id] = valkey.Valkey(
                 host='127.0.0.1',
                 port=node.port,
                 socket_timeout=5,
