@@ -282,11 +282,6 @@ The architecture is designed to support expansion in multiple dimensions:
 - **Resource Chaos**: Memory pressure, CPU throttling, disk I/O limitations
 - **Time Chaos**: Clock skew simulation, network time protocol disruption
 
-### Advanced Deployment Models
-- **Multi-Instance Clusters**: Distribute nodes across multiple machines
-- **Container Orchestration**: Kubernetes and Docker integration
-- **Cloud Deployment**: AWS, GCP, Azure cluster provisioning
-
 ### Extended Validation
 - **Performance Regression**: Benchmark comparison across test runs
 - **Memory Leak Detection**: Long-running test memory profiling
