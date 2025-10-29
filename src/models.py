@@ -34,13 +34,6 @@ class ClusterConfig:
     base_data_dir: str = "/tmp/valkey-fuzzer"
     valkey_binary: str = "/usr/local/bin/valkey-server"
     enable_cleanup: bool = True
-    
-    def __post_init__(self):
-        """Validate cluster configuration"""
-        if not (1 <= self.num_shards <= 16):
-            raise ValueError("Shard count must be between 1 and 16")
-        if not (0 <= self.replicas_per_shard <= 2):
-            raise ValueError("Replica count must be between 0 and 2")
 
 
 @dataclass
