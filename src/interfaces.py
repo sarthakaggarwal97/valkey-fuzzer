@@ -6,7 +6,7 @@ from typing import List, Optional
 from dataclasses import dataclass
 from .models import (
     Scenario, ExecutionResult, DSLConfig, ValidationResult,
-    ClusterConfig, ClusterInstance, ClusterStatus, NodeInfo,
+    ClusterConfig, ClusterInstance, ClusterStatus, NodeInfo, NodePlan,
     ChaosConfig, ChaosResult, ProcessChaosType,
     WorkloadConfig, WorkloadSession, WorkloadMetrics,
     Operation
@@ -45,29 +45,46 @@ class IFuzzerEngine(ABC):
 class IClusterOrchestrator(ABC):
     """Interface for cluster lifecycle management"""
     
+    # ConfigurationManager methods
     @abstractmethod
-    def create_cluster(self, config: ClusterConfig) -> ClusterInstance:
-        """Create a new Valkey cluster"""
+    def setup_valkey_from_source(self, base_dir: str = "/tmp/valkey-build") -> str:
+        """Find or build Valkey binary, return path to valkey-server binary"""
         pass
     
     @abstractmethod
-    def destroy_cluster(self, cluster_id: str) -> bool:
-        """Destroy an existing cluster"""
+    def plan_topology(self) -> List['NodePlan']:
+        """Plan cluster topology with primary and replica nodes"""
         pass
     
     @abstractmethod
-    def get_cluster_status(self, cluster_id: str) -> ClusterStatus:
-        """Get current cluster status"""
+    def spawn_all_nodes(self, node_plans: List['NodePlan']) -> List[NodeInfo]:
+        """Spawn all Valkey processes and wait for them to be ready"""
         pass
     
     @abstractmethod
-    def get_node_info(self, cluster_id: str) -> List[NodeInfo]:
-        """Get information about all nodes in cluster"""
+    def cleanup_cluster(self, nodes_in_cluster: List[NodeInfo]) -> None:
+        """Clean up cluster by terminating nodes and releasing resources"""
+        pass
+    
+    # ClusterManager methods
+    @abstractmethod
+    def reset_cluster_state(self, nodes_in_cluster: List[NodeInfo]) -> None:
+        """Reset cluster state on all nodes"""
         pass
     
     @abstractmethod
-    def wait_for_cluster_ready(self, cluster_id: str, timeout: float = 60.0) -> bool:
-        """Wait for cluster to be ready for testing"""
+    def form_cluster(self, nodes_in_cluster: List[NodeInfo]) -> bool:
+        """Form a complete cluster from spawned nodes"""
+        pass
+    
+    @abstractmethod
+    def validate_cluster(self, nodes_in_cluster: List[NodeInfo]) -> bool:
+        """Validate cluster health and configuration"""
+        pass
+    
+    @abstractmethod
+    def close_connections(self) -> None:
+        """Close all Valkey client connections"""
         pass
 
 

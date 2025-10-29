@@ -4,52 +4,12 @@ import valkey
 import subprocess
 import shutil
 import uuid
-from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
+from ..models import ClusterConfig, NodePlan, NodeInfo
 
-@dataclass
-class ClusterConfig:
-    num_shards: int
-    replicas_per_shard: int
-    base_port: int = 6379
-    base_data_dir: str = "/tmp/valkey-fuzzer"
-    valkey_binary: str = "/usr/local/bin/valkey-server"
-    enable_cleanup: bool = True
-
-@dataclass
-class NodePlan:
-    node_id: str
-    role: str 
-    shard_id: int
-    port: int
-    bus_port: int
-    slot_start: Optional[int] = None 
-    slot_end: Optional[int] = None   
-    master_node_id: Optional[str] = None
-
-@dataclass
-class NodeInfo:
-    node_id: str
-    role: str
-    shard_id: int
-    port: int
-    bus_port: int
-    pid: int
-    process: subprocess.Popen
-    data_dir: str
-    log_file: str
-    slot_start: Optional[int] = None
-    slot_end: Optional[int] = None
-    master_node_id: Optional[str] = None
-    cluster_node_id: Optional[str] = None 
-
-@dataclass
-class ClusterHandle:
-    # Can use this to interact with the fuzzer engine
-    cluster_id: str
-    nodes: List[NodeInfo]
 
 class PortManager:
+    """Manages port allocation for Valkey cluster nodes"""
     
     def __init__(self, base_port: int = 6379, max_ports: int = 1000):
         self.base_port = base_port
@@ -57,6 +17,7 @@ class PortManager:
         self.allocated_ports: Dict[str, Tuple[int, int]] = {}
     
     def allocate_ports(self, node_id: str) -> Tuple[int, int]:
+        """Allocate client and bus ports for a node"""
         if not self.available_ports:
             raise Exception("No available ports!")
         
@@ -69,24 +30,50 @@ class PortManager:
         return client_port, bus_port
     
     def release_ports(self, node_id: str) -> None:
+        """Release allocated ports for a node"""
         if node_id in self.allocated_ports:
             client_port, bus_port = self.allocated_ports[node_id]
             self.available_ports.add(client_port)
             del self.allocated_ports[node_id]
             print(f"Released ports: {client_port}, {bus_port}")
 
+
 class ConfigurationManager:
+    """Manages Valkey cluster planning, node spawning, and resource cleanup"""
+
     def __init__(self, clusterConfig: ClusterConfig, port_manager: PortManager):
         self.clusterConfig = clusterConfig
         self.port_manager = port_manager
         self.cluster_id = self.generate_cluster_id()
     
+    def setup_valkey_from_source(self, base_dir: str = "/tmp/valkey-build") -> str:
+        """Clone and build Valkey binary, return path to valkey-server binary"""
+        result = subprocess.run(['which', 'valkey-server'], capture_output=True, text=True)
+        if result.returncode == 0:
+            valkey_binary = result.stdout.strip()
+            return valkey_binary
+                
+        valkey_dir = os.path.join(base_dir, "valkey")
+        valkey_binary = os.path.join(valkey_dir, "src", "valkey-server")
+        os.makedirs(base_dir, exist_ok=True)
+        
+        subprocess.run(['git', 'clone', 'https://github.com/valkey-io/valkey.git', valkey_dir], check=True)
+        subprocess.run(['make'], cwd=valkey_dir, check=True)
+        
+        if not os.path.exists(valkey_binary):
+            raise Exception(f"Build completed but binary not found at {valkey_binary}")
+        
+        print(f"Valkey built successfully at: {valkey_binary}")
+        return valkey_binary
+    
     def generate_cluster_id(self) -> str:
+        """Generate unique cluster identifier"""
         return str(uuid.uuid4())[:8]
     
     def create_node_plan(self, node_counter: int, role: str, shard_id: int, 
                          slot_start: Optional[int] = None, slot_end: Optional[int] = None,
                          master_node_id: Optional[str] = None) -> NodePlan:
+        """Create a node plan with allocated ports and configuration"""
         node_id = f"node-{node_counter}"
         client_port, bus_port = self.port_manager.allocate_ports(node_id)
         
@@ -102,6 +89,7 @@ class ConfigurationManager:
         )
     
     def plan_topology(self) -> List[NodePlan]:
+        """Plan cluster topology with given number of primary and replica nodes"""
         nodes = []
         node_counter = 0
         
@@ -135,7 +123,7 @@ class ConfigurationManager:
         return nodes
     
     def create_node_directories(self, node_id: str) -> Tuple[str, str]:
-        """Create directories for a node and return paths"""
+        """Create directories for a node and return path"""
         node_data_dir = os.path.join(self.clusterConfig.base_data_dir, f"cluster-{self.cluster_id}", node_id, "data")
         log_dir = os.path.join(self.clusterConfig.base_data_dir, "logs")
         
@@ -146,11 +134,11 @@ class ConfigurationManager:
         return node_data_dir, log_file
     
     def spawn_all_nodes(self, node_plans: List[NodePlan]) -> List[NodeInfo]:
+        """Spawn all Valkey processes and wait for them to be ready"""
         print(f"\nSpawning {len(node_plans)} nodes")
         node_info_list = []
         
         for plan in node_plans:
-            # Create directories for data (Note: Come back to this later)
             node_data_dir, log_file = self.create_node_directories(plan.node_id)
             
             cmd = [
@@ -230,7 +218,6 @@ class ConfigurationManager:
                 time.sleep(0.5)
             
             if not ready:
-                print(f"Node {node.node_id} failed to start")
                 for failed_node in node_info_list:
                     self.terminate_node(failed_node)
                 raise Exception(f"Node {node.node_id} failed to start")
@@ -239,6 +226,7 @@ class ConfigurationManager:
         return node_info_list
     
     def terminate_node(self, node: NodeInfo) -> None:
+        """Terminate a Valkey node process"""
         if node.process.poll() is not None:
             return
         
@@ -249,12 +237,12 @@ class ConfigurationManager:
             node.process.wait(timeout=5)
             print(f"{node.node_id} terminated")
         except subprocess.TimeoutExpired:
-            print(f"Forcing {node.node_id} to stop")
             node.process.kill()
             node.process.wait()
             print(f"{node.node_id} terminated")
     
     def cleanup_cluster(self, nodes_in_cluster: List[NodeInfo]) -> None:
+        """Clean up cluster by terminating nodes and releasing resources"""
         print(f"\nCleaning up cluster {self.cluster_id}")
         
         for node in nodes_in_cluster:
@@ -263,7 +251,6 @@ class ConfigurationManager:
         for node in nodes_in_cluster:
             self.port_manager.release_ports(node.node_id)
         
-        # Data deletion (Figure out data stuff)
         if self.clusterConfig.enable_cleanup:
             cluster_dir = os.path.join(
                 self.clusterConfig.base_data_dir,
@@ -275,12 +262,15 @@ class ConfigurationManager:
         
         print(f"Cluster {self.cluster_id} cleaned up")
 
+
 class ClusterManager:
+    """Manages Valkey cluster formation and validates cluster health. Works with nodes that have been spawned by ConfigurationManager"""
     
     def __init__(self):
         self.connections: Dict[str, valkey.Valkey] = {}
     
     def get_client(self, node: NodeInfo) -> valkey.Valkey:
+        """Get or create Valkey client connection for a node"""
         if node.node_id not in self.connections:
             self.connections[node.node_id] = valkey.Valkey(
                 host='127.0.0.1',
@@ -291,6 +281,7 @@ class ClusterManager:
         return self.connections[node.node_id]
     
     def get_cluster_info(self, node: NodeInfo) -> Dict[str, str]:
+        """Get cluster info from a node and parse into dictionary"""
         client = self.get_client(node)
         info = client.execute_command('CLUSTER', 'INFO')
         
@@ -302,6 +293,7 @@ class ClusterManager:
         return info_dict
     
     def cluster_meet(self, nodes_in_cluster: List[NodeInfo], timeout: int = 30) -> None:
+        """Connect cluster nodes and wait for convergence"""
         if len(nodes_in_cluster) < 2:
             return
         
@@ -347,7 +339,8 @@ class ClusterManager:
         
         raise Exception(f"Cluster failed to converge within {timeout}s")
     
-    def reset_cluster_state(self, nodes_in_cluster: List[NodeInfo]) -> None:        
+    def reset_cluster_state(self, nodes_in_cluster: List[NodeInfo]) -> None:
+        """Reset cluster state on all nodes"""        
         print("\nResetting cluster state")
         for node in nodes_in_cluster:
             client = self.get_client(node)
@@ -358,10 +351,8 @@ class ClusterManager:
         print("Successfully reset the cluster")
     
     def assign_and_verify_slots(self, nodes_in_cluster: List[NodeInfo]) -> Dict[str, str]:
-        primary_nodes = []
-        for node in nodes_in_cluster:
-            if node.role == 'primary':
-                primary_nodes.append(node)
+        """Assign hash slots to primary nodes and verify assignment"""
+        primary_nodes = [node for node in nodes_in_cluster if node.role == 'primary']
         
         if not primary_nodes:
             print("No primary nodes to assign slots to")
@@ -404,6 +395,7 @@ class ClusterManager:
         return node_ids
     
     def setup_and_sync_replication(self, nodes_in_cluster: List[NodeInfo], primary_ids: Dict[str, str], timeout: int = 60) -> None:
+        """Configure replication and wait for replicas to sync"""
         replicas = [node for node in nodes_in_cluster if node.role == 'replica']
         
         if not replicas:
@@ -459,6 +451,7 @@ class ClusterManager:
         raise Exception(f"Replicas failed to sync within {timeout}s")
     
     def validate_cluster(self, nodes_in_cluster: List[NodeInfo]) -> bool:
+        """Validate cluster health and configuration"""
         if not nodes_in_cluster:
             return False
         
@@ -495,6 +488,7 @@ class ClusterManager:
         return is_healthy
     
     def form_cluster(self, nodes_in_cluster: List[NodeInfo]) -> bool:
+        """Form a complete cluster from spawned nodes"""
         print("\n" + "=" * 60)
         print("FORMING CLUSTER")
         print("=" * 60)
@@ -516,38 +510,10 @@ class ClusterManager:
             return False
     
     def close_connections(self) -> None:
+        """Close all Valkey client connections"""
         for client in self.connections.values():
             try:
                 client.close()
             except:
                 pass
         self.connections.clear()
-
-if __name__ == "__main__":
-    print("\nTesting Cluster Formation")
-
-    result = subprocess.run(['which', 'valkey-server'], capture_output=True, text=True)
-    
-    if result.returncode != 0:
-        print("valkey-server not found")
-        exit(1)
-    
-    print(f"Found valkey-server at: {result.stdout.strip()}")
-    
-    config = ClusterConfig(num_shards=2, replicas_per_shard=1, base_port=6789)
-    port_mgr = PortManager(base_port=6789)
-    config_mgr = ConfigurationManager(config, port_mgr)
-    cluster_mgr = ClusterManager()
-    
-    topology = config_mgr.plan_topology()
-    nodes = config_mgr.spawn_all_nodes(topology)
-    
-    if cluster_mgr.form_cluster(nodes):
-        print("\nCluster created successfully!")
-        print("\nPress enter to clean up")
-        input()
-    else:
-        print("\nCluster formation failed")
-    
-    cluster_mgr.close_connections()
-    config_mgr.cleanup_cluster(nodes)
