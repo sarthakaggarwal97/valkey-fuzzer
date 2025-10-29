@@ -4,9 +4,12 @@ import valkey
 import subprocess
 import shutil
 import uuid
+import logging
+import traceback
 from typing import List, Dict, Optional, Tuple
 from ..models import ClusterConfig, NodePlan, NodeInfo
 
+logging.basicConfig(format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', level=logging.INFO, force=True)
 
 class PortManager:
     """Manages port allocation for Valkey cluster nodes"""
@@ -27,6 +30,7 @@ class PortManager:
         self.available_ports.discard(client_port)
         self.allocated_ports[node_id] = (client_port, bus_port)
         
+        logging.info(f"Allocated ports: {client_port}, {bus_port}")
         return client_port, bus_port
     
     def release_ports(self, node_id: str) -> None:
@@ -35,7 +39,7 @@ class PortManager:
             client_port, bus_port = self.allocated_ports[node_id]
             self.available_ports.add(client_port)
             del self.allocated_ports[node_id]
-            print(f"Released ports: {client_port}, {bus_port}")
+            logging.info(f"Released ports: {client_port}, {bus_port}")
 
 
 class ConfigurationManager:
@@ -63,7 +67,6 @@ class ConfigurationManager:
         if not os.path.exists(valkey_binary):
             raise Exception(f"Build completed but binary not found at {valkey_binary}")
         
-        print(f"Valkey built successfully at: {valkey_binary}")
         return valkey_binary
     
     def generate_cluster_id(self) -> str:
@@ -96,8 +99,8 @@ class ConfigurationManager:
         total_slots = 16384
         slots_per_shard = total_slots // self.clusterConfig.num_shards
         
-        print(f"\nPlanning topology for {self.clusterConfig.num_shards} shards with "
-              f"{self.clusterConfig.replicas_per_shard} replica(s) each")
+        logging.info(f"Planning topology for {self.clusterConfig.num_shards} shards with {self.clusterConfig.replicas_per_shard} replica(s) each")
+        print()
         
         for shard_num in range(self.clusterConfig.num_shards):
             slot_start = shard_num * slots_per_shard
@@ -109,14 +112,14 @@ class ConfigurationManager:
             
             primary_node_plan = self.create_node_plan(node_counter, 'primary', shard_num, slot_start, slot_end)
             nodes.append(primary_node_plan)
-            print(f"{primary_node_plan.node_id}: primary, shard {shard_num}, "
-                  f"port {primary_node_plan.port}, slots {slot_start}-{slot_end}")
+            logging.info(f"{primary_node_plan.node_id}: primary, shard {shard_num}, "
+                        f"port {primary_node_plan.port}, slots {slot_start}-{slot_end}")
             node_counter += 1
             
             for _ in range(self.clusterConfig.replicas_per_shard):
                 replica_plan = self.create_node_plan(node_counter, 'replica', shard_num, master_node_id=primary_node_plan.node_id)
                 nodes.append(replica_plan)
-                print(f"{replica_plan.node_id}: replica, shard {shard_num}, "
+                logging.info(f"{replica_plan.node_id}: replica, shard {shard_num}, "
                       f"port {replica_plan.port}, master={primary_node_plan.node_id}")
                 node_counter += 1
         
@@ -135,7 +138,8 @@ class ConfigurationManager:
     
     def spawn_all_nodes(self, node_plans: List[NodePlan]) -> List[NodeInfo]:
         """Spawn all Valkey processes and wait for them to be ready"""
-        print(f"\nSpawning {len(node_plans)} nodes")
+        print()
+        logging.info(f"Spawning {len(node_plans)} nodes")
         node_info_list = []
         
         for plan in node_plans:
@@ -162,7 +166,7 @@ class ConfigurationManager:
                 '--maxmemory-policy', 'allkeys-lru'
             ]
             
-            print(f"Spawning {plan.node_id} on port {plan.port}")
+            logging.info(f"Spawning {plan.node_id} on port {plan.port}")
             try:
                 process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 
@@ -182,34 +186,34 @@ class ConfigurationManager:
                 )
                 
                 node_info_list.append(node_info)
-                print(f"Spawned {plan.node_id} with PID {process.pid}")
+                logging.info(f"Spawned {plan.node_id} with PID {process.pid}")
                 
             except Exception as e:
-                print(f"Failed to spawn {plan.node_id}: {e}")
+                logging.info(f"Failed to spawn {plan.node_id}: {e}")
                 for node in node_info_list:
                     self.terminate_node(node)
                 raise
         
-        print(f"\nWaiting for all nodes to be ready")
+        logging.info(f"Waiting for all nodes to be ready")
         for node in node_info_list:
             deadline = time.time() + 30
             ready = False
             
             while time.time() < deadline:
                 if node.process.poll() is not None:
-                    print(f"Node {node.node_id} process died")
+                    logging.info(f"Node {node.node_id} process died")
                     break
                 
                 try:
                     client = valkey.Valkey(
                         host='127.0.0.1',
                         port=node.port,
-                        socket_timeout=1,
+                        socket_timeout=3,
                         decode_responses=True
                     )
                     
                     if client.ping():
-                        print(f"Node {node.node_id} is active")
+                        logging.info(f"Node {node.node_id} is active")
                         ready = True
                         break
                 except (valkey.ConnectionError, valkey.TimeoutError):
@@ -222,7 +226,7 @@ class ConfigurationManager:
                     self.terminate_node(failed_node)
                 raise Exception(f"Node {node.node_id} failed to start")
         
-        print(f"All {len(node_info_list)} nodes are active")
+        logging.info(f"All {len(node_info_list)} nodes are active")
         return node_info_list
     
     def terminate_node(self, node: NodeInfo) -> None:
@@ -230,20 +234,21 @@ class ConfigurationManager:
         if node.process.poll() is not None:
             return
         
-        print(f"Terminating {node.node_id} (PID {node.pid})")
+        logging.info(f"Terminating {node.node_id} (PID {node.pid})")
         
         node.process.terminate()
         try:
             node.process.wait(timeout=5)
-            print(f"{node.node_id} terminated")
+            logging.info(f"{node.node_id} terminated")
         except subprocess.TimeoutExpired:
             node.process.kill()
             node.process.wait()
-            print(f"{node.node_id} terminated")
+            logging.info(f"{node.node_id} terminated")
     
     def cleanup_cluster(self, nodes_in_cluster: List[NodeInfo]) -> None:
         """Clean up cluster by terminating nodes and releasing resources"""
-        print(f"\nCleaning up cluster {self.cluster_id}")
+        print()
+        logging.info(f"Cleaning up cluster {self.cluster_id}")
         
         for node in nodes_in_cluster:
             self.terminate_node(node)
@@ -258,9 +263,9 @@ class ConfigurationManager:
             )
             if os.path.exists(cluster_dir):
                 shutil.rmtree(cluster_dir)
-                print(f"Deleted data directory")
+                logging.info(f"Deleted data directory")
         
-        print(f"Cluster {self.cluster_id} cleaned up")
+        logging.info(f"Cluster {self.cluster_id} cleaned up")
 
 
 class ClusterManager:
@@ -297,23 +302,24 @@ class ClusterManager:
         if len(nodes_in_cluster) < 2:
             return
         
-        print(f"\nConnecting {len(nodes_in_cluster)} nodes with CLUSTER MEET")
-        
         first_node = nodes_in_cluster[0]
         first_node_client = self.get_client(first_node)
+
+        print()
+        logging.info(f"Connecting {len(nodes_in_cluster)} nodes with CLUSTER MEET using {first_node.node_id} as starting node")
                 
         for node in nodes_in_cluster[1:]:
-            print(f"Meeting {node.node_id} (port {node.port})")
+            logging.info(f"Meeting {node.node_id} (port {node.port})")
             first_node_client.execute_command('CLUSTER', 'MEET', '127.0.0.1', node.port)
             time.sleep(0.1)
         
-        print("CLUSTER MEET complete")
+        logging.info("CLUSTER MEET complete")
         
         # Wait for convergence
         expected_count = len(nodes_in_cluster)
         deadline = time.time() + timeout
         
-        print(f"\nWaiting for cluster convergence for all {expected_count} nodes")
+        logging.info(f"Waiting for cluster convergence for all {expected_count} nodes")
         
         while time.time() < deadline:
             all_converged = True
@@ -324,15 +330,15 @@ class ClusterManager:
                     known_nodes = int(info_dict.get('cluster_known_nodes', 0))
                     
                     if known_nodes < expected_count:
-                        print(f"{node.node_id} sees {known_nodes}/{expected_count} nodes")
+                        logging.info(f"{node.node_id} sees {known_nodes}/{expected_count} nodes")
                         all_converged = False
                     
                 except Exception as e:
-                    print(f"Error checking {node.node_id}: {e}")
+                    logging.info(f"Error checking {node.node_id}: {e}")
                     all_converged = False
             
             if all_converged:
-                print(f"All nodes see each other")
+                logging.info(f"All nodes see each other")
                 return
             
             time.sleep(1)
@@ -341,24 +347,22 @@ class ClusterManager:
     
     def reset_cluster_state(self, nodes_in_cluster: List[NodeInfo]) -> None:
         """Reset cluster state on all nodes"""        
-        print("\nResetting cluster state")
+        logging.info("Resetting cluster state")
         for node in nodes_in_cluster:
             client = self.get_client(node)
             client.execute_command('CLUSTER', 'RESET', 'HARD')
-            print(f"Reset {node.node_id}")
-        
         time.sleep(1)
-        print("Successfully reset the cluster")
     
     def assign_and_verify_slots(self, nodes_in_cluster: List[NodeInfo]) -> Dict[str, str]:
         """Assign hash slots to primary nodes and verify assignment"""
         primary_nodes = [node for node in nodes_in_cluster if node.role == 'primary']
         
         if not primary_nodes:
-            print("No primary nodes to assign slots to")
+            logging.info("No primary nodes to assign slots to")
             return {}
         
-        print(f"\nAssigning slots to {len(primary_nodes)} primaries")
+        print()
+        logging.info(f"Assigning slots to {len(primary_nodes)} primaries")
         
         node_ids = {}
         
@@ -366,7 +370,7 @@ class ClusterManager:
             client = self.get_client(primary)
             
             slots = list(range(primary.slot_start, primary.slot_end + 1))
-            print(f"Assigning slots {primary.slot_start}-{primary.slot_end} to {primary.node_id}")
+            logging.info(f"Assigning slots {primary.slot_start}-{primary.slot_end} to {primary.node_id}")
             
             client.execute_command('CLUSTER', 'ADDSLOTS', *slots)
             
@@ -375,19 +379,19 @@ class ClusterManager:
             node_ids[primary.node_id] = cluster_node_id
             primary.cluster_node_id = cluster_node_id
             
-            print(f"{primary.node_id} cluster ID: {cluster_node_id[:8]}")
+            logging.info(f"{primary.node_id} cluster ID: {cluster_node_id[:8]}")
         
-        print("Slot assignment complete")
-        time.sleep(2)
+        logging.info("Slot assignment complete")
+        time.sleep(5)
         
         # Verify slots were assigned correctly
         info_dict = self.get_cluster_info(nodes_in_cluster[0])
         slots_assigned = int(info_dict.get('cluster_slots_assigned', 0))
         slots_fail = int(info_dict.get('cluster_slots_fail', 0))
         
-        print(f"\nSlot verification:")
-        print(f"Slots assigned: {slots_assigned}/16384")
-        print(f"Slots failed: {slots_fail}")
+        logging.info(f"Slot verification:")
+        logging.info(f"Slots assigned: {slots_assigned}/16384")
+        logging.info(f"Slots failed: {slots_fail}")
         
         if slots_assigned != 16384 or slots_fail != 0:
             raise Exception(f"Slot assignment failed: {slots_assigned}/16384 assigned, {slots_fail} failed")
@@ -399,29 +403,30 @@ class ClusterManager:
         replicas = [node for node in nodes_in_cluster if node.role == 'replica']
         
         if not replicas:
-            print("\nNo replicas to configure")
+            logging.info("No replicas to configure")
             return
         
-        print(f"\nConfiguring {len(replicas)} replicas")
+        print()
+        logging.info(f"Configuring {len(replicas)} replicas")
         
         for replica in replicas:
             master_cluster_id = primary_ids.get(replica.master_node_id)
             
             if not master_cluster_id:
-                print(f"Could not find master for {replica.node_id}")
+                logging.info(f"Could not find master for {replica.node_id}")
                 continue
             
-            print(f"Configuring {replica.node_id} to replicate {replica.master_node_id}")
+            logging.info(f"Configuring {replica.node_id} to replicate {replica.master_node_id}")
             
             client = self.get_client(replica)
             client.execute_command('CLUSTER', 'REPLICATE', master_cluster_id)
             replica.cluster_node_id = client.execute_command('CLUSTER', 'MYID')
             
-            print(f"Replication configured")
+            logging.info(f"Replication configured")
         
-        print("Replication setup complete")
+        logging.info("Replication setup complete")
         
-        print(f"\nWaiting for {len(replicas)} replicas to sync")
+        logging.info(f"Waiting for {len(replicas)} replicas to sync")
         deadline = time.time() + timeout
         
         while time.time() < deadline:
@@ -435,15 +440,15 @@ class ClusterManager:
                     master_link = info.get('master_link_status')
                     
                     if master_link != 'up':
-                        print(f"  {replica.node_id}: {master_link}")
+                        logging.info(f"  {replica.node_id}: {master_link}")
                         all_synced = False
                 
                 except Exception as e:
-                    print(f"Error checking {replica.node_id}: {e}")
+                    logging.info(f"Error checking {replica.node_id}: {e}")
                     all_synced = False
             
             if all_synced:
-                print("All replicas are in sync with their master!")
+                logging.info("All replicas are in sync with their master")
                 return
             
             time.sleep(1)
@@ -455,43 +460,37 @@ class ClusterManager:
         if not nodes_in_cluster:
             return False
         
-        print("\n" + "=" * 60)
-        print("CLUSTER VALIDATION")
-        print("=" * 60)
+        print()
+        logging.info("CLUSTER VALIDATION")
         
         client = self.get_client(nodes_in_cluster[0])
         info = client.execute_command('CLUSTER', 'INFO')
         
-        print(f"RAW CLUSTER INFO:\n{info}\n")
+        logging.info(f"RAW CLUSTER INFO:\n{info}")
 
-        info_dict = {}
-        for line in info.split('\r\n'):
-            if ':' in line:
-                key, value = line.split(':', 1)
-                info_dict[key] = value
+        info_dict = self.get_cluster_info(nodes_in_cluster[0])
         
         cluster_state = info_dict.get('cluster_state')
         slots_assigned = int(info_dict.get('cluster_slots_assigned', 0))
         slots_fail = int(info_dict.get('cluster_slots_fail', 0))
         
-        print(f"Cluster state: {cluster_state}")
-        print(f"Slots assigned: {slots_assigned}/16384")
-        print(f"Slots failed: {slots_fail}")
+        logging.info(f"Cluster state: {cluster_state}")
+        logging.info(f"Slots assigned: {slots_assigned}/16384")
+        logging.info(f"Slots failed: {slots_fail}")
         
         is_healthy = (cluster_state == 'ok' and slots_assigned == 16384 and slots_fail == 0)
         
         if is_healthy:
-            print("\nCluster is Healthy")
+            logging.info("Cluster is Healthy")
         else:
-            print("\n Cluster is Not Healthy")
+            logging.info("Cluster is Not Healthy")
                 
         return is_healthy
     
     def form_cluster(self, nodes_in_cluster: List[NodeInfo]) -> bool:
         """Form a complete cluster from spawned nodes"""
-        print("\n" + "=" * 60)
-        print("FORMING CLUSTER")
-        print("=" * 60)
+        print()
+        logging.info("FORMING CLUSTER")
         
         try:
             self.reset_cluster_state(nodes_in_cluster)
@@ -504,8 +503,7 @@ class ClusterManager:
             return self.validate_cluster(nodes_in_cluster)
         
         except Exception as e:
-            print(f"\nCluster formation failed: {e}")
-            import traceback
+            logging.info(f"Cluster formation failed: {e}")
             traceback.print_exc()
             return False
     

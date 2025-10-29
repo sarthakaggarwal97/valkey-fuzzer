@@ -1,8 +1,19 @@
 import pytest
-import tempfile
+import logging
 from src.cluster_orchestrator.orchestrator import PortManager, ConfigurationManager, ClusterManager
 from src.models import ClusterConfig
 
+logging.basicConfig(format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', level=logging.INFO, force=True)
+
+@pytest.fixture(autouse=True)
+def test_separator(request):
+    print(f"\n{'='*60}")
+    print(f"Running: {request.node.name}")
+    print(f"{'='*60}")
+    yield
+    print(f"{'='*60}")
+    print(f"Completed: {request.node.name}")
+    print(f"{'='*60}\n")
 
 def test_port_manager_allocation():
     """Test port allocation and release"""
@@ -25,6 +36,9 @@ def test_port_manager_allocation():
     assert client_port3 == 6789
     assert bus_port3 == 16789
     assert "node-3" in port_mgr.allocated_ports
+    
+    port_mgr.release_ports("node-2")
+    port_mgr.release_ports("node-3")
 
 def test_configuration_manager_topology():
     """Test topology planning"""
@@ -61,10 +75,10 @@ def test_full_cluster_creation():
     config = ClusterConfig(
         num_shards=2, 
         replicas_per_shard=1, 
-        base_port=7001, 
+        base_port=7100, 
         valkey_binary=valkey_binary
     )
-    port_mgr = PortManager(base_port=7001)
+    port_mgr = PortManager(base_port=7100)
     config_mgr = ConfigurationManager(config, port_mgr)
     cluster_mgr = ClusterManager()
     
@@ -87,10 +101,10 @@ def test_full_cluster_creation_large():
     config = ClusterConfig(
         num_shards=3, 
         replicas_per_shard=2, 
-        base_port=7002, 
+        base_port=7200, 
         valkey_binary=valkey_binary
     )
-    port_mgr = PortManager(base_port=7002)
+    port_mgr = PortManager(base_port=7200)
     config_mgr = ConfigurationManager(config, port_mgr)
     cluster_mgr = ClusterManager()
     
