@@ -1,13 +1,8 @@
 """
 Unit tests for Chaos Coordinator components
 
-Phase 1 Focus:
 - ChaosCoordinator: Scenario management and timing coordination
 - ChaosScenario: Scenario data structure
-
-Note: ChaosRecoveryManager and ChaosTimingManager tests removed
-as these components are not needed for Phase 1 (process chaos).
-They will be added back when implementing network chaos in Phase 2+.
 """
 import time
 import pytest
@@ -129,7 +124,8 @@ class TestChaosCoordinator:
         result = self.coordinator.execute_scenario(scenario)
         
         assert result.state == ChaosScenarioState.FAILED
-        assert result.error_message == "Test error"
+        assert "Test error" in result.error_message
+        assert result.error_message.startswith("Exception during scenario execution:")
         assert result.scenario_id not in self.coordinator.active_scenarios
         assert result in self.coordinator.scenario_history
     
@@ -322,5 +318,106 @@ class TestChaosCoordinator:
         
         result = self.coordinator._inject_chaos(scenario)
         assert result is None
-    """Test cases for ChaosRecoveryManager"""
     
+    @patch('time.time')
+    def test_execute_scenario_no_chaos_injected(self, mock_time):
+        """Test scenario execution when no chaos is injected"""
+        mock_time.return_value = 1234567890.0
+        
+        # Create scenario with no target node
+        scenario = self.coordinator.create_scenario(
+            self.test_operation,
+            self.test_chaos_config,
+            target_node=None  # No target = no chaos
+        )
+        
+        result = self.coordinator.execute_scenario(scenario)
+        
+        assert result.state == ChaosScenarioState.FAILED
+        assert "No chaos was injected" in result.error_message
+        assert len(result.chaos_results) == 0
+    
+    @patch('time.time')
+    @patch.object(ChaosCoordinator, '_inject_chaos')
+    def test_execute_scenario_all_chaos_failed(self, mock_inject, mock_time):
+        """Test scenario execution when all chaos attempts fail"""
+        mock_time.return_value = 1234567890.0
+        
+        # Mock chaos injection to return failed results
+        failed_result = ChaosResult(
+            chaos_id="failed_chaos",
+            chaos_type=ChaosType.PROCESS_KILL,
+            target_node=self.test_node.node_id,
+            success=False,
+            start_time=1234567890.0,
+            error_message="Process not found"
+        )
+        mock_inject.return_value = failed_result
+        
+        scenario = self.coordinator.create_scenario(
+            self.test_operation,
+            self.test_chaos_config,
+            target_node=self.test_node
+        )
+        
+        result = self.coordinator.execute_scenario(scenario)
+        
+        assert result.state == ChaosScenarioState.FAILED
+        assert "All chaos injection attempts failed" in result.error_message
+        assert len(result.chaos_results) > 0
+        assert all(not r.success for r in result.chaos_results)
+    
+    @patch('time.time')
+    @patch.object(ChaosCoordinator, '_inject_chaos')
+    def test_execute_scenario_partial_success(self, mock_inject, mock_time):
+        """Test scenario execution with partial chaos success"""
+        mock_time.return_value = 1234567890.0
+        
+        # Mock chaos injection to return mix of success and failure
+        call_count = [0]
+        def mock_inject_side_effect(scenario):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return ChaosResult(
+                    chaos_id=f"chaos_{call_count[0]}",
+                    chaos_type=ChaosType.PROCESS_KILL,
+                    target_node=self.test_node.node_id,
+                    success=True,
+                    start_time=1234567890.0
+                )
+            else:
+                return ChaosResult(
+                    chaos_id=f"chaos_{call_count[0]}",
+                    chaos_type=ChaosType.PROCESS_KILL,
+                    target_node=self.test_node.node_id,
+                    success=False,
+                    start_time=1234567890.0,
+                    error_message="Failed"
+                )
+        
+        mock_inject.side_effect = mock_inject_side_effect
+        
+        # Configure to inject chaos multiple times
+        chaos_config = ChaosConfig(
+            chaos_type=ChaosType.PROCESS_KILL,
+            target_selection=TargetSelection(strategy="random"),
+            timing=ChaosTiming(),
+            coordination=ChaosCoordination(
+                chaos_before_operation=True,
+                chaos_during_operation=True
+            ),
+            process_chaos_type=ProcessChaosType.SIGKILL
+        )
+        
+        scenario = self.coordinator.create_scenario(
+            self.test_operation,
+            chaos_config,
+            target_node=self.test_node
+        )
+        
+        result = self.coordinator.execute_scenario(scenario)
+        
+        # Should be COMPLETED because at least one chaos succeeded
+        assert result.state == ChaosScenarioState.COMPLETED
+        assert len(result.chaos_results) == 2
+        assert any(r.success for r in result.chaos_results)

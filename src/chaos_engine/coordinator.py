@@ -89,15 +89,31 @@ class ChaosCoordinator:
             if coordination.chaos_after_operation:
                 self._execute_chaos_after_operation(scenario)
             
-            scenario.state = ChaosScenarioState.COMPLETED
+            # Check if any chaos was successfully injected
+            successful_chaos = [r for r in scenario.chaos_results if r and r.success]
+            
+            if not scenario.chaos_results:
+                # No chaos was attempted
+                scenario.state = ChaosScenarioState.FAILED
+                scenario.error_message = "No chaos was injected (no target node or no chaos configured)"
+                logger.warning(f"Chaos scenario {scenario.scenario_id} failed: no chaos injected")
+            elif not successful_chaos:
+                # Chaos was attempted but all failed
+                scenario.state = ChaosScenarioState.FAILED
+                scenario.error_message = "All chaos injection attempts failed"
+                logger.warning(f"Chaos scenario {scenario.scenario_id} failed: all chaos attempts unsuccessful")
+            else:
+                # At least one chaos injection succeeded
+                scenario.state = ChaosScenarioState.COMPLETED
+                logger.info(f"Completed chaos scenario {scenario.scenario_id} with {len(successful_chaos)}/{len(scenario.chaos_results)} successful chaos injections")
+            
             scenario.end_time = time.time()
-            logger.info(f"Completed chaos scenario {scenario.scenario_id}")
             
         except Exception as e:
             scenario.state = ChaosScenarioState.FAILED
             scenario.end_time = time.time()
-            scenario.error_message = str(e)
-            logger.error(f"Chaos scenario {scenario.scenario_id} failed: {e}")
+            scenario.error_message = f"Exception during scenario execution: {str(e)}"
+            logger.error(f"Chaos scenario {scenario.scenario_id} failed with exception: {e}")
         
         finally:
             # Move to history
