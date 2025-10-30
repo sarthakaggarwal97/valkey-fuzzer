@@ -81,7 +81,7 @@ def real_cluster():
         config_mgr.cleanup_cluster(nodes)
         pytest.fail("Failed to form cluster")
     
-    logging.info(f"✓ Real cluster created with {len(nodes)} nodes")
+    logging.info(f"OK: Real cluster created with {len(nodes)} nodes")
     
     # Yield cluster components to test
     yield {
@@ -95,7 +95,7 @@ def real_cluster():
     logging.info("Cleaning up real cluster...")
     cluster_mgr.close_connections()
     config_mgr.cleanup_cluster(nodes)
-    logging.info("✓ Cluster cleaned up")
+    logging.info("OK: Cluster cleaned up")
 
 
 class TestRealChaosIntegration:
@@ -125,7 +125,7 @@ class TestRealChaosIntegration:
         for node in nodes:
             chaos_engine.unregister_node_process(node.node_id)
         
-        logging.info("✅ Real cluster created and nodes registered successfully")
+        logging.info("PASS: Real cluster created and nodes registered successfully")
     
     def test_real_process_kill_with_sigterm(self, real_cluster):
         """
@@ -145,7 +145,7 @@ class TestRealChaosIntegration:
         
         # Verify cluster is healthy before chaos
         assert cluster_mgr.validate_cluster(nodes)
-        logging.info("✓ Cluster healthy before chaos")
+        logging.info("OK: Cluster healthy before chaos")
         
         # Inject real chaos - kill the replica
         logging.info(f"Injecting chaos: SIGTERM on {replica.node_id}")
@@ -155,20 +155,20 @@ class TestRealChaosIntegration:
         assert result.success is True
         assert result.target_node == replica.node_id
         assert result.chaos_type == ChaosType.PROCESS_KILL
-        logging.info(f"✓ Chaos injected: {result.chaos_type.value}")
+        logging.info(f"OK: Chaos injected: {result.chaos_type.value}")
         
         # Wait for process to die
         time.sleep(2)
         
         # Verify process is actually dead
         assert replica.process.poll() is not None
-        logging.info(f"✓ Process {replica.pid} is dead")
+        logging.info(f"OK: Process {replica.pid} is dead")
         
         # Cleanup
         for node in nodes:
             chaos_engine.unregister_node_process(node.node_id)
         
-        logging.info("✅ Real process killed successfully with SIGTERM")
+        logging.info("PASS: Real process killed successfully with SIGTERM")
     
     def test_real_process_kill_with_sigkill(self, real_cluster):
         """
@@ -194,20 +194,20 @@ class TestRealChaosIntegration:
         # Verify chaos was successful
         assert result.success is True
         assert result.target_node == replica.node_id
-        logging.info(f"✓ Chaos injected: SIGKILL")
+        logging.info(f"OK: Chaos injected: SIGKILL")
         
         # Wait for process to die
         time.sleep(1)
         
         # Verify process is actually dead
         assert replica.process.poll() is not None
-        logging.info(f"✓ Process {replica.pid} is dead (SIGKILL)")
+        logging.info(f"OK: Process {replica.pid} is dead (SIGKILL)")
         
         # Cleanup
         for node in nodes:
             chaos_engine.unregister_node_process(node.node_id)
         
-        logging.info("✅ Real process killed successfully with SIGKILL")
+        logging.info("PASS: Real process killed successfully with SIGKILL")
     
     def test_real_failover_scenario_with_chaos(self, real_cluster):
         """
@@ -237,7 +237,7 @@ class TestRealChaosIntegration:
         
         # Verify cluster is healthy
         assert cluster_mgr.validate_cluster(nodes)
-        logging.info("✓ Cluster healthy before chaos")
+        logging.info("OK: Cluster healthy before chaos")
         
         # Create failover operation
         failover_operation = Operation(
@@ -287,20 +287,20 @@ class TestRealChaosIntegration:
         assert result.chaos_results[0].success is True
         assert result.chaos_results[0].target_node == primary.node_id
         
-        logging.info(f"✓ Chaos scenario completed")
-        logging.info(f"✓ Primary node killed: {primary.node_id}")
+        logging.info(f"OK: Chaos scenario completed")
+        logging.info(f"OK: Primary node killed: {primary.node_id}")
         
         # Wait for process to die
         time.sleep(2)
         
         # Verify primary is dead
         assert primary.process.poll() is not None
-        logging.info(f"✓ Primary process {primary.pid} is dead")
+        logging.info(f"OK: Primary process {primary.pid} is dead")
         
         # Verify replicas are still alive
         for replica in replicas:
             assert replica.process.poll() is None
-            logging.info(f"✓ Replica {replica.node_id} still running")
+            logging.info(f"OK: Replica {replica.node_id} still running")
         
         # Try to connect to replicas
         for replica in replicas:
@@ -308,7 +308,7 @@ class TestRealChaosIntegration:
                 client = cluster_mgr.get_client(replica)
                 pong = client.ping()
                 assert pong is True
-                logging.info(f"✓ Replica {replica.node_id} is responsive")
+                logging.info(f"OK: Replica {replica.node_id} is responsive")
             except Exception as e:
                 logging.warning(f"Replica {replica.node_id} not responsive: {e}")
         
@@ -317,7 +317,7 @@ class TestRealChaosIntegration:
         for node in nodes:
             chaos_engine.unregister_node_process(node.node_id)
         
-        logging.info("\n✅ Real failover scenario with chaos completed successfully")
+        logging.info("\nPASS: Real failover scenario with chaos completed successfully")
         logging.info(f"   - Primary killed: {primary.node_id}")
         logging.info(f"   - Replicas survived: {len(replicas)}")
     
@@ -345,18 +345,18 @@ class TestRealChaosIntegration:
             
             time.sleep(1)
             assert replica.process.poll() is not None
-            logging.info(f"✓ Replica {replica.node_id} killed")
+            logging.info(f"OK: Replica {replica.node_id} killed")
         
         # Verify primary is still alive
         primary = next(node for node in nodes if node.role == 'primary')
         assert primary.process.poll() is None
-        logging.info(f"✓ Primary {primary.node_id} still running after all replicas killed")
+        logging.info(f"OK: Primary {primary.node_id} still running after all replicas killed")
         
         # Cleanup
         for node in nodes:
             chaos_engine.unregister_node_process(node.node_id)
         
-        logging.info(f"\n✅ Cascading failures test completed")
+        logging.info(f"\nPASS: Cascading failures test completed")
         logging.info(f"   - Replicas killed: {len(replicas)}")
         logging.info(f"   - Primary survived: {primary.node_id}")
 
@@ -396,7 +396,7 @@ class TestRealLargeClusterChaos:
         try:
             success = cluster_mgr.form_cluster(nodes)
             assert success
-            logging.info("✓ Large cluster formed successfully")
+            logging.info("OK: Large cluster formed successfully")
             
             # Register all nodes
             for node in nodes:
@@ -423,14 +423,14 @@ class TestRealLargeClusterChaos:
                     
                     time.sleep(1)
                     assert target.process.poll() is not None
-                    logging.info(f"✓ Killed {target.node_id}")
+                    logging.info(f"OK: Killed {target.node_id}")
             
             # Verify all primaries are still alive
             for primary in primaries:
                 assert primary.process.poll() is None
-                logging.info(f"✓ Primary {primary.node_id} still running")
+                logging.info(f"OK: Primary {primary.node_id} still running")
             
-            logging.info(f"\n✅ Large cluster chaos test completed")
+            logging.info(f"\nPASS: Large cluster chaos test completed")
             logging.info(f"   - Total nodes: {len(nodes)}")
             logging.info(f"   - Nodes killed: 3")
             logging.info(f"   - Primaries survived: {len(primaries)}")
