@@ -151,38 +151,6 @@ def multi_shard_cluster():
     cluster_mgr.close_connections()
     config_mgr.cleanup_cluster(nodes)
     logging.info("OK: Multi-shard cluster cleaned up")
-    
-    port_mgr = PortManager(base_port=7300)
-    config_mgr = ConfigurationManager(config, port_mgr)
-    cluster_mgr = ClusterManager()
-    
-    # Plan and spawn nodes
-    logging.info("Creating real Valkey cluster...")
-    topology = config_mgr.plan_topology()
-    nodes = config_mgr.spawn_all_nodes(topology)
-    
-    # Form cluster
-    success = cluster_mgr.form_cluster(nodes)
-    if not success:
-        cluster_mgr.close_connections()
-        config_mgr.cleanup_cluster(nodes)
-        pytest.fail("Failed to form cluster")
-    
-    logging.info(f"OK: Real cluster created with {len(nodes)} nodes")
-    
-    # Yield cluster components to test
-    yield {
-        'nodes': nodes,
-        'config_mgr': config_mgr,
-        'cluster_mgr': cluster_mgr,
-        'port_mgr': port_mgr
-    }
-    
-    # Cleanup
-    logging.info("Cleaning up real cluster...")
-    cluster_mgr.close_connections()
-    config_mgr.cleanup_cluster(nodes)
-    logging.info("OK: Cluster cleaned up")
 
 
 class TestRealChaosIntegration:
