@@ -15,7 +15,7 @@ from ..models import (
     Operation, ChaosConfig, TargetSelection
 )
 
-
+logging.basicConfig(format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', level=logging.INFO, force=True)
 logger = logging.getLogger(__name__)
 
 
