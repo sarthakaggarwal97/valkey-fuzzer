@@ -4,6 +4,7 @@ Core data models for the Cluster Bus Fuzzer
 from dataclasses import dataclass
 from typing import Dict, List, Any, Optional
 from enum import Enum
+import subprocess
 
 
 class OperationType(Enum):
@@ -24,36 +25,46 @@ class ProcessChaosType(Enum):
     SIGTERM = "sigterm"
 
 
-class NodeRole(Enum):
-    """Valkey node roles"""
-    PRIMARY = "primary"
-    REPLICA = "replica"
-    FAILED = "failed"
-
-
-@dataclass
-class NodeConfig:
-    """Configuration for a single Valkey node"""
-    node_id: str
-    host: str
-    port: int
-    role: NodeRole
-    primary_id: Optional[str] = None  # For replicas, ID of their primary
-
-
 @dataclass
 class ClusterConfig:
     """Configuration for a Valkey cluster"""
-    shard_count: int  # 3-16 shards
-    replica_count: int  # 0-2 replicas per shard
-    node_configs: List[NodeConfig]
-    
-    def __post_init__(self):
-        """Validate cluster configuration"""
-        if not (3 <= self.shard_count <= 16):
-            raise ValueError("Shard count must be between 3 and 16")
-        if not (0 <= self.replica_count <= 2):
-            raise ValueError("Replica count must be between 0 and 2")
+    num_shards: int
+    replicas_per_shard: int
+    base_port: int = 6379
+    base_data_dir: str = "/tmp/valkey-fuzzer"
+    valkey_binary: str = "/usr/local/bin/valkey-server"
+    enable_cleanup: bool = True
+
+
+@dataclass
+class NodePlan:
+    """Plan for a node before it's spawned"""
+    node_id: str
+    role: str 
+    shard_id: int
+    port: int
+    bus_port: int
+    slot_start: Optional[int] = None 
+    slot_end: Optional[int] = None   
+    master_node_id: Optional[str] = None
+
+
+@dataclass
+class NodeInfo:
+    """Information about a running cluster node"""
+    node_id: str
+    role: str
+    shard_id: int
+    port: int
+    bus_port: int
+    pid: int
+    process: subprocess.Popen
+    data_dir: str
+    log_file: str
+    slot_start: Optional[int] = None
+    slot_end: Optional[int] = None
+    master_node_id: Optional[str] = None
+    cluster_node_id: Optional[str] = None
 
 
 @dataclass
@@ -175,23 +186,6 @@ class ValidationResult:
 
 
 @dataclass
-class NodeInfo:
-    """Information about a cluster node"""
-    node_id: str
-    host: str
-    port: int
-    role: NodeRole
-    slots: List[int]
-    primary_id: Optional[str] = None
-    replica_ids: List[str] = None
-    is_healthy: bool = True
-    
-    def __post_init__(self):
-        if self.replica_ids is None:
-            self.replica_ids = []
-
-
-@dataclass
 class ClusterStatus:
     """Overall cluster status information"""
     cluster_id: str
@@ -199,6 +193,16 @@ class ClusterStatus:
     total_slots_assigned: int
     is_healthy: bool
     formation_complete: bool
+
+
+@dataclass
+class ClusterInstance:
+    """Represents a created cluster instance"""
+    cluster_id: str
+    config: ClusterConfig
+    nodes: List[NodeInfo]
+    creation_time: float
+    is_ready: bool = False
 
 
 @dataclass
@@ -262,13 +266,3 @@ class DSLConfig:
     """DSL-based test configuration"""
     config_text: str
     parsed_scenario: Optional[Scenario] = None
-
-
-@dataclass
-class ClusterInstance:
-    """Represents a created cluster instance"""
-    cluster_id: str
-    config: ClusterConfig
-    nodes: List[NodeInfo]
-    creation_time: float
-    is_ready: bool = False
