@@ -153,15 +153,13 @@ class ConfigurationManager:
                 '--cluster-enabled', 'yes',
                 '--cluster-config-file', os.path.join(node_data_dir, 'nodes.conf'),
                 '--cluster-node-timeout', '5000',
-                '--cluster-replica-validity-factor', '10',
-                '--cluster-migration-barrier', '1',
                 '--cluster-require-full-coverage', 'no',
                 '--dir', node_data_dir,
                 '--logfile', log_file,
                 '--loglevel', 'notice',
                 '--appendonly', 'yes',
                 '--appendfilename', 'appendonly.aof',
-                '--save', '""',
+                '--save', '',
                 '--maxmemory', '500mb',
                 '--maxmemory-policy', 'allkeys-lru'
             ]
@@ -454,6 +452,21 @@ class ClusterManager:
             time.sleep(1)
         
         raise Exception(f"Replicas failed to sync within {timeout}s")
+    
+    def validate_node_configs(self, nodes_in_cluster: List[NodeInfo], expected_configs: Dict[str, str]) -> bool:
+        """Validate node configurations"""
+        for node in nodes_in_cluster:
+            client = self.get_client(node)
+            config = client.config_get('*')
+            
+            for key, expected in expected_configs.items():
+                actual = config.get(key, 'NOT_SET')
+                if actual != expected:
+                    logging.info(f"Config validation failed: {node.node_id} {key}, expected '{expected}', but got '{actual}'")
+                    return False
+        
+        logging.info(f"All {len(nodes_in_cluster)} node configurations are correctly set")
+        return True
     
     def validate_cluster(self, nodes_in_cluster: List[NodeInfo]) -> bool:
         """Validate cluster health and configuration"""

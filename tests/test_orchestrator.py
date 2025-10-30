@@ -68,7 +68,7 @@ def test_configuration_manager_topology():
 
 
 def test_full_cluster_creation():
-    """Test complete cluster creation with 2 shards and 1 replica"""
+    """Test complete cluster creation with 2 shards and 1 replica, including config validation"""
     config_mgr = ConfigurationManager(ClusterConfig(num_shards=2, replicas_per_shard=1), PortManager())
     valkey_binary = config_mgr.setup_valkey_from_source()
     
@@ -86,6 +86,20 @@ def test_full_cluster_creation():
     nodes = config_mgr.spawn_all_nodes(topology)
     
     try:
+        # Validate node configurations
+        expected_configs = {
+            'protected-mode': 'no',
+            'cluster-enabled': 'yes',
+            'cluster-node-timeout': '5000',
+            'appendonly': 'yes', 
+            'save': '',
+            'cluster-require-full-coverage': 'no',
+            'maxmemory-policy': 'allkeys-lru',
+        }
+        config_valid = cluster_mgr.validate_node_configs(nodes, expected_configs)
+        assert config_valid
+        
+        # Test cluster formation
         success = cluster_mgr.form_cluster(nodes)
         assert success
     finally:
