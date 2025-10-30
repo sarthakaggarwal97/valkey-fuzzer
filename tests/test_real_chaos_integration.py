@@ -193,7 +193,12 @@ class TestRealChaosIntegration:
         Test that we can create a real cluster and register nodes with chaos engine
         """
         nodes = real_cluster['nodes']
+        cluster_mgr = real_cluster['cluster_mgr']
         chaos_engine = ProcessChaosEngine()
+        
+        # Verify cluster is healthy
+        assert cluster_mgr.validate_cluster(nodes)
+        logging.info("OK: Cluster healthy")
         
         # Register all real nodes
         for node in nodes:
@@ -447,7 +452,12 @@ class TestRealChaosIntegration:
         Test cascading failures: kill multiple nodes in sequence
         """
         nodes = real_cluster['nodes']
+        cluster_mgr = real_cluster['cluster_mgr']
         chaos_engine = ProcessChaosEngine()
+        
+        # Verify cluster is healthy before chaos
+        assert cluster_mgr.validate_cluster(nodes)
+        logging.info("OK: Cluster healthy before chaos")
         
         # Register all nodes
         for node in nodes:
@@ -472,6 +482,12 @@ class TestRealChaosIntegration:
         primary = next(node for node in nodes if node.role == 'primary')
         assert primary.process.poll() is None
         logging.info(f"OK: Primary {primary.node_id} still running after all replicas killed")
+        
+        # Verify cluster state after killing all replicas (should still be healthy - primaries have all slots)
+        remaining_nodes = [n for n in nodes if n.role == 'primary']
+        cluster_healthy = cluster_mgr.validate_cluster(remaining_nodes)
+        assert cluster_healthy, "Cluster should remain healthy with primaries alive (all slots covered)"
+        logging.info(f"OK: Cluster state after killing all replicas: healthy (all slots covered)")
         
         # Cleanup
         for node in nodes:
@@ -519,6 +535,10 @@ class TestRealLargeClusterChaos:
             assert success
             logging.info("OK: Large cluster formed successfully")
             
+            # Verify cluster is healthy before chaos
+            assert cluster_mgr.validate_cluster(nodes)
+            logging.info("OK: Large cluster healthy before chaos")
+            
             # Register all nodes
             for node in nodes:
                 chaos_engine.register_node_process(node.node_id, node.pid)
@@ -550,6 +570,12 @@ class TestRealLargeClusterChaos:
             for primary in primaries:
                 assert primary.process.poll() is None
                 logging.info(f"OK: Primary {primary.node_id} still running")
+            
+            # Verify cluster state after chaos (should still be healthy - primaries have all slots)
+            remaining_nodes = [n for n in nodes if n.process.poll() is None]
+            cluster_healthy = cluster_mgr.validate_cluster(remaining_nodes)
+            assert cluster_healthy, "Cluster should remain healthy with primaries alive"
+            logging.info(f"OK: Large cluster state after chaos: healthy (all slots covered)")
             
             logging.info(f"\nPASS: Large cluster chaos test completed")
             logging.info(f"   - Total nodes: {len(nodes)}")
@@ -623,12 +649,18 @@ class TestComprehensiveChaosScenarios:
         Test chaos injection DURING a failover operation
         """
         nodes = real_cluster['nodes']
+        cluster_mgr = real_cluster['cluster_mgr']
         chaos_engine = ProcessChaosEngine()
         coordinator = ChaosCoordinator(chaos_engine)
         
-        # Find primary and replica
-        primary = next(node for node in nodes if node.role == 'primary')
-        replicas = [node for node in nodes if node.role == 'replica']
+        # Verify cluster is healthy before chaos
+        assert cluster_mgr.validate_cluster(nodes)
+        logging.info("OK: Cluster healthy before chaos")
+        
+        # Find primary and replica from shard 0
+        shard_0_nodes = [node for node in nodes if node.shard_id == 0]
+        primary = next(node for node in shard_0_nodes if node.role == 'primary')
+        replicas = [node for node in shard_0_nodes if node.role == 'replica']
         replica = replicas[0]
         
         logging.info(f"Primary: {primary.node_id}, Target replica: {replica.node_id}")
@@ -689,6 +721,12 @@ class TestComprehensiveChaosScenarios:
         assert replica.process.poll() is not None
         logging.info(f"OK: Replica process {replica.pid} is dead")
         
+        # Verify cluster state after chaos (should still be healthy - primary has all slots)
+        remaining_nodes = [n for n in nodes if n.node_id != replica.node_id]
+        cluster_healthy = cluster_mgr.validate_cluster(remaining_nodes)
+        assert cluster_healthy, "Cluster should remain healthy after killing replica"
+        logging.info(f"OK: Cluster state after chaos: healthy (all slots covered)")
+        
         # Cleanup
         coordinator.cleanup_all_scenarios()
         for node in nodes:
@@ -701,13 +739,19 @@ class TestComprehensiveChaosScenarios:
         Test chaos injection AFTER a failover operation
         """
         nodes = real_cluster['nodes']
+        cluster_mgr = real_cluster['cluster_mgr']
         chaos_engine = ProcessChaosEngine()
         coordinator = ChaosCoordinator(chaos_engine)
         
-        # Find primary and replica
-        primary = next(node for node in nodes if node.role == 'primary')
-        replicas = [node for node in nodes if node.role == 'replica']
-        replica = replicas[1] if len(replicas) > 1 else replicas[0]
+        # Verify cluster is healthy before chaos
+        assert cluster_mgr.validate_cluster(nodes)
+        logging.info("OK: Cluster healthy before chaos")
+        
+        # Find primary and replica from shard 1
+        shard_1_nodes = [node for node in nodes if node.shard_id == 1]
+        primary = next(node for node in shard_1_nodes if node.role == 'primary')
+        replicas = [node for node in shard_1_nodes if node.role == 'replica']
+        replica = replicas[0]
         
         logging.info(f"Primary: {primary.node_id}, Target replica: {replica.node_id}")
         
@@ -767,6 +811,12 @@ class TestComprehensiveChaosScenarios:
         assert replica.process.poll() is not None
         logging.info(f"OK: Replica process {replica.pid} is dead")
         
+        # Verify cluster state after chaos (should still be healthy - primary has all slots)
+        remaining_nodes = [n for n in nodes if n.node_id != replica.node_id]
+        cluster_healthy = cluster_mgr.validate_cluster(remaining_nodes)
+        assert cluster_healthy, "Cluster should remain healthy after killing replica"
+        logging.info(f"OK: Cluster state after chaos: healthy (all slots covered)")
+        
         # Cleanup
         coordinator.cleanup_all_scenarios()
         for node in nodes:
@@ -781,12 +831,18 @@ class TestComprehensiveChaosScenarios:
         - Kill another replica DURING operation
         """
         nodes = real_cluster['nodes']
+        cluster_mgr = real_cluster['cluster_mgr']
         chaos_engine = ProcessChaosEngine()
         coordinator = ChaosCoordinator(chaos_engine)
         
-        # Find primary and replicas
-        primary = next(node for node in nodes if node.role == 'primary')
-        replicas = [node for node in nodes if node.role == 'replica']
+        # Verify cluster is healthy before chaos
+        assert cluster_mgr.validate_cluster(nodes)
+        logging.info("OK: Cluster healthy before chaos")
+        
+        # Find primary and replicas from shard 2
+        shard_2_nodes = [node for node in nodes if node.shard_id == 2]
+        primary = next(node for node in shard_2_nodes if node.role == 'primary')
+        replicas = [node for node in shard_2_nodes if node.role == 'replica']
         
         logging.info(f"Primary: {primary.node_id}")
         logging.info(f"Replicas: {[r.node_id for r in replicas]}")
@@ -855,12 +911,18 @@ class TestComprehensiveChaosScenarios:
         Test chaos injection with timing delays
         """
         nodes = real_cluster['nodes']
+        cluster_mgr = real_cluster['cluster_mgr']
         chaos_engine = ProcessChaosEngine()
         coordinator = ChaosCoordinator(chaos_engine)
         
-        # Find replica
-        replica = next(node for node in nodes if node.role == 'replica')
-        primary = next(node for node in nodes if node.role == 'primary')
+        # Verify cluster is healthy before chaos
+        assert cluster_mgr.validate_cluster(nodes)
+        logging.info("OK: Cluster healthy before chaos")
+        
+        # Find replica from shard 0
+        shard_0_nodes = [node for node in nodes if node.shard_id == 0]
+        replica = next(node for node in shard_0_nodes if node.role == 'replica')
+        primary = next(node for node in shard_0_nodes if node.role == 'primary')
         
         logging.info(f"Target: {replica.node_id}")
         
@@ -922,6 +984,12 @@ class TestComprehensiveChaosScenarios:
         assert replica.process.poll() is not None
         logging.info(f"OK: Process {replica.pid} is dead")
         
+        # Verify cluster state after chaos (should still be healthy - primary has all slots)
+        remaining_nodes = [n for n in nodes if n.node_id != replica.node_id]
+        cluster_healthy = cluster_mgr.validate_cluster(remaining_nodes)
+        assert cluster_healthy, "Cluster should remain healthy after killing replica"
+        logging.info(f"OK: Cluster state after chaos: healthy (all slots covered)")
+        
         # Cleanup
         coordinator.cleanup_all_scenarios()
         for node in nodes:
@@ -934,7 +1002,12 @@ class TestComprehensiveChaosScenarios:
         Test chaos with random target selection strategy
         """
         nodes = real_cluster['nodes']
+        cluster_mgr = real_cluster['cluster_mgr']
         chaos_engine = ProcessChaosEngine()
+        
+        # Verify cluster is healthy before chaos
+        assert cluster_mgr.validate_cluster(nodes)
+        logging.info("OK: Cluster healthy before chaos")
         
         # Register nodes
         for node in nodes:
@@ -959,6 +1032,12 @@ class TestComprehensiveChaosScenarios:
         time.sleep(1)
         assert target.process.poll() is not None
         logging.info(f"OK: Process {target.pid} is dead")
+        
+        # Verify cluster state after chaos (should still be healthy - primaries have all slots)
+        remaining_nodes = [n for n in nodes if n.node_id != target.node_id]
+        cluster_healthy = cluster_mgr.validate_cluster(remaining_nodes)
+        assert cluster_healthy, "Cluster should remain healthy after killing replica"
+        logging.info(f"OK: Cluster state after chaos: healthy (all slots covered)")
         
         # Cleanup
         for node in nodes:

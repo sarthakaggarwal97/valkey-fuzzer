@@ -158,7 +158,6 @@ class ConfigurationManager:
                 '--cluster-enabled', 'yes',
                 '--cluster-config-file', os.path.join(node_data_dir, 'nodes.conf'),
                 '--cluster-node-timeout', '5000',
-                '--cluster-replica-validity-factor', '2',  # Enable faster automatic failover
                 '--cluster-require-full-coverage', 'no',
                 '--dir', node_data_dir,
                 '--logfile', log_file,
