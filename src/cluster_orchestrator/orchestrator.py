@@ -158,6 +158,7 @@ class ConfigurationManager:
                 '--cluster-enabled', 'yes',
                 '--cluster-config-file', os.path.join(node_data_dir, 'nodes.conf'),
                 '--cluster-node-timeout', '5000',
+                '--cluster-replica-validity-factor', '2',  # Enable faster automatic failover
                 '--cluster-require-full-coverage', 'no',
                 '--dir', node_data_dir,
                 '--logfile', log_file,
@@ -299,6 +300,20 @@ class ClusterManager:
                 key, value = line.split(':', 1)
                 info_dict[key] = value
         return info_dict
+    
+    def get_node_role(self, node: NodeInfo) -> str:
+        """Get the current role of a node (master/slave)"""
+        client = self.get_client(node)
+        nodes_info = client.execute_command('CLUSTER', 'NODES')
+        
+        # Parse CLUSTER NODES output to find this node's role
+        for line in nodes_info.split('\n'):
+            if 'myself' in line:
+                if 'master' in line:
+                    return 'master'
+                elif 'slave' in line:
+                    return 'slave'
+        return 'unknown'
     
     def cluster_meet(self, nodes_in_cluster: List[NodeInfo], timeout: int = 30) -> None:
         """Connect cluster nodes and wait for convergence"""
