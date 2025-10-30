@@ -12,7 +12,7 @@ from typing import Dict, List, Optional
 from ..interfaces import IChaosEngine
 from ..models import (
     NodeInfo, ChaosResult, ChaosType, ProcessChaosType, 
-    Operation, ChaosConfig, TargetSelection, NodeRole
+    Operation, ChaosConfig, TargetSelection
 )
 
 
@@ -154,10 +154,6 @@ class BaseChaosEngine(IChaosEngine, ABC):
         if not target_node:
             return False
         
-        if not target_node.is_healthy:
-            logger.warning(f"Target node {target_node.node_id} is not healthy")
-            return False
-        
         # Check if node has a valid process ID
         if target_node.node_id not in self.node_processes:
             logger.warning(f"No process ID found for node {target_node.node_id}")
@@ -292,8 +288,9 @@ class ChaosTargetSelector:
         return [node for node in self.cluster_nodes[cluster_id] if node.role == NodeRole.REPLICA]
     
     def get_healthy_nodes(self, cluster_id: str) -> List[NodeInfo]:
-        """Get all healthy nodes in cluster"""
+        """Get all healthy nodes in cluster (all nodes with registered processes)"""
         if cluster_id not in self.cluster_nodes:
             return []
         
-        return [node for node in self.cluster_nodes[cluster_id] if node.is_healthy]
+        # Return all nodes - health tracking not implemented in current NodeInfo model
+        return self.cluster_nodes[cluster_id]
