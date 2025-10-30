@@ -59,11 +59,6 @@ class ConfigurationManager:
                 
         valkey_dir = os.path.join(base_dir, "valkey")
         valkey_binary = os.path.join(valkey_dir, "src", "valkey-server")
-        
-        # Check if binary already exists from previous build
-        if os.path.exists(valkey_binary):
-            return valkey_binary
-        
         os.makedirs(base_dir, exist_ok=True)
         
         subprocess.run(['git', 'clone', 'https://github.com/valkey-io/valkey.git', valkey_dir], check=True)
