@@ -361,7 +361,6 @@ class TestRealChaosIntegration:
         logging.info(f"   - Primary survived: {primary.node_id}")
 
 
-@pytest.mark.slow
 class TestRealLargeClusterChaos:
     """Tests with larger real clusters (marked as slow)"""
     
