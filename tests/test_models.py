@@ -3,45 +3,36 @@ Tests for core data models
 """
 import pytest
 from src.models import (
-    ClusterConfig, NodeConfig, NodeRole, OperationType, ChaosType,
+    ClusterConfig, NodePlan, NodeInfo, OperationType, ChaosType,
     Scenario, Operation, OperationTiming, ChaosConfig,
     TargetSelection, ChaosTiming, ChaosCoordination, ValidationConfig
 )
 
 
-def test_cluster_config_validation():
-    """Test cluster configuration validation"""
-    # Valid configuration
-    nodes = [
-        NodeConfig("node1", "localhost", 7000, NodeRole.PRIMARY),
-        NodeConfig("node2", "localhost", 7001, NodeRole.REPLICA, "node1")
-    ]
-    config = ClusterConfig(shard_count=3, replica_count=1, node_configs=nodes)
-    assert config.shard_count == 3
-    assert config.replica_count == 1
-    
-    # Invalid shard count
-    with pytest.raises(ValueError, match="Shard count must be between 3 and 16"):
-        ClusterConfig(shard_count=2, replica_count=1, node_configs=nodes)
-    
-    # Invalid replica count
-    with pytest.raises(ValueError, match="Replica count must be between 0 and 2"):
-        ClusterConfig(shard_count=3, replica_count=3, node_configs=nodes)
+def test_cluster_config_creation():
+    """Test cluster configuration creation"""
+    config = ClusterConfig(num_shards=3, replicas_per_shard=1)
+    assert config.num_shards == 3
+    assert config.replicas_per_shard == 1
+    assert config.base_port == 6379
+    assert config.enable_cleanup == True
 
 
-def test_node_config_creation():
-    """Test node configuration creation"""
+def test_node_plan_creation():
+    """Test node plan creation"""
     # Primary node
-    primary = NodeConfig("node1", "localhost", 7000, NodeRole.PRIMARY)
+    primary = NodePlan("node1", "primary", 0, 7000, 17000, 0, 5461)
     assert primary.node_id == "node1"
-    assert primary.role == NodeRole.PRIMARY
-    assert primary.primary_id is None
+    assert primary.role == "primary"
+    assert primary.shard_id == 0
+    assert primary.slot_start == 0
+    assert primary.slot_end == 5461
     
     # Replica node
-    replica = NodeConfig("node2", "localhost", 7001, NodeRole.REPLICA, "node1")
+    replica = NodePlan("node2", "replica", 0, 7001, 17001, master_node_id="node1")
     assert replica.node_id == "node2"
-    assert replica.role == NodeRole.REPLICA
-    assert replica.primary_id == "node1"
+    assert replica.role == "replica"
+    assert replica.master_node_id == "node1"
 
 
 def test_operation_creation():
@@ -82,8 +73,7 @@ def test_chaos_config_creation():
 def test_scenario_creation():
     """Test complete test scenario creation"""
     # Create cluster config
-    nodes = [NodeConfig("node1", "localhost", 7000, NodeRole.PRIMARY)]
-    cluster_config = ClusterConfig(shard_count=3, replica_count=0, node_configs=nodes)
+    cluster_config = ClusterConfig(num_shards=3, replicas_per_shard=0)
     
     # Create operation
     operation = Operation(
