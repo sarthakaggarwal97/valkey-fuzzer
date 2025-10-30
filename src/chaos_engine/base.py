@@ -278,14 +278,14 @@ class ChaosTargetSelector:
         if cluster_id not in self.cluster_nodes:
             return []
         
-        return [node for node in self.cluster_nodes[cluster_id] if node.role == NodeRole.PRIMARY]
+        return [node for node in self.cluster_nodes[cluster_id] if node.role == "primary"]
     
     def get_replica_nodes(self, cluster_id: str) -> List[NodeInfo]:
         """Get all replica nodes in cluster"""
         if cluster_id not in self.cluster_nodes:
             return []
         
-        return [node for node in self.cluster_nodes[cluster_id] if node.role == NodeRole.REPLICA]
+        return [node for node in self.cluster_nodes[cluster_id] if node.role == "replica"]
     
     def get_healthy_nodes(self, cluster_id: str) -> List[NodeInfo]:
         """Get all healthy nodes in cluster (all nodes with registered processes)"""
