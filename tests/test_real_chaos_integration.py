@@ -164,6 +164,11 @@ class TestRealChaosIntegration:
         assert replica.process.poll() is not None
         logging.info(f"OK: Process {replica.pid} is dead")
         
+        # Verify cluster state after chaos (should still be ok with remaining nodes)
+        remaining_nodes = [n for n in nodes if n.node_id != replica.node_id]
+        cluster_healthy = cluster_mgr.validate_cluster(remaining_nodes)
+        logging.info(f"Cluster state after chaos: {'healthy' if cluster_healthy else 'degraded'}")
+        
         # Cleanup
         for node in nodes:
             chaos_engine.unregister_node_process(node.node_id)
@@ -187,6 +192,10 @@ class TestRealChaosIntegration:
         for node in nodes:
             chaos_engine.register_node_process(node.node_id, node.pid)
         
+        # Verify cluster is healthy before chaos
+        assert cluster_mgr.validate_cluster(nodes)
+        logging.info("OK: Cluster healthy before chaos")
+        
         # Inject real chaos - kill the replica with SIGKILL
         logging.info(f"Injecting chaos: SIGKILL on {replica.node_id}")
         result = chaos_engine.inject_process_chaos(replica, ProcessChaosType.SIGKILL)
@@ -202,6 +211,11 @@ class TestRealChaosIntegration:
         # Verify process is actually dead
         assert replica.process.poll() is not None
         logging.info(f"OK: Process {replica.pid} is dead (SIGKILL)")
+        
+        # Verify cluster state after chaos
+        remaining_nodes = [n for n in nodes if n.node_id != replica.node_id]
+        cluster_healthy = cluster_mgr.validate_cluster(remaining_nodes)
+        logging.info(f"Cluster state after chaos: {'healthy' if cluster_healthy else 'degraded'}")
         
         # Cleanup
         for node in nodes:
@@ -311,6 +325,15 @@ class TestRealChaosIntegration:
                 logging.info(f"OK: Replica {replica.node_id} is responsive")
             except Exception as e:
                 logging.warning(f"Replica {replica.node_id} not responsive: {e}")
+        
+        # Verify cluster state after primary killed (will be degraded but replicas should be reachable)
+        # Note: Cluster will report as unhealthy because primary is down, but that's expected
+        remaining_nodes = [n for n in nodes if n.node_id != primary.node_id]
+        try:
+            cluster_healthy = cluster_mgr.validate_cluster(remaining_nodes)
+            logging.info(f"Cluster state after primary killed: {'healthy' if cluster_healthy else 'degraded (expected)'}")
+        except Exception as e:
+            logging.info(f"Cluster validation failed after primary killed (expected): {e}")
         
         # Cleanup
         coordinator.cleanup_all_scenarios()
@@ -441,3 +464,452 @@ class TestRealLargeClusterChaos:
                 chaos_engine.unregister_node_process(node.node_id)
             cluster_mgr.close_connections()
             config_mgr.cleanup_cluster(nodes)
+
+
+
+class TestComprehensiveChaosScenarios:
+    """Comprehensive tests covering all chaos coordination combinations"""
+    
+    def test_sigterm_on_primary(self, real_cluster):
+        """
+        Test killing primary node with SIGTERM (graceful shutdown)
+        """
+        nodes = real_cluster['nodes']
+        cluster_mgr = real_cluster['cluster_mgr']
+        chaos_engine = ProcessChaosEngine()
+        
+        # Find primary node
+        primary = next(node for node in nodes if node.role == 'primary')
+        logging.info(f"Target: {primary.node_id} (PID {primary.pid})")
+        
+        # Register nodes
+        for node in nodes:
+            chaos_engine.register_node_process(node.node_id, node.pid)
+        
+        # Verify cluster is healthy before chaos
+        assert cluster_mgr.validate_cluster(nodes)
+        logging.info("OK: Cluster healthy before chaos")
+        
+        # Kill primary with SIGTERM
+        logging.info(f"Injecting chaos: SIGTERM on primary {primary.node_id}")
+        result = chaos_engine.inject_process_chaos(primary, ProcessChaosType.SIGTERM)
+        
+        # Verify chaos was successful
+        assert result.success is True
+        assert result.target_node == primary.node_id
+        logging.info(f"OK: Chaos injected: {result.chaos_type.value}")
+        
+        # Wait for process to die
+        time.sleep(2)
+        
+        # Verify process is actually dead
+        assert primary.process.poll() is not None
+        logging.info(f"OK: Primary process {primary.pid} is dead")
+        
+        # Verify cluster state after primary killed
+        remaining_nodes = [n for n in nodes if n.node_id != primary.node_id]
+        try:
+            cluster_healthy = cluster_mgr.validate_cluster(remaining_nodes)
+            logging.info(f"Cluster state after primary killed: {'healthy' if cluster_healthy else 'degraded (expected)'}")
+        except Exception as e:
+            logging.info(f"Cluster validation after primary killed: {e}")
+        
+        # Cleanup
+        for node in nodes:
+            chaos_engine.unregister_node_process(node.node_id)
+        
+        logging.info("PASS: Primary killed successfully with SIGTERM")
+    
+    def test_chaos_during_operation(self, real_cluster):
+        """
+        Test chaos injection DURING a failover operation
+        """
+        nodes = real_cluster['nodes']
+        chaos_engine = ProcessChaosEngine()
+        coordinator = ChaosCoordinator(chaos_engine)
+        
+        # Find primary and replica
+        primary = next(node for node in nodes if node.role == 'primary')
+        replicas = [node for node in nodes if node.role == 'replica']
+        replica = replicas[0]
+        
+        logging.info(f"Primary: {primary.node_id}, Target replica: {replica.node_id}")
+        
+        # Register nodes
+        for node in nodes:
+            chaos_engine.register_node_process(node.node_id, node.pid)
+        
+        # Create failover operation
+        failover_operation = Operation(
+            type=OperationType.FAILOVER,
+            target_node=primary.node_id,
+            parameters={},
+            timing=OperationTiming()
+        )
+        
+        # Configure chaos to happen DURING failover
+        chaos_config = ChaosConfig(
+            chaos_type=ChaosType.PROCESS_KILL,
+            target_selection=TargetSelection(
+                strategy="specific",
+                specific_nodes=[replica.node_id]
+            ),
+            timing=ChaosTiming(
+                delay_before_operation=0.0,
+                delay_after_operation=0.0
+            ),
+            coordination=ChaosCoordination(
+                chaos_before_operation=False,
+                chaos_during_operation=True,  # Kill DURING operation
+                chaos_after_operation=False
+            ),
+            process_chaos_type=ProcessChaosType.SIGKILL
+        )
+        
+        logging.info(f"Chaos timing: DURING operation")
+        
+        # Create and execute scenario
+        scenario = coordinator.create_scenario(
+            operation=failover_operation,
+            chaos_config=chaos_config,
+            target_node=replica
+        )
+        
+        result = coordinator.execute_scenario(scenario)
+        
+        # Verify chaos was injected
+        assert result.state == ChaosScenarioState.COMPLETED
+        assert len(result.chaos_results) == 1
+        assert result.chaos_results[0].success is True
+        assert result.chaos_results[0].target_node == replica.node_id
+        
+        logging.info(f"OK: Chaos scenario completed")
+        logging.info(f"OK: Replica killed during operation: {replica.node_id}")
+        
+        # Wait for process to die
+        time.sleep(1)
+        assert replica.process.poll() is not None
+        logging.info(f"OK: Replica process {replica.pid} is dead")
+        
+        # Cleanup
+        coordinator.cleanup_all_scenarios()
+        for node in nodes:
+            chaos_engine.unregister_node_process(node.node_id)
+        
+        logging.info("PASS: Chaos during operation completed")
+    
+    def test_chaos_after_operation(self, real_cluster):
+        """
+        Test chaos injection AFTER a failover operation
+        """
+        nodes = real_cluster['nodes']
+        chaos_engine = ProcessChaosEngine()
+        coordinator = ChaosCoordinator(chaos_engine)
+        
+        # Find primary and replica
+        primary = next(node for node in nodes if node.role == 'primary')
+        replicas = [node for node in nodes if node.role == 'replica']
+        replica = replicas[1] if len(replicas) > 1 else replicas[0]
+        
+        logging.info(f"Primary: {primary.node_id}, Target replica: {replica.node_id}")
+        
+        # Register nodes
+        for node in nodes:
+            chaos_engine.register_node_process(node.node_id, node.pid)
+        
+        # Create failover operation
+        failover_operation = Operation(
+            type=OperationType.FAILOVER,
+            target_node=primary.node_id,
+            parameters={},
+            timing=OperationTiming()
+        )
+        
+        # Configure chaos to happen AFTER failover
+        chaos_config = ChaosConfig(
+            chaos_type=ChaosType.PROCESS_KILL,
+            target_selection=TargetSelection(
+                strategy="specific",
+                specific_nodes=[replica.node_id]
+            ),
+            timing=ChaosTiming(
+                delay_before_operation=0.0,
+                delay_after_operation=1.0  # Wait 1s after operation
+            ),
+            coordination=ChaosCoordination(
+                chaos_before_operation=False,
+                chaos_during_operation=False,
+                chaos_after_operation=True  # Kill AFTER operation
+            ),
+            process_chaos_type=ProcessChaosType.SIGTERM
+        )
+        
+        logging.info(f"Chaos timing: AFTER operation (delay: 1.0s)")
+        
+        # Create and execute scenario
+        scenario = coordinator.create_scenario(
+            operation=failover_operation,
+            chaos_config=chaos_config,
+            target_node=replica
+        )
+        
+        result = coordinator.execute_scenario(scenario)
+        
+        # Verify chaos was injected
+        assert result.state == ChaosScenarioState.COMPLETED
+        assert len(result.chaos_results) == 1
+        assert result.chaos_results[0].success is True
+        assert result.chaos_results[0].target_node == replica.node_id
+        
+        logging.info(f"OK: Chaos scenario completed")
+        logging.info(f"OK: Replica killed after operation: {replica.node_id}")
+        
+        # Wait for process to die
+        time.sleep(2)
+        assert replica.process.poll() is not None
+        logging.info(f"OK: Replica process {replica.pid} is dead")
+        
+        # Cleanup
+        coordinator.cleanup_all_scenarios()
+        for node in nodes:
+            chaos_engine.unregister_node_process(node.node_id)
+        
+        logging.info("PASS: Chaos after operation completed")
+    
+    def test_multiple_chaos_phases(self, real_cluster):
+        """
+        Test multiple chaos injections at different phases:
+        - Kill one replica BEFORE operation
+        - Kill another replica DURING operation
+        """
+        nodes = real_cluster['nodes']
+        chaos_engine = ProcessChaosEngine()
+        coordinator = ChaosCoordinator(chaos_engine)
+        
+        # Find primary and replicas
+        primary = next(node for node in nodes if node.role == 'primary')
+        replicas = [node for node in nodes if node.role == 'replica']
+        
+        logging.info(f"Primary: {primary.node_id}")
+        logging.info(f"Replicas: {[r.node_id for r in replicas]}")
+        
+        # Register nodes
+        for node in nodes:
+            chaos_engine.register_node_process(node.node_id, node.pid)
+        
+        # Create failover operation
+        failover_operation = Operation(
+            type=OperationType.FAILOVER,
+            target_node=primary.node_id,
+            parameters={},
+            timing=OperationTiming()
+        )
+        
+        # Configure chaos at multiple phases
+        chaos_config = ChaosConfig(
+            chaos_type=ChaosType.PROCESS_KILL,
+            target_selection=TargetSelection(
+                strategy="specific",
+                specific_nodes=[replicas[0].node_id]
+            ),
+            timing=ChaosTiming(
+                delay_before_operation=0.5,
+                delay_after_operation=0.0
+            ),
+            coordination=ChaosCoordination(
+                chaos_before_operation=True,   # Kill before
+                chaos_during_operation=True,   # Kill during
+                chaos_after_operation=False
+            ),
+            process_chaos_type=ProcessChaosType.SIGKILL
+        )
+        
+        logging.info(f"Chaos phases: BEFORE + DURING")
+        
+        # Execute scenario
+        scenario = coordinator.create_scenario(
+            operation=failover_operation,
+            chaos_config=chaos_config,
+            target_node=replicas[0]
+        )
+        
+        result = coordinator.execute_scenario(scenario)
+        
+        # Verify multiple chaos events
+        assert result.state == ChaosScenarioState.COMPLETED
+        assert len(result.chaos_results) == 2  # Before + During
+        
+        successful_chaos = [r for r in result.chaos_results if r.success]
+        assert len(successful_chaos) == 2
+        
+        logging.info(f"OK: Multiple chaos events executed: {len(result.chaos_results)}")
+        logging.info(f"OK: Successful chaos injections: {len(successful_chaos)}")
+        
+        # Cleanup
+        coordinator.cleanup_all_scenarios()
+        for node in nodes:
+            chaos_engine.unregister_node_process(node.node_id)
+        
+        logging.info("PASS: Multiple chaos phases completed")
+    
+    def test_chaos_with_timing_delays(self, real_cluster):
+        """
+        Test chaos injection with timing delays
+        """
+        nodes = real_cluster['nodes']
+        chaos_engine = ProcessChaosEngine()
+        coordinator = ChaosCoordinator(chaos_engine)
+        
+        # Find replica
+        replica = next(node for node in nodes if node.role == 'replica')
+        primary = next(node for node in nodes if node.role == 'primary')
+        
+        logging.info(f"Target: {replica.node_id}")
+        
+        # Register nodes
+        for node in nodes:
+            chaos_engine.register_node_process(node.node_id, node.pid)
+        
+        # Create operation
+        operation = Operation(
+            type=OperationType.FAILOVER,
+            target_node=primary.node_id,
+            parameters={},
+            timing=OperationTiming()
+        )
+        
+        # Configure chaos with delays
+        chaos_config = ChaosConfig(
+            chaos_type=ChaosType.PROCESS_KILL,
+            target_selection=TargetSelection(
+                strategy="specific",
+                specific_nodes=[replica.node_id]
+            ),
+            timing=ChaosTiming(
+                delay_before_operation=2.0,  # Wait 2s before chaos
+                delay_after_operation=0.0
+            ),
+            coordination=ChaosCoordination(
+                chaos_before_operation=True,
+                chaos_during_operation=False,
+                chaos_after_operation=False
+            ),
+            process_chaos_type=ProcessChaosType.SIGKILL
+        )
+        
+        logging.info(f"Chaos timing: 2s delay before operation")
+        
+        # Execute scenario and measure time
+        start_time = time.time()
+        scenario = coordinator.create_scenario(
+            operation=operation,
+            chaos_config=chaos_config,
+            target_node=replica
+        )
+        
+        result = coordinator.execute_scenario(scenario)
+        elapsed_time = time.time() - start_time
+        
+        # Verify chaos was injected
+        assert result.state == ChaosScenarioState.COMPLETED
+        assert len(result.chaos_results) == 1
+        assert result.chaos_results[0].success is True
+        
+        # Verify timing delay was applied (should take at least 2 seconds)
+        assert elapsed_time >= 2.0
+        logging.info(f"OK: Chaos executed with timing delay (elapsed: {elapsed_time:.2f}s)")
+        
+        # Verify process is dead
+        time.sleep(1)
+        assert replica.process.poll() is not None
+        logging.info(f"OK: Process {replica.pid} is dead")
+        
+        # Cleanup
+        coordinator.cleanup_all_scenarios()
+        for node in nodes:
+            chaos_engine.unregister_node_process(node.node_id)
+        
+        logging.info("PASS: Chaos with timing delays completed")
+    
+    def test_random_target_selection(self, real_cluster):
+        """
+        Test chaos with random target selection strategy
+        """
+        nodes = real_cluster['nodes']
+        chaos_engine = ProcessChaosEngine()
+        
+        # Register nodes
+        for node in nodes:
+            chaos_engine.register_node_process(node.node_id, node.pid)
+        
+        # Get a random replica (simulating random selection)
+        replicas = [node for node in nodes if node.role == 'replica']
+        import random
+        target = random.choice(replicas)
+        
+        logging.info(f"Random target selected: {target.node_id}")
+        
+        # Kill the randomly selected node
+        result = chaos_engine.inject_process_chaos(target, ProcessChaosType.SIGKILL)
+        
+        # Verify chaos was successful
+        assert result.success is True
+        assert result.target_node == target.node_id
+        logging.info(f"OK: Random target killed: {target.node_id}")
+        
+        # Wait for process to die
+        time.sleep(1)
+        assert target.process.poll() is not None
+        logging.info(f"OK: Process {target.pid} is dead")
+        
+        # Cleanup
+        for node in nodes:
+            chaos_engine.unregister_node_process(node.node_id)
+        
+        logging.info("PASS: Random target selection completed")
+    
+    def test_all_replicas_chaos(self, real_cluster):
+        """
+        Test killing all replicas in sequence
+        """
+        nodes = real_cluster['nodes']
+        cluster_mgr = real_cluster['cluster_mgr']
+        chaos_engine = ProcessChaosEngine()
+        
+        # Register nodes
+        for node in nodes:
+            chaos_engine.register_node_process(node.node_id, node.pid)
+        
+        # Verify cluster is healthy before chaos
+        assert cluster_mgr.validate_cluster(nodes)
+        logging.info("OK: Cluster healthy before chaos")
+        
+        # Get all replicas
+        replicas = [node for node in nodes if node.role == 'replica']
+        primary = next(node for node in nodes if node.role == 'primary')
+        
+        logging.info(f"Killing all {len(replicas)} replicas")
+        
+        # Kill all replicas
+        for replica in replicas:
+            logging.info(f"Killing replica: {replica.node_id}")
+            result = chaos_engine.inject_process_chaos(replica, ProcessChaosType.SIGKILL)
+            assert result.success is True
+            time.sleep(0.5)
+            assert replica.process.poll() is not None
+            logging.info(f"OK: Killed {replica.node_id}")
+        
+        # Verify primary is still alive
+        assert primary.process.poll() is None
+        logging.info(f"OK: Primary {primary.node_id} still running")
+        
+        # Verify cluster state with only primary (will be degraded but primary should be reachable)
+        remaining_nodes = [primary]
+        cluster_healthy = cluster_mgr.validate_cluster(remaining_nodes)
+        logging.info(f"Cluster state with only primary: {'healthy' if cluster_healthy else 'degraded (expected)'}")
+        
+        # Cleanup
+        for node in nodes:
+            chaos_engine.unregister_node_process(node.node_id)
+        
+        logging.info(f"PASS: All replicas killed, primary survived")
