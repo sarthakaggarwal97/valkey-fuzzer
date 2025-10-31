@@ -13,6 +13,7 @@ WARNING: These tests:
 import pytest
 import time
 import logging
+import subprocess
 from src.cluster_orchestrator.orchestrator import (
     PortManager, ConfigurationManager, ClusterManager
 )
@@ -29,6 +30,33 @@ logging.basicConfig(
     level=logging.INFO,
     force=True
 )
+
+# Cluster configuration constants
+CLUSTER_NODE_TIMEOUT_MS = 5000  # Must match --cluster-node-timeout in orchestrator.py
+CLUSTER_NODE_TIMEOUT_SEC = CLUSTER_NODE_TIMEOUT_MS / 1000.0
+
+
+def wait_for_process_death(process: subprocess.Popen, node_id: str, timeout: float = 10.0) -> None:
+    """
+    Wait for a process to die, with proper timeout handling.
+    
+    Args:
+        process: The subprocess.Popen object
+        node_id: Node identifier for logging
+        timeout: Maximum time to wait in seconds
+    
+    Raises:
+        AssertionError: If process doesn't die within timeout
+    """
+    try:
+        process.wait(timeout=timeout)
+        logging.info(f"OK: Process for {node_id} (PID {process.pid}) terminated")
+    except subprocess.TimeoutExpired:
+        # Force kill if still alive
+        logging.warning(f"Process {process.pid} didn't terminate within {timeout}s, force killing")
+        process.kill()
+        process.wait()
+        raise AssertionError(f"Process {process.pid} for {node_id} didn't die gracefully within {timeout}s")
 
 
 @pytest.fixture(autouse=True)
@@ -47,7 +75,7 @@ def test_separator(request):
 def real_cluster():
     """
     Fixture that creates a real Valkey cluster with 3 shards (3 primaries + 3 replicas = 6 nodes)
-    Using 3 shards ensures automatic failover works (requires quorum of masters)
+    Using 3 shards provides quorum for cluster operations and failure detection.
     """
     # Setup Valkey binary
     config_mgr = ConfigurationManager(
@@ -102,7 +130,7 @@ def real_cluster():
 def multi_shard_cluster():
     """
     Fixture that creates a real multi-shard Valkey cluster (3 shards, 1 replica each = 6 nodes)
-    This is needed for automatic failover testing (requires quorum of masters)
+    Multiple shards provide quorum for cluster operations and failure detection.
     """
     # Setup Valkey binary
     config_mgr = ConfigurationManager(
@@ -232,7 +260,7 @@ class TestRealChaosIntegration:
         # Verify process is actually dead
         assert replica.process.poll() is not None, f"Process {replica.pid} should be dead after SIGTERM"
         
-        # Verify cluster state after killing replica (should still be healthy - primary has all slots)
+        # Verify cluster state after killing replica (should still be healthy - primaries collectively cover all slots)
         remaining_nodes = [n for n in nodes if n.node_id != replica.node_id]
         cluster_healthy = cluster_mgr.validate_cluster(remaining_nodes)
         assert cluster_healthy, "Cluster should remain healthy after killing replica"
@@ -274,12 +302,8 @@ class TestRealChaosIntegration:
         assert result.target_node == replica.node_id
         logging.info(f"OK: Chaos injected: SIGKILL")
         
-        # Wait for process to die
-        time.sleep(1)
-        
-        # Verify process is actually dead
-        assert replica.process.poll() is not None
-        logging.info(f"OK: Process {replica.pid} is dead (SIGKILL)")
+        # Wait for process to die (SIGKILL should be immediate)
+        wait_for_process_death(replica.process, replica.node_id, timeout=5.0)
         
         # Verify cluster state after killing replica (should still be healthy)
         remaining_nodes = [n for n in nodes if n.node_id != replica.node_id]
@@ -375,12 +399,8 @@ class TestRealChaosIntegration:
         logging.info(f"OK: Chaos scenario completed")
         logging.info(f"OK: Primary node killed: {primary.node_id}")
         
-        # Wait for process to die
-        time.sleep(2)
-        
-        # Verify primary is dead
-        assert primary.process.poll() is not None
-        logging.info(f"OK: Primary process {primary.pid} is dead")
+        # Wait for process to die (SIGKILL should be immediate)
+        wait_for_process_death(primary.process, primary.node_id, timeout=5.0)
         
         # Verify replicas are still alive
         for replica in replicas:
@@ -442,20 +462,19 @@ class TestRealChaosIntegration:
             result = chaos_engine.inject_process_chaos(replica, ProcessChaosType.SIGKILL)
             assert result.success is True
             
-            time.sleep(1)
-            assert replica.process.poll() is not None
-            logging.info(f"OK: Replica {replica.node_id} killed")
+            wait_for_process_death(replica.process, replica.node_id, timeout=5.0)
         
-        # Verify primary is still alive
-        primary = next(node for node in nodes if node.role == 'primary')
-        assert primary.process.poll() is None
-        logging.info(f"OK: Primary {primary.node_id} still running after all replicas killed")
+        # Verify all primaries are still alive
+        primaries = [node for node in nodes if node.role == 'primary']
+        for primary in primaries:
+            assert primary.process.poll() is None
+            logging.info(f"OK: Primary {primary.node_id} still running after all replicas killed")
         
-        # Verify cluster state after killing all replicas (should still be healthy - primaries have all slots)
-        remaining_nodes = [n for n in nodes if n.role == 'primary']
+        # Verify cluster state after killing all replicas (should still be healthy - primaries collectively cover all slots)
+        remaining_nodes = primaries
         cluster_healthy = cluster_mgr.validate_cluster(remaining_nodes)
-        assert cluster_healthy, "Cluster should remain healthy with primaries alive (all slots covered)"
-        logging.info(f"OK: Cluster state after killing all replicas: healthy (all slots covered)")
+        assert cluster_healthy, "Cluster should remain healthy with primaries alive (all slots collectively covered)"
+        logging.info(f"OK: Cluster state after killing all replicas: healthy (all slots collectively covered)")
         
         # Cleanup
         for node in nodes:
@@ -463,7 +482,7 @@ class TestRealChaosIntegration:
         
         logging.info(f"\nPASS: Cascading failures test completed")
         logging.info(f"   - Replicas killed: {len(replicas)}")
-        logging.info(f"   - Primary survived: {primary.node_id}")
+        logging.info(f"   - Primaries survived: {len(primaries)}")
 
 
 class TestRealLargeClusterChaos:
@@ -530,20 +549,18 @@ class TestRealLargeClusterChaos:
                     )
                     assert result.success is True
                     
-                    time.sleep(1)
-                    assert target.process.poll() is not None
-                    logging.info(f"OK: Killed {target.node_id}")
+                    wait_for_process_death(target.process, target.node_id, timeout=5.0)
             
             # Verify all primaries are still alive
             for primary in primaries:
                 assert primary.process.poll() is None
                 logging.info(f"OK: Primary {primary.node_id} still running")
             
-            # Verify cluster state after chaos (should still be healthy - primaries have all slots)
+            # Verify cluster state after chaos (should still be healthy - primaries collectively cover all slots)
             remaining_nodes = [n for n in nodes if n.process.poll() is None]
             cluster_healthy = cluster_mgr.validate_cluster(remaining_nodes)
             assert cluster_healthy, "Cluster should remain healthy with primaries alive"
-            logging.info(f"OK: Large cluster state after chaos: healthy (all slots covered)")
+            logging.info(f"OK: Large cluster state after chaos: healthy (all slots collectively covered)")
             
             logging.info(f"\nPASS: Large cluster chaos test completed")
             logging.info(f"   - Total nodes: {len(nodes)}")
@@ -591,11 +608,8 @@ class TestComprehensiveChaosScenarios:
         assert result.target_node == primary.node_id
         logging.info(f"OK: Chaos injected: {result.chaos_type.value}")
         
-        # Wait for process to die
-        time.sleep(2)
-        
-        # Verify process is actually dead
-        assert primary.process.poll() is not None
+        # Wait for process to die (SIGTERM may take longer than SIGKILL)
+        wait_for_process_death(primary.process, primary.node_id, timeout=10.0)
         logging.info(f"OK: Primary process {primary.pid} is dead")
         
         # Verify cluster state after primary killed
@@ -684,16 +698,14 @@ class TestComprehensiveChaosScenarios:
         logging.info(f"OK: Chaos scenario completed")
         logging.info(f"OK: Replica killed during operation: {replica.node_id}")
         
-        # Wait for process to die
-        time.sleep(1)
-        assert replica.process.poll() is not None
-        logging.info(f"OK: Replica process {replica.pid} is dead")
+        # Wait for process to die (SIGKILL should be immediate)
+        wait_for_process_death(replica.process, replica.node_id, timeout=5.0)
         
-        # Verify cluster state after chaos (should still be healthy - primary has all slots)
+        # Verify cluster state after chaos (should still be healthy - primaries collectively cover all slots)
         remaining_nodes = [n for n in nodes if n.node_id != replica.node_id]
         cluster_healthy = cluster_mgr.validate_cluster(remaining_nodes)
         assert cluster_healthy, "Cluster should remain healthy after killing replica"
-        logging.info(f"OK: Cluster state after chaos: healthy (all slots covered)")
+        logging.info(f"OK: Cluster state after chaos: healthy (all slots collectively covered)")
         
         # Cleanup
         coordinator.cleanup_all_scenarios()
@@ -774,16 +786,14 @@ class TestComprehensiveChaosScenarios:
         logging.info(f"OK: Chaos scenario completed")
         logging.info(f"OK: Replica killed after operation: {replica.node_id}")
         
-        # Wait for process to die
-        time.sleep(2)
-        assert replica.process.poll() is not None
-        logging.info(f"OK: Replica process {replica.pid} is dead")
+        # Wait for process to die (SIGTERM may take longer than SIGKILL)
+        wait_for_process_death(replica.process, replica.node_id, timeout=10.0)
         
-        # Verify cluster state after chaos (should still be healthy - primary has all slots)
+        # Verify cluster state after chaos (should still be healthy - primaries collectively cover all slots)
         remaining_nodes = [n for n in nodes if n.node_id != replica.node_id]
         cluster_healthy = cluster_mgr.validate_cluster(remaining_nodes)
         assert cluster_healthy, "Cluster should remain healthy after killing replica"
-        logging.info(f"OK: Cluster state after chaos: healthy (all slots covered)")
+        logging.info(f"OK: Cluster state after chaos: healthy (all slots collectively covered)")
         
         # Cleanup
         coordinator.cleanup_all_scenarios()
@@ -947,16 +957,14 @@ class TestComprehensiveChaosScenarios:
         assert elapsed_time >= 2.0
         logging.info(f"OK: Chaos executed with timing delay (elapsed: {elapsed_time:.2f}s)")
         
-        # Verify process is dead
-        time.sleep(1)
-        assert replica.process.poll() is not None
-        logging.info(f"OK: Process {replica.pid} is dead")
+        # Wait for process to die (SIGKILL should be immediate)
+        wait_for_process_death(replica.process, replica.node_id, timeout=5.0)
         
-        # Verify cluster state after chaos (should still be healthy - primary has all slots)
+        # Verify cluster state after chaos (should still be healthy - primaries collectively cover all slots)
         remaining_nodes = [n for n in nodes if n.node_id != replica.node_id]
         cluster_healthy = cluster_mgr.validate_cluster(remaining_nodes)
         assert cluster_healthy, "Cluster should remain healthy after killing replica"
-        logging.info(f"OK: Cluster state after chaos: healthy (all slots covered)")
+        logging.info(f"OK: Cluster state after chaos: healthy (all slots collectively covered)")
         
         # Cleanup
         coordinator.cleanup_all_scenarios()
@@ -996,16 +1004,14 @@ class TestComprehensiveChaosScenarios:
         assert result.target_node == target.node_id
         logging.info(f"OK: Random target killed: {target.node_id}")
         
-        # Wait for process to die
-        time.sleep(1)
-        assert target.process.poll() is not None
-        logging.info(f"OK: Process {target.pid} is dead")
+        # Wait for process to die (SIGKILL should be immediate)
+        wait_for_process_death(target.process, target.node_id, timeout=5.0)
         
-        # Verify cluster state after chaos (should still be healthy - primaries have all slots)
+        # Verify cluster state after chaos (should still be healthy - primaries collectively cover all slots)
         remaining_nodes = [n for n in nodes if n.node_id != target.node_id]
         cluster_healthy = cluster_mgr.validate_cluster(remaining_nodes)
         assert cluster_healthy, "Cluster should remain healthy after killing replica"
-        logging.info(f"OK: Cluster state after chaos: healthy (all slots covered)")
+        logging.info(f"OK: Cluster state after chaos: healthy (all slots collectively covered)")
         
         # Cleanup
         for node in nodes:
@@ -1029,9 +1035,9 @@ class TestComprehensiveChaosScenarios:
         assert cluster_mgr.validate_cluster(nodes)
         logging.info("OK: Cluster healthy before chaos")
         
-        # Get all replicas
+        # Get all replicas and primaries
         replicas = [node for node in nodes if node.role == 'replica']
-        primary = next(node for node in nodes if node.role == 'primary')
+        primaries = [node for node in nodes if node.role == 'primary']
         
         logging.info(f"Killing all {len(replicas)} replicas")
         
@@ -1040,25 +1046,24 @@ class TestComprehensiveChaosScenarios:
             logging.info(f"Killing replica: {replica.node_id}")
             result = chaos_engine.inject_process_chaos(replica, ProcessChaosType.SIGKILL)
             assert result.success is True
-            time.sleep(0.5)
-            assert replica.process.poll() is not None
-            logging.info(f"OK: Killed {replica.node_id}")
+            wait_for_process_death(replica.process, replica.node_id, timeout=5.0)
         
-        # Verify primary is still alive
-        assert primary.process.poll() is None
-        logging.info(f"OK: Primary {primary.node_id} still running")
+        # Verify all primaries are still alive
+        for primary in primaries:
+            assert primary.process.poll() is None
+            logging.info(f"OK: Primary {primary.node_id} still running")
         
-        # Verify cluster state with only primary (should still be healthy - primary has all slots)
-        remaining_nodes = [primary]
+        # Verify cluster state with only primaries (should still be healthy - primaries collectively cover all slots)
+        remaining_nodes = primaries
         cluster_healthy = cluster_mgr.validate_cluster(remaining_nodes)
-        assert cluster_healthy, "Cluster should remain healthy with primary alive (all slots covered)"
-        logging.info(f"OK: Cluster state with only primary: healthy (all slots covered)")
+        assert cluster_healthy, "Cluster should remain healthy with primaries alive (all slots collectively covered)"
+        logging.info(f"OK: Cluster state with only primaries: healthy (all slots collectively covered)")
         
         # Cleanup
         for node in nodes:
             chaos_engine.unregister_node_process(node.node_id)
         
-        logging.info(f"PASS: All replicas killed, primary survived")
+        logging.info(f"PASS: All replicas killed, {len(primaries)} primaries survived")
 
 
 
@@ -1072,13 +1077,14 @@ class TestFailoverValidation:
         This test validates:
         1. Cluster is healthy before chaos
         2. Primary is killed successfully
-        3. Replicas remain as slaves (Valkey Cluster has no automatic failover)
-        4. Cluster state becomes 'fail' (expected - slots unavailable)
-        5. Cluster detects the failure within node-timeout period
+        3. Automatic failover may occur (replica promotion to master)
+        4. Cluster detects the failure and attempts recovery
+        5. Failover timing depends on node-timeout and cluster configuration
         
-        Note: Valkey Cluster requires manual failover or Redis Sentinel for
-        automatic replica promotion. This test validates the failure detection
-        mechanism, not automatic recovery.
+        Note: Valkey Cluster supports automatic failover when properly configured.
+        Failover requires: sufficient replicas, quorum of masters, and appropriate
+        node-timeout settings. This test validates both failure detection and
+        potential automatic recovery.
         """
         nodes = multi_shard_cluster['nodes']
         cluster_mgr = multi_shard_cluster['cluster_mgr']
@@ -1121,19 +1127,17 @@ class TestFailoverValidation:
         result = chaos_engine.inject_process_chaos(primary, ProcessChaosType.SIGKILL)
         assert result.success is True
         
-        # Wait for process to die
-        time.sleep(2)
-        assert primary.process.poll() is not None
-        logging.info(f"OK: Primary process {primary.pid} is dead")
+        # Wait for process to die (SIGKILL should be immediate)
+        wait_for_process_death(primary.process, primary.node_id, timeout=5.0)
         
         # Wait for automatic failover to occur
         # Node goes through: PFAIL (possible fail) -> FAIL (confirmed by majority) -> Failover
-        # This requires: node-timeout (5s) + gossip propagation + majority consensus
-        # Typically takes 2-3x node timeout, but can take up to 30s in practice
-        node_timeout = 5
-        max_failover_time = 30  # Wait up to 30s for PFAIL -> FAIL -> Failover
+        # This requires: node-timeout + gossip propagation + majority consensus
+        # Typically takes 2-3x node timeout, but can take longer in practice
+        # Using the actual configured cluster-node-timeout from orchestrator
+        max_failover_time = int(CLUSTER_NODE_TIMEOUT_SEC * 6)  # 6x node timeout for safety
         
-        logging.info(f"Waiting for automatic failover (max {max_failover_time}s)...")
+        logging.info(f"Waiting for automatic failover (max {max_failover_time}s, node-timeout={CLUSTER_NODE_TIMEOUT_SEC}s)...")
         
         # Poll for replica promotion
         promoted_replica = None
