@@ -266,3 +266,19 @@ class DSLConfig:
     """DSL-based test configuration"""
     config_text: str
     parsed_scenario: Optional[Scenario] = None
+
+
+@dataclass
+class ClusterConnection:
+    """Stores cluster connection information after orchestrator creates cluster"""
+    nodes: List[NodeInfo]
+    cluster_id: str
+    
+    def __post_init__(self):
+        self.startup_nodes = [{'host': '127.0.0.1', 'port': node.port} for node in self.nodes]
+    
+    def get_primary_nodes(self) -> List[NodeInfo]:
+        return [node for node in self.nodes if node.role == 'primary']
+    
+    def get_replica_nodes(self) -> List[NodeInfo]:
+        return [node for node in self.nodes if node.role == 'replica']
