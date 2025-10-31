@@ -55,7 +55,7 @@ def test_chaos_config_creation():
     """Test chaos configuration creation"""
     target_selection = TargetSelection(strategy="random")
     timing = ChaosTiming(delay_before_operation=1.0, chaos_duration=10.0)
-    coordination = ChaosCoordination(coordinate_with_operation=True)
+    coordination = ChaosCoordination(chaos_during_operation=True)
     
     chaos_config = ChaosConfig(
         chaos_type=ChaosType.PROCESS_KILL,
@@ -67,7 +67,7 @@ def test_chaos_config_creation():
     assert chaos_config.chaos_type == ChaosType.PROCESS_KILL
     assert chaos_config.target_selection.strategy == "random"
     assert chaos_config.timing.chaos_duration == 10.0
-    assert chaos_config.coordination.coordinate_with_operation is True
+    assert chaos_config.coordination.chaos_during_operation is True
 
 
 def test_scenario_creation():

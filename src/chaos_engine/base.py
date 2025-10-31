@@ -76,46 +76,6 @@ class BaseChaosEngine(IChaosEngine, ABC):
         self.chaos_history.append(chaos_result)
         return chaos_result
     
-    def coordinate_with_operation(self, operation: Operation, chaos_config: ChaosConfig) -> ChaosResult:
-        """Coordinate chaos injection with operation execution"""
-        if not self.coordination_enabled:
-            return ChaosResult(
-                chaos_id="disabled",
-                chaos_type=chaos_config.chaos_type,
-                target_node="none",
-                success=False,
-                start_time=time.time(),
-                error_message="Chaos coordination is disabled"
-            )
-        
-        # Select target node based on configuration
-        target_node = self._select_chaos_target(operation, chaos_config.target_selection)
-        if not target_node:
-            return ChaosResult(
-                chaos_id="no_target",
-                chaos_type=chaos_config.chaos_type,
-                target_node="none",
-                success=False,
-                start_time=time.time(),
-                error_message="No suitable target node found for chaos injection"
-            )
-        
-        # Apply timing coordination
-        self._apply_chaos_timing(chaos_config.timing, chaos_config.coordination)
-        
-        # Execute chaos based on type
-        if chaos_config.chaos_type == ChaosType.PROCESS_KILL:
-            return self.inject_process_chaos(target_node, chaos_config.process_chaos_type)
-        else:
-            return ChaosResult(
-                chaos_id="unsupported",
-                chaos_type=chaos_config.chaos_type,
-                target_node=target_node.node_id,
-                success=False,
-                start_time=time.time(),
-                error_message=f"Unsupported chaos type: {chaos_config.chaos_type}"
-            )
-    
     def stop_chaos(self, chaos_id: str) -> bool:
         """Stop active chaos injection"""
         if chaos_id not in self.active_chaos:
@@ -203,16 +163,6 @@ class BaseChaosEngine(IChaosEngine, ABC):
         # For now, return None to indicate no target selected
         # This will be properly implemented when cluster orchestrator is available
         return None
-    
-    def _apply_chaos_timing(self, timing, coordination) -> None:
-        """Apply timing delays for chaos coordination"""
-        if coordination.chaos_before_operation and timing.delay_before_operation > 0:
-            logger.info(f"Waiting {timing.delay_before_operation}s before operation")
-            time.sleep(timing.delay_before_operation)
-        
-        if coordination.chaos_after_operation and timing.delay_after_operation > 0:
-            logger.info(f"Waiting {timing.delay_after_operation}s after operation")
-            time.sleep(timing.delay_after_operation)
     
     def register_node_process(self, node_id: str, process_id: int) -> None:
         """Register a process ID for a node (for testing purposes)"""

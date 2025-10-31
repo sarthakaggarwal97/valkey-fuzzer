@@ -102,7 +102,6 @@ class ChaosTiming:
 @dataclass
 class ChaosCoordination:
     """Configuration for chaos coordination with operations"""
-    coordinate_with_operation: bool = True
     chaos_before_operation: bool = False
     chaos_during_operation: bool = True
     chaos_after_operation: bool = False

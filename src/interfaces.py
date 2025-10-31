@@ -35,11 +35,6 @@ class IFuzzerEngine(ABC):
     def validate_cluster_state(self, cluster_id: str) -> ValidationResult:
         """Validate current cluster state"""
         pass
-    
-    @abstractmethod
-    def coordinate_chaos(self, operation: Operation, chaos_config: ChaosConfig) -> ChaosResult:
-        """Coordinate chaos injection with operation execution"""
-        pass
 
 
 class IClusterOrchestrator(ABC):
@@ -94,11 +89,6 @@ class IChaosEngine(ABC):
     @abstractmethod
     def inject_process_chaos(self, target_node: NodeInfo, chaos_type: ProcessChaosType) -> ChaosResult:
         """Inject process-level chaos on target node"""
-        pass
-    
-    @abstractmethod
-    def coordinate_with_operation(self, operation: Operation, chaos_config: ChaosConfig) -> ChaosResult:
-        """Coordinate chaos injection with operation execution"""
         pass
     
     @abstractmethod
