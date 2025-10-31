@@ -23,6 +23,15 @@ def test_load_data():
         cluster_connection = cluster_mgr.form_cluster(nodes)        
         assert cluster_connection is not None
         
+        # Test live discovery
+        live_nodes = cluster_connection.get_current_nodes()
+        primary_nodes = cluster_connection.get_primary_nodes()
+        replica_nodes = cluster_connection.get_replica_nodes()
+        
+        assert len(live_nodes) == 6
+        assert len(primary_nodes) == 3
+        assert len(replica_nodes) == 3
+        
         success = load_all_slots(cluster_connection, keys_per_slot=10)
         assert success
         
