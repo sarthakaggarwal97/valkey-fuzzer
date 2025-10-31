@@ -273,24 +273,3 @@ class ChaosTargetSelector:
         # Return None for now - will be implemented when cluster orchestrator is available
         return None
     
-    def get_primary_nodes(self, cluster_id: str) -> List[NodeInfo]:
-        """Get all primary nodes in cluster"""
-        if cluster_id not in self.cluster_nodes:
-            return []
-        
-        return [node for node in self.cluster_nodes[cluster_id] if node.role == "primary"]
-    
-    def get_replica_nodes(self, cluster_id: str) -> List[NodeInfo]:
-        """Get all replica nodes in cluster"""
-        if cluster_id not in self.cluster_nodes:
-            return []
-        
-        return [node for node in self.cluster_nodes[cluster_id] if node.role == "replica"]
-    
-    def get_healthy_nodes(self, cluster_id: str) -> List[NodeInfo]:
-        """Get all healthy nodes in cluster (all nodes with registered processes)"""
-        if cluster_id not in self.cluster_nodes:
-            return []
-        
-        # Return all nodes - health tracking not implemented in current NodeInfo model
-        return self.cluster_nodes[cluster_id]
