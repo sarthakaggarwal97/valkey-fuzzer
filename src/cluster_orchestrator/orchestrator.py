@@ -488,35 +488,75 @@ class ClusterManager:
         return True
     
     def validate_cluster(self, nodes_in_cluster: List[NodeInfo]) -> bool:
-        """Validate cluster health and configuration"""
         if not nodes_in_cluster:
             return False
         
         print()
         logging.info("CLUSTER VALIDATION")
         
-        client = self.get_client(nodes_in_cluster[0])
-        info = client.execute_command('CLUSTER', 'INFO')
+        # Collect cluster state from all nodes
+        node_states = []
+        unreachable_nodes = []
         
-        logging.info(f"RAW CLUSTER INFO:\n{info}")
-
-        info_dict = self.get_cluster_info(nodes_in_cluster[0])
+        for node in nodes_in_cluster:
+            try:
+                client = self.get_client(node)
+                info_dict = self.get_cluster_info(node)
+                
+                cluster_state = info_dict.get('cluster_state')
+                slots_assigned = int(info_dict.get('cluster_slots_assigned', 0))
+                slots_fail = int(info_dict.get('cluster_slots_fail', 0))
+                
+                node_states.append({
+                    'node_id': node.node_id,
+                    'state': cluster_state,
+                    'slots_assigned': slots_assigned,
+                    'slots_fail': slots_fail
+                })
+                
+                logging.info(f"{node.node_id}: state={cluster_state}, slots={slots_assigned}/16384, fail={slots_fail}")
+                
+            except Exception as e:
+                unreachable_nodes.append(node.node_id)
+                logging.warning(f"Expected node {node.node_id} is unreachable: {e}")
         
-        cluster_state = info_dict.get('cluster_state')
-        slots_assigned = int(info_dict.get('cluster_slots_assigned', 0))
-        slots_fail = int(info_dict.get('cluster_slots_fail', 0))
+        # Fail if any expected nodes are unreachable
+        if unreachable_nodes:
+            logging.warning(f"Validation failed: {len(unreachable_nodes)} expected node(s) unreachable: {', '.join(unreachable_nodes)}")
+            return False
         
-        logging.info(f"Cluster state: {cluster_state}")
-        logging.info(f"Slots assigned: {slots_assigned}/16384")
-        logging.info(f"Slots failed: {slots_fail}")
+        # Check if we got any responses (should always be true if no unreachable nodes)
+        if not node_states:
+            logging.warning(f"Could not reach any nodes for validation")
+            return False
         
-        is_healthy = (cluster_state == 'ok' and slots_assigned == 16384 and slots_fail == 0)
+        # Check for consensus - all nodes should agree on cluster state
+        first_state = node_states[0]
+        consensus = all(
+            state['state'] == first_state['state'] and
+            state['slots_assigned'] == first_state['slots_assigned'] and
+            state['slots_fail'] == first_state['slots_fail']
+            for state in node_states
+        )
+        
+        if not consensus:
+            logging.warning("Validation failed: Cluster nodes have inconsistent views:")
+            for state in node_states:
+                logging.warning(f"  {state['node_id']}: {state['state']}, {state['slots_assigned']}/16384, fail={state['slots_fail']}")
+            return False
+        
+        # Check if the consensus view is healthy
+        is_healthy = (
+            first_state['state'] == 'ok' and 
+            first_state['slots_assigned'] == 16384 and 
+            first_state['slots_fail'] == 0
+        )
         
         if is_healthy:
-            logging.info("Cluster is Healthy")
+            logging.info(f"Cluster is Healthy (all {len(node_states)} nodes reachable and consistent)")
         else:
-            logging.info("Cluster is Not Healthy")
-                
+            logging.info(f"Cluster is Not Healthy: state={first_state['state']}, slots={first_state['slots_assigned']}/16384")
+        
         return is_healthy
     
     def form_cluster(self, nodes_in_cluster: List[NodeInfo]) -> ClusterConnection:
