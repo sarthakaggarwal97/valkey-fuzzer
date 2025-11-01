@@ -250,7 +250,7 @@ class OperationOrchestrator(IOperationOrchestrator):
             # Check if target node exists
             target_found = False
             for node in cluster_status.nodes:
-                if operation.target_node in node.node_id:
+                if operation.target_node == node.node_id:
                     target_found = True
                     # Check if it's a primary node
                     if node.role != 'primary':
