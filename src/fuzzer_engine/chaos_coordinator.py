@@ -1,5 +1,14 @@
 """
-Chaos Coordinator - Manages chaos injection timing and coordination with operations
+Chaos Coordinator - Core chaos injection coordination for fuzzer engine
+
+This is the main chaos coordinator used by the fuzzer engine for operation-based
+chaos injection. It handles:
+- Target node selection
+- Timing coordination (before/during/after operations)
+- Chaos injection execution
+- Chaos history tracking
+
+For scenario-based testing with state management, see chaos_engine.coordinator.
 """
 import logging
 import time
@@ -17,8 +26,17 @@ logger = logging.getLogger(__name__)
 
 class ChaosCoordinator:
     """
-    Coordinates chaos injection timing with cluster operations.
-    Manages the lifecycle of chaos scenarios and ensures proper synchronization.
+    Core chaos coordinator for operation-based chaos injection.
+    
+    This coordinator is used by the fuzzer engine to inject chaos in coordination
+    with cluster operations. It provides:
+    - Node registration and target selection
+    - Timing-based chaos coordination
+    - Direct chaos injection
+    - History tracking
+    
+    For scenario-based testing with state management and callbacks,
+    use chaos_engine.coordinator.ChaosCoordinator instead.
     """
     
     def __init__(self):
