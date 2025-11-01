@@ -109,9 +109,13 @@ class ChaosCoordinator:
             
             # Chaos during operation (most common for failover testing)
             if coordination.chaos_during_operation:
-                logger.info("Chaos will be injected during operation execution")
-                # Note: Actual injection happens in execute_chaos_during_operation
-                # This is just logging the intent
+                logger.info("Injecting chaos during operation execution")
+                
+                result = self._inject_chaos(target_node, chaos_config)
+                chaos_results.append(result)
+                
+                if result.success:
+                    logger.info(f"During-operation chaos injected on {target_node.node_id}")
             
             # Chaos after operation
             if coordination.chaos_after_operation:
