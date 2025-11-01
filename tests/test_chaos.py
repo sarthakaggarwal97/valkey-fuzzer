@@ -76,7 +76,6 @@ class ClusterTestContext:
         self.cluster_mgr.close_connections()
         self.config_mgr.cleanup_cluster(self.nodes)
 
-    # Convenience helpers -------------------------------------------------
     def primaries(self) -> List[NodeInfo]:
         return [node for node in self.nodes if node.role == "primary"]
 
@@ -285,7 +284,6 @@ class TestRealChaosIntegration:
 
         wait_for_process_death(primary.process, primary.node_id, timeout=5.0)
 
-        # Verify the replica is eventually promoted
         promoted = False
         deadline = time.time() + CLUSTER_NODE_TIMEOUT_SEC * 6
         while time.time() < deadline:
@@ -357,8 +355,6 @@ class TestRealChaosIntegration:
         result = coordinator.execute_scenario(scenario)
         assert result.state == ChaosScenarioState.COMPLETED
         assert len(result.chaos_results) == 3
-        # Only the first process kill should succeed because the subsequent phases
-        # target the same PID, which will already be terminated.
         assert any(res.success for res in result.chaos_results)
 
         coordinator.cleanup_all_scenarios()
@@ -376,7 +372,6 @@ class TestClusterScalability:
         discovered = large_cluster.connection.get_current_nodes()
         assert len(discovered) == len(large_cluster.nodes)
 
-        # Kill one replica per shard
         for primary in large_cluster.primaries():
             replicas = large_cluster.replicas_for_primary(primary)
             if not replicas:
