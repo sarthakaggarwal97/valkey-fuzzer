@@ -141,6 +141,39 @@ class ConfigurationManager:
         log_file = os.path.join(log_dir, f"{node_id}.log")
         return node_data_dir, log_file
     
+    def build_node_command(self, port: int, data_dir: str, log_file: str) -> List[str]:
+        """
+        Build the Valkey server command with standard cluster configuration.
+        
+        This is the single source of truth for node configuration parameters.
+        
+        Args:
+            port: Client port for the node
+            data_dir: Data directory for the node
+            log_file: Log file path for the node
+        
+        Returns:
+            List of command arguments for subprocess.Popen
+        """
+        return [
+            self.clusterConfig.valkey_binary,
+            '--port', str(port),
+            '--bind', '127.0.0.1',
+            '--protected-mode', 'no',
+            '--cluster-enabled', 'yes',
+            '--cluster-config-file', os.path.join(data_dir, 'nodes.conf'),
+            '--cluster-node-timeout', '5000',
+            '--cluster-require-full-coverage', 'no',
+            '--dir', data_dir,
+            '--logfile', log_file,
+            '--loglevel', 'notice',
+            '--appendonly', 'yes',
+            '--appendfilename', 'appendonly.aof',
+            '--save', '',
+            '--maxmemory', '500mb',
+            '--maxmemory-policy', 'allkeys-lru'
+        ]
+    
     def spawn_all_nodes(self, node_plans: List[NodePlan]) -> List[NodeInfo]:
         """Spawn all Valkey processes and wait for them to be ready"""
         print()
@@ -150,24 +183,8 @@ class ConfigurationManager:
         for plan in node_plans:
             node_data_dir, log_file = self.create_node_directories(plan.node_id)
             
-            cmd = [
-                self.clusterConfig.valkey_binary,
-                '--port', str(plan.port),
-                '--bind', '127.0.0.1',
-                '--protected-mode', 'no',
-                '--cluster-enabled', 'yes',
-                '--cluster-config-file', os.path.join(node_data_dir, 'nodes.conf'),
-                '--cluster-node-timeout', '5000',
-                '--cluster-require-full-coverage', 'no',
-                '--dir', node_data_dir,
-                '--logfile', log_file,
-                '--loglevel', 'notice',
-                '--appendonly', 'yes',
-                '--appendfilename', 'appendonly.aof',
-                '--save', '',
-                '--maxmemory', '500mb',
-                '--maxmemory-policy', 'allkeys-lru'
-            ]
+            # Build command using centralized configuration
+            cmd = self.build_node_command(plan.port, node_data_dir, log_file)
             
             logging.info(f"Spawning {plan.node_id} on port {plan.port}")
             try:
@@ -269,25 +286,8 @@ class ConfigurationManager:
         """
         logging.info(f"Restarting {node.node_id} on port {node.port}")
         
-        # Build the same command used to spawn the node originally
-        cmd = [
-            self.clusterConfig.valkey_binary,
-            '--port', str(node.port),
-            '--bind', '127.0.0.1',
-            '--protected-mode', 'no',
-            '--cluster-enabled', 'yes',
-            '--cluster-config-file', os.path.join(node.data_dir, 'nodes.conf'),
-            '--cluster-node-timeout', '5000',
-            '--cluster-require-full-coverage', 'no',
-            '--dir', node.data_dir,
-            '--logfile', node.log_file,
-            '--loglevel', 'notice',
-            '--appendonly', 'yes',
-            '--appendfilename', 'appendonly.aof',
-            '--save', '',
-            '--maxmemory', '500mb',
-            '--maxmemory-policy', 'allkeys-lru'
-        ]
+        # Build command using centralized configuration
+        cmd = self.build_node_command(node.port, node.data_dir, node.log_file)
         
         try:
             # Start new process
