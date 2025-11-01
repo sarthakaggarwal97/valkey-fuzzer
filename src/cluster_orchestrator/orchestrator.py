@@ -268,21 +268,6 @@ class ConfigurationManager:
     def restart_node(self, node: NodeInfo, wait_ready: bool = True, ready_timeout: float = 30.0) -> NodeInfo:
         """
         Restart a Valkey node process.
-        
-        This will start a new process with the same configuration (port, data_dir, etc.)
-        as the original node. The node will rejoin the cluster automatically using its
-        existing cluster configuration (nodes.conf).
-        
-        Args:
-            node: The NodeInfo of the node to restart
-            wait_ready: Whether to wait for the node to be ready before returning
-            ready_timeout: Maximum time to wait for node to be ready (seconds)
-        
-        Returns:
-            Updated NodeInfo with new process and PID
-        
-        Raises:
-            Exception: If node fails to start within ready_timeout
         """
         logging.info(f"Restarting {node.node_id} on port {node.port}")
         
