@@ -61,6 +61,11 @@ class IClusterOrchestrator(ABC):
         """Clean up cluster by terminating nodes and releasing resources"""
         pass
     
+    @abstractmethod
+    def restart_node(self, node: NodeInfo, wait_ready: bool = True, ready_timeout: float = 30.0) -> NodeInfo:
+        """Restart a Valkey node process with the same configuration"""
+        pass
+    
     # ClusterManager methods
     @abstractmethod
     def reset_cluster_state(self, nodes_in_cluster: List[NodeInfo]) -> None:

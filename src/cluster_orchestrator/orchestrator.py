@@ -248,6 +248,93 @@ class ConfigurationManager:
             node.process.wait()
             logging.info(f"{node.node_id} terminated")
     
+    def restart_node(self, node: NodeInfo, wait_ready: bool = True, ready_timeout: float = 30.0) -> NodeInfo:
+        """
+        Restart a Valkey node process.
+        
+        This will start a new process with the same configuration (port, data_dir, etc.)
+        as the original node. The node will rejoin the cluster automatically using its
+        existing cluster configuration (nodes.conf).
+        
+        Args:
+            node: The NodeInfo of the node to restart
+            wait_ready: Whether to wait for the node to be ready before returning
+            ready_timeout: Maximum time to wait for node to be ready (seconds)
+        
+        Returns:
+            Updated NodeInfo with new process and PID
+        
+        Raises:
+            Exception: If node fails to start within ready_timeout
+        """
+        logging.info(f"Restarting {node.node_id} on port {node.port}")
+        
+        # Build the same command used to spawn the node originally
+        cmd = [
+            self.clusterConfig.valkey_binary,
+            '--port', str(node.port),
+            '--bind', '127.0.0.1',
+            '--protected-mode', 'no',
+            '--cluster-enabled', 'yes',
+            '--cluster-config-file', os.path.join(node.data_dir, 'nodes.conf'),
+            '--cluster-node-timeout', '5000',
+            '--cluster-require-full-coverage', 'no',
+            '--dir', node.data_dir,
+            '--logfile', node.log_file,
+            '--loglevel', 'notice',
+            '--appendonly', 'yes',
+            '--appendfilename', 'appendonly.aof',
+            '--save', '',
+            '--maxmemory', '500mb',
+            '--maxmemory-policy', 'allkeys-lru'
+        ]
+        
+        try:
+            # Start new process
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            
+            # Update node info with new process
+            node.process = process
+            node.pid = process.pid
+            
+            logging.info(f"Restarted {node.node_id} with new PID {process.pid}")
+            
+            # Wait for node to be ready if requested
+            if wait_ready:
+                deadline = time.time() + ready_timeout
+                ready = False
+                
+                while time.time() < deadline:
+                    if node.process.poll() is not None:
+                        raise Exception(f"Node {node.node_id} process died during restart")
+                    
+                    try:
+                        client = valkey.Valkey(
+                            host='127.0.0.1',
+                            port=node.port,
+                            socket_timeout=3,
+                            decode_responses=True
+                        )
+                        
+                        if client.ping():
+                            logging.info(f"Node {node.node_id} is ready after restart")
+                            ready = True
+                            break
+                    except (valkey.ConnectionError, valkey.TimeoutError):
+                        pass
+                    
+                    time.sleep(0.5)
+                
+                if not ready:
+                    self.terminate_node(node)
+                    raise Exception(f"Node {node.node_id} failed to become ready within {ready_timeout}s")
+            
+            return node
+            
+        except Exception as e:
+            logging.error(f"Failed to restart {node.node_id}: {e}")
+            raise
+    
     def cleanup_cluster(self, nodes_in_cluster: List[NodeInfo]) -> None:
         """Clean up cluster by terminating nodes and releasing resources"""
         print()
