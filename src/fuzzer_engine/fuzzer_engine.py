@@ -38,28 +38,12 @@ class FuzzerEngine(IFuzzerEngine):
         logger.info("Fuzzer Engine initialized")
     
     def generate_random_scenario(self, seed: Optional[int] = None) -> Scenario:
-        """
-        Generate a randomized test scenario.
-        
-        Args:
-            seed: Optional seed for reproducibility
-            
-        Returns:
-            Generated test scenario
-        """
+        """Generate a randomized test scenario with optional seed for reproducibility."""
         logger.info(f"Generating random scenario with seed: {seed}")
         return self.scenario_generator.generate_random_scenario(seed)
     
     def execute_dsl_scenario(self, dsl_config: DSLConfig) -> ExecutionResult:
-        """
-        Execute a test scenario from DSL configuration.
-        
-        Args:
-            dsl_config: DSL configuration containing test specification
-            
-        Returns:
-            Execution result with test outcomes
-        """
+        """Execute a test scenario from DSL configuration."""
         logger.info("Executing DSL-based scenario")
         
         try:
@@ -298,15 +282,7 @@ class FuzzerEngine(IFuzzerEngine):
             self._cleanup_resources(cluster_instance, cluster_connection)
     
     def validate_cluster_state(self, cluster_id: str) -> ValidationResult:
-        """
-        Validate current cluster state.
-        
-        Args:
-            cluster_id: Cluster identifier
-            
-        Returns:
-            Validation result
-        """
+        """Validate current cluster state and return validation result."""
         logger.info(f"Validating cluster state: {cluster_id}")
         
         # Get cluster connection from active clusters

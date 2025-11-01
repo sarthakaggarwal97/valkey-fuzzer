@@ -33,13 +33,7 @@ class FuzzerLogger:
         logger.info(f"Test logger initialized with log directory: {self.log_dir}")
     
     def log_test_start(self, scenario: Scenario) -> None:
-        """
-        Log the start of a test scenario.
-        Creates an immutable log entry with scenario configuration.
-        
-        Args:
-            scenario: Test scenario being executed
-        """
+        """Log the start of a test scenario with immutable configuration."""
         self.current_test_id = scenario.scenario_id
         self.test_start_times[scenario.scenario_id] = time.time()
         
@@ -62,19 +56,10 @@ class FuzzerLogger:
         }
         
         logger.info(f"Started test {scenario.scenario_id} (seed: {scenario.seed})")
-        
-        # Write initial log to disk
         self._write_log_to_disk(scenario.scenario_id)
     
     def log_operation(self, operation: Operation, success: bool, details: str) -> None:
-        """
-        Log a cluster operation execution.
-        
-        Args:
-            operation: The operation that was executed
-            success: Whether the operation succeeded
-            details: Additional details about the operation execution
-        """
+        """Log a cluster operation execution with success status and details."""
         if not self.current_test_id:
             logger.warning("No active test to log operation to")
             return
@@ -97,17 +82,10 @@ class FuzzerLogger:
         self.test_logs[self.current_test_id]['operation_logs'].append(operation_log)
         
         logger.info(f"Logged operation: {operation.type.value} on {operation.target_node} - {'SUCCESS' if success else 'FAILED'}")
-        
-        # Write updated log to disk
         self._write_log_to_disk(self.current_test_id)
     
     def log_chaos_event(self, chaos_result: ChaosResult) -> None:
-        """
-        Log a chaos injection event.
-        
-        Args:
-            chaos_result: Result of the chaos injection
-        """
+        """Log a chaos injection event with result details."""
         if not self.current_test_id:
             logger.warning("No active test to log chaos event to")
             return
@@ -128,17 +106,10 @@ class FuzzerLogger:
         self.test_logs[self.current_test_id]['chaos_events'].append(chaos_log)
         
         logger.info(f"Logged chaos event: {chaos_result.chaos_type.value} on {chaos_result.target_node} - {'SUCCESS' if chaos_result.success else 'FAILED'}")
-        
-        # Write updated log to disk
         self._write_log_to_disk(self.current_test_id)
     
     def log_validation_result(self, validation_result: ValidationResult) -> None:
-        """
-        Log a cluster state validation result.
-        
-        Args:
-            validation_result: Result of cluster validation
-        """
+        """Log a cluster state validation result."""
         if not self.current_test_id:
             logger.warning("No active test to log validation result to")
             return
@@ -177,18 +148,10 @@ class FuzzerLogger:
         
         logger.info(f"Logged validation result: slot_coverage={validation_result.slot_coverage}, "
                    f"replicas_synced={validation_result.replica_sync.all_replicas_synced}")
-        
-        # Write updated log to disk
         self._write_log_to_disk(self.current_test_id)
     
     def log_cluster_state_snapshot(self, cluster_status: ClusterStatus, label: str = "") -> None:
-        """
-        Log a snapshot of cluster state at a specific point in time.
-        
-        Args:
-            cluster_status: Current cluster status
-            label: Optional label for this snapshot (e.g., "before_operation", "after_chaos")
-        """
+        """Log a snapshot of cluster state at a specific point in time."""
         if not self.current_test_id:
             logger.warning("No active test to log cluster state to")
             return
@@ -217,18 +180,10 @@ class FuzzerLogger:
         self.test_logs[self.current_test_id]['cluster_state_snapshots'].append(snapshot)
         
         logger.info(f"Logged cluster state snapshot: {label} - healthy={cluster_status.is_healthy}")
-        
-        # Write updated log to disk
         self._write_log_to_disk(self.current_test_id)
     
     def log_error(self, error_message: str, error_details: Optional[Dict[str, Any]] = None) -> None:
-        """
-        Log an error that occurred during test execution.
-        
-        Args:
-            error_message: Description of the error
-            error_details: Optional additional error details
-        """
+        """Log an error that occurred during test execution."""
         if not self.current_test_id:
             logger.warning("No active test to log error to")
             return
@@ -243,23 +198,14 @@ class FuzzerLogger:
         self.test_logs[self.current_test_id]['errors'].append(error_log)
         
         logger.error(f"Logged error: {error_message}")
-        
-        # Write updated log to disk
         self._write_log_to_disk(self.current_test_id)
     
     def log_test_completion(self, test_result: ExecutionResult) -> None:
-        """
-        Log the completion of a test scenario.
-        Finalizes the test log with execution results.
-        
-        Args:
-            test_result: Final execution result
-        """
+        """Log the completion of a test scenario with final execution results."""
         if test_result.scenario_id not in self.test_logs:
             logger.warning(f"No log found for test {test_result.scenario_id}")
             return
         
-        # Update test log with completion details
         self.test_logs[test_result.scenario_id].update({
             'end_time': test_result.end_time,
             'end_timestamp': datetime.fromtimestamp(test_result.end_time).isoformat(),
@@ -273,23 +219,13 @@ class FuzzerLogger:
         logger.info(f"Completed test {test_result.scenario_id} - {'SUCCESS' if test_result.success else 'FAILED'} "
                    f"(duration: {test_result.end_time - test_result.start_time:.2f}s)")
         
-        # Write final log to disk
         self._write_log_to_disk(test_result.scenario_id)
         
-        # Clear current test
         if self.current_test_id == test_result.scenario_id:
             self.current_test_id = None
     
     def generate_report(self, test_results: List[ExecutionResult]) -> str:
-        """
-        Generate a summary report from multiple test executions.
-        
-        Args:
-            test_results: List of test execution results
-            
-        Returns:
-            Formatted report string
-        """
+        """Generate a summary report from multiple test executions."""
         if not test_results:
             return "No test results to report"
         
@@ -346,7 +282,6 @@ class FuzzerLogger:
         
         report = "\n".join(report_lines)
         
-        # Write report to disk
         report_file = self.log_dir / f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
         report_file.write_text(report)
         logger.info(f"Generated report: {report_file}")
@@ -427,15 +362,7 @@ class FuzzerLogger:
             logger.error(f"Failed to write log to disk: {e}")
     
     def get_test_log(self, test_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Get the log for a specific test.
-        
-        Args:
-            test_id: Test scenario ID
-            
-        Returns:
-            Test log dictionary, or None if not found
-        """
+        """Get the log for a specific test, or None if not found."""
         return self.test_logs.get(test_id)
     
     def get_all_test_logs(self) -> Dict[str, Dict[str, Any]]:
