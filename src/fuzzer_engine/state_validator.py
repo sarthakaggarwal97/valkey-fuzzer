@@ -281,8 +281,11 @@ class StateValidator(IStateValidator):
                 if master_link_status != 'up':
                     lagging_replicas.append(f"{replica['host']}:{replica['port']}")
                 
-                if isinstance(master_last_io_seconds, (int, float)):
-                    max_lag = max(max_lag, master_last_io_seconds)
+                try:
+                    lag_value = float(master_last_io_seconds)
+                    max_lag = max(max_lag, lag_value)
+                except (ValueError, TypeError):
+                    pass
                 
                 client.close()
             
