@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import Dict, List, Any, Optional
 from enum import Enum
 import subprocess
+import valkey
+
 
 
 class OperationType(Enum):
@@ -265,3 +267,45 @@ class DSLConfig:
     """DSL-based test configuration"""
     config_text: str
     parsed_scenario: Optional[Scenario] = None
+
+
+@dataclass
+class ClusterConnection:
+    """Stores cluster connection information after orchestrator creates cluster"""
+    initial_nodes: List[NodeInfo]
+    cluster_id: str
+    
+    def __post_init__(self):
+        self.startup_nodes = [{'host': '127.0.0.1', 'port': node.port} for node in self.initial_nodes]
+    
+    def get_current_nodes(self) -> List[Dict]:
+        """Get current cluster topology via CLUSTER NODES"""
+        # Used for real-time cluster topology for chaos testing
+        for node_info in self.startup_nodes:
+            try:
+                client = valkey.Valkey(host=node_info['host'], port=node_info['port'])
+                cluster_nodes_raw = client.execute_command('CLUSTER', 'NODES')
+                client.close()
+                
+                current_nodes = []
+                for line in cluster_nodes_raw.decode().strip().split('\n'):
+                    parts = line.split()
+                    host_port = parts[1].split('@')[0].split(':')
+                    current_nodes.append({
+                        'node_id': parts[0],
+                        'host': host_port[0],
+                        'port': int(host_port[1]),
+                        'role': 'primary' if 'master' in parts[2] else 'replica'
+                    })
+                return current_nodes # list of dictionaries representing all nodes currently active in cluster
+            except:
+                continue
+        return []
+    
+    def get_primary_nodes(self) -> List[Dict]:
+        """Get current primary nodes"""
+        return [node for node in self.get_current_nodes() if node['role'] == 'primary']
+    
+    def get_replica_nodes(self) -> List[Dict]:
+        """Get current replica nodes"""
+        return [node for node in self.get_current_nodes() if node['role'] == 'replica']

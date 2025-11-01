@@ -7,7 +7,7 @@ import uuid
 import logging
 import traceback
 from typing import List, Dict, Optional, Tuple
-from ..models import ClusterConfig, NodePlan, NodeInfo
+from ..models import ClusterConfig, NodePlan, NodeInfo, ClusterConnection
 
 logging.basicConfig(format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', level=logging.INFO, force=True)
 
@@ -519,7 +519,7 @@ class ClusterManager:
                 
         return is_healthy
     
-    def form_cluster(self, nodes_in_cluster: List[NodeInfo]) -> bool:
+    def form_cluster(self, nodes_in_cluster: List[NodeInfo]) -> ClusterConnection:
         """Form a complete cluster from spawned nodes"""
         print()
         logging.info("FORMING CLUSTER")
@@ -532,12 +532,16 @@ class ClusterManager:
                        
             self.setup_and_sync_replication(nodes_in_cluster, primary_ids)
             
-            return self.validate_cluster(nodes_in_cluster)
+            if not self.validate_cluster(nodes_in_cluster):
+                raise Exception("Cluster validation failed")
+            
+            cluster_id = nodes_in_cluster[0].node_id.split('-')[0] if nodes_in_cluster else 'unknown'
+            return ClusterConnection(nodes_in_cluster, cluster_id)
         
         except Exception as e:
             logging.info(f"Cluster formation failed: {e}")
             traceback.print_exc()
-            return False
+            return None
     
     def close_connections(self) -> None:
         """Close all Valkey client connections"""
