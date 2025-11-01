@@ -1,5 +1,6 @@
 # Core dependencies for Cluster Bus Fuzzer
 valkey[libvalkey]>=6.0.0  # For Valkey client connectivity with compiled response parser
+PyYAML>=6.0  # For DSL configuration parsing
 
 # Testing
 pytest>=7.0.0
