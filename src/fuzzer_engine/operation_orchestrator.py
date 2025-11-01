@@ -96,21 +96,28 @@ class OperationOrchestrator(IOperationOrchestrator):
         # Get current cluster nodes
         current_nodes = self.cluster_connection.get_current_nodes()
         
-        # Find target node
+        # Find target node using exact matching
         target_node = None
+        
+        # Strategy 1: Try exact node_id match
         for node in current_nodes:
-            # Match by node identifier pattern (e.g., "shard-0-primary")
-            if operation.target_node in str(node):
-                target_node = node
-                break
-            # Also try matching by port or node_id
-            if str(node.get('port')) in operation.target_node or node.get('node_id') in operation.target_node:
+            if node.get('node_id') == operation.target_node:
                 target_node = node
                 break
         
+        # Strategy 2: Try exact port match
         if not target_node:
-            # If exact match not found, try to find primary node by shard
-            # Extract shard number from target_node string (e.g., "shard-0-primary" -> 0)
+            try:
+                target_port = int(operation.target_node)
+                for node in current_nodes:
+                    if node.get('port') == target_port:
+                        target_node = node
+                        break
+            except ValueError:
+                pass  # target_node is not a port number
+        
+        # Strategy 3: Try shard-based matching (e.g., "shard-0-primary")
+        if not target_node:
             try:
                 if 'shard-' in operation.target_node:
                     shard_num = int(operation.target_node.split('shard-')[1].split('-')[0])

@@ -2,6 +2,7 @@
 Tests for Operation Orchestrator
 """
 import pytest
+from unittest.mock import Mock, patch
 from src.fuzzer_engine.operation_orchestrator import OperationOrchestrator
 from src.models import (
     Operation, OperationType, OperationTiming, ClusterStatus,
@@ -328,3 +329,148 @@ def test_validate_operation_preconditions_no_substring_false_positive():
     
     # Should fail - no exact match found (substring matching would incorrectly succeed)
     assert orchestrator.validate_operation_preconditions(operation, cluster_status) is False
+
+
+
+def test_execute_failover_exact_node_id_match():
+    """Test that failover uses exact node_id matching, not substring"""
+    orchestrator = OperationOrchestrator()
+    
+    # Create mock cluster connection with node-1 and node-10
+    mock_connection = Mock()
+    mock_connection.get_current_nodes.return_value = [
+        {
+            'node_id': 'node-1',
+            'host': '127.0.0.1',
+            'port': 7001,
+            'role': 'primary'
+        },
+        {
+            'node_id': 'node-10',
+            'host': '127.0.0.1',
+            'port': 7010,
+            'role': 'primary'
+        },
+        {
+            'node_id': 'node-11',
+            'host': '127.0.0.1',
+            'port': 7011,
+            'role': 'primary'
+        }
+    ]
+    
+    orchestrator.set_cluster_connection(mock_connection)
+    
+    # Create operation targeting node-1
+    operation = Operation(
+        type=OperationType.FAILOVER,
+        target_node="node-1",
+        parameters={},
+        timing=OperationTiming()
+    )
+    
+    # Mock the Valkey client
+    with patch('src.fuzzer_engine.operation_orchestrator.valkey.Valkey') as mock_valkey:
+        mock_client = Mock()
+        mock_valkey.return_value = mock_client
+        mock_client.execute_command.return_value = b'OK'
+        
+        # Execute failover
+        result = orchestrator._execute_failover(operation)
+        
+        # Verify it connected to the correct port (7001, not 7010)
+        # Check that Valkey was called with the correct host and port
+        call_args = mock_valkey.call_args
+        assert call_args.kwargs['host'] == '127.0.0.1'
+        assert call_args.kwargs['port'] == 7001
+
+
+def test_execute_failover_no_substring_false_positive():
+    """Test that substring matching doesn't cause false positives in failover"""
+    orchestrator = OperationOrchestrator()
+    
+    # Create mock cluster connection with only node-10, node-11, node-12
+    mock_connection = Mock()
+    mock_connection.get_current_nodes.return_value = [
+        {
+            'node_id': 'node-10',
+            'host': '127.0.0.1',
+            'port': 7010,
+            'role': 'primary'
+        },
+        {
+            'node_id': 'node-11',
+            'host': '127.0.0.1',
+            'port': 7011,
+            'role': 'primary'
+        },
+        {
+            'node_id': 'node-12',
+            'host': '127.0.0.1',
+            'port': 7012,
+            'role': 'primary'
+        }
+    ]
+    
+    orchestrator.set_cluster_connection(mock_connection)
+    
+    # Create operation targeting node-1 (which doesn't exist)
+    operation = Operation(
+        type=OperationType.FAILOVER,
+        target_node="node-1",
+        parameters={},
+        timing=OperationTiming()
+    )
+    
+    # Execute failover - should fail because node-1 doesn't exist
+    result = orchestrator._execute_failover(operation)
+    
+    # Should return False (not found)
+    assert result is False
+
+
+def test_execute_failover_port_matching():
+    """Test that failover can match by exact port number"""
+    orchestrator = OperationOrchestrator()
+    
+    # Create mock cluster connection
+    mock_connection = Mock()
+    mock_connection.get_current_nodes.return_value = [
+        {
+            'node_id': 'abc123',
+            'host': '127.0.0.1',
+            'port': 7001,
+            'role': 'primary'
+        },
+        {
+            'node_id': 'def456',
+            'host': '127.0.0.1',
+            'port': 7010,
+            'role': 'primary'
+        }
+    ]
+    
+    orchestrator.set_cluster_connection(mock_connection)
+    
+    # Create operation targeting by port
+    operation = Operation(
+        type=OperationType.FAILOVER,
+        target_node="7001",
+        parameters={},
+        timing=OperationTiming()
+    )
+    
+    # Mock the Valkey client
+    with patch('src.fuzzer_engine.operation_orchestrator.valkey.Valkey') as mock_valkey:
+        mock_client = Mock()
+        mock_valkey.return_value = mock_client
+        mock_client.execute_command.return_value = b'OK'
+        
+        # Execute failover
+        result = orchestrator._execute_failover(operation)
+        
+        # Verify it connected to the correct port
+        # Check that Valkey was called with the correct host and port
+        call_args = mock_valkey.call_args
+        assert call_args.kwargs['host'] == '127.0.0.1'
+        assert call_args.kwargs['port'] == 7001
