@@ -15,6 +15,9 @@ from .chaos_coordinator import ChaosCoordinator
 from .operation_orchestrator import OperationOrchestrator
 from .state_validator import StateValidator
 from .test_logger import FuzzerLogger
+from .error_handler import (
+    ErrorHandler, ErrorContext, ErrorCategory, ErrorSeverity, RetryConfig
+)
 
 logging.basicConfig(format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', level=logging.INFO, force=True)
 logger = logging.getLogger(__name__)
@@ -34,6 +37,7 @@ class FuzzerEngine(IFuzzerEngine):
         self.operation_orchestrator = OperationOrchestrator()
         self.state_validator = StateValidator()
         self.logger = FuzzerLogger()
+        self.error_handler = ErrorHandler()
         
         logger.info("Fuzzer Engine initialized")
     
@@ -311,29 +315,33 @@ class FuzzerEngine(IFuzzerEngine):
         Returns:
             ClusterInstance if successful, None otherwise
         """
-        for attempt in range(max_retries):
-            try:
-                logger.info(f"Creating cluster (attempt {attempt + 1}/{max_retries})")
-                cluster_instance = self.cluster_coordinator.create_cluster(scenario.cluster_config)
-                logger.info(f"Cluster created successfully: {cluster_instance.cluster_id}")
-                return cluster_instance
-                
-            except Exception as e:
-                logger.error(f"Cluster creation attempt {attempt + 1} failed: {e}")
-                
-                if attempt < max_retries - 1:
-                    # Exponential backoff
-                    wait_time = 2 ** attempt
-                    logger.info(f"Retrying in {wait_time} seconds...")
-                    time.sleep(wait_time)
-                else:
-                    logger.error("All cluster creation attempts failed")
-                    self.logger.log_error(
-                        "Cluster creation failed after all retries",
-                        {"attempts": max_retries, "error": str(e)}
-                    )
+        retry_config = RetryConfig(
+            max_attempts=max_retries,
+            initial_delay=1.0,
+            exponential_base=2.0,
+            jitter=True
+        )
         
-        return None
+        def create_cluster_operation():
+            return self.cluster_coordinator.create_cluster(scenario.cluster_config)
+        
+        success, cluster_instance = self.error_handler.retry_with_backoff(
+            operation=create_cluster_operation,
+            config=retry_config,
+            error_category=ErrorCategory.CLUSTER_CREATION,
+            operation_name="cluster creation"
+        )
+        
+        if success:
+            logger.info(f"Cluster created successfully: {cluster_instance.cluster_id}")
+        else:
+            logger.error("All cluster creation attempts failed")
+            self.logger.log_error(
+                "Cluster creation failed after all retries",
+                {"attempts": max_retries}
+            )
+        
+        return cluster_instance if success else None
     
     def _validate_cluster_readiness_with_retry(self, cluster_id: str, max_retries: int = 5) -> bool:
         """
@@ -346,30 +354,34 @@ class FuzzerEngine(IFuzzerEngine):
         Returns:
             True if cluster is ready, False otherwise
         """
-        for attempt in range(max_retries):
-            try:
-                logger.info(f"Validating cluster readiness (attempt {attempt + 1}/{max_retries})")
-                
-                if self.cluster_coordinator.validate_cluster_readiness(cluster_id):
-                    logger.info("Cluster is ready")
-                    return True
-                
-                if attempt < max_retries - 1:
-                    logger.info("Cluster not ready, waiting...")
-                    time.sleep(2)
-                    
-            except Exception as e:
-                logger.error(f"Readiness validation attempt {attempt + 1} failed: {e}")
-                
-                if attempt < max_retries - 1:
-                    time.sleep(2)
-        
-        logger.error("Cluster failed readiness validation after all retries")
-        self.logger.log_error(
-            "Cluster readiness validation failed",
-            {"attempts": max_retries}
+        retry_config = RetryConfig(
+            max_attempts=max_retries,
+            initial_delay=2.0,
+            exponential_base=1.5,
+            jitter=False
         )
-        return False
+        
+        def validate_readiness_operation():
+            if self.cluster_coordinator.validate_cluster_readiness(cluster_id):
+                return True
+            else:
+                raise Exception("Cluster not ready")
+        
+        success, _ = self.error_handler.retry_with_backoff(
+            operation=validate_readiness_operation,
+            config=retry_config,
+            error_category=ErrorCategory.CLUSTER_VALIDATION,
+            operation_name="cluster readiness validation"
+        )
+        
+        if not success:
+            logger.error("Cluster failed readiness validation after all retries")
+            self.logger.log_error(
+                "Cluster readiness validation failed",
+                {"attempts": max_retries, "cluster_id": cluster_id}
+            )
+        
+        return success
     
     def _cleanup_resources(self, cluster_instance, cluster_connection):
         """
@@ -380,21 +392,26 @@ class FuzzerEngine(IFuzzerEngine):
             cluster_connection: Cluster connection to close
         """
         try:
-            # Stop all active chaos
-            logger.info("Stopping active chaos injections")
-            self.chaos_coordinator.stop_all_chaos()
+            cleanup_success = self.error_handler.cleanup_after_failure(
+                cluster_instance=cluster_instance,
+                cluster_connection=cluster_connection,
+                chaos_coordinator=self.chaos_coordinator,
+                cluster_coordinator=self.cluster_coordinator
+            )
             
-            # Cleanup chaos for cluster
-            if cluster_instance:
-                self.chaos_coordinator.cleanup_chaos(cluster_instance.cluster_id)
-            
-            # Destroy cluster
-            if cluster_instance:
-                logger.info(f"Destroying cluster: {cluster_instance.cluster_id}")
-                self.cluster_coordinator.destroy_cluster(cluster_instance.cluster_id)
-            
-            logger.info("Resource cleanup completed")
+            if cleanup_success:
+                logger.info("Resource cleanup completed successfully")
+            else:
+                logger.warning("Resource cleanup completed with errors")
             
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
-            # Continue cleanup even if errors occur (graceful degradation)
+            # Log error but don't raise - cleanup should always complete
+            error_context = ErrorContext(
+                category=ErrorCategory.RESOURCE_CLEANUP,
+                severity=ErrorSeverity.MEDIUM,
+                message=f"Cleanup error: {e}",
+                exception=e,
+                cluster_id=cluster_instance.cluster_id if cluster_instance else None
+            )
+            self.error_handler.handle_error(error_context)
