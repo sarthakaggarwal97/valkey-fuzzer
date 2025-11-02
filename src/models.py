@@ -281,6 +281,10 @@ class ClusterConnection:
     def get_current_nodes(self) -> List[Dict]:
         """Get current cluster topology via CLUSTER NODES"""
         # Used for real-time cluster topology for chaos testing
+        
+        # Build a mapping from port to shard_id using initial_nodes
+        port_to_shard = {node.port: node.shard_id for node in self.initial_nodes}
+        
         for node_info in self.startup_nodes:
             try:
                 client = valkey.Valkey(host=node_info['host'], port=node_info['port'])
@@ -291,11 +295,17 @@ class ClusterConnection:
                 for line in cluster_nodes_raw.decode().strip().split('\n'):
                     parts = line.split()
                     host_port = parts[1].split('@')[0].split(':')
+                    port = int(host_port[1])
+                    
+                    # Get shard_id from our mapping
+                    shard_id = port_to_shard.get(port)
+                    
                     current_nodes.append({
                         'node_id': parts[0],
                         'host': host_port[0],
-                        'port': int(host_port[1]),
-                        'role': 'primary' if 'master' in parts[2] else 'replica'
+                        'port': port,
+                        'role': 'primary' if 'master' in parts[2] else 'replica',
+                        'shard_id': shard_id
                     })
                 return current_nodes # list of dictionaries representing all nodes currently active in cluster
             except:

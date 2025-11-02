@@ -343,19 +343,22 @@ def test_execute_failover_exact_node_id_match():
             'node_id': 'node-1',
             'host': '127.0.0.1',
             'port': 7001,
-            'role': 'primary'
+            'role': 'primary',
+            'shard_id': 0
         },
         {
             'node_id': 'node-10',
             'host': '127.0.0.1',
             'port': 7010,
-            'role': 'primary'
+            'role': 'primary',
+            'shard_id': 1
         },
         {
             'node_id': 'node-11',
             'host': '127.0.0.1',
             'port': 7011,
-            'role': 'primary'
+            'role': 'primary',
+            'shard_id': 2
         }
     ]
     
@@ -396,19 +399,22 @@ def test_execute_failover_no_substring_false_positive():
             'node_id': 'node-10',
             'host': '127.0.0.1',
             'port': 7010,
-            'role': 'primary'
+            'role': 'primary',
+            'shard_id': 1
         },
         {
             'node_id': 'node-11',
             'host': '127.0.0.1',
             'port': 7011,
-            'role': 'primary'
+            'role': 'primary',
+            'shard_id': 2
         },
         {
             'node_id': 'node-12',
             'host': '127.0.0.1',
             'port': 7012,
-            'role': 'primary'
+            'role': 'primary',
+            'shard_id': 3
         }
     ]
     
@@ -429,6 +435,65 @@ def test_execute_failover_no_substring_false_positive():
     assert result is False
 
 
+def test_execute_failover_shard_based_matching():
+    """Test that failover can match by shard-X-primary format"""
+    orchestrator = OperationOrchestrator()
+    
+    # Create mock cluster connection with nodes having shard_id
+    mock_connection = Mock()
+    mock_connection.get_current_nodes.return_value = [
+        {
+            'node_id': 'node-0',
+            'host': '127.0.0.1',
+            'port': 6379,
+            'role': 'primary',
+            'shard_id': 0
+        },
+        {
+            'node_id': 'node-30',
+            'host': '127.0.0.1',
+            'port': 6409,
+            'role': 'primary',
+            'shard_id': 10
+        },
+        {
+            'node_id': 'node-31',
+            'host': '127.0.0.1',
+            'port': 6410,
+            'role': 'replica',
+            'shard_id': 10
+        }
+    ]
+    
+    orchestrator.set_cluster_connection(mock_connection)
+    
+    # Create operation targeting shard-10-primary
+    operation = Operation(
+        type=OperationType.FAILOVER,
+        target_node="shard-10-primary",
+        parameters={},
+        timing=OperationTiming()
+    )
+    
+    # Mock the Valkey client
+    with patch('src.fuzzer_engine.operation_orchestrator.valkey.Valkey') as mock_valkey:
+        mock_client = Mock()
+        mock_valkey.return_value = mock_client
+        # Mock CLUSTER NODES response showing replica
+        mock_client.execute_command.return_value = (
+            'node-31 127.0.0.1:6410@16410 slave node-30 0 0 0 connected\n'
+            'node-30 127.0.0.1:6409@16409 master - 0 0 0 connected 14890-16383\n'
+        )
+        
+        # Execute failover
+        result = orchestrator._execute_failover(operation)
+        
+        # Verify it connected to the correct shard 10 primary (port 6409)
+        call_args_list = mock_valkey.call_args_list
+        # First call should be to the primary node (6409)
+        assert call_args_list[0].kwargs['port'] == 6409
+
+
 def test_execute_failover_port_matching():
     """Test that failover can match by exact port number"""
     orchestrator = OperationOrchestrator()
@@ -440,13 +505,15 @@ def test_execute_failover_port_matching():
             'node_id': 'abc123',
             'host': '127.0.0.1',
             'port': 7001,
-            'role': 'primary'
+            'role': 'primary',
+            'shard_id': 0
         },
         {
             'node_id': 'def456',
             'host': '127.0.0.1',
             'port': 7010,
-            'role': 'primary'
+            'role': 'primary',
+            'shard_id': 1
         }
     ]
     

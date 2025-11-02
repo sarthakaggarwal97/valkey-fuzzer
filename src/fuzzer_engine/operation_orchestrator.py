@@ -119,13 +119,15 @@ class OperationOrchestrator(IOperationOrchestrator):
         # Strategy 3: Try shard-based matching (e.g., "shard-0-primary")
         if not target_node:
             try:
-                if 'shard-' in operation.target_node:
-                    shard_num = int(operation.target_node.split('shard-')[1].split('-')[0])
-                    # Find primary nodes and select by index
-                    primary_nodes = [n for n in current_nodes if n['role'] == 'primary']
-                    if shard_num < len(primary_nodes):
-                        target_node = primary_nodes[shard_num]
-                        logging.info(f"Matched target to primary node at port {target_node['port']}")
+                if 'shard-' in operation.target_node and '-primary' in operation.target_node:
+                    # Extract shard number from "shard-X-primary" format
+                    shard_num = int(operation.target_node.split('shard-')[1].split('-primary')[0])
+                    # Find primary node with matching shard_id
+                    for node in current_nodes:
+                        if node['role'] == 'primary' and node.get('shard_id') == shard_num:
+                            target_node = node
+                            logging.info(f"Matched target to shard {shard_num} primary at port {target_node['port']}")
+                            break
             except (ValueError, IndexError):
                 pass
         

@@ -56,6 +56,10 @@ class FuzzerLogger:
         }
         
         logger.info(f"Started test {scenario.scenario_id} (seed: {scenario.seed})")
+        
+        # Log human-readable scenario summary
+        self._log_scenario_summary(scenario)
+        
         self._write_log_to_disk(scenario.scenario_id)
     
     def log_operation(self, operation: Operation, success: bool, details: str) -> None:
@@ -347,6 +351,53 @@ class FuzzerLogger:
             'convergence_timeout': config.convergence_timeout,
             'max_replication_lag': config.max_replication_lag
         }
+    
+    def _log_scenario_summary(self, scenario: Scenario) -> None:
+        """Log a human-readable summary of the scenario before execution"""
+        summary_lines = [
+            "",
+            "=" * 80,
+            f"SCENARIO SUMMARY: {scenario.scenario_id}",
+            "=" * 80,
+            f"Seed: {scenario.seed}",
+            "",
+            "CLUSTER CONFIGURATION:",
+            f"  - Shards: {scenario.cluster_config.num_shards}",
+            f"  - Replicas per shard: {scenario.cluster_config.replicas_per_shard}",
+            f"  - Base port: {scenario.cluster_config.base_port}",
+            f"  - Total nodes: {scenario.cluster_config.num_shards * (1 + scenario.cluster_config.replicas_per_shard)}",
+            "",
+            f"OPERATIONS ({len(scenario.operations)} total):",
+        ]
+        
+        for i, op in enumerate(scenario.operations, 1):
+            summary_lines.append(f"  {i}. {op.type.value} on {op.target_node}")
+            if op.parameters:
+                summary_lines.append(f"     Parameters: {op.parameters}")
+            summary_lines.append(f"     Timing: delay_before={op.timing.delay_before}s, timeout={op.timing.timeout}s, delay_after={op.timing.delay_after}s")
+        
+        summary_lines.extend([
+            "",
+            "CHAOS CONFIGURATION:",
+            f"  - Type: {scenario.chaos_config.chaos_type.value}",
+            f"  - Target strategy: {scenario.chaos_config.target_selection.strategy}",
+        ])
+        
+        if scenario.chaos_config.process_chaos_type:
+            summary_lines.append(f"  - Process chaos type: {scenario.chaos_config.process_chaos_type.value}")
+        
+        summary_lines.extend([
+            f"  - Chaos timing: before={scenario.chaos_config.coordination.chaos_before_operation}, "
+            f"during={scenario.chaos_config.coordination.chaos_during_operation}, "
+            f"after={scenario.chaos_config.coordination.chaos_after_operation}",
+            f"  - Duration: {scenario.chaos_config.timing.chaos_duration}s",
+            "",
+            "=" * 80,
+            ""
+        ])
+        
+        for line in summary_lines:
+            logger.info(line)
     
     def _write_log_to_disk(self, test_id: str) -> None:
         """Write test log to disk as JSON"""
