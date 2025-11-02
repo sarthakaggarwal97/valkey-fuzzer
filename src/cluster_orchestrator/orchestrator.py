@@ -471,19 +471,32 @@ class ClusterManager:
             logging.info(f"{primary.node_id} cluster ID: {cluster_node_id[:8]}")
         
         logging.info("Slot assignment complete")
-        time.sleep(5)
         
-        # Verify slots were assigned correctly
-        info_dict = self.get_cluster_info(nodes_in_cluster[0])
-        slots_assigned = int(info_dict.get('cluster_slots_assigned', 0))
-        slots_fail = int(info_dict.get('cluster_slots_fail', 0))
+        # Verify slots were assigned correctly with retry logic
+        max_retries = 10
+        retry_delay = 2.0
         
-        logging.info(f"Slot verification:")
-        logging.info(f"Slots assigned: {slots_assigned}/16384")
-        logging.info(f"Slots failed: {slots_fail}")
+        for attempt in range(max_retries):
+            time.sleep(retry_delay)
+            
+            info_dict = self.get_cluster_info(nodes_in_cluster[0])
+            slots_assigned = int(info_dict.get('cluster_slots_assigned', 0))
+            slots_fail = int(info_dict.get('cluster_slots_fail', 0))
+            
+            if attempt == 0 or attempt == max_retries - 1:
+                logging.info(f"Slot verification (attempt {attempt + 1}/{max_retries}):")
+                logging.info(f"Slots assigned: {slots_assigned}/16384")
+                logging.info(f"Slots failed: {slots_fail}")
+            
+            if slots_assigned == 16384 and slots_fail == 0:
+                logging.info(f"Slot assignment verified successfully after {attempt + 1} attempts")
+                return node_ids
+            
+            if attempt < max_retries - 1:
+                logging.debug(f"Waiting for slot propagation... ({slots_assigned}/16384)")
         
-        if slots_assigned != 16384 or slots_fail != 0:
-            raise Exception(f"Slot assignment failed: {slots_assigned}/16384 assigned, {slots_fail} failed")
+        # Final check failed
+        raise Exception(f"Slot assignment failed after {max_retries} attempts: {slots_assigned}/16384 assigned, {slots_fail} failed")
         
         return node_ids
     

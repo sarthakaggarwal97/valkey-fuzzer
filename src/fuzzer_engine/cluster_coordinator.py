@@ -102,8 +102,19 @@ class ClusterCoordinator:
         cluster_instance = cluster_data['instance']
         
         try:
-            # Validate cluster health
-            is_healthy = self.cluster_manager.validate_cluster(cluster_instance.nodes)
+            # Filter out dead nodes before validation
+            # After chaos, some nodes may be dead - only validate live nodes
+            live_nodes = []
+            for node in cluster_instance.nodes:
+                if node.process and node.process.poll() is None:
+                    # Process is still running
+                    live_nodes.append(node)
+            
+            # If no live nodes, use all nodes (cluster might have restarted nodes)
+            nodes_to_validate = live_nodes if live_nodes else cluster_instance.nodes
+            
+            # Validate cluster health with live nodes only
+            is_healthy = self.cluster_manager.validate_cluster(nodes_to_validate)
             
             # Count assigned slots
             total_slots = sum(

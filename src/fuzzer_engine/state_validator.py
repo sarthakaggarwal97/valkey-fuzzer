@@ -262,13 +262,14 @@ class StateValidator(IStateValidator):
         
         lagging_replicas = []
         max_lag = 0.0
+        dead_replicas = []
         
-        try:
-            for replica in replica_nodes:
+        for replica in replica_nodes:
+            try:
                 client = valkey.Valkey(
                     host=replica['host'],
                     port=replica['port'],
-                    socket_timeout=5,
+                    socket_timeout=2,  # Reduced timeout for dead nodes
                     decode_responses=True
                 )
                 
@@ -288,22 +289,25 @@ class StateValidator(IStateValidator):
                     pass
                 
                 client.close()
-            
-            all_synced = len(lagging_replicas) == 0 and max_lag <= self.validation_config.max_replication_lag
-            
-            return ReplicationStatus(
-                all_replicas_synced=all_synced,
-                max_lag=max_lag,
-                lagging_replicas=lagging_replicas
-            )
-            
-        except Exception as e:
-            logging.error(f"Replica sync validation failed: {e}")
-            return ReplicationStatus(
-                all_replicas_synced=False,
-                max_lag=float('inf'),
-                lagging_replicas=[]
-            )
+                
+            except Exception as e:
+                # Node is dead or unreachable - this is expected after chaos
+                logging.debug(f"Replica {replica['host']}:{replica['port']} unreachable (likely dead): {e}")
+                dead_replicas.append(f"{replica['host']}:{replica['port']}")
+                # Don't add to lagging_replicas - dead nodes are handled separately
+        
+        # Consider sync successful if live replicas are synced
+        # Dead replicas are expected after chaos and shouldn't fail validation
+        all_synced = len(lagging_replicas) == 0 and max_lag <= self.validation_config.max_replication_lag
+        
+        if dead_replicas:
+            logging.info(f"Dead replicas detected (expected after chaos): {dead_replicas}")
+        
+        return ReplicationStatus(
+            all_replicas_synced=all_synced,
+            max_lag=max_lag,
+            lagging_replicas=lagging_replicas
+        )
     
     def validate_replica_sync(self, cluster_status: ClusterStatus) -> bool:
         """
@@ -336,33 +340,39 @@ class StateValidator(IStateValidator):
         try:
             # Try to connect to each node
             disconnected_nodes = []
+            connected_nodes = []
             
             for node in current_nodes:
                 try:
                     client = valkey.Valkey(
                         host=node['host'],
                         port=node['port'],
-                        socket_timeout=3,
+                        socket_timeout=2,  # Reduced timeout for dead nodes
                         decode_responses=True
                     )
                     client.ping()
                     client.close()
-                except Exception:
+                    connected_nodes.append(f"{node['host']}:{node['port']}")
+                except Exception as e:
+                    # Node is dead or unreachable - expected after chaos
+                    logging.debug(f"Node {node['host']}:{node['port']} unreachable: {e}")
                     disconnected_nodes.append(f"{node['host']}:{node['port']}")
             
+            # After chaos, some nodes being dead is expected and acceptable
+            # We consider connectivity good if at least one node per shard is reachable
+            # For now, we're lenient: as long as SOME nodes are connected, it's acceptable
             all_connected = len(disconnected_nodes) == 0
             
-            # For partition detection, we would need more sophisticated logic
-            # For now, assume no partitions if all nodes are connected
+            # For partition detection
             partition_groups = []
-            if not all_connected:
+            if not all_connected and connected_nodes:
                 # Simple partition detection: connected vs disconnected
-                connected = [f"{n['host']}:{n['port']}" for n in current_nodes 
-                           if f"{n['host']}:{n['port']}" not in disconnected_nodes]
-                if connected:
-                    partition_groups.append(connected)
+                partition_groups.append(connected_nodes)
                 if disconnected_nodes:
                     partition_groups.append(disconnected_nodes)
+            
+            if disconnected_nodes:
+                logging.info(f"Disconnected nodes detected (expected after chaos): {disconnected_nodes}")
             
             return ConnectivityStatus(
                 all_nodes_connected=all_connected,
@@ -401,24 +411,37 @@ class StateValidator(IStateValidator):
                     node_data_mismatches={}
                 )
             
-            # Sample a few keys from first primary
-            node = primary_nodes[0]
-            client = valkey.Valkey(
-                host=node['host'],
-                port=node['port'],
-                socket_timeout=5,
-                decode_responses=True
-            )
+            # Try to connect to any available primary
+            for node in primary_nodes:
+                try:
+                    client = valkey.Valkey(
+                        host=node['host'],
+                        port=node['port'],
+                        socket_timeout=2,  # Reduced timeout
+                        decode_responses=True
+                    )
+                    
+                    # Get some keys to check
+                    keys = client.keys('*')[:10]  # Sample first 10 keys
+                    
+                    client.close()
+                    
+                    # For basic validation, if we can read keys, consider it consistent
+                    # Full validation would require comparing across replicas
+                    return ConsistencyStatus(
+                        consistent=True,
+                        inconsistent_keys=[],
+                        node_data_mismatches={}
+                    )
+                except Exception as e:
+                    # This primary is dead, try next one
+                    logging.debug(f"Primary {node['host']}:{node['port']} unreachable: {e}")
+                    continue
             
-            # Get some keys to check
-            keys = client.keys('*')[:10]  # Sample first 10 keys
-            
-            client.close()
-            
-            # For basic validation, if we can read keys, consider it consistent
-            # Full validation would require comparing across replicas
+            # All primaries are dead - this is a problem
+            logging.warning("All primary nodes unreachable for consistency check")
             return ConsistencyStatus(
-                consistent=True,
+                consistent=False,
                 inconsistent_keys=[],
                 node_data_mismatches={}
             )
