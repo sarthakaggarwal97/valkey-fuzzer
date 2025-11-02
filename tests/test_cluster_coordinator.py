@@ -115,6 +115,121 @@ def test_create_cluster_success(mock_cluster_manager_class, mock_config_manager_
     assert len(cluster_instance.nodes) == 1
 
 
+@patch('src.fuzzer_engine.cluster_coordinator.ConfigurationManager')
+@patch('src.fuzzer_engine.cluster_coordinator.ClusterManager')
+def test_create_cluster_cleanup_on_formation_failure(mock_cluster_manager_class, mock_config_manager_class):
+    """Test that spawned nodes are cleaned up when cluster formation fails"""
+    # Setup mocks
+    mock_config_manager = Mock()
+    mock_config_manager.setup_valkey_from_source.return_value = "/usr/bin/valkey-server"
+    mock_config_manager.plan_topology.return_value = []
+    
+    mock_nodes = [
+        NodeInfo(
+            node_id="node-0",
+            role="primary",
+            shard_id=0,
+            port=7000,
+            bus_port=17000,
+            pid=12345,
+            process=Mock(),
+            data_dir="/tmp/test",
+            log_file="/tmp/test.log",
+            slot_start=0,
+            slot_end=5461
+        ),
+        NodeInfo(
+            node_id="node-1",
+            role="replica",
+            shard_id=0,
+            port=7001,
+            bus_port=17001,
+            pid=12346,
+            process=Mock(),
+            data_dir="/tmp/test",
+            log_file="/tmp/test.log"
+        )
+    ]
+    mock_config_manager.spawn_all_nodes.return_value = mock_nodes
+    mock_config_manager_class.return_value = mock_config_manager
+    
+    # Mock cluster formation to fail
+    mock_cluster_manager = Mock()
+    mock_cluster_manager.form_cluster.return_value = None  # Formation fails
+    mock_cluster_manager_class.return_value = mock_cluster_manager
+    
+    # Create coordinator
+    coordinator = ClusterCoordinator()
+    coordinator.cluster_manager = mock_cluster_manager
+    
+    config = ClusterConfig(
+        num_shards=1,
+        replicas_per_shard=1,
+        base_port=7000
+    )
+    
+    # Attempt to create cluster - should raise exception
+    with pytest.raises(Exception, match="Failed to form cluster"):
+        coordinator.create_cluster(config)
+    
+    # Verify cleanup was called with the spawned nodes
+    mock_config_manager.cleanup_cluster.assert_called_once_with(mock_nodes)
+    
+    # Verify no cluster was stored in active_clusters
+    assert len(coordinator.active_clusters) == 0
+
+
+@patch('src.fuzzer_engine.cluster_coordinator.ConfigurationManager')
+@patch('src.fuzzer_engine.cluster_coordinator.ClusterManager')
+def test_create_cluster_cleanup_on_exception(mock_cluster_manager_class, mock_config_manager_class):
+    """Test that spawned nodes are cleaned up when cluster formation raises an exception"""
+    # Setup mocks
+    mock_config_manager = Mock()
+    mock_config_manager.setup_valkey_from_source.return_value = "/usr/bin/valkey-server"
+    mock_config_manager.plan_topology.return_value = []
+    
+    mock_nodes = [
+        NodeInfo(
+            node_id="node-0",
+            role="primary",
+            shard_id=0,
+            port=7000,
+            bus_port=17000,
+            pid=12345,
+            process=Mock(),
+            data_dir="/tmp/test",
+            log_file="/tmp/test.log"
+        )
+    ]
+    mock_config_manager.spawn_all_nodes.return_value = mock_nodes
+    mock_config_manager_class.return_value = mock_config_manager
+    
+    # Mock cluster formation to raise an exception
+    mock_cluster_manager = Mock()
+    mock_cluster_manager.form_cluster.side_effect = Exception("Cluster validation failed")
+    mock_cluster_manager_class.return_value = mock_cluster_manager
+    
+    # Create coordinator
+    coordinator = ClusterCoordinator()
+    coordinator.cluster_manager = mock_cluster_manager
+    
+    config = ClusterConfig(
+        num_shards=1,
+        replicas_per_shard=0,
+        base_port=7000
+    )
+    
+    # Attempt to create cluster - should raise exception
+    with pytest.raises(Exception, match="Cluster validation failed"):
+        coordinator.create_cluster(config)
+    
+    # Verify cleanup was called with the spawned nodes
+    mock_config_manager.cleanup_cluster.assert_called_once_with(mock_nodes)
+    
+    # Verify no cluster was stored in active_clusters
+    assert len(coordinator.active_clusters) == 0
+
+
 def test_get_node_info_success():
     """Test getting node info successfully"""
     coordinator = ClusterCoordinator()

@@ -41,6 +41,9 @@ class ClusterCoordinator:
         """
         logger.info(f"Creating cluster with {config.num_shards} shards, {config.replicas_per_shard} replicas per shard")
         
+        config_manager = None
+        nodes = []
+        
         try:
             # Initialize configuration manager
             config_manager = ConfigurationManager(config, self.port_manager)
@@ -82,6 +85,15 @@ class ClusterCoordinator:
             
         except Exception as e:
             logger.error(f"Failed to create cluster: {e}")
+            
+            # Clean up spawned nodes and release ports on failure
+            if nodes and config_manager:
+                logger.info("Cleaning up spawned nodes after cluster formation failure")
+                try:
+                    config_manager.cleanup_cluster(nodes)
+                except Exception as cleanup_error:
+                    logger.error(f"Error during cleanup: {cleanup_error}")
+            
             raise
     
     def get_cluster_status(self, cluster_id: str) -> Optional[ClusterStatus]:
