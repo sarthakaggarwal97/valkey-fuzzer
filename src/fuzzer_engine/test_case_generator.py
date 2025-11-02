@@ -56,7 +56,8 @@ class ScenarioGenerator(ITestCaseGenerator):
     def _generate_random_cluster_config(self) -> ClusterConfig:
         """Generate random cluster configuration"""
         num_shards = random.randint(3, 16)
-        replicas_per_shard = random.randint(0, 2)
+        # Ensure at least 1 replica per shard for failover operations
+        replicas_per_shard = random.randint(1, 2)
         base_port = random.randint(7000, 8000)
         
         return ClusterConfig(

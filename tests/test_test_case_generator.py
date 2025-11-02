@@ -32,7 +32,8 @@ def test_generate_random_scenario_without_seed():
     
     # Should have valid configuration
     assert 3 <= scenario.cluster_config.num_shards <= 16
-    assert 0 <= scenario.cluster_config.replicas_per_shard <= 2
+    # Ensure at least 1 replica for failover operations
+    assert 1 <= scenario.cluster_config.replicas_per_shard <= 2
     assert len(scenario.operations) >= 1
     assert scenario.seed is not None
 
@@ -44,7 +45,8 @@ def test_random_cluster_config_ranges():
     for _ in range(10):
         scenario = generator.generate_random_scenario()
         assert 3 <= scenario.cluster_config.num_shards <= 16
-        assert 0 <= scenario.cluster_config.replicas_per_shard <= 2
+        # Ensure at least 1 replica for failover operations
+        assert 1 <= scenario.cluster_config.replicas_per_shard <= 2
 
 
 def test_random_operations_are_failover():

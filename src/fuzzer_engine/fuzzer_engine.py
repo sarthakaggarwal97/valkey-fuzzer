@@ -227,10 +227,11 @@ class FuzzerEngine(IFuzzerEngine):
             self.logger.log_validation_result(final_validation)
             
             # Determine overall success
+            # Success means: operations executed and cluster remains operational (all slots covered)
+            # We don't require all replicas to be synced because chaos may have killed nodes
             success = (
                 operations_executed > 0 and
-                final_validation.slot_coverage and
-                final_validation.replica_sync.all_replicas_synced
+                final_validation.slot_coverage
             )
             
             end_time = time.time()
