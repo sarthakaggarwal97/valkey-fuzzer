@@ -52,9 +52,6 @@ class ChaosScenario:
 class ChaosCoordinator:
     """
     Scenario-based chaos coordinator for advanced testing.
-    
-    This wraps the core chaos injection logic and adds scenario management,
-    state tracking, and callbacks for complex test orchestration.
     """
     
     def __init__(self, chaos_engine):
@@ -226,8 +223,6 @@ class ChaosCoordinator:
     def _inject_chaos(self, scenario: ChaosScenario) -> Optional[ChaosResult]:
         """
         Inject chaos based on scenario configuration.
-        
-        Delegates to the chaos engine for actual injection.
         """
         if not scenario.target_node:
             logger.warning(f"No target node for chaos injection in scenario {scenario.scenario_id}")

@@ -19,9 +19,6 @@ class OperationOrchestrator(IOperationOrchestrator):
     def __init__(self, cluster_connection: Optional[ClusterConnection] = None):
         """
         Initialize operation orchestrator
-        
-        Args:
-            cluster_connection: Connection to the cluster
         """
         self.cluster_connection = cluster_connection
         self.active_operations: Dict[str, Operation] = {}
@@ -34,13 +31,6 @@ class OperationOrchestrator(IOperationOrchestrator):
     def execute_operation(self, operation: Operation, cluster_id: str) -> bool:
         """
         Execute a single cluster operation
-        
-        Args:
-            operation: Operation to execute
-            cluster_id: Cluster identifier
-            
-        Returns:
-            bool: True if operation succeeded
         """
         if not self.cluster_connection:
             logging.error("No cluster connection available")
@@ -84,12 +74,6 @@ class OperationOrchestrator(IOperationOrchestrator):
     def _execute_failover(self, operation: Operation) -> bool:
         """
         Execute failover operation
-        
-        Args:
-            operation: Failover operation to execute
-            
-        Returns:
-            bool: True if failover succeeded
         """
         logging.info(f"Executing failover on {operation.target_node}")
         
@@ -208,13 +192,6 @@ class OperationOrchestrator(IOperationOrchestrator):
     def _execute_manual_failover(self, target_node: Dict, operation: Operation) -> bool:
         """
         Execute manual failover when no replicas are available
-        
-        Args:
-            target_node: Target primary node
-            operation: Failover operation
-            
-        Returns:
-            bool: True if manual failover succeeded
         """
         logging.info(f"Attempting manual failover on primary at port {target_node['port']}")
         
@@ -239,13 +216,6 @@ class OperationOrchestrator(IOperationOrchestrator):
     def validate_operation_preconditions(self, operation: Operation, cluster_status: ClusterStatus) -> bool:
         """
         Validate that operation can be executed
-        
-        Args:
-            operation: Operation to validate
-            cluster_status: Current cluster status
-            
-        Returns:
-            bool: True if operation can be executed
         """
         if not cluster_status.is_healthy:
             logging.warning("Cluster is not healthy")
@@ -276,14 +246,6 @@ class OperationOrchestrator(IOperationOrchestrator):
     def wait_for_operation_completion(self, operation: Operation, cluster_id: str, timeout: float) -> bool:
         """
         Wait for operation to complete
-        
-        Args:
-            operation: Operation to wait for
-            cluster_id: Cluster identifier
-            timeout: Timeout in seconds
-            
-        Returns:
-            bool: True if operation completed successfully
         """
         if not self.cluster_connection:
             return False

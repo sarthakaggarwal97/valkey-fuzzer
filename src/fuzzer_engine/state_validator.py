@@ -21,9 +21,6 @@ class StateValidator(IStateValidator):
     def __init__(self, validation_config: Optional[ValidationConfig] = None):
         """
         Initialize state validator
-        
-        Args:
-            validation_config: Configuration for validation checks
         """
         self.validation_config = validation_config or ValidationConfig()
         self.validation_cache: Dict[str, ValidationResult] = {}
@@ -31,13 +28,6 @@ class StateValidator(IStateValidator):
     def validate_cluster_state(self, cluster_id: str, cluster_connection: ClusterConnection = None) -> ValidationResult:
         """
         Perform comprehensive cluster state validation
-        
-        Args:
-            cluster_id: Cluster identifier
-            cluster_connection: Connection to cluster
-            
-        Returns:
-            ValidationResult: Validation results
         """
         start_time = time.time()
         
@@ -234,12 +224,6 @@ class StateValidator(IStateValidator):
     def validate_slot_coverage(self, cluster_status: ClusterStatus) -> bool:
         """
         Validate all slots are assigned
-        
-        Args:
-            cluster_status: Current cluster status
-            
-        Returns:
-            bool: True if all slots are assigned
         """
         return cluster_status.total_slots_assigned == 16384
     
@@ -312,12 +296,6 @@ class StateValidator(IStateValidator):
     def validate_replica_sync(self, cluster_status: ClusterStatus) -> bool:
         """
         Validate replica synchronization (simplified interface)
-        
-        Args:
-            cluster_status: Current cluster status
-            
-        Returns:
-            bool: True if all replicas are synced
         """
         # This is a simplified version that would need actual cluster connection
         # For now, return True as a placeholder
@@ -457,12 +435,6 @@ class StateValidator(IStateValidator):
     def validate_data_consistency(self, cluster_status: ClusterStatus) -> bool:
         """
         Validate data consistency (simplified interface)
-        
-        Args:
-            cluster_status: Current cluster status
-            
-        Returns:
-            bool: True if data is consistent
         """
         # Simplified version
         return True

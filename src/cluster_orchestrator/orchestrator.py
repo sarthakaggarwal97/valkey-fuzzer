@@ -146,14 +146,6 @@ class ConfigurationManager:
         Build the Valkey server command with standard cluster configuration.
         
         This is the single source of truth for node configuration parameters.
-        
-        Args:
-            port: Client port for the node
-            data_dir: Data directory for the node
-            log_file: Log file path for the node
-        
-        Returns:
-            List of command arguments for subprocess.Popen
         """
         return [
             self.clusterConfig.valkey_binary,

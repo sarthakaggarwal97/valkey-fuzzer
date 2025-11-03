@@ -116,12 +116,6 @@ class DSLValidator:
     def validate_structure(config_dict: dict) -> list:
         """
         Validate the structure of a DSL configuration dictionary.
-        
-        Args:
-            config_dict: Parsed YAML configuration
-            
-        Returns:
-            List of validation errors (empty if valid)
         """
         errors = []
         

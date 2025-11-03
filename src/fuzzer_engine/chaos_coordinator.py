@@ -25,20 +25,6 @@ logger = logging.getLogger(__name__)
 
 
 class ChaosCoordinator:
-    """
-    Core chaos coordinator for operation-based chaos injection.
-    
-    This coordinator is used by the fuzzer engine to inject chaos in coordination
-    with cluster operations. It provides:
-    - Node registration and target selection
-    - Timing-based chaos coordination
-    - Direct chaos injection
-    - History tracking
-    
-    For scenario-based testing with state management and callbacks,
-    use chaos_engine.coordinator.ChaosCoordinator instead.
-    """
-    
     def __init__(self):
         self.chaos_engine = ProcessChaosEngine()
         self.active_chaos_scenarios: dict[str, List[ChaosResult]] = {}
@@ -47,10 +33,6 @@ class ChaosCoordinator:
     def register_cluster_nodes(self, cluster_id: str, nodes: List[NodeInfo]) -> None:
         """
         Register cluster nodes with the chaos engine for chaos injection.
-        
-        Args:
-            cluster_id: Unique identifier for the cluster
-            nodes: List of nodes in the cluster
         """
         logger.info(f"Registering {len(nodes)} nodes for chaos injection in cluster {cluster_id}")
         
@@ -71,14 +53,6 @@ class ChaosCoordinator:
     ) -> List[ChaosResult]:
         """
         Coordinate chaos injection with a cluster operation based on timing configuration.
-        
-        Args:
-            operation: The cluster operation being executed
-            chaos_config: Configuration for chaos injection
-            cluster_nodes: List of nodes in the cluster
-            
-        Returns:
-            List of ChaosResult from chaos injections
         """
         chaos_results = []
         
@@ -144,13 +118,6 @@ class ChaosCoordinator:
         """
         Execute chaos injection during operation execution.
         This is typically called by the operation orchestrator at the appropriate time.
-        
-        Args:
-            target_node: Node to inject chaos on
-            chaos_config: Configuration for chaos injection
-            
-        Returns:
-            ChaosResult from the chaos injection
         """
         logger.info(f"Executing chaos during operation on {target_node.node_id}")
         
@@ -162,13 +129,6 @@ class ChaosCoordinator:
     def _inject_chaos(self, target_node: NodeInfo, chaos_config: ChaosConfig) -> ChaosResult:
         """
         Inject chaos on the target node based on configuration.
-        
-        Args:
-            target_node: Node to inject chaos on
-            chaos_config: Configuration for chaos injection
-            
-        Returns:
-            ChaosResult from the chaos injection
         """
         if chaos_config.chaos_type == ChaosType.PROCESS_KILL:
             # Determine process chaos type
@@ -204,13 +164,6 @@ class ChaosCoordinator:
     ) -> Optional[NodeInfo]:
         """
         Select a target node for chaos injection based on selection strategy.
-        
-        Args:
-            cluster_nodes: List of nodes in the cluster
-            target_selection: Target selection configuration
-            
-        Returns:
-            Selected NodeInfo, or None if no suitable target found
         """
         if not cluster_nodes:
             return None
@@ -250,21 +203,12 @@ class ChaosCoordinator:
     def get_chaos_history(self) -> List[ChaosResult]:
         """
         Get the history of all chaos injections.
-        
-        Returns:
-            List of all ChaosResult from chaos injections
         """
         return self.chaos_history.copy()
     
     def cleanup_chaos(self, cluster_id: str) -> bool:
         """
         Clean up chaos effects for a cluster.
-        
-        Args:
-            cluster_id: Unique identifier for the cluster
-            
-        Returns:
-            True if cleanup successful, False otherwise
         """
         logger.info(f"Cleaning up chaos for cluster {cluster_id}")
         

@@ -95,12 +95,6 @@ class FuzzerEngine(IFuzzerEngine):
         3. Executes operations with chaos coordination
         4. Validates cluster state after each operation
         5. Cleans up resources
-        
-        Args:
-            scenario: Test scenario to execute
-            
-        Returns:
-            Execution result with test outcomes
         """
         start_time = time.time()
         operations_executed = 0
@@ -308,13 +302,6 @@ class FuzzerEngine(IFuzzerEngine):
     def _create_cluster_with_retry(self, scenario: Scenario, max_retries: int = 3):
         """
         Create cluster with retry logic for failure recovery.
-        
-        Args:
-            scenario: Test scenario containing cluster configuration
-            max_retries: Maximum number of retry attempts
-            
-        Returns:
-            ClusterInstance if successful, None otherwise
         """
         retry_config = RetryConfig(
             max_attempts=max_retries,
@@ -347,13 +334,6 @@ class FuzzerEngine(IFuzzerEngine):
     def _validate_cluster_readiness_with_retry(self, cluster_id: str, max_retries: int = 5) -> bool:
         """
         Validate cluster readiness with retry logic.
-        
-        Args:
-            cluster_id: Cluster identifier
-            max_retries: Maximum number of retry attempts
-            
-        Returns:
-            True if cluster is ready, False otherwise
         """
         retry_config = RetryConfig(
             max_attempts=max_retries,
@@ -387,10 +367,6 @@ class FuzzerEngine(IFuzzerEngine):
     def _cleanup_resources(self, cluster_instance, cluster_connection):
         """
         Clean up all resources with graceful degradation.
-        
-        Args:
-            cluster_instance: Cluster instance to clean up
-            cluster_connection: Cluster connection to close
         """
         try:
             cleanup_success = self.error_handler.cleanup_after_failure(

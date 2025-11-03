@@ -91,12 +91,6 @@ class ErrorHandler:
     def handle_error(self, error_context: ErrorContext) -> bool:
         """
         Handle an error with appropriate recovery strategy.
-        
-        Args:
-            error_context: Context information about the error
-            
-        Returns:
-            True if error was recovered, False otherwise
         """
         # Log error
         self._log_error(error_context)
@@ -132,16 +126,6 @@ class ErrorHandler:
     ) -> tuple[bool, Any]:
         """
         Execute an operation with retry logic and exponential backoff.
-        
-        Args:
-            operation: Callable to execute
-            config: Retry configuration
-            error_category: Category of error for logging
-            operation_name: Name of operation for logging
-            **kwargs: Arguments to pass to operation
-            
-        Returns:
-            Tuple of (success: bool, result: Any)
         """
         last_exception = None
         delay = config.initial_delay
@@ -269,15 +253,6 @@ class ErrorHandler:
     ) -> bool:
         """
         Comprehensive cleanup after test failure.
-        
-        Args:
-            cluster_instance: Cluster instance to clean up
-            cluster_connection: Cluster connection to close
-            chaos_coordinator: Chaos coordinator for stopping chaos
-            cluster_coordinator: Cluster coordinator for destroying cluster
-            
-        Returns:
-            True if cleanup successful, False otherwise
         """
         logger.info("Starting comprehensive cleanup after failure")
         
@@ -374,9 +349,6 @@ class ErrorHandler:
     def get_error_summary(self) -> Dict[str, Any]:
         """
         Get summary of all errors encountered.
-        
-        Returns:
-            Dictionary with error statistics
         """
         total_errors = len(self.error_history)
         

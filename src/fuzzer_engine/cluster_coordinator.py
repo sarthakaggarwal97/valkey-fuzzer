@@ -29,15 +29,6 @@ class ClusterCoordinator:
     def create_cluster(self, config: ClusterConfig) -> ClusterInstance:
         """
         Create a new Valkey cluster with the specified configuration.
-        
-        Args:
-            config: Cluster configuration specifying topology and settings
-            
-        Returns:
-            ClusterInstance with cluster details and node information
-            
-        Raises:
-            Exception: If cluster creation or formation fails
         """
         logger.info(f"Creating cluster with {config.num_shards} shards, {config.replicas_per_shard} replicas per shard")
         
@@ -99,12 +90,6 @@ class ClusterCoordinator:
     def get_cluster_status(self, cluster_id: str) -> Optional[ClusterStatus]:
         """
         Get current status of a cluster.
-        
-        Args:
-            cluster_id: Unique identifier for the cluster
-            
-        Returns:
-            ClusterStatus with current cluster state, or None if cluster not found
         """
         if cluster_id not in self.active_clusters:
             logger.warning(f"Cluster {cluster_id} not found")
@@ -152,12 +137,6 @@ class ClusterCoordinator:
     def validate_cluster_readiness(self, cluster_id: str) -> bool:
         """
         Validate that cluster is ready for testing.
-        
-        Args:
-            cluster_id: Unique identifier for the cluster
-            
-        Returns:
-            True if cluster is ready, False otherwise
         """
         status = self.get_cluster_status(cluster_id)
         
@@ -185,13 +164,6 @@ class ClusterCoordinator:
     def get_node_info(self, cluster_id: str, node_id: str) -> Optional[NodeInfo]:
         """
         Get information about a specific node in the cluster.
-        
-        Args:
-            cluster_id: Unique identifier for the cluster
-            node_id: Identifier for the node
-            
-        Returns:
-            NodeInfo for the specified node, or None if not found
         """
         if cluster_id not in self.active_clusters:
             return None
@@ -207,12 +179,6 @@ class ClusterCoordinator:
     def get_all_nodes(self, cluster_id: str) -> List[NodeInfo]:
         """
         Get all nodes in the cluster.
-        
-        Args:
-            cluster_id: Unique identifier for the cluster
-            
-        Returns:
-            List of NodeInfo for all nodes in the cluster
         """
         if cluster_id not in self.active_clusters:
             return []
@@ -223,14 +189,6 @@ class ClusterCoordinator:
     def restart_node(self, cluster_id: str, node_id: str, wait_ready: bool = True) -> bool:
         """
         Restart a specific node in the cluster.
-        
-        Args:
-            cluster_id: Unique identifier for the cluster
-            node_id: Identifier for the node to restart
-            wait_ready: Whether to wait for node to be ready after restart
-            
-        Returns:
-            True if restart successful, False otherwise
         """
         if cluster_id not in self.active_clusters:
             logger.error(f"Cluster {cluster_id} not found")
@@ -256,12 +214,6 @@ class ClusterCoordinator:
     def destroy_cluster(self, cluster_id: str) -> bool:
         """
         Destroy a cluster and clean up all resources.
-        
-        Args:
-            cluster_id: Unique identifier for the cluster
-            
-        Returns:
-            True if cleanup successful, False otherwise
         """
         if cluster_id not in self.active_clusters:
             logger.warning(f"Cluster {cluster_id} not found")
