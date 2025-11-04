@@ -22,7 +22,7 @@ class TestFuzzerEngineIntegration:
         scenario = engine.generate_random_scenario(seed=42)
         
         assert scenario is not None
-        assert scenario.scenario_id == "random-42"
+        assert scenario.scenario_id == "42"
         assert scenario.seed == 42
         assert scenario.cluster_config is not None
         assert len(scenario.operations) > 0

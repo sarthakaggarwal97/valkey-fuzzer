@@ -72,7 +72,7 @@ class ChaosCoordinator:
             
             # Chaos before operation
             if coordination.chaos_before_operation:
-                logger.info(f"Injecting chaos before operation (delay: {timing.delay_before_operation}s)")
+                logger.info(f"Injecting chaos before operation (delay: {timing.delay_before_operation:.2f}s)")
                 time.sleep(timing.delay_before_operation)
                 
                 result = self._inject_chaos(target_node, chaos_config)
@@ -93,7 +93,7 @@ class ChaosCoordinator:
             
             # Chaos after operation
             if coordination.chaos_after_operation:
-                logger.info(f"Injecting chaos after operation (delay: {timing.delay_after_operation}s)")
+                logger.info(f"Injecting chaos after operation (delay: {timing.delay_after_operation:.2f}s)")
                 time.sleep(timing.delay_after_operation)
                 
                 result = self._inject_chaos(target_node, chaos_config)

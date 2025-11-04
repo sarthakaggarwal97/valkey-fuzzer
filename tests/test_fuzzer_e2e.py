@@ -44,7 +44,7 @@ class TestFuzzerEngineE2E:
         
         # Verify test completed
         assert result is not None
-        assert result.scenario_id == "random-42"
+        assert result.scenario_id == "42"
         assert result.end_time > result.start_time
         
         # Test should execute at least one operation
@@ -356,7 +356,7 @@ class TestFuzzerEngineE2E:
         assert result2 is not None
         
         # Both should have same scenario ID
-        assert result1.scenario_id == result2.scenario_id == f"random-{seed}"
+        assert result1.scenario_id == result2.scenario_id == str(seed)
         
         # Log comparison
         logger.info(f"Test 1: Operations={result1.operations_executed}, "

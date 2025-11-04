@@ -43,7 +43,7 @@ class ScenarioGenerator(ITestCaseGenerator):
         validation_config = ValidationConfig()
         
         scenario = Scenario(
-            scenario_id=f"random-{scenario_seed}",
+            scenario_id=str(scenario_seed),
             cluster_config=cluster_config,
             operations=operations,
             chaos_config=chaos_config,

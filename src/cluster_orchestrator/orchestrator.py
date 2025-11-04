@@ -304,7 +304,7 @@ class ConfigurationManager:
                 
                 if not ready:
                     self.terminate_node(node)
-                    raise Exception(f"Node {node.node_id} failed to become ready within {ready_timeout}s")
+                    raise Exception(f"Node {node.node_id} failed to become ready within {ready_timeout:.2f}s")
             
             return node
             
@@ -424,7 +424,7 @@ class ClusterManager:
             
             time.sleep(1)
         
-        raise Exception(f"Cluster failed to converge within {timeout}s")
+        raise Exception(f"Cluster failed to converge within {timeout:.2f}s")
     
     def reset_cluster_state(self, nodes_in_cluster: List[NodeInfo]) -> None:
         """Reset cluster state on all nodes"""        
@@ -547,7 +547,7 @@ class ClusterManager:
             
             time.sleep(1)
         
-        raise Exception(f"Replicas failed to sync within {timeout}s")
+        raise Exception(f"Replicas failed to sync within {timeout:.2f}s")
     
     def validate_node_configs(self, nodes_in_cluster: List[NodeInfo], expected_configs: Dict[str, str]) -> bool:
         """Validate node configurations"""

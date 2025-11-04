@@ -302,5 +302,5 @@ class OperationOrchestrator(IOperationOrchestrator):
                 logging.debug(f"Waiting for stabilization: {e}")
                 time.sleep(1)
         
-        logging.warning(f"Operation did not complete within {timeout}s")
+        logging.warning(f"Operation did not complete within {timeout:.2f}s")
         return False

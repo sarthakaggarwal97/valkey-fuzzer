@@ -374,7 +374,7 @@ class FuzzerLogger:
             summary_lines.append(f"  {i}. {op.type.value} on {op.target_node}")
             if op.parameters:
                 summary_lines.append(f"     Parameters: {op.parameters}")
-            summary_lines.append(f"     Timing: delay_before={op.timing.delay_before}s, timeout={op.timing.timeout}s, delay_after={op.timing.delay_after}s")
+            summary_lines.append(f"     Timing: delay_before={op.timing.delay_before:.2f}s, timeout={op.timing.timeout:.2f}s, delay_after={op.timing.delay_after:.2f}s")
         
         summary_lines.extend([
             "",
@@ -390,7 +390,7 @@ class FuzzerLogger:
             f"  - Chaos timing: before={scenario.chaos_config.coordination.chaos_before_operation}, "
             f"during={scenario.chaos_config.coordination.chaos_during_operation}, "
             f"after={scenario.chaos_config.coordination.chaos_after_operation}",
-            f"  - Duration: {scenario.chaos_config.timing.chaos_duration}s",
+            f"  - Duration: {scenario.chaos_config.timing.chaos_duration:.2f}s",
             "",
             "=" * 80,
             ""
