@@ -189,7 +189,7 @@ class ChaosCoordinator:
         timing = scenario.chaos_config.timing
         
         if timing.delay_before_operation > 0:
-            logger.info(f"Waiting {timing.delay_before_operation}s before chaos injection")
+            logger.info(f"Waiting {timing.delay_before_operation:.2f}s before chaos injection")
             time.sleep(timing.delay_before_operation)
         
         chaos_result = self._inject_chaos(scenario)
@@ -213,7 +213,7 @@ class ChaosCoordinator:
         timing = scenario.chaos_config.timing
         
         if timing.delay_after_operation > 0:
-            logger.info(f"Waiting {timing.delay_after_operation}s after operation")
+            logger.info(f"Waiting {timing.delay_after_operation:.2f}s after operation")
             time.sleep(timing.delay_after_operation)
         
         chaos_result = self._inject_chaos(scenario)

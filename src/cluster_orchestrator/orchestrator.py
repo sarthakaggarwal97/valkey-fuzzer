@@ -400,7 +400,7 @@ class ClusterManager:
         expected_count = len(nodes_in_cluster)
         deadline = time.time() + timeout
         
-        logging.info(f"Waiting for cluster convergence for all {expected_count} nodes")
+        logging.info(f"Waiting for cluster convergence for all {expected_count} nodes (timeout: {timeout:.2f}s)")
         
         while time.time() < deadline:
             all_converged = True
@@ -520,7 +520,7 @@ class ClusterManager:
         
         logging.info("Replication setup complete")
         
-        logging.info(f"Waiting for {len(replicas)} replicas to sync")
+        logging.info(f"Waiting for {len(replicas)} replicas to sync (timeout: {timeout:.2f}s)")
         deadline = time.time() + timeout
         
         while time.time() < deadline:

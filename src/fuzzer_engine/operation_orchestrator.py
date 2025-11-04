@@ -44,7 +44,7 @@ class OperationOrchestrator(IOperationOrchestrator):
         try:
             # Wait before operation if specified
             if operation.timing.delay_before > 0:
-                logging.info(f"Waiting {operation.timing.delay_before}s before operation")
+                logging.info(f"Waiting {operation.timing.delay_before:.2f}s before operation")
                 time.sleep(operation.timing.delay_before)
             
             # Execute based on operation type
@@ -57,7 +57,7 @@ class OperationOrchestrator(IOperationOrchestrator):
             
             # Wait after operation if specified
             if operation.timing.delay_after > 0:
-                logging.info(f"Waiting {operation.timing.delay_after}s after operation")
+                logging.info(f"Waiting {operation.timing.delay_after:.2f}s after operation")
                 time.sleep(operation.timing.delay_after)
             
             # Remove from active operations
@@ -250,7 +250,7 @@ class OperationOrchestrator(IOperationOrchestrator):
         if not self.cluster_connection:
             return False
         
-        logging.info(f"Waiting for operation completion (timeout: {timeout}s)")
+        logging.info(f"Waiting for operation completion (timeout: {timeout:.2f}s)")
         
         start_time = time.time()
         deadline = start_time + timeout
