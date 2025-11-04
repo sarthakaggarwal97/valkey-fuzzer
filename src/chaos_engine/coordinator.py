@@ -4,9 +4,12 @@ Chaos coordination and scenario management components
 This module provides high-level orchestration for chaos injection,
 coordinating chaos timing with cluster operations.
 
-- Simple scenario management
-- Basic timing coordination (before/during/after operations)
+- Scenario-based chaos management
+- Timing coordination (before/during/after operations)
 - Process chaos injection coordination
+
+This is a higher-level wrapper around the core chaos coordinator
+in fuzzer_engine.chaos_coordinator for scenario-based testing.
 """
 import time
 import uuid
@@ -47,7 +50,9 @@ class ChaosScenario:
 
 
 class ChaosCoordinator:
-    """Coordinates chaos injection with operation execution"""
+    """
+    Scenario-based chaos coordinator for advanced testing.
+    """
     
     def __init__(self, chaos_engine):
         self.chaos_engine = chaos_engine
@@ -184,7 +189,7 @@ class ChaosCoordinator:
         timing = scenario.chaos_config.timing
         
         if timing.delay_before_operation > 0:
-            logger.info(f"Waiting {timing.delay_before_operation}s before chaos injection")
+            logger.info(f"Waiting {timing.delay_before_operation:.2f}s before chaos injection")
             time.sleep(timing.delay_before_operation)
         
         chaos_result = self._inject_chaos(scenario)
@@ -208,7 +213,7 @@ class ChaosCoordinator:
         timing = scenario.chaos_config.timing
         
         if timing.delay_after_operation > 0:
-            logger.info(f"Waiting {timing.delay_after_operation}s after operation")
+            logger.info(f"Waiting {timing.delay_after_operation:.2f}s after operation")
             time.sleep(timing.delay_after_operation)
         
         chaos_result = self._inject_chaos(scenario)
@@ -216,7 +221,9 @@ class ChaosCoordinator:
             scenario.chaos_results.append(chaos_result)
     
     def _inject_chaos(self, scenario: ChaosScenario) -> Optional[ChaosResult]:
-        """Inject chaos based on scenario configuration"""
+        """
+        Inject chaos based on scenario configuration.
+        """
         if not scenario.target_node:
             logger.warning(f"No target node for chaos injection in scenario {scenario.scenario_id}")
             return None
@@ -224,10 +231,19 @@ class ChaosCoordinator:
         chaos_config = scenario.chaos_config
         
         if chaos_config.chaos_type == ChaosType.PROCESS_KILL:
+            process_chaos_type = chaos_config.process_chaos_type or ProcessChaosType.SIGKILL
             return self.chaos_engine.inject_process_chaos(
                 scenario.target_node, 
-                chaos_config.process_chaos_type
+                process_chaos_type
             )
         else:
             logger.error(f"Unsupported chaos type: {chaos_config.chaos_type}")
-            return None
+            return ChaosResult(
+                chaos_id="unsupported",
+                chaos_type=chaos_config.chaos_type,
+                target_node=scenario.target_node.node_id,
+                success=False,
+                start_time=time.time(),
+                end_time=time.time(),
+                error_message=f"Unsupported chaos type: {chaos_config.chaos_type}"
+            )

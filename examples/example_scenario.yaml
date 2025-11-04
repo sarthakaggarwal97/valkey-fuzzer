@@ -1,0 +1,65 @@
+# Example DSL Configuration for Cluster Bus Fuzzer
+# This file demonstrates the DSL format for defining reproducible test scenarios
+
+scenario_id: "example-failover-with-chaos"
+seed: 42  # Optional: for reproducibility
+
+# Cluster configuration
+cluster:
+  num_shards: 3
+  replicas_per_shard: 1
+  base_port: 7000
+  base_data_dir: "/tmp/valkey-fuzzer"
+  valkey_binary: "/usr/local/bin/valkey-server"
+  enable_cleanup: true
+
+# Operations to execute
+operations:
+  - type: "failover"
+    target_node: "shard-0-primary"
+    parameters:
+      force: false
+    timing:
+      delay_before: 1.0
+      timeout: 30.0
+      delay_after: 2.0
+  
+  - type: "failover"
+    target_node: "shard-1-primary"
+    parameters:
+      force: true
+    timing:
+      delay_before: 0.5
+      timeout: 30.0
+      delay_after: 1.0
+
+# Chaos configuration
+chaos:
+  type: "process_kill"
+  process_chaos_type: "sigkill"
+  
+  target_selection:
+    strategy: "primary_only"  # Options: random, primary_only, replica_only, specific
+    # specific_nodes:  # Only used when strategy is "specific"
+    #   - "node-1"
+    #   - "node-2"
+  
+  timing:
+    delay_before_operation: 0.5
+    delay_after_operation: 0.5
+    chaos_duration: 10.0
+  
+  coordination:
+    chaos_before_operation: false
+    chaos_during_operation: true
+    chaos_after_operation: false
+
+# Validation configuration
+validation:
+  check_slot_coverage: true
+  check_slot_conflicts: true
+  check_replica_sync: true
+  check_node_connectivity: true
+  check_data_consistency: true
+  convergence_timeout: 60.0
+  max_replication_lag: 5.0

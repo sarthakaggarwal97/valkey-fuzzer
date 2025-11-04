@@ -146,14 +146,6 @@ class ConfigurationManager:
         Build the Valkey server command with standard cluster configuration.
         
         This is the single source of truth for node configuration parameters.
-        
-        Args:
-            port: Client port for the node
-            data_dir: Data directory for the node
-            log_file: Log file path for the node
-        
-        Returns:
-            List of command arguments for subprocess.Popen
         """
         return [
             self.clusterConfig.valkey_binary,
@@ -312,7 +304,7 @@ class ConfigurationManager:
                 
                 if not ready:
                     self.terminate_node(node)
-                    raise Exception(f"Node {node.node_id} failed to become ready within {ready_timeout}s")
+                    raise Exception(f"Node {node.node_id} failed to become ready within {ready_timeout:.2f}s")
             
             return node
             
@@ -408,7 +400,7 @@ class ClusterManager:
         expected_count = len(nodes_in_cluster)
         deadline = time.time() + timeout
         
-        logging.info(f"Waiting for cluster convergence for all {expected_count} nodes")
+        logging.info(f"Waiting for cluster convergence for all {expected_count} nodes (timeout: {timeout:.2f}s)")
         
         while time.time() < deadline:
             all_converged = True
@@ -432,7 +424,7 @@ class ClusterManager:
             
             time.sleep(1)
         
-        raise Exception(f"Cluster failed to converge within {timeout}s")
+        raise Exception(f"Cluster failed to converge within {timeout:.2f}s")
     
     def reset_cluster_state(self, nodes_in_cluster: List[NodeInfo]) -> None:
         """Reset cluster state on all nodes"""        
@@ -471,19 +463,32 @@ class ClusterManager:
             logging.info(f"{primary.node_id} cluster ID: {cluster_node_id[:8]}")
         
         logging.info("Slot assignment complete")
-        time.sleep(5)
         
-        # Verify slots were assigned correctly
-        info_dict = self.get_cluster_info(nodes_in_cluster[0])
-        slots_assigned = int(info_dict.get('cluster_slots_assigned', 0))
-        slots_fail = int(info_dict.get('cluster_slots_fail', 0))
+        # Verify slots were assigned correctly with retry logic
+        max_retries = 10
+        retry_delay = 2.0
         
-        logging.info(f"Slot verification:")
-        logging.info(f"Slots assigned: {slots_assigned}/16384")
-        logging.info(f"Slots failed: {slots_fail}")
+        for attempt in range(max_retries):
+            time.sleep(retry_delay)
+            
+            info_dict = self.get_cluster_info(nodes_in_cluster[0])
+            slots_assigned = int(info_dict.get('cluster_slots_assigned', 0))
+            slots_fail = int(info_dict.get('cluster_slots_fail', 0))
+            
+            if attempt == 0 or attempt == max_retries - 1:
+                logging.info(f"Slot verification (attempt {attempt + 1}/{max_retries}):")
+                logging.info(f"Slots assigned: {slots_assigned}/16384")
+                logging.info(f"Slots failed: {slots_fail}")
+            
+            if slots_assigned == 16384 and slots_fail == 0:
+                logging.info(f"Slot assignment verified successfully after {attempt + 1} attempts")
+                return node_ids
+            
+            if attempt < max_retries - 1:
+                logging.debug(f"Waiting for slot propagation... ({slots_assigned}/16384)")
         
-        if slots_assigned != 16384 or slots_fail != 0:
-            raise Exception(f"Slot assignment failed: {slots_assigned}/16384 assigned, {slots_fail} failed")
+        # Final check failed
+        raise Exception(f"Slot assignment failed after {max_retries} attempts: {slots_assigned}/16384 assigned, {slots_fail} failed")
         
         return node_ids
     
@@ -515,7 +520,7 @@ class ClusterManager:
         
         logging.info("Replication setup complete")
         
-        logging.info(f"Waiting for {len(replicas)} replicas to sync")
+        logging.info(f"Waiting for {len(replicas)} replicas to sync (timeout: {timeout:.2f}s)")
         deadline = time.time() + timeout
         
         while time.time() < deadline:
@@ -542,7 +547,7 @@ class ClusterManager:
             
             time.sleep(1)
         
-        raise Exception(f"Replicas failed to sync within {timeout}s")
+        raise Exception(f"Replicas failed to sync within {timeout:.2f}s")
     
     def validate_node_configs(self, nodes_in_cluster: List[NodeInfo], expected_configs: Dict[str, str]) -> bool:
         """Validate node configurations"""
@@ -559,77 +564,112 @@ class ClusterManager:
         logging.info(f"All {len(nodes_in_cluster)} node configurations are correctly set")
         return True
     
-    def validate_cluster(self, nodes_in_cluster: List[NodeInfo]) -> bool:
+    def validate_cluster(self, nodes_in_cluster: List[NodeInfo], timeout: float = 30.0, interval: float = 1.0) -> bool:
         if not nodes_in_cluster:
             return False
         
         print()
         logging.info("CLUSTER VALIDATION")
-        
-        # Collect cluster state from all nodes
-        node_states = []
-        unreachable_nodes = []
-        
-        for node in nodes_in_cluster:
-            try:
-                client = self.get_client(node)
-                info_dict = self.get_cluster_info(node)
-                
-                cluster_state = info_dict.get('cluster_state')
-                slots_assigned = int(info_dict.get('cluster_slots_assigned', 0))
-                slots_fail = int(info_dict.get('cluster_slots_fail', 0))
-                
-                node_states.append({
-                    'node_id': node.node_id,
-                    'state': cluster_state,
-                    'slots_assigned': slots_assigned,
-                    'slots_fail': slots_fail
-                })
-                
-                logging.info(f"{node.node_id}: state={cluster_state}, slots={slots_assigned}/16384, fail={slots_fail}")
-                
-            except Exception as e:
-                unreachable_nodes.append(node.node_id)
-                logging.warning(f"Expected node {node.node_id} is unreachable: {e}")
-        
-        # Fail if any expected nodes are unreachable
-        if unreachable_nodes:
-            logging.warning(f"Validation failed: {len(unreachable_nodes)} expected node(s) unreachable: {', '.join(unreachable_nodes)}")
+        deadline = time.time() + timeout
+        last_states: List[Dict[str, object]] = []
+        last_unreachable: List[str] = []
+
+        while time.time() < deadline:
+            node_states = []
+            unreachable_nodes = []
+
+            for node in nodes_in_cluster:
+                try:
+                    client = self.get_client(node)
+                    info_dict = self.get_cluster_info(node)
+
+                    cluster_state = info_dict.get('cluster_state')
+                    slots_assigned = int(info_dict.get('cluster_slots_assigned', 0))
+                    slots_fail = int(info_dict.get('cluster_slots_fail', 0))
+
+                    node_state = {
+                        'node_id': node.node_id,
+                        'state': cluster_state,
+                        'slots_assigned': slots_assigned,
+                        'slots_fail': slots_fail
+                    }
+                    node_states.append(node_state)
+
+                    logging.info(f"{node.node_id}: state={cluster_state}, slots={slots_assigned}/16384, fail={slots_fail}")
+
+                except Exception as e:
+                    unreachable_nodes.append(node.node_id)
+                    logging.warning(f"Expected node {node.node_id} is unreachable: {e}")
+
+            if unreachable_nodes:
+                last_unreachable = unreachable_nodes
+                last_states = node_states
+                time.sleep(interval)
+                continue
+
+            if not node_states:
+                time.sleep(interval)
+                continue
+
+            first_state = node_states[0]
+            consensus = all(
+                state['state'] == first_state['state'] and
+                state['slots_assigned'] == first_state['slots_assigned'] and
+                state['slots_fail'] == first_state['slots_fail']
+                for state in node_states
+            )
+
+            if consensus:
+                is_healthy = (
+                    first_state['state'] == 'ok' and
+                    first_state['slots_assigned'] == 16384 and
+                    first_state['slots_fail'] == 0
+                )
+
+                if is_healthy:
+                    logging.info(f"Cluster is Healthy (all {len(node_states)} nodes reachable and consistent)")
+                    return True
+
+                # Consensus but cluster not yet healthy – wait a bit more before failing
+                last_states = node_states
+            else:
+                last_states = node_states
+
+            time.sleep(interval)
+
+        # If we reach here, validation failed after timeout
+        if last_unreachable:
+            logging.warning(
+                f"Validation failed: {len(last_unreachable)} expected node(s) unreachable: {', '.join(last_unreachable)}"
+            )        
             return False
         
-        # Check if we got any responses (should always be true if no unreachable nodes)
-        if not node_states:
-            logging.warning(f"Could not reach any nodes for validation")
-            return False
-        
-        # Check for consensus - all nodes should agree on cluster state
-        first_state = node_states[0]
-        consensus = all(
-            state['state'] == first_state['state'] and
-            state['slots_assigned'] == first_state['slots_assigned'] and
-            state['slots_fail'] == first_state['slots_fail']
-            for state in node_states
-        )
-        
-        if not consensus:
-            logging.warning("Validation failed: Cluster nodes have inconsistent views:")
-            for state in node_states:
-                logging.warning(f"  {state['node_id']}: {state['state']}, {state['slots_assigned']}/16384, fail={state['slots_fail']}")
-            return False
-        
-        # Check if the consensus view is healthy
-        is_healthy = (
-            first_state['state'] == 'ok' and 
-            first_state['slots_assigned'] == 16384 and 
-            first_state['slots_fail'] == 0
-        )
-        
-        if is_healthy:
-            logging.info(f"Cluster is Healthy (all {len(node_states)} nodes reachable and consistent)")
+        if last_states:
+            first_state = last_states[0]
+            consensus = all(
+                state['state'] == first_state['state'] and
+                state['slots_assigned'] == first_state['slots_assigned'] and
+                state['slots_fail'] == first_state['slots_fail']
+                for state in last_states
+            )
+
+            if not consensus:
+                logging.warning("Validation failed: Cluster nodes have inconsistent views:")
+                for state in last_states:
+                    logging.warning(
+                        f"  {state['node_id']}: {state['state']}, {state['slots_assigned']}/16384, fail={state['slots_fail']}"
+                    )
+                return False
+
+            logging.info(
+                f"Cluster is Not Healthy: state={first_state['state']}, "
+                f"slots={first_state['slots_assigned']}/16384"
+            )
+
         else:
-            logging.info(f"Cluster is Not Healthy: state={first_state['state']}, slots={first_state['slots_assigned']}/16384")
-        
-        return is_healthy
+            logging.warning("Could not reach any nodes for validation")
+
+        return False
     
     def form_cluster(self, nodes_in_cluster: List[NodeInfo]) -> ClusterConnection:
         """Form a complete cluster from spawned nodes"""

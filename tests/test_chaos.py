@@ -208,7 +208,7 @@ class TestRealChaosIntegration:
     @pytest.mark.parametrize(
         "chaos_type, timeout",
         [
-            (ProcessChaosType.SIGTERM, 10.0),
+            (ProcessChaosType.SIGTERM, 30.0),  # Increased timeout for graceful shutdown
             (ProcessChaosType.SIGKILL, 5.0),
         ],
     )

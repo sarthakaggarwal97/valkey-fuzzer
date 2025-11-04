@@ -1,0 +1,42 @@
+# Example configuration file for Cluster Bus Fuzzer
+# This file demonstrates the available configuration options
+
+# Cluster configuration
+cluster:
+  num_shards: 3
+  replicas_per_shard: 1
+  base_port: 6379
+  base_data_dir: /tmp/valkey-fuzzer
+  valkey_binary: /usr/local/bin/valkey-server
+  enable_cleanup: true
+
+# Validation configuration
+validation:
+  check_slot_coverage: true
+  check_slot_conflicts: true
+  check_replica_sync: true
+  check_node_connectivity: true
+  check_data_consistency: true
+  convergence_timeout: 60.0
+  max_replication_lag: 5.0
+
+# Workload configuration
+workload:
+  clients: 10
+  requests_per_client: 1000
+  data_size: 1024
+  pipeline: 1
+  key_pattern: "test:key:*"
+
+# Test execution settings
+execution:
+  # Number of operations to generate
+  operation_count: 5
+  
+  # Chaos injection settings
+  chaos_enabled: true
+  chaos_probability: 0.7
+  
+  # Timing settings
+  operation_delay: 2.0
+  validation_delay: 5.0
