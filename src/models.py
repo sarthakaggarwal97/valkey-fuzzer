@@ -280,14 +280,7 @@ class ClusterConnection:
     
     def get_current_nodes(self, include_failed: bool = True) -> List[Dict]:
         """
-        Get current cluster topology via CLUSTER NODES
-        
-        Args:
-            include_failed: If True, includes failed/disconnected nodes in the result.
-                          If False, only returns live nodes.
-        
-        Returns:
-            List of node dictionaries with keys: node_id, host, port, role, shard_id, status
+        Get current cluster topology via CLUSTER NODES. List of node dictionaries with keys: node_id, host, port, role, shard_id, status
         """
         # Build a mapping from port to shard_id using initial_nodes
         port_to_shard = {node.port: node.shard_id for node in self.initial_nodes}

@@ -338,7 +338,7 @@ def test_execute_failover_exact_node_id_match():
     
     # Create mock cluster connection with node-1 and node-10
     mock_connection = Mock()
-    mock_connection.get_current_nodes.return_value = [
+    nodes_list = [
         {
             'node_id': 'node-1',
             'host': '127.0.0.1',
@@ -361,6 +361,8 @@ def test_execute_failover_exact_node_id_match():
             'shard_id': 2
         }
     ]
+    mock_connection.get_current_nodes.return_value = nodes_list
+    mock_connection.get_live_nodes.return_value = nodes_list
     
     orchestrator.set_cluster_connection(mock_connection)
     
@@ -394,7 +396,7 @@ def test_execute_failover_no_substring_false_positive():
     
     # Create mock cluster connection with only node-10, node-11, node-12
     mock_connection = Mock()
-    mock_connection.get_current_nodes.return_value = [
+    nodes_list = [
         {
             'node_id': 'node-10',
             'host': '127.0.0.1',
@@ -417,6 +419,8 @@ def test_execute_failover_no_substring_false_positive():
             'shard_id': 3
         }
     ]
+    mock_connection.get_current_nodes.return_value = nodes_list
+    mock_connection.get_live_nodes.return_value = nodes_list
     
     orchestrator.set_cluster_connection(mock_connection)
     
@@ -441,7 +445,7 @@ def test_execute_failover_shard_based_matching():
     
     # Create mock cluster connection with nodes having shard_id
     mock_connection = Mock()
-    mock_connection.get_current_nodes.return_value = [
+    nodes_list = [
         {
             'node_id': 'node-0',
             'host': '127.0.0.1',
@@ -464,6 +468,8 @@ def test_execute_failover_shard_based_matching():
             'shard_id': 10
         }
     ]
+    mock_connection.get_current_nodes.return_value = nodes_list
+    mock_connection.get_live_nodes.return_value = nodes_list
     
     orchestrator.set_cluster_connection(mock_connection)
     
@@ -500,7 +506,7 @@ def test_execute_failover_port_matching():
     
     # Create mock cluster connection
     mock_connection = Mock()
-    mock_connection.get_current_nodes.return_value = [
+    nodes_list = [
         {
             'node_id': 'abc123',
             'host': '127.0.0.1',
@@ -516,6 +522,8 @@ def test_execute_failover_port_matching():
             'shard_id': 1
         }
     ]
+    mock_connection.get_current_nodes.return_value = nodes_list
+    mock_connection.get_live_nodes.return_value = nodes_list
     
     orchestrator.set_cluster_connection(mock_connection)
     
