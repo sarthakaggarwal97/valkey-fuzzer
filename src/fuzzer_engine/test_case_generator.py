@@ -285,6 +285,14 @@ class ScenarioGenerator(ITestCaseGenerator):
         if not scenario.operations:
             raise ValueError("Scenario must have at least one operation")
         
+        # Check if any failover operations exist
+        has_failover = any(op.type == OperationType.FAILOVER for op in scenario.operations)
+        
+        # Validate that failover operations have replicas available
+        if has_failover and scenario.cluster_config.replicas_per_shard == 0:
+            raise ValueError("Failover operations require at least 1 replica per shard. "
+                           "Set replicas_per_shard >= 1 or remove failover operations.")
+        
         for i, operation in enumerate(scenario.operations):
             if not operation.target_node:
                 raise ValueError(f"Operation {i}: target_node cannot be empty")

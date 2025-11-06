@@ -124,41 +124,97 @@ class OperationOrchestrator(IOperationOrchestrator):
             logging.error(f"Target node is not a primary: {target_node['role']}")
             return False
         
-        # Get a replica of this primary to execute failover
-        # First, we need to find replicas by checking cluster topology
+        # Get replicas of this primary to execute failover
+        # Use cluster_connection to find replicas from any live node (resilient to dead primary)
+        target_node_id = target_node['node_id']
+        target_shard_id = target_node.get('shard_id')
+        
+        logging.info(f"Finding replicas for primary {operation.target_node} (node_id: {target_node_id}, shard: {target_shard_id})")
+        
         try:
-            client = valkey.Valkey(
-                host=target_node['host'],
-                port=target_node['port'],
-                socket_timeout=5,
-                decode_responses=True
-            )
+            # Get fresh cluster topology from any live node
+            current_nodes = self.cluster_connection.get_current_nodes()
             
-            # Get cluster nodes to find replicas
-            cluster_nodes_raw = client.execute_command('CLUSTER', 'NODES')
-            target_node_id = target_node['node_id']
+            if not current_nodes:
+                logging.error("Cannot get current cluster nodes - all nodes may be down")
+                return False
             
-            # Parse to find replicas of this primary
+            # Find replicas of the target primary by shard_id or by querying a live node
             replica_nodes = []
-            for line in cluster_nodes_raw.split('\n'):
-                if not line.strip():
-                    continue
-                parts = line.split()
-                if len(parts) >= 4:
-                    # Check if this is a replica of our target primary
-                    if 'slave' in parts[2] and len(parts) >= 4 and parts[3] == target_node_id:
-                        host_port = parts[1].split('@')[0].split(':')
-                        replica_nodes.append({
-                            'host': host_port[0],
-                            'port': int(host_port[1])
-                        })
             
-            client.close()
+            # Strategy 1: Find replicas by shard_id (if available)
+            if target_shard_id is not None:
+                for node in current_nodes:
+                    if node.get('role') == 'replica' and node.get('shard_id') == target_shard_id:
+                        replica_nodes.append({
+                            'host': node['host'],
+                            'port': node['port'],
+                            'node_id': node['node_id']
+                        })
+                        logging.info(f"Found replica by shard_id: {node['node_id']} at port {node['port']}")
+            
+            # Strategy 2: Query a live node for cluster topology
+            # Try the target primary first for determinism, then fall back to other nodes
+            if not replica_nodes:
+                logging.info("Querying live nodes for replica information")
+                
+                # Build query order: target primary first, then other nodes
+                nodes_to_query = []
+                
+                # Add target primary first (if it's in current_nodes)
+                for node in current_nodes:
+                    if node.get('node_id') == target_node_id or node.get('port') == target_node.get('port'):
+                        nodes_to_query.append(node)
+                        break
+                
+                # Add remaining nodes as fallback
+                for node in current_nodes:
+                    if node not in nodes_to_query:
+                        nodes_to_query.append(node)
+                
+                # Query nodes in priority order
+                for node in nodes_to_query:
+                    try:
+                        client = valkey.Valkey(
+                            host=node['host'],
+                            port=node['port'],
+                            socket_timeout=3,
+                            decode_responses=True
+                        )
+                        
+                        # Get cluster nodes to find replicas
+                        cluster_nodes_raw = client.execute_command('CLUSTER', 'NODES')
+                        
+                        # Parse to find replicas of our target primary
+                        for line in cluster_nodes_raw.split('\n'):
+                            if not line.strip():
+                                continue
+                            parts = line.split()
+                            if len(parts) >= 4:
+                                # Check if this is a replica of our target primary
+                                if 'slave' in parts[2] and parts[3] == target_node_id:
+                                    host_port = parts[1].split('@')[0].split(':')
+                                    replica_nodes.append({
+                                        'host': host_port[0],
+                                        'port': int(host_port[1]),
+                                        'node_id': parts[0]
+                                    })
+                                    logging.info(f"Found replica via CLUSTER NODES from {node['port']}: port {host_port[1]}")
+                        
+                        client.close()
+                        
+                        # If we found replicas, break out of the loop
+                        if replica_nodes:
+                            break
+                            
+                    except Exception as e:
+                        logging.debug(f"Could not query node {node.get('node_id', 'unknown')} at port {node.get('port')}: {e}")
+                        continue
             
             if not replica_nodes:
-                logging.warning(f"No replicas found for primary {operation.target_node}")
-                # Try to execute failover on the primary itself (manual failover)
-                return self._execute_manual_failover(target_node, operation)
+                logging.error(f"Cannot execute failover: No replicas found for primary {operation.target_node}. "
+                             f"Failover requires at least one replica to promote.")
+                return False
             
             # Execute failover from first replica
             replica = replica_nodes[0]
@@ -189,29 +245,7 @@ class OperationOrchestrator(IOperationOrchestrator):
             logging.error(f"Failover execution failed: {e}")
             return False
     
-    def _execute_manual_failover(self, target_node: Dict, operation: Operation) -> bool:
-        """
-        Execute manual failover when no replicas are available
-        """
-        logging.info(f"Attempting manual failover on primary at port {target_node['port']}")
-        
-        try:
-            client = valkey.Valkey(
-                host=target_node['host'],
-                port=target_node['port'],
-                socket_timeout=5,
-                decode_responses=True
-            )
-            
-            # For a primary with no replicas, we can't really do a failover
-            # This is more of a graceful handling case
-            logging.warning("Cannot failover primary with no replicas")
-            client.close()
-            return False
-            
-        except Exception as e:
-            logging.error(f"Manual failover failed: {e}")
-            return False
+
     
     def validate_operation_preconditions(self, operation: Operation, cluster_status: ClusterStatus) -> bool:
         """
