@@ -328,16 +328,18 @@ class ClusterConnection:
                     if not line.strip():
                         continue
                     parts = line.split()
-                    if len(parts) < 3:
+                    if len(parts) < 8:
                         continue
                     
                     node_id = parts[0]
                     flags = parts[2]
+                    link_state = parts[7] if len(parts) > 7 else 'connected'
                     host_port = parts[1].split('@')[0].split(':')
                     port = int(host_port[1])
                     
                     # Determine node status
-                    is_failed = 'fail' in flags or 'disconnected' in flags
+                    # Check for fail/fail? in flags AND disconnected link state
+                    is_failed = 'fail' in flags or link_state == 'disconnected'
                     status = 'failed' if is_failed else 'connected'
                     
                     # Skip failed/disconnected nodes if not requested
