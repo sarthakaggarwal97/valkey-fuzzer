@@ -151,12 +151,22 @@ class StateValidator(IStateValidator):
         if not current_nodes:
             return False, []
         
+        # Find a live node to query
+        live_node = None
+        for node in current_nodes:
+            if node.get('status') == 'connected':
+                live_node = node
+                break
+        
+        if not live_node:
+            logging.error("No live nodes available for slot validation")
+            return False, []
+        
         try:
-            # Connect to first live node to get cluster info
-            node = current_nodes[0]
+            # Connect to a live node to get cluster info
             client = valkey.Valkey(
-                host=node['host'],
-                port=node['port'],
+                host=live_node['host'],
+                port=live_node['port'],
                 socket_timeout=5,
                 decode_responses=True
             )

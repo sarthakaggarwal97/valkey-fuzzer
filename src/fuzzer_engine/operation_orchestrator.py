@@ -258,8 +258,8 @@ class OperationOrchestrator(IOperationOrchestrator):
         # For failover, we wait for cluster to stabilize
         while time.time() < deadline:
             try:
-                # Get current cluster state
-                current_nodes = self.cluster_connection.get_current_nodes()
+                # Get current cluster state - use live nodes only
+                current_nodes = self.cluster_connection.get_live_nodes()
                 
                 if not current_nodes:
                     time.sleep(1)
@@ -269,7 +269,7 @@ class OperationOrchestrator(IOperationOrchestrator):
                 # For failover, we expect the cluster to have all nodes connected
                 # and slots properly assigned
                 
-                # Simple check: verify we can connect to nodes
+                # Connect to a live node to check cluster state
                 any_node = current_nodes[0]
                 client = valkey.Valkey(
                     host=any_node['host'],
