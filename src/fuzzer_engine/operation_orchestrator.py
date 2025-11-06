@@ -77,8 +77,8 @@ class OperationOrchestrator(IOperationOrchestrator):
         """
         logging.info(f"Executing failover on {operation.target_node}")
         
-        # Get current cluster nodes
-        current_nodes = self.cluster_connection.get_current_nodes()
+        # Get only live cluster nodes for operation execution
+        current_nodes = self.cluster_connection.get_live_nodes()
         
         # Find target node using exact matching
         target_node = None
