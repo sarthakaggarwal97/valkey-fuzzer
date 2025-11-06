@@ -17,6 +17,7 @@ class ClusterConfig:
     base_data_dir: str = "/tmp/valkey-fuzzer"
     valkey_binary: str = "/usr/local/bin/valkey-server"
     enable_cleanup: bool = True
+    cluster_node_timeout_ms: int = 5000  # Milliseconds for cluster failure detection
 
 
 @dataclass

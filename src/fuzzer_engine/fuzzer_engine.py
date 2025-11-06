@@ -130,6 +130,9 @@ class FuzzerEngine(IFuzzerEngine):
             if not self._validate_cluster_readiness_with_retry(cluster_instance.cluster_id):
                 raise Exception("Cluster failed readiness validation")
             
+            # Configure chaos coordinator with cluster config for dynamic stabilization timing
+            self.chaos_coordinator.set_cluster_config(scenario.cluster_config)
+            
             # Register cluster nodes with chaos coordinator
             self.chaos_coordinator.register_cluster_nodes(
                 cluster_instance.cluster_id,

@@ -155,7 +155,7 @@ class ConfigurationManager:
             '--protected-mode', 'no',
             '--cluster-enabled', 'yes',
             '--cluster-config-file', os.path.join(data_dir, 'nodes.conf'),
-            '--cluster-node-timeout', '5000',
+            '--cluster-node-timeout', str(self.clusterConfig.cluster_node_timeout_ms),
             '--cluster-require-full-coverage', 'no',
             '--dir', data_dir,
             '--logfile', log_file,

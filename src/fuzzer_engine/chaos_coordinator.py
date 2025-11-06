@@ -16,7 +16,7 @@ import random
 from typing import Optional, List
 from ..models import (
     Operation, ChaosConfig, ChaosResult, NodeInfo, 
-    ProcessChaosType, ChaosType, TargetSelection
+    ProcessChaosType, ChaosType, TargetSelection, ClusterConfig
 )
 from ..chaos_engine.base import ProcessChaosEngine
 
@@ -25,10 +25,21 @@ logger = logging.getLogger(__name__)
 
 
 class ChaosCoordinator:
-    def __init__(self):
+    def __init__(self, cluster_config: Optional[ClusterConfig] = None):
         self.chaos_engine = ProcessChaosEngine()
         self.active_chaos_scenarios: dict[str, List[ChaosResult]] = {}
         self.chaos_history: List[ChaosResult] = []
+        self.cluster_config = cluster_config or ClusterConfig(num_shards=3, replicas_per_shard=1)
+    
+    def set_cluster_config(self, cluster_config: ClusterConfig) -> None:
+        """Update the cluster configuration (useful when config is known after initialization)"""
+        self.cluster_config = cluster_config
+    
+    def _calculate_stabilization_time(self) -> float:
+        """Calculate the time needed for cluster to stabilize after a primary node kill."""
+        timeout_seconds = self.cluster_config.cluster_node_timeout_ms / 1000.0
+        # Failure detection (with gossip overhead) + promotion time
+        return (timeout_seconds * 1.5) + 3.0
     
     def register_cluster_nodes(self, cluster_id: str, nodes: List[NodeInfo]) -> None:
         """
@@ -89,6 +100,12 @@ class ChaosCoordinator:
                 
                 if result.success:
                     logger.info(f"Pre-operation chaos injected on {target_node.node_id}")
+                    
+                    # If we killed a primary node, wait for cluster to stabilize before operation
+                    if target_node.role == 'primary' and chaos_config.chaos_type == ChaosType.PROCESS_KILL:
+                        stabilization_time = self._calculate_stabilization_time()
+                        logger.info(f"Waiting {stabilization_time:.1f}s for cluster to stabilize after primary node kill")
+                        time.sleep(stabilization_time)
             
             # Chaos during operation (most common for failover testing)
             if coordination.chaos_during_operation:
@@ -99,6 +116,12 @@ class ChaosCoordinator:
                 
                 if result.success:
                     logger.info(f"During-operation chaos injected on {target_node.node_id}")
+                    
+                    # If we killed a primary node, wait for cluster to stabilize
+                    if target_node.role == 'primary' and chaos_config.chaos_type == ChaosType.PROCESS_KILL:
+                        stabilization_time = self._calculate_stabilization_time()
+                        logger.info(f"Waiting {stabilization_time:.1f}s for cluster to stabilize after primary node kill")
+                        time.sleep(stabilization_time)
             
             # Chaos after operation
             if coordination.chaos_after_operation:
@@ -110,6 +133,12 @@ class ChaosCoordinator:
                 
                 if result.success:
                     logger.info(f"Post-operation chaos injected on {target_node.node_id}")
+                    
+                    # If we killed a primary node, wait for cluster to detect failure and promote replica
+                    if target_node.role == 'primary' and chaos_config.chaos_type == ChaosType.PROCESS_KILL:
+                        stabilization_time = self._calculate_stabilization_time()
+                        logger.info(f"Waiting {stabilization_time:.1f}s for cluster to stabilize after primary node kill")
+                        time.sleep(stabilization_time)
             
             # Store chaos results for this scenario
             self.chaos_history.extend(chaos_results)
