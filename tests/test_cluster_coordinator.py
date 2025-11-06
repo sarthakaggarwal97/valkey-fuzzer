@@ -12,7 +12,6 @@ def test_cluster_coordinator_initialization():
     coordinator = ClusterCoordinator()
     
     assert coordinator.active_clusters == {}
-    assert coordinator.port_manager is not None
     assert coordinator.cluster_manager is not None
 
 

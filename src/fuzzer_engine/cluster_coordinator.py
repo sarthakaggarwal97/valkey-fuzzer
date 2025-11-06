@@ -23,7 +23,6 @@ class ClusterCoordinator:
     
     def __init__(self):
         self.active_clusters: dict[str, ClusterInstance] = {}
-        self.port_manager = PortManager()
         self.cluster_manager = ClusterManager()
     
     def create_cluster(self, config: ClusterConfig) -> ClusterInstance:
@@ -36,8 +35,12 @@ class ClusterCoordinator:
         nodes = []
         
         try:
+            # Create a fresh PortManager for this cluster using config's base_port
+            # Since we only maintain one cluster at a time, no need for pooling
+            port_manager = PortManager(base_port=config.base_port)
+            
             # Initialize configuration manager
-            config_manager = ConfigurationManager(config, self.port_manager)
+            config_manager = ConfigurationManager(config, port_manager)
             
             # Setup Valkey binary
             valkey_binary = config_manager.setup_valkey_from_source()
@@ -186,9 +189,10 @@ class ClusterCoordinator:
         cluster_instance = self.active_clusters[cluster_id]['instance']
         return cluster_instance.nodes
     
-    def restart_node(self, cluster_id: str, node_id: str, wait_ready: bool = True) -> bool:
+    def restart_node(self, cluster_id: str, node_id: str, wait_ready: bool = True, 
+                     chaos_coordinator=None) -> bool:
         """
-        Restart a specific node in the cluster.
+        Restart a specific node in the cluster. Optional ChaosCoordinator to update node registration after restart
         """
         if cluster_id not in self.active_clusters:
             logger.error(f"Cluster {cluster_id} not found")
@@ -204,9 +208,19 @@ class ClusterCoordinator:
         
         try:
             logger.info(f"Restarting node {node_id} in cluster {cluster_id}")
+            
+            # Restart the node (this updates node.pid with the new process ID)
             config_manager.restart_node(node, wait_ready=wait_ready)
-            logger.info(f"Node {node_id} restarted successfully")
+            
+            logger.info(f"Node {node_id} restarted successfully with new PID {node.pid}")
+            
+            # Update chaos engine registration with new PID if chaos_coordinator provided
+            if chaos_coordinator:
+                chaos_coordinator.update_node_registration(node)
+                logger.info(f"Updated chaos registration for restarted node {node_id}")
+            
             return True
+            
         except Exception as e:
             logger.error(f"Failed to restart node {node_id}: {e}")
             return False

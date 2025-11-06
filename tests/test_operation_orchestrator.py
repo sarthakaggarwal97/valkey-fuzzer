@@ -376,16 +376,30 @@ def test_execute_failover_exact_node_id_match():
     with patch('src.fuzzer_engine.operation_orchestrator.valkey.Valkey') as mock_valkey:
         mock_client = Mock()
         mock_valkey.return_value = mock_client
-        mock_client.execute_command.return_value = b'OK'
+        
+        # Mock CLUSTER NODES response with a replica for node-1
+        cluster_nodes_response = (
+            "node-1 127.0.0.1:7001@17001 master - 0 0 1 connected 0-5460\n"
+            "replica-1 127.0.0.1:7002@17002 slave node-1 0 0 2 connected\n"
+            "node-10 127.0.0.1:7010@17010 master - 0 0 3 connected 5461-10922\n"
+            "node-11 127.0.0.1:7011@17011 master - 0 0 4 connected 10923-16383\n"
+        )
+        
+        # First call: CLUSTER NODES (to find replicas)
+        # Second call: CLUSTER FAILOVER (on the replica)
+        mock_client.execute_command.side_effect = [
+            cluster_nodes_response,  # CLUSTER NODES response
+            b'OK'  # CLUSTER FAILOVER response
+        ]
         
         # Execute failover
         result = orchestrator._execute_failover(operation)
         
-        # Verify it connected to the correct port (7001, not 7010)
-        # Check that Valkey was called with the correct host and port
-        call_args = mock_valkey.call_args
-        assert call_args.kwargs['host'] == '127.0.0.1'
-        assert call_args.kwargs['port'] == 7001
+        # Verify it connected to the correct port (7001, not 7010 or 7011)
+        # The first call should be to port 7001 (the target primary)
+        first_call = mock_valkey.call_args_list[0]
+        assert first_call.kwargs['host'] == '127.0.0.1'
+        assert first_call.kwargs['port'] == 7001
 
 
 def test_execute_failover_no_substring_false_positive():
@@ -479,19 +493,18 @@ def test_execute_failover_shard_based_matching():
     with patch('src.fuzzer_engine.operation_orchestrator.valkey.Valkey') as mock_valkey:
         mock_client = Mock()
         mock_valkey.return_value = mock_client
-        # Mock CLUSTER NODES response showing replica
-        mock_client.execute_command.return_value = (
-            'node-31 127.0.0.1:6410@16410 slave node-30 0 0 0 connected\n'
-            'node-30 127.0.0.1:6409@16409 master - 0 0 0 connected 14890-16383\n'
-        )
+        # Mock CLUSTER FAILOVER response
+        mock_client.execute_command.return_value = b'OK'
         
         # Execute failover
         result = orchestrator._execute_failover(operation)
         
-        # Verify it connected to the correct shard 10 primary (port 6409)
+        # Verify it found the replica by shard_id and connected to it (port 6410)
+        # When shard_id is available, we use Strategy 1 (direct shard_id matching)
+        # and skip querying nodes, going straight to the replica
         call_args_list = mock_valkey.call_args_list
-        # First call should be to the primary node (6409)
-        assert call_args_list[0].kwargs['port'] == 6409
+        # Should connect to the replica (6410) to execute CLUSTER FAILOVER
+        assert call_args_list[0].kwargs['port'] == 6410
 
 
 def test_execute_failover_port_matching():
@@ -506,6 +519,13 @@ def test_execute_failover_port_matching():
             'host': '127.0.0.1',
             'port': 7001,
             'role': 'primary',
+            'shard_id': 0
+        },
+        {
+            'node_id': 'replica123',
+            'host': '127.0.0.1',
+            'port': 7002,
+            'role': 'replica',
             'shard_id': 0
         },
         {
@@ -531,13 +551,15 @@ def test_execute_failover_port_matching():
     with patch('src.fuzzer_engine.operation_orchestrator.valkey.Valkey') as mock_valkey:
         mock_client = Mock()
         mock_valkey.return_value = mock_client
+        # Mock CLUSTER FAILOVER response
         mock_client.execute_command.return_value = b'OK'
         
         # Execute failover
         result = orchestrator._execute_failover(operation)
         
-        # Verify it connected to the correct port
-        # Check that Valkey was called with the correct host and port
-        call_args = mock_valkey.call_args
-        assert call_args.kwargs['host'] == '127.0.0.1'
-        assert call_args.kwargs['port'] == 7001
+        # Verify it found the replica by shard_id and connected to it
+        # When shard_id is available, we use Strategy 1 (direct shard_id matching)
+        call_args_list = mock_valkey.call_args_list
+        # Should connect to the replica (7002) to execute CLUSTER FAILOVER
+        assert call_args_list[0].kwargs['host'] == '127.0.0.1'
+        assert call_args_list[0].kwargs['port'] == 7002

@@ -45,6 +45,15 @@ class ChaosCoordinator:
         
         logger.info(f"Registered {len(nodes)} nodes for chaos injection")
     
+    def update_node_registration(self, node: NodeInfo) -> None:
+        """
+        Update the chaos engine registration for a restarted node with its new PID.
+        This should be called after a node restart to ensure chaos injections target the correct process.
+        """
+        logger.info(f"Updating chaos registration for {node.node_id} with new PID {node.pid}")
+        self.chaos_engine.register_node_process(node.node_id, node.pid)
+        logger.debug(f"Node {node.node_id} chaos registration updated")
+    
     def coordinate_chaos_with_operation(
         self, 
         operation: Operation, 
