@@ -287,28 +287,91 @@ class ClusterConnection:
         
         for node_info in self.startup_nodes:
             try:
-                client = valkey.Valkey(host=node_info['host'], port=node_info['port'])
+                client = valkey.Valkey(host=node_info['host'], port=node_info['port'], socket_timeout=2)
                 cluster_nodes_raw = client.execute_command('CLUSTER', 'NODES')
                 client.close()
                 
-                current_nodes = []
+                # First pass: build shard mapping from current topology
+                # This handles cases where failovers have changed which nodes are primaries
+                shard_to_primary_node_id = {}
+                node_id_to_shard = {}
+                
                 for line in cluster_nodes_raw.decode().strip().split('\n'):
+                    if not line.strip():
+                        continue
                     parts = line.split()
+                    if len(parts) < 8:
+                        continue
+                    
+                    node_id = parts[0]
+                    flags = parts[2]
                     host_port = parts[1].split('@')[0].split(':')
                     port = int(host_port[1])
                     
-                    # Get shard_id from our mapping
-                    shard_id = port_to_shard.get(port)
+                    # Get initial shard_id from port mapping
+                    initial_shard_id = port_to_shard.get(port)
+                    
+                    # For replicas, get shard from their master
+                    if 'slave' in flags and len(parts) >= 4:
+                        master_node_id = parts[3]
+                        # We'll resolve this in second pass
+                        node_id_to_shard[node_id] = ('replica', master_node_id, port)
+                    elif 'master' in flags:
+                        # Primary nodes: use initial shard_id
+                        if initial_shard_id is not None:
+                            shard_to_primary_node_id[initial_shard_id] = node_id
+                            node_id_to_shard[node_id] = ('primary', initial_shard_id, port)
+                
+                # Second pass: resolve replica shards and build final node list
+                current_nodes = []
+                for line in cluster_nodes_raw.decode().strip().split('\n'):
+                    if not line.strip():
+                        continue
+                    parts = line.split()
+                    if len(parts) < 3:
+                        continue
+                    
+                    node_id = parts[0]
+                    flags = parts[2]
+                    host_port = parts[1].split('@')[0].split(':')
+                    port = int(host_port[1])
+                    
+                    # Skip failed/disconnected nodes
+                    if 'fail' in flags or 'disconnected' in flags:
+                        continue
+                    
+                    # Determine shard_id and role
+                    if node_id in node_id_to_shard:
+                        node_info_tuple = node_id_to_shard[node_id]
+                        if node_info_tuple[0] == 'primary':
+                            role = 'primary'
+                            shard_id = node_info_tuple[1]
+                        else:  # replica
+                            role = 'replica'
+                            master_node_id = node_info_tuple[1]
+                            # Find shard_id from master
+                            shard_id = None
+                            if master_node_id in node_id_to_shard:
+                                master_info = node_id_to_shard[master_node_id]
+                                if master_info[0] == 'primary':
+                                    shard_id = master_info[1]
+                            # Fallback to port mapping
+                            if shard_id is None:
+                                shard_id = port_to_shard.get(port)
+                    else:
+                        # Fallback for nodes not in our mapping
+                        role = 'primary' if 'master' in flags else 'replica'
+                        shard_id = port_to_shard.get(port)
                     
                     current_nodes.append({
-                        'node_id': parts[0],
+                        'node_id': node_id,
                         'host': host_port[0],
                         'port': port,
-                        'role': 'primary' if 'master' in parts[2] else 'replica',
+                        'role': role,
                         'shard_id': shard_id
                     })
                 return current_nodes # list of dictionaries representing all nodes currently active in cluster
-            except:
+            except Exception as e:
                 continue
         return []
     
