@@ -43,7 +43,7 @@ Repository = "https://github.com/valkey-io/cluster-bus-fuzzer"
 Issues = "https://github.com/valkey-io/cluster-bus-fuzzer/issues"
 
 [project.scripts]
-cluster-bus-fuzzer = "src.cli:main"
+valkey-fuzzer = "src.cli:main"
 
 [tool.setuptools]
 packages = ["src", "src.fuzzer_engine", "src.cluster_orchestrator", "src.chaos_engine"]

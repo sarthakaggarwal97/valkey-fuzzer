@@ -307,38 +307,38 @@ class FuzzerCLI:
 def create_parser() -> argparse.ArgumentParser:
     """Create argument parser for CLI"""
     parser = argparse.ArgumentParser(
-        prog='cluster-bus-fuzzer',
-        description='Cluster Bus Fuzzer - Test Valkey cluster bus robustness through chaos engineering',
+        prog='valkey-fuzzer',
+        description='Valkey Cluster Bus Fuzzer - Test Valkey cluster robustness through chaos engineering',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Run a random test
-  cluster-bus-fuzzer random
+  valkey-fuzzer random
   
   # Run with specific seed for reproducibility
-  cluster-bus-fuzzer random --seed 42
+  valkey-fuzzer random --seed 42
   
   # Run multiple iterations
-  cluster-bus-fuzzer random --iterations 10
+  valkey-fuzzer random --iterations 10
   
   # Run with configuration file
-  cluster-bus-fuzzer random --config config.yaml --output results.json
+  valkey-fuzzer random --config config.yaml --output results.json
   
   # Run DSL-based test
-  cluster-bus-fuzzer dsl examples/simple_failover.yaml
+  valkey-fuzzer dsl examples/simple_failover.yaml
   
   # Validate DSL file
-  cluster-bus-fuzzer validate examples/simple_failover.yaml
+  valkey-fuzzer validate examples/simple_failover.yaml
   
   # Verbose output
-  cluster-bus-fuzzer random --seed 42 --verbose
+  valkey-fuzzer random --seed 42 --verbose
         """
     )
     
     parser.add_argument(
         '--version',
         action='version',
-        version='Cluster Bus Fuzzer 0.1.0'
+        version='Valkey Fuzzer 0.1.0'
     )
     
     subparsers = parser.add_subparsers(dest='command', help='Command to execute')
