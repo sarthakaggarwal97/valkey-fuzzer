@@ -31,7 +31,7 @@ class PortManager:
         self.available_ports.discard(client_port)
         self.allocated_ports[node_id] = (client_port, bus_port)
         
-        logger.info(f"Allocated ports: {client_port}, {bus_port}")
+        logger.debug(f"Allocated ports: {client_port}, {bus_port}")
         return client_port, bus_port
     
     def release_ports(self, node_id: str) -> None:
@@ -40,7 +40,7 @@ class PortManager:
             client_port, bus_port = self.allocated_ports[node_id]
             self.available_ports.add(client_port)
             del self.allocated_ports[node_id]
-            logger.info(f"Released ports: {client_port}, {bus_port}")
+            logger.debug(f"Released ports: {client_port}, {bus_port}")
 
 
 class ConfigurationManager:
@@ -179,7 +179,7 @@ class ConfigurationManager:
             # Build command using centralized configuration
             cmd = self.build_node_command(plan.port, node_data_dir, log_file)
             
-            logger.info(f"Spawning {plan.node_id} on port {plan.port}")
+            logger.debug(f"Spawning {plan.node_id} on port {plan.port}")
             try:
                 process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 
@@ -199,10 +199,10 @@ class ConfigurationManager:
                 )
                 
                 node_info_list.append(node_info)
-                logger.info(f"Spawned {plan.node_id} with PID {process.pid}")
+                logger.debug(f"Spawned {plan.node_id} with PID {process.pid}")
                 
             except Exception as e:
-                logger.info(f"Failed to spawn {plan.node_id}: {e}")
+                logger.error(f"Failed to spawn {plan.node_id}: {e}")
                 for node in node_info_list:
                     self.terminate_node(node)
                 raise
@@ -226,7 +226,7 @@ class ConfigurationManager:
                     )
                     
                     if client.ping():
-                        logger.info(f"Node {node.node_id} is active")
+                        logger.debug(f"Node {node.node_id} is active")
                         ready = True
                         break
                 except (valkey.ConnectionError, valkey.TimeoutError):
@@ -247,16 +247,16 @@ class ConfigurationManager:
         if node.process.poll() is not None:
             return
         
-        logger.info(f"Terminating {node.node_id} (PID {node.pid})")
+        logger.debug(f"Terminating {node.node_id} (PID {node.pid})")
         
         node.process.terminate()
         try:
             node.process.wait(timeout=5)
-            logger.info(f"{node.node_id} terminated")
+            logger.debug(f"{node.node_id} terminated")
         except subprocess.TimeoutExpired:
             node.process.kill()
             node.process.wait()
-            logger.info(f"{node.node_id} terminated")
+            logger.debug(f"{node.node_id} terminated")
     
     def restart_node(self, node: NodeInfo, wait_ready: bool = True, ready_timeout: float = 30.0) -> NodeInfo:
         """
@@ -391,7 +391,7 @@ class ClusterManager:
         logger.info(f"Connecting {len(nodes_in_cluster)} nodes with CLUSTER MEET using {first_node.node_id} as starting node")
                 
         for node in nodes_in_cluster[1:]:
-            logger.info(f"Meeting {node.node_id} (port {node.port})")
+            logger.debug(f"Meeting {node.node_id} (port {node.port})")
             first_node_client.execute_command('CLUSTER', 'MEET', '127.0.0.1', node.port)
             time.sleep(0.1)
         
@@ -412,15 +412,14 @@ class ClusterManager:
                     known_nodes = int(info_dict.get('cluster_known_nodes', 0))
                     
                     if known_nodes < expected_count:
-                        logger.info(f"{node.node_id} sees {known_nodes}/{expected_count} nodes")
                         all_converged = False
                     
                 except Exception as e:
-                    logger.info(f"Error checking {node.node_id}: {e}")
+                    logger.error(f"Error checking {node.node_id}: {e}")
                     all_converged = False
             
             if all_converged:
-                logger.info(f"All nodes see each other")
+                logger.info(f"All nodes see each other and are apart of the cluster")
                 return
             
             time.sleep(1)
@@ -461,7 +460,7 @@ class ClusterManager:
             node_ids[primary.node_id] = cluster_node_id
             primary.cluster_node_id = cluster_node_id
             
-            logger.info(f"{primary.node_id} cluster ID: {cluster_node_id[:8]}")
+            logger.debug(f"{primary.node_id} cluster ID: {cluster_node_id[:8]}")
         
         logger.info("Slot assignment complete")
         
@@ -517,10 +516,8 @@ class ClusterManager:
             client.execute_command('CLUSTER', 'REPLICATE', master_cluster_id)
             replica.cluster_node_id = client.execute_command('CLUSTER', 'MYID')
             
-            logger.info(f"Replication configured")
-        
-        logger.info("Replication setup complete")
-        
+            logger.debug(f"Replication configured")
+                
         logger.info(f"Waiting for {len(replicas)} replicas to sync (timeout: {timeout:.2f}s)")
         deadline = time.time() + timeout
         
@@ -535,7 +532,6 @@ class ClusterManager:
                     master_link = info.get('master_link_status')
                     
                     if master_link != 'up':
-                        logger.info(f"  {replica.node_id}: {master_link}")
                         all_synced = False
                 
                 except Exception as e:
@@ -596,7 +592,7 @@ class ClusterManager:
                     }
                     node_states.append(node_state)
 
-                    logger.info(f"{node.node_id}: state={cluster_state}, slots={slots_assigned}/16384, fail={slots_fail}")
+                    logger.debug(f"{node.node_id}: state={cluster_state}, slots={slots_assigned}/16384, fail={slots_fail}")
 
                 except Exception as e:
                     unreachable_nodes.append(node.node_id)
