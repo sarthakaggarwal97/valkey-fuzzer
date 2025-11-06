@@ -35,8 +35,8 @@ class StateValidator(IStateValidator):
             logging.error("No cluster connection provided")
             return self._create_failed_validation(start_time)
         
-        # Get current cluster nodes
-        current_nodes = cluster_connection.get_current_nodes()
+        # Get ALL cluster nodes (including failed ones) for accurate validation
+        current_nodes = cluster_connection.get_current_nodes(include_failed=True)
         if not current_nodes:
             logging.error("No nodes available in cluster")
             return self._create_failed_validation(start_time)
@@ -151,12 +151,22 @@ class StateValidator(IStateValidator):
         if not current_nodes:
             return False, []
         
+        # Find a live node to query
+        live_node = None
+        for node in current_nodes:
+            if node.get('status') == 'connected':
+                live_node = node
+                break
+        
+        if not live_node:
+            logging.error("No live nodes available for slot validation")
+            return False, []
+        
         try:
-            # Connect to first node to get cluster info
-            node = current_nodes[0]
+            # Connect to a live node to get cluster info
             client = valkey.Valkey(
-                host=node['host'],
-                port=node['port'],
+                host=live_node['host'],
+                port=live_node['port'],
                 socket_timeout=5,
                 decode_responses=True
             )
@@ -175,8 +185,10 @@ class StateValidator(IStateValidator):
             # Get cluster nodes to check for conflicts
             cluster_nodes = client.execute_command('CLUSTER', 'NODES')
             
-            # Parse slot assignments
+            # Parse slot assignments from ALL nodes, but track which are live
             slot_assignments: Dict[int, List[str]] = {}
+            live_node_ids: Set[str] = set()
+            
             for line in cluster_nodes.split('\n'):
                 if not line.strip():
                     continue
@@ -185,6 +197,16 @@ class StateValidator(IStateValidator):
                     continue
                 
                 node_id = parts[0]
+                flags = parts[2]
+                link_state = parts[7] if len(parts) > 7 else 'connected'
+                
+                # Track live nodes - check for explicit fail/fail? tokens and disconnected link state
+                flag_list = flags.split(',')
+                has_fail_flag = 'fail' in flag_list or 'fail?' in flag_list
+                is_live = not has_fail_flag and link_state != 'disconnected'
+                if is_live:
+                    live_node_ids.add(node_id)
+                
                 # Slots are in parts[8:]
                 for slot_range in parts[8:]:
                     if '-' in slot_range:
@@ -193,27 +215,40 @@ class StateValidator(IStateValidator):
                         for slot in range(int(start), int(end) + 1):
                             if slot not in slot_assignments:
                                 slot_assignments[slot] = []
-                            slot_assignments[slot].append(node_id)
+                            slot_assignments[slot].append((node_id, is_live))
                     else:
                         # Single slot
                         try:
                             slot = int(slot_range)
                             if slot not in slot_assignments:
                                 slot_assignments[slot] = []
-                            slot_assignments[slot].append(node_id)
+                            slot_assignments[slot].append((node_id, is_live))
                         except ValueError:
                             pass
             
             client.close()
             
-            # Check for conflicts
+            # Check for conflicts and slot coverage
             conflicts = []
-            for slot, nodes in slot_assignments.items():
-                if len(nodes) > 1:
-                    conflicts.append(SlotConflict(slot=slot, conflicting_nodes=nodes))
+            slots_covered_by_live_nodes = 0
             
-            # Slot coverage is good if all slots assigned and no failures
-            slot_coverage = (slots_assigned == 16384 and slots_fail == 0)
+            for slot, node_tuples in slot_assignments.items():
+                # Get live nodes for this slot
+                live_nodes_for_slot = [node_id for node_id, is_live in node_tuples if is_live]
+                
+                # Check for conflicts (multiple live nodes claiming same slot)
+                if len(live_nodes_for_slot) > 1:
+                    conflicts.append(SlotConflict(slot=slot, conflicting_nodes=live_nodes_for_slot))
+                
+                # Count slots covered by at least one live node
+                if len(live_nodes_for_slot) > 0:
+                    slots_covered_by_live_nodes += 1
+            
+            # Slot coverage is good if all 16384 slots are covered by live nodes
+            slot_coverage = (slots_covered_by_live_nodes == 16384)
+            
+            if not slot_coverage:
+                logging.warning(f"Slot coverage incomplete: {slots_covered_by_live_nodes}/16384 slots covered by live nodes")
             
             return slot_coverage, conflicts
             
@@ -249,6 +284,11 @@ class StateValidator(IStateValidator):
         dead_replicas = []
         
         for replica in replica_nodes:
+            # Check if node is marked as failed in topology
+            if replica.get('status') == 'failed':
+                dead_replicas.append(f"{replica['host']}:{replica['port']}")
+                continue
+            
             try:
                 client = valkey.Valkey(
                     host=replica['host'],
@@ -321,6 +361,13 @@ class StateValidator(IStateValidator):
             connected_nodes = []
             
             for node in current_nodes:
+                node_addr = f"{node['host']}:{node['port']}"
+                
+                # Check if node is marked as failed in topology
+                if node.get('status') == 'failed':
+                    disconnected_nodes.append(node_addr)
+                    continue
+                
                 try:
                     client = valkey.Valkey(
                         host=node['host'],
@@ -330,11 +377,11 @@ class StateValidator(IStateValidator):
                     )
                     client.ping()
                     client.close()
-                    connected_nodes.append(f"{node['host']}:{node['port']}")
+                    connected_nodes.append(node_addr)
                 except Exception as e:
                     # Node is dead or unreachable - expected after chaos
-                    logging.debug(f"Node {node['host']}:{node['port']} unreachable: {e}")
-                    disconnected_nodes.append(f"{node['host']}:{node['port']}")
+                    logging.debug(f"Node {node_addr} unreachable: {e}")
+                    disconnected_nodes.append(node_addr)
             
             # After chaos, some nodes being dead is expected and acceptable
             # We consider connectivity good if at least one node per shard is reachable

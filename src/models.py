@@ -276,39 +276,115 @@ class ClusterConnection:
     def __post_init__(self):
         self.startup_nodes = [{'host': '127.0.0.1', 'port': node.port} for node in self.initial_nodes]
     
-    def get_current_nodes(self) -> List[Dict]:
-        """Get current cluster topology via CLUSTER NODES"""
-        # Used for real-time cluster topology for chaos testing
-        
+    def get_current_nodes(self, include_failed: bool = True) -> List[Dict]:
+        """
+        Get current cluster topology via CLUSTER NODES. List of node dictionaries with keys: node_id, host, port, role, shard_id, status
+        """
         # Build a mapping from port to shard_id using initial_nodes
         port_to_shard = {node.port: node.shard_id for node in self.initial_nodes}
         
         for node_info in self.startup_nodes:
             try:
-                client = valkey.Valkey(host=node_info['host'], port=node_info['port'])
+                client = valkey.Valkey(host=node_info['host'], port=node_info['port'], socket_timeout=2)
                 cluster_nodes_raw = client.execute_command('CLUSTER', 'NODES')
                 client.close()
                 
-                current_nodes = []
+                # First pass: build shard mapping from current topology
+                # This handles cases where failovers have changed which nodes are primaries
+                shard_to_primary_node_id = {}
+                node_id_to_shard = {}
+                
                 for line in cluster_nodes_raw.decode().strip().split('\n'):
+                    if not line.strip():
+                        continue
                     parts = line.split()
+                    if len(parts) < 8:
+                        continue
+                    
+                    node_id = parts[0]
+                    flags = parts[2]
                     host_port = parts[1].split('@')[0].split(':')
                     port = int(host_port[1])
                     
-                    # Get shard_id from our mapping
-                    shard_id = port_to_shard.get(port)
+                    # Get initial shard_id from port mapping
+                    initial_shard_id = port_to_shard.get(port)
+                    
+                    # For replicas, get shard from their master
+                    if 'slave' in flags and len(parts) >= 4:
+                        master_node_id = parts[3]
+                        # We'll resolve this in second pass
+                        node_id_to_shard[node_id] = ('replica', master_node_id, port, flags)
+                    elif 'master' in flags:
+                        # Primary nodes: use initial shard_id
+                        if initial_shard_id is not None:
+                            shard_to_primary_node_id[initial_shard_id] = node_id
+                            node_id_to_shard[node_id] = ('primary', initial_shard_id, port, flags)
+                
+                # Second pass: resolve replica shards and build final node list
+                current_nodes = []
+                for line in cluster_nodes_raw.decode().strip().split('\n'):
+                    if not line.strip():
+                        continue
+                    parts = line.split()
+                    if len(parts) < 8:
+                        continue
+                    
+                    node_id = parts[0]
+                    flags = parts[2]
+                    link_state = parts[7] if len(parts) > 7 else 'connected'
+                    host_port = parts[1].split('@')[0].split(':')
+                    port = int(host_port[1])
+                    
+                    # Determine node status
+                    # Check for explicit fail/fail? tokens (not substring match to avoid matching 'nofailover')
+                    flag_list = flags.split(',')
+                    has_fail_flag = 'fail' in flag_list or 'fail?' in flag_list
+                    is_failed = has_fail_flag or link_state == 'disconnected'
+                    status = 'failed' if is_failed else 'connected'
+                    
+                    # Skip failed/disconnected nodes if not requested
+                    if not include_failed and is_failed:
+                        continue
+                    
+                    # Determine shard_id and role
+                    if node_id in node_id_to_shard:
+                        node_info_tuple = node_id_to_shard[node_id]
+                        if node_info_tuple[0] == 'primary':
+                            role = 'primary'
+                            shard_id = node_info_tuple[1]
+                        else:  # replica
+                            role = 'replica'
+                            master_node_id = node_info_tuple[1]
+                            # Find shard_id from master
+                            shard_id = None
+                            if master_node_id in node_id_to_shard:
+                                master_info = node_id_to_shard[master_node_id]
+                                if master_info[0] == 'primary':
+                                    shard_id = master_info[1]
+                            # Fallback to port mapping
+                            if shard_id is None:
+                                shard_id = port_to_shard.get(port)
+                    else:
+                        # Fallback for nodes not in our mapping
+                        role = 'primary' if 'master' in flags else 'replica'
+                        shard_id = port_to_shard.get(port)
                     
                     current_nodes.append({
-                        'node_id': parts[0],
+                        'node_id': node_id,
                         'host': host_port[0],
                         'port': port,
-                        'role': 'primary' if 'master' in parts[2] else 'replica',
-                        'shard_id': shard_id
+                        'role': role,
+                        'shard_id': shard_id,
+                        'status': status
                     })
-                return current_nodes # list of dictionaries representing all nodes currently active in cluster
-            except:
+                return current_nodes
+            except Exception as e:
                 continue
         return []
+    
+    def get_live_nodes(self) -> List[Dict]:
+        """Get only live (connected) nodes from the cluster"""
+        return self.get_current_nodes(include_failed=False)
     
     def get_primary_nodes(self) -> List[Dict]:
         """Get current primary nodes"""

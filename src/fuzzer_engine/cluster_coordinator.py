@@ -116,10 +116,10 @@ class ClusterCoordinator:
             # Validate cluster health with live nodes only
             is_healthy = self.cluster_manager.validate_cluster(nodes_to_validate)
             
-            # Count assigned slots
+            # Count assigned slots from live primary nodes only
             total_slots = sum(
                 (node.slot_end - node.slot_start + 1) 
-                for node in cluster_instance.nodes 
+                for node in nodes_to_validate 
                 if node.role == 'primary' and node.slot_start is not None
             )
             
