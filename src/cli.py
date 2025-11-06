@@ -308,7 +308,7 @@ def create_parser() -> argparse.ArgumentParser:
     """Create argument parser for CLI"""
     parser = argparse.ArgumentParser(
         prog='valkey-fuzzer',
-        description='Valkey Fuzzer - Test Valkey cluster robustness through chaos engineering',
+        description='Valkey Cluster Bus Fuzzer - Test Valkey cluster robustness through chaos engineering',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
