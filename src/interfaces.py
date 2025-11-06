@@ -6,10 +6,9 @@ from typing import List, Optional
 from dataclasses import dataclass
 from .models import (
     Scenario, ExecutionResult, DSLConfig, ValidationResult,
-    ClusterConfig, ClusterInstance, ClusterStatus, NodeInfo, NodePlan,
-    ChaosConfig, ChaosResult, ProcessChaosType,
-    WorkloadConfig, WorkloadSession, WorkloadMetrics,
-    Operation
+    ClusterConfig, ClusterInstance, ClusterStatus, ClusterConnection,
+    NodeInfo, NodePlan, ChaosConfig, ChaosResult, ProcessChaosType,
+    WorkloadConfig, WorkloadSession, WorkloadMetrics, Operation
 )
 
 
@@ -40,20 +39,24 @@ class IFuzzerEngine(ABC):
 class IClusterOrchestrator(ABC):
     """Interface for cluster lifecycle management"""
     
-    # ConfigurationManager methods
     @abstractmethod
     def setup_valkey_from_source(self, base_dir: str = "/tmp/valkey-build") -> str:
         """Find or build Valkey binary, return path to valkey-server binary"""
         pass
     
     @abstractmethod
-    def plan_topology(self) -> List['NodePlan']:
-        """Plan cluster topology with primary and replica nodes"""
+    def spawn_all_nodes(self, node_plans: List[NodePlan]) -> List[NodeInfo]:
+        """Spawn all Valkey processes and wait for them to be ready"""
         pass
     
     @abstractmethod
-    def spawn_all_nodes(self, node_plans: List['NodePlan']) -> List[NodeInfo]:
-        """Spawn all Valkey processes and wait for them to be ready"""
+    def form_cluster(self, nodes_in_cluster: List[NodeInfo]) -> ClusterConnection:
+        """Form a complete cluster from spawned nodes"""
+        pass
+    
+    @abstractmethod
+    def validate_cluster(self, nodes_in_cluster: List[NodeInfo], timeout: float = 30.0, interval: float = 1.0) -> bool:
+        """Validate cluster health and configuration"""
         pass
     
     @abstractmethod
@@ -63,25 +66,9 @@ class IClusterOrchestrator(ABC):
     
     @abstractmethod
     def restart_node(self, node: NodeInfo, wait_ready: bool = True, ready_timeout: float = 30.0) -> NodeInfo:
-        """Restart a Valkey node process with the same configuration"""
+        """Restart a Valkey node process"""
         pass
-    
-    # ClusterManager methods
-    @abstractmethod
-    def reset_cluster_state(self, nodes_in_cluster: List[NodeInfo]) -> None:
-        """Reset cluster state on all nodes"""
-        pass
-    
-    @abstractmethod
-    def form_cluster(self, nodes_in_cluster: List[NodeInfo]) -> bool:
-        """Form a complete cluster from spawned nodes"""
-        pass
-    
-    @abstractmethod
-    def validate_cluster(self, nodes_in_cluster: List[NodeInfo]) -> bool:
-        """Validate cluster health and configuration"""
-        pass
-    
+
     @abstractmethod
     def close_connections(self) -> None:
         """Close all Valkey client connections"""
@@ -225,5 +212,3 @@ class ILogger(ABC):
     def generate_report(self, test_results: List[ExecutionResult]) -> str:
         """Generate summary report"""
         pass
-
-

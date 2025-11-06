@@ -8,25 +8,6 @@ import subprocess
 import valkey
 
 
-
-class OperationType(Enum):
-    """Types of operations supported by the fuzzer"""
-    FAILOVER = "failover"
-    # Future extensions: ADD_REPLICA, REMOVE_REPLICA, RESHARD, SCALE_OUT, SCALE_IN, CONFIG_CHANGE
-
-
-class ChaosType(Enum):
-    """Types of chaos injection supported"""
-    PROCESS_KILL = "process_kill"
-    # Future extensions: NETWORK_PARTITION, PACKET_DROP, LATENCY_INJECTION
-
-
-class ProcessChaosType(Enum):
-    """Types of process chaos injection"""
-    SIGKILL = "sigkill"
-    SIGTERM = "sigterm"
-
-
 @dataclass
 class ClusterConfig:
     """Configuration for a Valkey cluster"""
@@ -67,6 +48,23 @@ class NodeInfo:
     slot_end: Optional[int] = None
     master_node_id: Optional[str] = None
     cluster_node_id: Optional[str] = None
+
+class OperationType(Enum):
+    """Types of operations supported by the fuzzer"""
+    FAILOVER = "failover"
+    # Future extensions: ADD_REPLICA, REMOVE_REPLICA, RESHARD, SCALE_OUT, SCALE_IN, CONFIG_CHANGE
+
+
+class ChaosType(Enum):
+    """Types of chaos injection supported"""
+    PROCESS_KILL = "process_kill"
+    # Future extensions: NETWORK_PARTITION, PACKET_DROP, LATENCY_INJECTION
+
+
+class ProcessChaosType(Enum):
+    """Types of process chaos injection"""
+    SIGKILL = "sigkill"
+    SIGTERM = "sigterm"
 
 
 @dataclass

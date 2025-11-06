@@ -50,9 +50,7 @@ class ChaosScenario:
 
 
 class ChaosCoordinator:
-    """
-    Scenario-based chaos coordinator for advanced testing.
-    """
+    """Scenario-based chaos coordinator for advanced testing"""
     
     def __init__(self, chaos_engine):
         self.chaos_engine = chaos_engine
@@ -131,7 +129,7 @@ class ChaosCoordinator:
     def cancel_scenario(self, scenario_id: str) -> bool:
         """Cancel an active chaos scenario"""
         if scenario_id not in self.active_scenarios:
-            logger.warning(f"Scenario {scenario_id} not found in active scenarios")
+            logger.warning(f"Can't cancel scenario {scenario_id} because it's not an active scenario")
             return False
         
         scenario = self.active_scenarios[scenario_id]
@@ -221,9 +219,7 @@ class ChaosCoordinator:
             scenario.chaos_results.append(chaos_result)
     
     def _inject_chaos(self, scenario: ChaosScenario) -> Optional[ChaosResult]:
-        """
-        Inject chaos based on scenario configuration.
-        """
+        """Inject chaos based on scenario configuration"""
         if not scenario.target_node:
             logger.warning(f"No target node for chaos injection in scenario {scenario.scenario_id}")
             return None

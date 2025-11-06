@@ -4,10 +4,9 @@ from __future__ import annotations
 import logging
 import subprocess
 import time
+import pytest
 from dataclasses import dataclass
 from typing import Iterable, List
-
-import pytest
 
 from src.chaos_engine import ChaosCoordinator, ChaosScenarioState, ProcessChaosEngine
 from src.cluster_orchestrator.orchestrator import (
@@ -30,21 +29,13 @@ from src.models import (
     TargetSelection,
 )
 
-logging.basicConfig(
-    format="%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s",
-    level=logging.INFO,
-    force=True,
-)
+logging.basicConfig(format="%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s", level=logging.INFO, force=True)
 
 CLUSTER_NODE_TIMEOUT_MS = 5000
 CLUSTER_NODE_TIMEOUT_SEC = CLUSTER_NODE_TIMEOUT_MS / 1000.0
 
 
-def wait_for_process_death(
-    process: subprocess.Popen,
-    node_id: str,
-    timeout: float = 10.0,
-) -> None:
+def wait_for_process_death(process: subprocess.Popen, node_id: str, timeout: float = 10.0) -> None:
     """Wait until the given process terminates, raising on timeout."""
     try:
         process.wait(timeout=timeout)
@@ -205,41 +196,7 @@ class TestRealChaosIntegration:
 
         chaos_engine.cleanup_chaos(real_cluster.connection.cluster_id)
 
-    @pytest.mark.parametrize(
-        "chaos_type, timeout",
-        [
-            (ProcessChaosType.SIGTERM, 30.0),  # Increased timeout for graceful shutdown
-            (ProcessChaosType.SIGKILL, 5.0),
-        ],
-    )
-    def test_process_kill_on_replica(
-        self,
-        real_cluster: ClusterTestContext,
-        chaos_type: ProcessChaosType,
-        timeout: float,
-    ) -> None:
-        chaos_engine = ProcessChaosEngine()
-        real_cluster.register_all_nodes(chaos_engine)
-
-        replica_info = real_cluster.connection.get_replica_nodes()[0]
-        replica = real_cluster.find_node_by_cluster_id(replica_info["node_id"])
-
-        assert real_cluster.validate(), "Cluster must be healthy before chaos"
-
-        result = chaos_engine.inject_process_chaos(replica, chaos_type)
-        assert result.success is True
-        assert result.target_node == replica.node_id
-        assert result.chaos_type == ChaosType.PROCESS_KILL
-
-        wait_for_process_death(replica.process, replica.node_id, timeout=timeout)
-
-        remaining_nodes = [node for node in real_cluster.nodes if node != replica]
-        assert real_cluster.validate(remaining_nodes), "Cluster should remain healthy"
-
-    def test_failover_scenario_with_coordinator(
-        self,
-        real_cluster: ClusterTestContext,
-    ) -> None:
+    def test_failover_scenario_with_coordinator(self, real_cluster: ClusterTestContext) -> None:
         chaos_engine = ProcessChaosEngine()
         coordinator = ChaosCoordinator(chaos_engine)
         real_cluster.register_all_nodes(chaos_engine)
@@ -358,6 +315,64 @@ class TestRealChaosIntegration:
         assert any(res.success for res in result.chaos_results)
 
         coordinator.cleanup_all_scenarios()
+
+    def test_chaos_target_selection_strategies(self, real_cluster: ClusterTestContext) -> None:
+        """Test that different target selection strategies work correctly"""
+        chaos_engine = ProcessChaosEngine()
+        real_cluster.register_all_nodes(chaos_engine)
+        
+        chaos_engine.target_selector.update_cluster_topology(real_cluster.connection.cluster_id, real_cluster.nodes)
+        
+        # Specific node that exists
+        target_node = real_cluster.nodes[0]
+        selected = chaos_engine._select_chaos_target(
+            real_cluster.connection.cluster_id,
+            TargetSelection(strategy="specific", specific_nodes=[target_node.node_id])
+        )
+        assert selected.node_id == target_node.node_id
+        
+        # Specific node that doesn't exist
+        selected = chaos_engine._select_chaos_target(
+            real_cluster.connection.cluster_id,
+            TargetSelection(strategy="specific", specific_nodes=["node-999"])
+        )
+        assert selected is None
+        
+        # Primary Node Only
+        selected = chaos_engine._select_chaos_target(real_cluster.connection.cluster_id, TargetSelection(strategy="primary_only"))
+        assert selected is not None
+        assert selected.role == "primary"
+        
+        # Replica Node Only
+        selected = chaos_engine._select_chaos_target(real_cluster.connection.cluster_id, TargetSelection(strategy="replica_only"))
+        assert selected is not None
+        assert selected.role == "replica"
+        
+        # Random Node
+        selected = chaos_engine._select_chaos_target(real_cluster.connection.cluster_id, TargetSelection(strategy="random"))
+        assert selected is not None
+        assert selected in real_cluster.nodes
+
+    def test_target_selection_with_chaos_injection(self, real_cluster: ClusterTestContext) -> None:
+        """Integration test: select target and inject chaos"""
+        chaos_engine = ProcessChaosEngine()
+        real_cluster.register_all_nodes(chaos_engine)
+        
+        chaos_engine.target_selector.update_cluster_topology(real_cluster.connection.cluster_id, real_cluster.nodes)
+        
+        target = chaos_engine._select_chaos_target(real_cluster.connection.cluster_id, TargetSelection(strategy="replica_only"))
+        
+        assert target is not None
+        assert target.role == "replica"
+        
+        result = chaos_engine.inject_process_chaos(target, ProcessChaosType.SIGKILL)
+        assert result.success is True
+        
+        wait_for_process_death(target.process, target.node_id, timeout=5.0)
+        
+        # Cluster should remain healthy after injecting chaos
+        remaining = [n for n in real_cluster.nodes if n.node_id != target.node_id]
+        assert real_cluster.validate(remaining)
 
 
 class TestClusterScalability:

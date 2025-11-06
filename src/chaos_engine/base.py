@@ -1,6 +1,4 @@
-"""
-Base classes for Chaos Engine components
-"""
+"""Base classes for Chaos Engine components"""
 import os
 import signal
 import time
@@ -183,9 +181,9 @@ class ProcessChaosEngine(BaseChaosEngine):
         super().__init__()
         self.target_selector = ChaosTargetSelector()
     
-    def _select_chaos_target(self, operation: Operation, target_selection: TargetSelection) -> Optional[NodeInfo]:
+    def _select_chaos_target(self, cluster_id: str, target_selection: TargetSelection) -> Optional[NodeInfo]:
         """Select target node for chaos injection based on cluster topology"""
-        return self.target_selector.select_target(operation, target_selection)
+        return self.target_selector.select_target(cluster_id, target_selection)
 
 
 class ChaosTargetSelector:
@@ -199,27 +197,62 @@ class ChaosTargetSelector:
         self.cluster_nodes[cluster_id] = nodes
         logger.debug(f"Updated topology for cluster {cluster_id} with {len(nodes)} nodes")
     
-    def select_target(self, operation: Operation, target_selection: TargetSelection) -> Optional[NodeInfo]:
+    def select_target(self, cluster_id: str, target_selection: TargetSelection) -> Optional[NodeInfo]:
         """Select target node based on selection strategy"""
-        # For now, this is a placeholder since we don't have cluster orchestrator integration
-        # In a real implementation, this would:
-        # 1. Get current cluster topology
-        # 2. Filter nodes based on strategy (primary_only, replica_only, etc.)
-        # 3. Select target based on strategy (random, specific, etc.)
+
+        # Get nodes for this cluster
+        if cluster_id not in self.cluster_nodes:
+            logger.warning(f"No topology information for cluster {cluster_id}")
+            return None
+        
+        nodes = self.cluster_nodes[cluster_id]
+        if not nodes:
+            logger.warning(f"No nodes available in cluster {cluster_id}")
+            return None
+        
+        strategy = target_selection.strategy
         
         if target_selection.strategy == "specific" and target_selection.specific_nodes:
-            # Would select from specific nodes
-            pass
-        elif target_selection.strategy == "random":
-            # Would randomly select from available nodes
-            pass
-        elif target_selection.strategy == "primary_only":
-            # Would select only from primary nodes
-            pass
-        elif target_selection.strategy == "replica_only":
-            # Would select only from replica nodes
-            pass
+            # Find the first available node from the specific list
+            for node_id in target_selection.specific_nodes:
+                for node in nodes:
+                    if node.node_id == node_id:
+                        logger.info(f"Selected specific node: {node.node_id}")
+                        return node
+            
+            logger.warning(f"None of the specified nodes found: {target_selection.specific_nodes}")
+            return None
         
-        # Return None for now - will be implemented when cluster orchestrator is available
-        return None
+        elif target_selection.strategy == "random":
+            selected = random.choice(nodes)
+            logger.info(f"Selected random node: node id: {selected.node_id}, role: ({selected.role}, shard: {selected.shard_id})")
+            return selected
+        
+        elif target_selection.strategy == "primary_only":
+            primaries = [n for n in nodes if n.role == 'primary']
+            
+            if not primaries:
+                logger.warning("No primary nodes available")
+                return None
+            
+            # Randomly select from primaries
+            selected = random.choice(primaries)
+            logger.info(f"Selected random primary: {selected.node_id} (shard {selected.shard_id})")
+            return selected
+        
+        elif target_selection.strategy == "replica_only":
+            replicas = [n for n in nodes if n.role == 'replica']
+            
+            if not replicas:
+                logger.warning("No replica nodes available")
+                return None
+            
+            # Randomly select from replicas
+            selected = random.choice(replicas)
+            logger.info(f"Selected random replica: {selected.node_id} (shard {selected.shard_id})")
+            return selected
+        
+        else:
+            logger.error(f"Unknown target selection strategy: {strategy}")
+            return None
     
