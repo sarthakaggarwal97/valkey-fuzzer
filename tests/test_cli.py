@@ -311,7 +311,7 @@ class TestCLIParser:
     def test_create_parser(self):
         """Test parser creation"""
         parser = create_parser()
-        assert parser.prog == 'cluster-bus-fuzzer'
+        assert parser.prog == 'valkey-fuzzer'
     
     def test_parse_random_command(self):
         """Test parsing random command"""
