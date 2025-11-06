@@ -152,7 +152,7 @@ class StateValidator(IStateValidator):
             return False, []
         
         try:
-            # Connect to first node to get cluster info
+            # Connect to first live node to get cluster info
             node = current_nodes[0]
             client = valkey.Valkey(
                 host=node['host'],
@@ -175,7 +175,7 @@ class StateValidator(IStateValidator):
             # Get cluster nodes to check for conflicts
             cluster_nodes = client.execute_command('CLUSTER', 'NODES')
             
-            # Parse slot assignments
+            # Parse slot assignments, but only from live nodes (not failed/disconnected)
             slot_assignments: Dict[int, List[str]] = {}
             for line in cluster_nodes.split('\n'):
                 if not line.strip():
@@ -185,6 +185,12 @@ class StateValidator(IStateValidator):
                     continue
                 
                 node_id = parts[0]
+                flags = parts[2]
+                
+                # Skip failed or disconnected nodes - they shouldn't count for slot coverage
+                if 'fail' in flags or 'disconnected' in flags:
+                    continue
+                
                 # Slots are in parts[8:]
                 for slot_range in parts[8:]:
                     if '-' in slot_range:
@@ -206,14 +212,19 @@ class StateValidator(IStateValidator):
             
             client.close()
             
-            # Check for conflicts
+            # Check for conflicts (multiple live nodes claiming same slot)
             conflicts = []
             for slot, nodes in slot_assignments.items():
                 if len(nodes) > 1:
                     conflicts.append(SlotConflict(slot=slot, conflicting_nodes=nodes))
             
-            # Slot coverage is good if all slots assigned and no failures
-            slot_coverage = (slots_assigned == 16384 and slots_fail == 0)
+            # Slot coverage is good if all slots are assigned to live nodes
+            # Check that we have all 16384 slots covered by live nodes
+            slots_covered = len(slot_assignments)
+            slot_coverage = (slots_covered == 16384)
+            
+            if not slot_coverage:
+                logging.warning(f"Slot coverage incomplete: {slots_covered}/16384 slots covered by live nodes")
             
             return slot_coverage, conflicts
             
