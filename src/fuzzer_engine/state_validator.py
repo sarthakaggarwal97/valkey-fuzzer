@@ -198,9 +198,12 @@ class StateValidator(IStateValidator):
                 
                 node_id = parts[0]
                 flags = parts[2]
+                link_state = parts[7] if len(parts) > 7 else 'connected'
                 
-                # Track live nodes
-                is_live = 'fail' not in flags and 'disconnected' not in flags
+                # Track live nodes - check for explicit fail/fail? tokens and disconnected link state
+                flag_list = flags.split(',')
+                has_fail_flag = 'fail' in flag_list or 'fail?' in flag_list
+                is_live = not has_fail_flag and link_state != 'disconnected'
                 if is_live:
                     live_node_ids.add(node_id)
                 

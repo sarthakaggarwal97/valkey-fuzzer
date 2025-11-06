@@ -338,8 +338,10 @@ class ClusterConnection:
                     port = int(host_port[1])
                     
                     # Determine node status
-                    # Check for fail/fail? in flags AND disconnected link state
-                    is_failed = 'fail' in flags or link_state == 'disconnected'
+                    # Check for explicit fail/fail? tokens (not substring match to avoid matching 'nofailover')
+                    flag_list = flags.split(',')
+                    has_fail_flag = 'fail' in flag_list or 'fail?' in flag_list
+                    is_failed = has_fail_flag or link_state == 'disconnected'
                     status = 'failed' if is_failed else 'connected'
                     
                     # Skip failed/disconnected nodes if not requested
