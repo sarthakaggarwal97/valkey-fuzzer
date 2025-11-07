@@ -9,11 +9,7 @@ from dataclasses import dataclass
 from typing import Iterable, List
 
 from src.chaos_engine import ChaosCoordinator, ChaosScenarioState, ProcessChaosEngine
-from src.cluster_orchestrator.orchestrator import (
-    ClusterManager,
-    ConfigurationManager,
-    PortManager,
-)
+from src.cluster_orchestrator.orchestrator import ClusterManager, ConfigurationManager, PortManager
 from src.models import (
     ChaosConfig,
     ChaosCoordination,

@@ -25,8 +25,6 @@ def load_all_slots(cluster_connection: ClusterConnection, keys_per_slot: int = 1
     slot_table_len = len(CRC16_SLOT_TABLE)
     total_keys = keys_per_slot * 16384
     
-    logging.info(f"Generating {total_keys} keys ({keys_per_slot} per slot)")
-    
     keys = []
     for i in range(total_keys):
         table_key = CRC16_SLOT_TABLE[i % slot_table_len]
@@ -36,7 +34,7 @@ def load_all_slots(cluster_connection: ClusterConnection, keys_per_slot: int = 1
     try:
         success_count = 0
 
-        logging.info("Loading keys into cluster")
+        logging.info(f"Loading {total_keys} keys ({keys_per_slot} per slot) into cluster")
         
         for i, key in enumerate(keys):
             try:
