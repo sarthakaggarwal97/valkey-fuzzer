@@ -1,9 +1,10 @@
+import logging
+import random
+
 import valkey
 from valkey.cluster import ClusterNode
-import random
-import logging
 from ..models import ClusterConnection
-from .crc16_slot_table import CRC16_SLOT_TABLE
+from .crc16_slots import generate_crc16_slot_table
 
 logging.basicConfig(format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', level=logging.INFO, force=True)
 
@@ -22,14 +23,15 @@ def load_all_slots(cluster_connection: ClusterConnection, keys_per_slot: int = 1
     )
     
     # Generate keys using CRC16 slot table
-    slot_table_len = len(CRC16_SLOT_TABLE)
+    slot_table = generate_crc16_slot_table()
+    slot_table_len = len(slot_table)
     total_keys = keys_per_slot * 16384
     
     logging.info(f"Generating {total_keys} keys ({keys_per_slot} per slot)")
     
     keys = []
     for i in range(total_keys):
-        table_key = CRC16_SLOT_TABLE[i % slot_table_len]
+        table_key = slot_table[i % slot_table_len]
         key = f"key:{{{table_key}}}:{random.randint(0, 1000)}"
         keys.append(key)
     
