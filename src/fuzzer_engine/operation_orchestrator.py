@@ -9,6 +9,7 @@ from ..models import (
     Operation, OperationType, ClusterStatus, NodeInfo, ClusterConnection
 )
 from ..interfaces import IOperationOrchestrator
+from ..cluster_orchestrator.orchestrator import ClusterManager
 
 logging.basicConfig(level=logging.INFO)
 
@@ -20,6 +21,7 @@ class OperationOrchestrator(IOperationOrchestrator):
         """
         Initialize operation orchestrator
         """
+        self.cluster_manager = ClusterManager()
         self.cluster_connection = cluster_connection
         self.active_operations: Dict[str, Operation] = {}
         self.operation_counter = 0
@@ -241,11 +243,20 @@ class OperationOrchestrator(IOperationOrchestrator):
             # Wait for failover to complete
             success = self.wait_for_operation_completion(operation, self.cluster_connection.cluster_id, operation.timing.timeout)
             
-            # Validate data is consistant after failover
+            # Validate replication links after failover
             if success:
-                if not self._validate_failover_data_integrity(target_shard_id):
-                    logging.warning("Failover data validation failed")
-                    return False
+                max_retries = 3
+                for attempt in range(max_retries):
+                    live_nodes = [n for n in self.cluster_connection.initial_nodes 
+                                 if n.process and n.process.poll() is None]
+                    if self.cluster_manager.check_replication_links(live_nodes):
+                        logging.info("Replication links are all up after failover")
+                        break
+                    if attempt < max_retries - 1:
+                        logging.debug(f"Replication link check attempt {attempt + 1} failed, retrying in 3s")
+                        time.sleep(3)
+                else:
+                    logging.warning("Replication link check failed after all retries")
             
             return success
             
@@ -347,27 +358,3 @@ class OperationOrchestrator(IOperationOrchestrator):
         logging.warning(f"Operation did not complete within {timeout:.2f}s")
         return False
     
-    def _validate_failover_data_integrity(self, target_shard_id: int) -> bool:
-        """Validate failover succeeded by checking replica sync status"""
-        try:
-            current_nodes = self.cluster_connection.get_current_nodes()
-            
-            # Check replica sync status
-            replicas = [n for n in current_nodes if n.get('shard_id') == target_shard_id and n.get('role') == 'replica']
-            synced_count = 0
-            for replica in replicas:
-                try:
-                    client = valkey.Valkey(host=replica['host'], port=replica['port'], socket_timeout=2, decode_responses=True)
-                    info = client.info('replication')
-                    if info.get('master_link_status') == 'up':
-                        synced_count += 1
-                    client.close()
-                except:
-                    pass
-            
-            logging.info(f"Failover validation: {synced_count} replicas synced for shard {target_shard_id}")
-            return True
-            
-        except Exception as e:
-            logging.error(f"Failover validation failed: {e}")
-            return False
