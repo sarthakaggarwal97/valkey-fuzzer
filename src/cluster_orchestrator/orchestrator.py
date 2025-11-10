@@ -561,6 +561,21 @@ class ClusterManager:
         logger.info(f"All {len(nodes_in_cluster)} node configurations are correctly set")
         return True
     
+    def check_replication_links(self, nodes_in_cluster: List[NodeInfo]) -> bool:
+        """Check if all replica master_link_status is 'up'"""
+        for node in nodes_in_cluster:
+            try:
+                client = self.get_client(node)
+                info = client.info('replication')
+                
+                if info.get('role') == 'slave':
+                    if info.get('master_link_status') != 'up':
+                        return False
+            except:
+                return False
+        
+        return True
+    
     def validate_cluster(self, nodes_in_cluster: List[NodeInfo], timeout: float = 30.0, interval: float = 1.0) -> bool:
         if not nodes_in_cluster:
             return False
@@ -623,7 +638,10 @@ class ClusterManager:
                     first_state['slots_fail'] == 0
                 )
 
-                if is_healthy:
+                # Check replica sync status
+                replicas_synced = self.check_replication_links(nodes_in_cluster)
+
+                if is_healthy and replicas_synced:
                     logger.info(f"Cluster is Healthy (all {len(node_states)} nodes reachable and consistent)")
                     return True
 

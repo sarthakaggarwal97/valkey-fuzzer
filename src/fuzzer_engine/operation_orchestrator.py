@@ -9,6 +9,7 @@ from ..models import (
     Operation, OperationType, ClusterStatus, NodeInfo, ClusterConnection
 )
 from ..interfaces import IOperationOrchestrator
+from ..cluster_orchestrator.orchestrator import ClusterManager
 
 logging.basicConfig(level=logging.INFO)
 
@@ -20,6 +21,7 @@ class OperationOrchestrator(IOperationOrchestrator):
         """
         Initialize operation orchestrator
         """
+        self.cluster_manager = ClusterManager()
         self.cluster_connection = cluster_connection
         self.active_operations: Dict[str, Operation] = {}
         self.operation_counter = 0
@@ -239,7 +241,24 @@ class OperationOrchestrator(IOperationOrchestrator):
             replica_client.close()
             
             # Wait for failover to complete
-            return self.wait_for_operation_completion(operation, self.cluster_connection.cluster_id, operation.timing.timeout)
+            success = self.wait_for_operation_completion(operation, self.cluster_connection.cluster_id, operation.timing.timeout)
+            
+            # Validate replication links after failover
+            if success:
+                max_retries = 3
+                for attempt in range(max_retries):
+                    live_nodes = [n for n in self.cluster_connection.initial_nodes 
+                                 if n.process and n.process.poll() is None]
+                    if self.cluster_manager.check_replication_links(live_nodes):
+                        logging.info("Replication links are all up after failover")
+                        break
+                    if attempt < max_retries - 1:
+                        logging.debug(f"Replication link check attempt {attempt + 1} failed, retrying in 3s")
+                        time.sleep(3)
+                else:
+                    logging.warning("Replication link check failed after all retries")
+            
+            return success
             
         except Exception as e:
             logging.error(f"Failover execution failed: {e}")
@@ -338,3 +357,4 @@ class OperationOrchestrator(IOperationOrchestrator):
         
         logging.warning(f"Operation did not complete within {timeout:.2f}s")
         return False
+    

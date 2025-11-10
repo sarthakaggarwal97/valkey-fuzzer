@@ -9,6 +9,7 @@ from ..models import (
     ClusterConnection, ClusterStatus
 )
 from ..interfaces import IFuzzerEngine
+from ..valkey_client.load_data import load_all_slots
 from .test_case_generator import ScenarioGenerator
 from .cluster_coordinator import ClusterCoordinator
 from .chaos_coordinator import ChaosCoordinator
@@ -130,17 +131,17 @@ class FuzzerEngine(IFuzzerEngine):
             if not self._validate_cluster_readiness_with_retry(cluster_instance.cluster_id):
                 raise Exception("Cluster failed readiness validation")
             
-            # Register cluster nodes with chaos coordinator
-            self.chaos_coordinator.register_cluster_nodes(
-                cluster_instance.cluster_id,
-                cluster_instance.nodes
-            )
+            # Step 3: Load test data
+            logger.info("Step 3: Loading test data")
+            self._load_test_data(cluster_connection)
+            
+            self.chaos_coordinator.register_cluster_nodes(cluster_instance.cluster_id, cluster_instance.nodes)
             
             # Set cluster connection for operation orchestrator
             self.operation_orchestrator.set_cluster_connection(cluster_connection)
             
-            # Step 3: Execute operations with chaos coordination
-            logger.info(f"Step 3: Executing {len(scenario.operations)} operations")
+            # Step 4: Execute operations with chaos coordination
+            logger.info(f"Step 4: Executing {len(scenario.operations)} operations")
             
             for i, operation in enumerate(scenario.operations):
                 logger.info(f"Executing operation {i+1}/{len(scenario.operations)}: {operation.type.value}")
@@ -209,8 +210,8 @@ class FuzzerEngine(IFuzzerEngine):
                     )
                     # Continue with next operation (graceful degradation)
             
-            # Step 4: Final cluster validation
-            logger.info("Step 4: Final cluster validation")
+            # Step 5: Final cluster validation
+            logger.info("Step 5: Final cluster validation")
             final_validation = self.state_validator.validate_cluster_state(
                 cluster_instance.cluster_id,
                 cluster_connection
@@ -361,6 +362,10 @@ class FuzzerEngine(IFuzzerEngine):
             )
         
         return success
+    
+    def _load_test_data(self, cluster_connection: ClusterConnection):
+        """Load test data into the cluster for validation purposes"""
+        load_all_slots(cluster_connection, keys_per_slot=5)
     
     def _cleanup_resources(self, cluster_instance, cluster_connection):
         """
