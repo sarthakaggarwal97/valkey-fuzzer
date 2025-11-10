@@ -41,6 +41,15 @@ class StateValidator(IStateValidator):
             logging.error("No nodes available in cluster")
             return self._create_failed_validation(start_time)
         
+        # Check if any primary nodes are dead and wait for automatic failover if they are
+        dead_primaries = [n for n in current_nodes if n.get('role') == 'primary' and n.get('status') == 'failed']
+        if dead_primaries:
+            failover_wait = 15.0
+            logging.info(f"Detected {len(dead_primaries)} dead primary node(s), waiting {failover_wait}s for automatic failover")
+            time.sleep(failover_wait)
+            # Refresh node list after waiting
+            current_nodes = cluster_connection.get_current_nodes(include_failed=True)
+        
         # Create cluster status from current nodes
         cluster_status = self._build_cluster_status(cluster_id, current_nodes)
         
