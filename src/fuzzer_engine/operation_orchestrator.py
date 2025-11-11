@@ -287,7 +287,7 @@ class OperationOrchestrator(IOperationOrchestrator):
         start_time = time.time()
         
         # Get live nodes and validate cluster is healthy
-        live_nodes = [n for n in self.cluster_connection.initial_nodes if n.process and n.process.poll() is None]
+        live_nodes = [n for n in self.cluster_connection.initial_nodes if n.process is None or n.process.poll() is None]
                 
         if not self.cluster_manager.validate_cluster(live_nodes, timeout=timeout):
             logging.warning(f"Operation did not complete within {timeout:.2f}s")
@@ -296,7 +296,7 @@ class OperationOrchestrator(IOperationOrchestrator):
         # Validate replication links after cluster is healthy
         max_retries = 3
         for attempt in range(max_retries):
-            live_nodes = [n for n in self.cluster_connection.initial_nodes if n.process and n.process.poll() is None]
+            live_nodes = [n for n in self.cluster_connection.initial_nodes if n.process is None or n.process.poll() is None]
             if self.cluster_manager.check_replication_links(live_nodes):
                 elapsed = time.time() - start_time
                 logging.info(f"Operation completed successfully in {elapsed:.2f}s")
