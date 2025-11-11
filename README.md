@@ -202,15 +202,15 @@ Cluster Configuration:
 - Total Nodes: 6
 
 Operations Executed:
-✓ Failover (shard 1, primary) - 2.3s
-✓ Process Kill (shard 2, SIGKILL) - coordinated
+Failover (shard 1, primary) - 2.3s
+Process Kill (shard 2, SIGKILL) - coordinated
 
 Validation Results:
-✓ Slot Coverage: All 16384 slots assigned
-✓ Replica Sync: All replicas synchronized
-✓ Data Consistency: 100% match across replicas
-✓ Convergence Time: 12.4s (within 30.0s limit)
-✓ Replication Lag: 0.8s average
+Slot Coverage: All 16384 slots assigned
+Replica Sync: All replicas synchronized
+Data Consistency: 100% match across replicas
+Convergence Time: 12.4s (within 30.0s limit)
+Replication Lag: 0.8s average
 
 Workload Metrics:
 - Operations: 15,432 total

@@ -118,14 +118,14 @@ class ConfigurationManager:
             
             primary_node_plan = self.create_node_plan(node_counter, 'primary', shard_num, slot_start, slot_end)
             nodes.append(primary_node_plan)
-            logger.info(f"{primary_node_plan.node_id}: primary, shard {shard_num}, "
+            logger.debug(f"{primary_node_plan.node_id}: primary, shard {shard_num}, "
                         f"port {primary_node_plan.port}, slots {slot_start}-{slot_end}")
             node_counter += 1
             
             for _ in range(self.clusterConfig.replicas_per_shard):
                 replica_plan = self.create_node_plan(node_counter, 'replica', shard_num, master_node_id=primary_node_plan.node_id)
                 nodes.append(replica_plan)
-                logger.info(f"{replica_plan.node_id}: replica, shard {shard_num}, "
+                logger.debug(f"{replica_plan.node_id}: replica, shard {shard_num}, "
                       f"port {replica_plan.port}, master={primary_node_plan.node_id}")
                 node_counter += 1
         
@@ -451,7 +451,7 @@ class ClusterManager:
             client = self.get_client(primary)
             
             slots = list(range(primary.slot_start, primary.slot_end + 1))
-            logger.info(f"Assigning slots {primary.slot_start}-{primary.slot_end} to {primary.node_id}")
+            logger.debug(f"Assigning slots {primary.slot_start}-{primary.slot_end} to {primary.node_id}")
             
             client.execute_command('CLUSTER', 'ADDSLOTS', *slots)
             
@@ -489,8 +489,6 @@ class ClusterManager:
         
         # Final check failed
         raise Exception(f"Slot assignment failed after {max_retries} attempts: {slots_assigned}/16384 assigned, {slots_fail} failed")
-        
-        return node_ids
     
     def setup_and_sync_replication(self, nodes_in_cluster: List[NodeInfo], primary_ids: Dict[str, str], timeout: int = 60) -> None:
         """Configure replication and wait for replicas to sync"""
@@ -510,7 +508,7 @@ class ClusterManager:
                 logger.info(f"Could not find master for {replica.node_id}")
                 continue
             
-            logger.info(f"Configuring {replica.node_id} to replicate {replica.master_node_id}")
+            logger.debug(f"Configuring {replica.node_id} to replicate {replica.master_node_id}")
             
             client = self.get_client(replica)
             client.execute_command('CLUSTER', 'REPLICATE', master_cluster_id)

@@ -16,11 +16,7 @@ from src.models import (
     ChaosCoordination, ValidationConfig, DSLConfig
 )
 
-logging.basicConfig(
-    format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s',
-    level=logging.INFO,
-    force=True
-)
+logging.basicConfig(format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', level=logging.INFO, force=True)
 logger = logging.getLogger(__name__)
 
 
@@ -444,7 +440,7 @@ class TestFuzzerLogging:
         log_file = log_dir / f"{result.scenario_id}.json"
         
         if log_file.exists():
-            logger.info(f"✓ Log file created: {log_file}")
+            logger.info(f"Log file created: {log_file}")
             
             # Read and verify log content
             import json
@@ -454,7 +450,7 @@ class TestFuzzerLogging:
             assert log_data['scenario_id'] == result.scenario_id
             assert 'start_time' in log_data
             assert 'cluster_config' in log_data
-            logger.info(f"✓ Log file contains valid data")
+            logger.info(f"Log file contains valid data")
         else:
             logger.warning(f"Log file not found: {log_file}")
 

@@ -9,7 +9,9 @@ class ClusterBusFuzzer:
     """Main orchestrator for the Cluster Bus Fuzzer system"""
     
     def __init__(self):
-        """Initialize the fuzzer with the main fuzzer engine"""
+        """
+        Initialize the fuzzer with the main fuzzer engine
+        """
         self.fuzzer_engine = FuzzerEngine()
     
     def run_random_test(self, seed: int = None):
