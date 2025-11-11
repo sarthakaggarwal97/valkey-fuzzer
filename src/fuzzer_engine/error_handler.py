@@ -10,11 +10,7 @@ from typing import Optional, Callable, Any, Dict, List
 from enum import Enum
 from dataclasses import dataclass
 
-logging.basicConfig(
-    format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s',
-    level=logging.INFO,
-    force=True
-)
+logging.basicConfig(format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', level=logging.INFO, force=True)
 logger = logging.getLogger(__name__)
 
 
@@ -89,9 +85,7 @@ class ErrorHandler:
         self.recovery_strategies[ErrorCategory.STATE_VALIDATION] = self._recover_state_validation
     
     def handle_error(self, error_context: ErrorContext) -> bool:
-        """
-        Handle an error with appropriate recovery strategy.
-        """
+        """Handle an error with appropriate recovery strategy"""
         # Log error
         self._log_error(error_context)
         
@@ -124,9 +118,7 @@ class ErrorHandler:
         operation_name: str = "operation",
         **kwargs
     ) -> tuple[bool, Any]:
-        """
-        Execute an operation with retry logic and exponential backoff.
-        """
+        """Execute an operation with retry logic and exponential backoff"""
         last_exception = None
         delay = config.initial_delay
         
@@ -251,9 +243,7 @@ class ErrorHandler:
         chaos_coordinator=None,
         cluster_coordinator=None
     ) -> bool:
-        """
-        Comprehensive cleanup after test failure.
-        """
+        """Comprehensive cleanup after test failure"""
         logger.info("Starting comprehensive cleanup after failure")
         
         cleanup_success = True
@@ -347,9 +337,7 @@ class ErrorHandler:
             logger.exception(error_context.exception)
     
     def get_error_summary(self) -> Dict[str, Any]:
-        """
-        Get summary of all errors encountered.
-        """
+        """Get summary of all errors encountered"""
         total_errors = len(self.error_history)
         
         errors_by_category = {}

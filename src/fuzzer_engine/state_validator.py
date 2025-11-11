@@ -274,9 +274,6 @@ class StateValidator(IStateValidator):
     def _validate_replica_sync(self, cluster_status: ClusterStatus, current_nodes: List[Dict]) -> ReplicationStatus:
         """
         Validate replica synchronization
-        
-        Returns:
-            ReplicationStatus: Replication status
         """
         replica_nodes = [n for n in current_nodes if n['role'] == 'replica']
         
@@ -353,9 +350,6 @@ class StateValidator(IStateValidator):
     def _validate_node_connectivity(self, cluster_status: ClusterStatus, current_nodes: List[Dict]) -> ConnectivityStatus:
         """
         Validate node connectivity
-        
-        Returns:
-            ConnectivityStatus: Connectivity status
         """
         if not current_nodes:
             return ConnectivityStatus(
@@ -425,9 +419,6 @@ class StateValidator(IStateValidator):
     def _validate_data_consistency(self, cluster_status: ClusterStatus, current_nodes: List[Dict]) -> ConsistencyStatus:
         """
         Validate data consistency across nodes
-        
-        Returns:
-            ConsistencyStatus: Consistency status
         """
         # Data consistency validation is complex and requires:
         # 1. Identifying primary-replica pairs

@@ -93,17 +93,17 @@ def validate_dsl(dsl_file):
     try:
         # Load DSL
         dsl_config = DSLLoader.load_from_file(dsl_file)
-        print("✓ DSL file loaded successfully")
+        print("DSL file loaded successfully")
         
         # Parse and validate
         from src.fuzzer_engine import ScenarioGenerator
         generator = ScenarioGenerator()
         
         scenario = generator.parse_dsl_config(dsl_config.config_text)
-        print("✓ DSL parsed successfully")
+        print("DSL parsed successfully")
         
         generator.validate_scenario(scenario)
-        print("✓ Scenario validated successfully")
+        print("Scenario validated successfully")
         
         print("\nScenario Summary:")
         print(f"  ID: {scenario.scenario_id}")
@@ -113,11 +113,11 @@ def validate_dsl(dsl_file):
         print(f"  Operations: {len(scenario.operations)}")
         print(f"  Chaos Type: {scenario.chaos_config.chaos_type.value}")
         
-        print("\n✓ DSL configuration is valid!")
+        print("\nDSL configuration is valid!")
         return True
         
     except Exception as e:
-        print(f"\n✗ Validation failed: {e}")
+        print(f"\nValidation failed: {e}")
         return False
 
 

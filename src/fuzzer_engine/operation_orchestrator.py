@@ -5,9 +5,7 @@ import time
 import logging
 import valkey
 from typing import Dict, Optional
-from ..models import (
-    Operation, OperationType, ClusterStatus, NodeInfo, ClusterConnection
-)
+from ..models import Operation, OperationType, ClusterStatus, NodeInfo, ClusterConnection
 from ..interfaces import IOperationOrchestrator
 from ..cluster_orchestrator.orchestrator import ClusterManager
 
@@ -240,32 +238,14 @@ class OperationOrchestrator(IOperationOrchestrator):
             
             replica_client.close()
             
-            # Wait for failover to complete
-            success = self.wait_for_operation_completion(operation, self.cluster_connection.cluster_id, operation.timing.timeout)
-            
-            # Validate replication links after failover
-            if success:
-                max_retries = 3
-                for attempt in range(max_retries):
-                    live_nodes = [n for n in self.cluster_connection.initial_nodes 
-                                 if n.process and n.process.poll() is None]
-                    if self.cluster_manager.check_replication_links(live_nodes):
-                        logging.info("Replication links are all up after failover")
-                        break
-                    if attempt < max_retries - 1:
-                        logging.debug(f"Replication link check attempt {attempt + 1} failed, retrying in 3s")
-                        time.sleep(3)
-                else:
-                    logging.warning("Replication link check failed after all retries")
-            
-            return success
+            # Wait for failover to complete then validate cluster slots and replication links
+            return self.wait_for_operation_completion(operation, self.cluster_connection.cluster_id, operation.timing.timeout)
             
         except Exception as e:
             logging.error(f"Failover execution failed: {e}")
             return False
     
 
-    
     def validate_operation_preconditions(self, operation: Operation, cluster_status: ClusterStatus) -> bool:
         """
         Validate that operation can be executed
@@ -298,63 +278,33 @@ class OperationOrchestrator(IOperationOrchestrator):
     
     def wait_for_operation_completion(self, operation: Operation, cluster_id: str, timeout: float) -> bool:
         """
-        Wait for operation to complete
+        Wait for operation to complete by checking cluster health
         """
         if not self.cluster_connection:
             return False
         
         logging.info(f"Waiting for operation completion (timeout: {timeout:.2f}s)")
-        
         start_time = time.time()
-        deadline = start_time + timeout
         
-        # For failover, we wait for cluster to stabilize
-        while time.time() < deadline:
-            try:
-                # Get current cluster state - use live nodes only
-                current_nodes = self.cluster_connection.get_live_nodes()
+        # Get live nodes and validate cluster is healthy
+        live_nodes = [n for n in self.cluster_connection.initial_nodes if n.process is None or n.process.poll() is None]
                 
-                if not current_nodes:
-                    time.sleep(1)
-                    continue
-                
-                # Check if cluster has stabilized
-                # For failover, we expect the cluster to have all nodes connected
-                # and slots properly assigned
-                
-                # Connect to a live node to check cluster state
-                any_node = current_nodes[0]
-                client = valkey.Valkey(
-                    host=any_node['host'],
-                    port=any_node['port'],
-                    socket_timeout=3,
-                    decode_responses=True
-                )
-                
-                # Check cluster state
-                info = client.execute_command('CLUSTER', 'INFO')
-                info_dict = {}
-                for line in info.split('\r\n'):
-                    if ':' in line:
-                        key, value = line.split(':', 1)
-                        info_dict[key] = value
-                
-                cluster_state = info_dict.get('cluster_state')
-                slots_assigned = int(info_dict.get('cluster_slots_assigned', 0))
-                
-                client.close()
-                
-                if cluster_state == 'ok' and slots_assigned == 16384:
-                    elapsed = time.time() - start_time
-                    logging.info(f"Operation completed successfully in {elapsed:.2f}s")
-                    return True
-                
-                time.sleep(1)
-                
-            except Exception as e:
-                logging.debug(f"Waiting for stabilization: {e}")
-                time.sleep(1)
+        if not self.cluster_manager.validate_cluster(live_nodes, timeout=timeout):
+            logging.warning(f"Operation did not complete within {timeout:.2f}s")
+            return False
         
-        logging.warning(f"Operation did not complete within {timeout:.2f}s")
+        # Validate replication links after cluster is healthy
+        max_retries = 3
+        for attempt in range(max_retries):
+            live_nodes = [n for n in self.cluster_connection.initial_nodes if n.process is None or n.process.poll() is None]
+            if self.cluster_manager.check_replication_links(live_nodes):
+                elapsed = time.time() - start_time
+                logging.info(f"Operation completed successfully in {elapsed:.2f}s")
+                return True
+            if attempt < max_retries - 1:
+                logging.debug(f"Replication link check attempt {attempt + 1} failed, retrying in 3s")
+                time.sleep(3)
+        
+        logging.warning("Replication link check failed after all retries")
         return False
     
