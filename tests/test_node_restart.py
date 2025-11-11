@@ -45,7 +45,7 @@ def test_restart_single_node():
     nodes = config_mgr.spawn_all_nodes(topology)
     
     try:
-        success = cluster_mgr.form_cluster(nodes)
+        success = cluster_mgr.form_cluster(nodes, config_mgr.cluster_id)
         assert success, "Failed to form cluster"
         logging.info("OK: Cluster formed")
         
@@ -121,7 +121,7 @@ def test_restart_primary_in_multi_shard_cluster():
     nodes = config_mgr.spawn_all_nodes(topology)
     
     try:
-        success = cluster_mgr.form_cluster(nodes)
+        success = cluster_mgr.form_cluster(nodes, config_mgr.cluster_id)
         assert success, "Failed to form cluster"
         logging.info("OK: Cluster formed")
         
@@ -218,7 +218,7 @@ def test_restart_multiple_nodes_sequentially():
     nodes = config_mgr.spawn_all_nodes(topology)
     
     try:
-        success = cluster_mgr.form_cluster(nodes)
+        success = cluster_mgr.form_cluster(nodes, config_mgr.cluster_id)
         assert success, "Failed to form cluster"
         logging.info("OK: Cluster formed")
         

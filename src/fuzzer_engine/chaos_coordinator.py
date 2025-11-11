@@ -43,7 +43,7 @@ class ChaosCoordinator:
         # Update cluster topology for target selection
         self.chaos_engine.target_selector.update_cluster_topology(cluster_id, nodes)
         
-        logger.info(f"Registered {len(nodes)} nodes for chaos injection")
+        logger.info(f"Successfully registered {len(nodes)} nodes for chaos injection")
     
     def update_node_registration(self, node: NodeInfo) -> None:
         """
@@ -88,7 +88,7 @@ class ChaosCoordinator:
                 chaos_results.append(result)
                 
                 if result.success:
-                    logger.info(f"Pre-operation chaos injected on {target_node.node_id}")
+                    logger.debug(f"Pre-operation chaos injected on {target_node.node_id}")
             
             # Chaos during operation (most common for failover testing)
             if coordination.chaos_during_operation:
@@ -98,7 +98,7 @@ class ChaosCoordinator:
                 chaos_results.append(result)
                 
                 if result.success:
-                    logger.info(f"During-operation chaos injected on {target_node.node_id}")
+                    logger.debug(f"During-operation chaos injected on {target_node.node_id}")
             
             # Chaos after operation
             if coordination.chaos_after_operation:
@@ -109,7 +109,7 @@ class ChaosCoordinator:
                 chaos_results.append(result)
                 
                 if result.success:
-                    logger.info(f"Post-operation chaos injected on {target_node.node_id}")
+                    logger.debug(f"Post-operation chaos injected on {target_node.node_id}")
             
             # Store chaos results for this scenario
             self.chaos_history.extend(chaos_results)

@@ -106,7 +106,6 @@ class ConfigurationManager:
         slots_per_shard = total_slots // self.clusterConfig.num_shards
         
         logger.info(f"Planning topology for {self.clusterConfig.num_shards} shards with {self.clusterConfig.replicas_per_shard} replica(s) each")
-        print()
         
         for shard_num in range(self.clusterConfig.num_shards):
             slot_start = shard_num * slots_per_shard
@@ -428,7 +427,7 @@ class ClusterManager:
     
     def reset_cluster_state(self, nodes_in_cluster: List[NodeInfo]) -> None:
         """Reset cluster state on all nodes"""        
-        logger.info("Resetting cluster state")
+        logger.debug("Resetting cluster state")
         for node in nodes_in_cluster:
             client = self.get_client(node)
             client.execute_command('CLUSTER', 'RESET', 'HARD')
@@ -476,9 +475,9 @@ class ClusterManager:
             slots_fail = int(info_dict.get('cluster_slots_fail', 0))
             
             if attempt == 0 or attempt == max_retries - 1:
-                logger.info(f"Slot verification (attempt {attempt + 1}/{max_retries}):")
-                logger.info(f"Slots assigned: {slots_assigned}/16384")
-                logger.info(f"Slots failed: {slots_fail}")
+                logger.debug(f"Slot verification (attempt {attempt + 1}/{max_retries}):")
+                logger.debug(f"Slots assigned: {slots_assigned}/16384")
+                logger.debug(f"Slots failed: {slots_fail}")
             
             if slots_assigned == 16384 and slots_fail == 0:
                 logger.info(f"Slot assignment verified successfully after {attempt + 1} attempts")
@@ -684,7 +683,7 @@ class ClusterManager:
 
         return False
     
-    def form_cluster(self, nodes_in_cluster: List[NodeInfo]) -> ClusterConnection:
+    def form_cluster(self, nodes_in_cluster: List[NodeInfo], cluster_id: str) -> ClusterConnection:
         """Form a complete cluster from spawned nodes"""
         print()
         logger.info("FORMING CLUSTER")
@@ -700,7 +699,6 @@ class ClusterManager:
             if not self.validate_cluster(nodes_in_cluster):
                 raise Exception("Cluster validation failed")
             
-            cluster_id = nodes_in_cluster[0].node_id.split('-')[0] if nodes_in_cluster else 'unknown'
             return ClusterConnection(nodes_in_cluster, cluster_id)
         
         except Exception as e:

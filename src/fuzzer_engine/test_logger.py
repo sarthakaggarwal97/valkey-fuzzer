@@ -52,9 +52,7 @@ class FuzzerLogger:
             'errors': [],
             'status': 'running'
         }
-        
-        logger.info(f"Started test {scenario.scenario_id} (seed: {scenario.seed})")
-        
+                
         # Log human-readable scenario summary
         self._log_scenario_summary(scenario)
         

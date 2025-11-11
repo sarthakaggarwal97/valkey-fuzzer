@@ -260,7 +260,6 @@ class ErrorHandler:
         # Cleanup chaos for cluster
         if chaos_coordinator and cluster_instance:
             try:
-                logger.info(f"Cleaning up chaos for cluster {cluster_instance.cluster_id}")
                 chaos_coordinator.cleanup_chaos(cluster_instance.cluster_id)
             except Exception as e:
                 logger.error(f"Failed to cleanup chaos: {e}")
@@ -269,7 +268,6 @@ class ErrorHandler:
         # Destroy cluster
         if cluster_coordinator and cluster_instance:
             try:
-                logger.info(f"Destroying cluster {cluster_instance.cluster_id}")
                 cluster_coordinator.destroy_cluster(cluster_instance.cluster_id)
             except Exception as e:
                 logger.error(f"Failed to destroy cluster: {e}")

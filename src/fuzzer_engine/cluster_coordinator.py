@@ -45,7 +45,7 @@ class ClusterCoordinator:
             # Setup Valkey binary
             valkey_binary = config_manager.setup_valkey_from_source()
             config.valkey_binary = valkey_binary
-            logger.info(f"Using Valkey binary: {valkey_binary}")
+            logger.debug(f"Using Valkey binary: {valkey_binary}")
             
             # Plan topology
             node_plans = config_manager.plan_topology()
@@ -54,7 +54,7 @@ class ClusterCoordinator:
             nodes = config_manager.spawn_all_nodes(node_plans)
             
             # Form cluster
-            cluster_connection = self.cluster_manager.form_cluster(nodes)
+            cluster_connection = self.cluster_manager.form_cluster(nodes, config_manager.cluster_id)
             
             if not cluster_connection:
                 raise Exception("Failed to form cluster")

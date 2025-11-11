@@ -100,7 +100,7 @@ def test_full_cluster_creation():
         assert config_valid
         
         # Test cluster formation
-        success = cluster_mgr.form_cluster(nodes)
+        success = cluster_mgr.form_cluster(nodes, config_mgr.cluster_id)
         assert success
     finally:
         cluster_mgr.close_connections()
@@ -126,7 +126,7 @@ def test_full_cluster_creation_large():
     nodes = config_mgr.spawn_all_nodes(topology)
     
     try:
-        success = cluster_mgr.form_cluster(nodes)
+        success = cluster_mgr.form_cluster(nodes, config_mgr.cluster_id)
         assert success
     finally:
         cluster_mgr.close_connections()

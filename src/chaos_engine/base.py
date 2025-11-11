@@ -138,8 +138,8 @@ class BaseChaosEngine(IChaosEngine, ABC):
             
             return True
         except ProcessLookupError:
-            logger.warning(f"Process {process_id} not found (may have already exited)")
-            return False
+            logger.info(f"Process {process_id} already dead (chaos goal achieved)")
+            return True
         except PermissionError:
             logger.error(f"Permission denied when trying to kill process {process_id}")
             return False

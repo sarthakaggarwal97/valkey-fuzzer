@@ -20,7 +20,7 @@ def test_load_data():
         
         topology = config_mgr.plan_topology()
         nodes = config_mgr.spawn_all_nodes(topology)
-        cluster_connection = cluster_mgr.form_cluster(nodes)        
+        cluster_connection = cluster_mgr.form_cluster(nodes, config_mgr.cluster_id)        
         assert cluster_connection is not None
         
         # Test live discovery

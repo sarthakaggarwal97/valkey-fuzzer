@@ -50,7 +50,7 @@ class IClusterOrchestrator(ABC):
         pass
     
     @abstractmethod
-    def form_cluster(self, nodes_in_cluster: List[NodeInfo]) -> ClusterConnection:
+    def form_cluster(self, nodes_in_cluster: List[NodeInfo], cluster_id: str) -> ClusterConnection:
         """Form a complete cluster from spawned nodes"""
         pass
     

@@ -124,11 +124,13 @@ class FuzzerEngine(IFuzzerEngine):
                 self.logger.log_cluster_state_snapshot(cluster_status, "initial_state")
             
             # Step 2: Validate cluster readiness
+            print()
             logger.info("Step 2: Validating cluster readiness")
             if not self._validate_cluster_readiness_with_retry(cluster_instance.cluster_id):
                 raise Exception("Cluster failed readiness validation")
             
             # Step 3: Load test data
+            print()
             logger.info("Step 3: Loading test data")
             self._load_test_data(cluster_connection)
             
@@ -138,6 +140,7 @@ class FuzzerEngine(IFuzzerEngine):
             self.operation_orchestrator.set_cluster_connection(cluster_connection)
             
             # Step 4: Execute operations with chaos coordination
+            print()
             logger.info(f"Step 4: Executing {len(scenario.operations)} operations")
             
             for i, operation in enumerate(scenario.operations):
@@ -208,6 +211,7 @@ class FuzzerEngine(IFuzzerEngine):
                     # Continue with next operation (graceful degradation)
             
             # Step 5: Final cluster validation
+            print()
             logger.info("Step 5: Final cluster validation")
             final_validation = self.state_validator.validate_cluster_state(
                 cluster_instance.cluster_id,
@@ -317,13 +321,10 @@ class FuzzerEngine(IFuzzerEngine):
         )
         
         if success:
-            logger.info(f"Cluster created successfully: {cluster_instance.cluster_id}")
+            logger.info(f"Cluster created successfully - Cluster ID: {cluster_instance.cluster_id}")
         else:
             logger.error("All cluster creation attempts failed")
-            self.logger.log_error(
-                "Cluster creation failed after all retries",
-                {"attempts": max_retries}
-            )
+            self.logger.log_error("Cluster creation failed after all retries", {"attempts": max_retries})
         
         return cluster_instance if success else None
     
@@ -353,10 +354,7 @@ class FuzzerEngine(IFuzzerEngine):
         
         if not success:
             logger.error("Cluster failed readiness validation after all retries")
-            self.logger.log_error(
-                "Cluster readiness validation failed",
-                {"attempts": max_retries, "cluster_id": cluster_id}
-            )
+            self.logger.log_error("Cluster readiness validation failed", {"attempts": max_retries, "cluster_id": cluster_id})
         
         return success
     
