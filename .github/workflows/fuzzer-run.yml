@@ -1,9 +1,9 @@
-name: Daily Valkey Fuzzer
+name: Valkey Fuzzer
 
 on:
   schedule:
-    # Run daily at 2 AM UTC
-    - cron: '0 2 * * *'
+    # Run every 4 hours
+    - cron: '0 */4 * * *'
   workflow_dispatch:  # Allow manual triggering
 
 jobs:
@@ -30,7 +30,7 @@ jobs:
     - name: Run random fuzzer test
       run: |
         echo "========================================"
-        echo "Daily Random Fuzzer Test"
+        echo "Random Fuzzer Test"
         echo "Timestamp: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
         echo "========================================"
         valkey-fuzzer random --verbose
