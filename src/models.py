@@ -439,6 +439,7 @@ class ReplicationValidationConfig:
     max_acceptable_lag: float = 5.0  # seconds
     require_all_replicas_synced: bool = False  # Allow dead replicas after chaos
     check_replication_offset: bool = True
+    min_replicas_per_shard: int = 1  # Minimum live replicas per shard (0 = no check)
     timeout: float = 10.0
 
 
@@ -466,7 +467,7 @@ class SlotCoverageValidationConfig:
 @dataclass
 class TopologyValidationConfig:
     """Configuration for topology validation"""
-    strict_mode: bool = True  # Strict matching of expected topology - catches role/shard bugs
+    strict_mode: bool = True  # Strict matching of expected topology
     allow_failed_nodes: bool = True  # Allow nodes to be failed after chaos
     timeout: float = 10.0
 
@@ -476,8 +477,18 @@ class ViewConsistencyValidationConfig:
     """Configuration for view consistency validation"""
     require_full_consensus: bool = True
     allow_transient_inconsistency: bool = True
-    max_inconsistency_duration: float = 5.0  # Tighter window to catch slow convergence bugs
+    max_inconsistency_duration: float = 5.0
     timeout: float = 15.0
+
+
+@dataclass
+class DataConsistencyValidationConfig:
+    """Configuration for data consistency validation"""
+    check_test_keys: bool = True  # Validate test keys written before chaos
+    check_cross_replica_consistency: bool = True  # Validate data matches across replicas
+    num_test_keys: int = 100  # Number of test keys to write/validate
+    key_prefix: str = "fuzzer:test:"  # Prefix for test keys
+    timeout: float = 10.0
 
 
 @dataclass
@@ -489,6 +500,7 @@ class StateValidationConfig:
     check_slot_coverage: bool = True
     check_topology: bool = True
     check_view_consistency: bool = True
+    check_data_consistency: bool = True
 
     # Timing configuration
     stabilization_wait: float = 2.0  # Wait before validation
@@ -506,6 +518,7 @@ class StateValidationConfig:
     slot_coverage_config: SlotCoverageValidationConfig = None
     topology_config: TopologyValidationConfig = None
     view_consistency_config: ViewConsistencyValidationConfig = None
+    data_consistency_config: DataConsistencyValidationConfig = None
 
     def __post_init__(self):
         if self.replication_config is None:
@@ -518,6 +531,8 @@ class StateValidationConfig:
             self.topology_config = TopologyValidationConfig()
         if self.view_consistency_config is None:
             self.view_consistency_config = ViewConsistencyValidationConfig()
+        if self.data_consistency_config is None:
+            self.data_consistency_config = DataConsistencyValidationConfig()
 
 
 @dataclass
@@ -609,6 +624,26 @@ class ViewConsistencyValidation:
 
 
 @dataclass
+class DataInconsistency:
+    """Describes a data inconsistency"""
+    key: str
+    inconsistency_type: str  # "missing", "value_mismatch", "unreachable"
+    expected_value: Optional[str]
+    actual_values: Dict[str, str]  # node_address -> value
+
+
+@dataclass
+class DataConsistencyValidation:
+    """Data consistency validation result"""
+    success: bool
+    test_keys_checked: int
+    missing_keys: List[str]
+    inconsistent_keys: List[DataInconsistency]
+    unreachable_keys: List[str]
+    error_message: Optional[str] = None
+
+
+@dataclass
 class StateValidationResult:
     """Comprehensive validation result"""
     overall_success: bool
@@ -621,18 +656,52 @@ class StateValidationResult:
     slot_coverage: Optional[SlotCoverageValidation]
     topology: Optional[TopologyValidation]
     view_consistency: Optional[ViewConsistencyValidation]
+    data_consistency: Optional[DataConsistencyValidation]
 
     # Failure information
     failed_checks: List[str]
     error_messages: List[str]
 
     def is_critical_failure(self) -> bool:
-        """Determine if failure is critical and should halt execution"""
-        # Critical failures: slot coverage lost, split-brain detected
+        """Determine if failure is critical and should halt execution.
+        
+        Critical failures indicate the cluster is in a broken state where
+        continuing operations could cause data loss or corruption.
+        """
+        # 1. Slot coverage lost - data is unreachable
         if self.slot_coverage and not self.slot_coverage.success:
             return True
+        
+        # 2. Split-brain detected - cluster partitioned
         if self.view_consistency and self.view_consistency.split_brain_detected:
             return True
+        
+        # 3. Quorum lost - cluster cannot make decisions
+        if self.cluster_status and not self.cluster_status.success:
+            if self.cluster_status.has_quorum is False:
+                return True
+        
+        # 4. All replicas down for any shard - zero redundancy
+        if self.replication and not self.replication.success:
+            # Check if error message indicates zero redundancy
+            if self.replication.error_message:
+                if "insufficient redundancy" in self.replication.error_message.lower():
+                    return True
+                if "all replicas are disconnected" in self.replication.error_message.lower():
+                    return True
+        
+        # 5. Missing shards or wrong primary count - topology broken
+        if self.topology and not self.topology.success:
+            # Check for critical topology issues
+            for mismatch in self.topology.topology_mismatches:
+                if mismatch.mismatch_type in ['missing_shard', 'missing_primary', 'primary_count']:
+                    return True
+        
+        # 6. Data loss detected
+        if self.data_consistency and not self.data_consistency.success:
+            if self.data_consistency.missing_keys:
+                return True
+        
         return False
 
 

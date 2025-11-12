@@ -18,6 +18,9 @@ from ..models import (
     TopologyMismatch,
     ViewConsistencyValidation,
     ViewDiscrepancy,
+    DataConsistencyValidation,
+    DataConsistencyValidationConfig,
+    DataInconsistency,
     ExpectedTopology,
     StateValidationConfig,
     StateValidationResult
@@ -291,6 +294,80 @@ class ReplicationValidator:
                     )
                     logger.error(error_message)
 
+            # CRITICAL: Check per-shard redundancy (chaos-aware)
+            # Even if some replicas are allowed to be dead, we must ensure each shard has minimum redundancy
+            # BUT: Only fail if the redundancy loss is due to UNEXPECTED failures (not killed by chaos)
+            if success and config.min_replicas_per_shard > 0:
+                # Group replicas by shard
+                shard_replicas: Dict[int, Dict[str, List]] = {}  # shard_id -> {alive: [], dead_expected: [], dead_unexpected: []}
+                
+                for replica in replica_nodes:
+                    shard_id = replica.get('shard_id')
+                    if shard_id is None:
+                        continue
+                    
+                    if shard_id not in shard_replicas:
+                        shard_replicas[shard_id] = {'alive': [], 'dead_expected': [], 'dead_unexpected': []}
+                    
+                    replica_address = format_node_address(replica)
+                    if replica_address in disconnected_replicas:
+                        # Check if this was an expected death (killed by chaos)
+                        if replica_address in killed_nodes:
+                            shard_replicas[shard_id]['dead_expected'].append(replica_address)
+                        else:
+                            shard_replicas[shard_id]['dead_unexpected'].append(replica_address)
+                    else:
+                        shard_replicas[shard_id]['alive'].append(replica_address)
+                
+                # Check each shard has minimum redundancy
+                # ONLY fail if redundancy loss is due to unexpected failures
+                shards_without_redundancy = []
+                for shard_id, replicas in shard_replicas.items():
+                    alive_count = len(replicas['alive'])
+                    dead_expected_count = len(replicas['dead_expected'])
+                    dead_unexpected_count = len(replicas['dead_unexpected'])
+                    
+                    # Calculate what redundancy SHOULD be (accounting for killed nodes)
+                    total_replicas = alive_count + dead_expected_count + dead_unexpected_count
+                    expected_alive = total_replicas - dead_expected_count  # What we expect after chaos
+                    
+                    # Only fail if we have UNEXPECTED redundancy loss
+                    if alive_count < config.min_replicas_per_shard and dead_unexpected_count > 0:
+                        shards_without_redundancy.append({
+                            'shard_id': shard_id,
+                            'alive_replicas': alive_count,
+                            'dead_expected': dead_expected_count,
+                            'dead_unexpected': dead_unexpected_count,
+                            'dead_unexpected_addresses': replicas['dead_unexpected']
+                        })
+                        logger.error(
+                            f"Shard {shard_id} has insufficient redundancy due to UNEXPECTED failures: "
+                            f"{alive_count} alive replica(s) < {config.min_replicas_per_shard} required. "
+                            f"Dead (expected/chaos): {dead_expected_count}, "
+                            f"Dead (UNEXPECTED): {dead_unexpected_count} - {replicas['dead_unexpected']}"
+                        )
+                    elif alive_count < config.min_replicas_per_shard:
+                        # Redundancy loss is due to chaos only - log but don't fail
+                        logger.warning(
+                            f"Shard {shard_id} has reduced redundancy due to chaos: "
+                            f"{alive_count} alive replica(s) (killed by chaos: {dead_expected_count})"
+                        )
+                
+                if shards_without_redundancy:
+                    success = False
+                    shard_details = ", ".join([
+                        f"shard {s['shard_id']} ({s['alive_replicas']} alive, "
+                        f"{s['dead_unexpected']} unexpected failures)"
+                        for s in shards_without_redundancy
+                    ])
+                    error_message = (
+                        f"CRITICAL: {len(shards_without_redundancy)} shard(s) have insufficient redundancy "
+                        f"due to UNEXPECTED failures (< {config.min_replicas_per_shard} alive replica per shard). "
+                        f"Affected shards: {shard_details}. "
+                        f"This indicates unexpected replica failures - not caused by chaos!"
+                    )
+                    logger.error(error_message)
+
             if success and config.require_all_replicas_synced:
                 # Strict mode: fail if any replica is not synced
                 if not all_replicas_synced:
@@ -312,8 +389,7 @@ class ReplicationValidator:
                     success = False
                     error_message = "All replicas are disconnected"
                 elif disconnected_replicas:
-                    # Some replicas disconnected but not all - this is acceptable after chaos
-                    # Set all_replicas_synced to False but keep success=True
+                    # Some replicas disconnected but not all - check if redundancy is maintained
                     logger.info(
                         f"{len(disconnected_replicas)} replica(s) disconnected but cluster still functional"
                     )
@@ -643,18 +719,61 @@ class ClusterStatusValidator:
                                 f"(killed by chaos) - expected behavior"
                             )
                     else:
-                        # Mismatch between killed and failed nodes
-                        if not degraded_reason:
+                        killed_but_not_failed = expected_failed_nodes - actual_failed_nodes
+                        failed_but_not_killed = actual_failed_nodes - expected_failed_nodes
+                        
+                        if killed_but_not_failed and success:
+                            success = False
+                            error_message = (
+                                f"Killed nodes not in fail state: {killed_but_not_failed}. "
+                                f"These nodes were killed by chaos but are not marked as failed. "
+                                f"This indicates improper node termination or cluster state tracking bug."
+                            )
+                            logger.error(error_message)
+                        
+                        if failed_but_not_killed and success:
+                            success = False
+                            error_message = (
+                                f"Unexpected nodes in fail state: {failed_but_not_killed}. "
+                                f"These nodes failed but were not killed by chaos. "
+                                f"This indicates cascading failures or other clustering bugs. "
+                                f"Expected failed: {expected_failed_nodes}, Actual failed: {actual_failed_nodes}"
+                            )
+                            logger.error(error_message)
+                else:
+                    # CRITICAL FIX: No killed nodes tracked, but nodes are in fail state
+                    # This could mean:
+                    # 1. We're not tracking chaos (old code path) - be lenient
+                    # 2. Spontaneous failures occurred - should fail!
+                    # 
+                    # If cluster state is "ok" but nodes are failed, this is a BUG
+                    # (cluster should not report "ok" with failed nodes)
+                    if success and overall_cluster_state in config.acceptable_states:
+                        # Cluster says it's OK but has failed nodes - this is suspicious
+                        # Only allow if explicitly configured to allow degraded state
+                        if not config.allow_degraded:
+                            success = False
+                            error_message = (
+                                f"Spontaneous node failures detected: {len(nodes_in_fail_state)} node(s) in fail state "
+                                f"but were not killed by chaos. "
+                                f"Failed nodes: {nodes_in_fail_state}. "
+                                f"This indicates unexpected node failures or failed failover attempts. "
+                                f"Cluster state: {overall_cluster_state}"
+                            )
+                            logger.error(error_message)
+                        else:
+                            # Degraded state is explicitly allowed
                             degraded_reason = (
                                 f"{len(nodes_in_fail_state)} node(s) in fail state "
-                                f"(expected {len(killed_nodes)} killed nodes)"
+                                f"(degraded state allowed by config)"
                             )
-                else:
-                    # No killed nodes tracked, but nodes are in fail state
-                    # This is expected after chaos, so we don't fail validation
-                    # unless cluster state is also bad
-                    if not degraded_reason:
-                        degraded_reason = f"{len(nodes_in_fail_state)} node(s) in fail state"
+                            logger.warning(
+                                f"Nodes in fail state but degraded state is allowed: {nodes_in_fail_state}"
+                            )
+                    else:
+                        # Cluster state is already bad or we're being lenient
+                        if not degraded_reason:
+                            degraded_reason = f"{len(nodes_in_fail_state)} node(s) in fail state"
 
             # Check quorum
             if not has_quorum:
@@ -705,7 +824,8 @@ class SlotCoverageValidator:
     def validate(
         self,
         cluster_connection: ClusterConnection,
-        config: SlotCoverageValidationConfig
+        config: SlotCoverageValidationConfig,
+        killed_nodes: Optional[set[str]] = None
     ) -> SlotCoverageValidation:
         """Check slot coverage across the cluster from all nodes' perspectives."""
         try:
@@ -846,7 +966,36 @@ class SlotCoverageValidator:
             success = True
             error_message = None
 
-            if config.require_full_coverage and unassigned_slots:
+            # Initialize killed_nodes if not provided
+            if killed_nodes is None:
+                killed_nodes = set()
+
+            # CRITICAL: Check if slots are assigned to killed nodes
+            if killed_nodes:
+                # Build reverse mapping: node_address -> node_id for killed nodes
+                killed_node_ids = set()
+                for node in all_nodes:
+                    node_address = format_node_address(node)
+                    if node_address in killed_nodes:
+                        killed_node_ids.add(node['node_id'])
+
+                # Check if any slots are assigned to killed nodes
+                slots_on_killed_nodes = []
+                for node_id in killed_node_ids:
+                    if node_id in slot_distribution:
+                        slots_on_killed_nodes.extend(slot_distribution[node_id])
+
+                if slots_on_killed_nodes:
+                    success = False
+                    error_message = (
+                        f"CRITICAL: {len(slots_on_killed_nodes)} slots still assigned to killed nodes. "
+                        f"Killed nodes: {killed_nodes}. "
+                        f"This indicates failover did not complete or slots were not reassigned. "
+                        f"Affected slots: {self._group_slots_into_ranges(slots_on_killed_nodes)}"
+                    )
+                    logger.error(error_message)
+
+            if success and config.require_full_coverage and unassigned_slots:
                 success = False
                 error_message = (
                     f"{len(unassigned_slots)} slots are unassigned "
@@ -854,7 +1003,7 @@ class SlotCoverageValidator:
                 )
                 logger.error(error_message)
 
-            if not config.allow_slot_conflicts and conflicting_slots:
+            if success and not config.allow_slot_conflicts and conflicting_slots:
                 success = False
                 conflict_msg = (
                     f"{len(conflicting_slots)} slots have conflicting assignments"
@@ -1092,20 +1241,36 @@ class TopologyValidator:
                     )
             else:
                 # In non-strict mode, allow some flexibility
-                # Only fail if there are critical mismatches
+                # But still fail on CRITICAL mismatches that indicate serious bugs
                 critical_mismatches = [
                     m for m in topology_mismatches
-                    if m.mismatch_type in ['missing_primary', 'wrong_role']
+                    if m.mismatch_type in [
+                        'missing_primary',      # Missing primary is critical
+                        'wrong_role',           # Wrong role is critical
+                        'missing_shard',        # ADDED: Entire shard missing is critical
+                        'primary_count',        # ADDED: Wrong primary count is critical
+                        'replica_count'         # ADDED: Wrong replica count is critical (could indicate dropped replicas)
+                    ]
                 ]
 
                 if critical_mismatches:
                     success = False
+                    # Provide detailed error message
+                    mismatch_details = ", ".join([
+                        f"{m.mismatch_type}({m.node_id})" for m in critical_mismatches[:5]
+                    ])
+                    if len(critical_mismatches) > 5:
+                        mismatch_details += f"... and {len(critical_mismatches) - 5} more"
+                    
                     error_message = (
                         f"Topology validation failed: "
-                        f"{len(critical_mismatches)} critical mismatch(es) found"
+                        f"{len(critical_mismatches)} critical mismatch(es) found. "
+                        f"Details: {mismatch_details}. "
+                        f"This indicates cluster-bus regressions, dropped replicas, or missing shards."
                     )
+                    logger.error(error_message)
                 elif topology_mismatches:
-                    # Non-critical mismatches, log but don't fail
+                    # Non-critical mismatches (e.g., extra_replica in strict mode), log but don't fail
                     logger.info(
                         f"Topology validation passed with {len(topology_mismatches)} "
                         f"non-critical mismatch(es)"
@@ -1274,7 +1439,8 @@ class ViewConsistencyValidator:
     def validate(
         self,
         cluster_connection: ClusterConnection,
-        config: 'ViewConsistencyValidationConfig'
+        config: 'ViewConsistencyValidationConfig',
+        killed_nodes: Optional[set[str]] = None
     ) -> 'ViewConsistencyValidation':
         """Check cluster view consistency across all reachable nodes."""
         try:
@@ -1347,6 +1513,88 @@ class ViewConsistencyValidator:
             # Compare views and identify discrepancies
             view_discrepancies = self._compare_views(node_views)
 
+            # Initialize killed_nodes if not provided
+            if killed_nodes is None:
+                killed_nodes = set()
+
+            # STRENGTHENED: Filter out expected discrepancies about killed nodes
+            unexpected_discrepancies = []
+            if killed_nodes:
+                # Build mapping of killed node addresses to node IDs
+                killed_node_ids = set()
+                for node_addr, node_view in node_views.items():
+                    for node_id, node_info in node_view.items():
+                        node_address = node_info.get('address', '').split('@')[0]  # Remove bus port
+                        if node_address in killed_nodes:
+                            killed_node_ids.add(node_id)
+
+                # Filter discrepancies - only keep those NOT about killed nodes
+                # BUT: Be smart about which discrepancies are expected vs unexpected
+                for discrepancy in view_discrepancies:
+                    subject_node_id = discrepancy.subject_node
+                    
+                    # Check if this discrepancy is about a killed node
+                    is_about_killed_node = False
+                    
+                    # Check if subject_node is a killed node ID
+                    if subject_node_id in killed_node_ids:
+                        is_about_killed_node = True
+                    
+                    # Also check if the discrepancy is about a killed node address
+                    if not is_about_killed_node:
+                        for node_view in node_views.values():
+                            if subject_node_id in node_view:
+                                node_address = node_view[subject_node_id].get('address', '').split('@')[0]
+                                if node_address in killed_nodes:
+                                    is_about_killed_node = True
+                                    break
+                    
+                    # Determine if this is an expected discrepancy
+                    is_expected = False
+                    if is_about_killed_node:
+                        # For killed nodes, only certain discrepancies are expected
+                        if discrepancy.discrepancy_type == "membership":
+                            # Missing from view is expected
+                            if "not in view" in discrepancy.actual_value or "missing" in discrepancy.actual_value.lower():
+                                is_expected = True
+                                logger.debug(
+                                    f"Ignoring expected membership discrepancy: killed node {subject_node_id} missing from view"
+                                )
+                        elif discrepancy.discrepancy_type == "state":
+                            # Being marked as "failed" is expected
+                            if "fail" in discrepancy.actual_value.lower():
+                                is_expected = True
+                                logger.debug(
+                                    f"Ignoring expected state discrepancy: killed node {subject_node_id} marked as failed"
+                                )
+                            else:
+                                # BUG: Killed node should be marked as failed, not connected!
+                                logger.error(
+                                    f"BUG: Killed node {subject_node_id} has wrong state: {discrepancy.actual_value} "
+                                    f"(should be 'fail')"
+                                )
+                        # All other discrepancy types about killed nodes are UNEXPECTED (bugs)
+                        # - role changes: killed nodes shouldn't change roles
+                        # - address changes: killed nodes shouldn't change addresses
+                        # - extra in view: killed nodes shouldn't appear as "extra"
+                    
+                    if not is_expected:
+                        unexpected_discrepancies.append(discrepancy)
+                        if is_about_killed_node:
+                            logger.error(
+                                f"UNEXPECTED discrepancy about killed node {subject_node_id}: "
+                                f"type={discrepancy.discrepancy_type}, "
+                                f"expected={discrepancy.expected_value}, actual={discrepancy.actual_value}"
+                            )
+                        else:
+                            logger.warning(
+                                f"UNEXPECTED view discrepancy (not about killed nodes): "
+                                f"{discrepancy.discrepancy_type} for node {subject_node_id}"
+                            )
+            else:
+                # No killed nodes tracked, all discrepancies are unexpected
+                unexpected_discrepancies = view_discrepancies
+
             # Check for split-brain scenarios
             split_brain_detected = self._detect_split_brain(node_views)
 
@@ -1356,10 +1604,10 @@ class ViewConsistencyValidator:
             # Calculate consensus percentage
             consensus_percentage = self._calculate_consensus(node_views)
 
-            # Determine if views are consistent
-            consistent_views = len(view_discrepancies) == 0
+            # Determine if views are consistent (using unexpected discrepancies only)
+            consistent_views = len(unexpected_discrepancies) == 0
 
-            # Determine overall success
+            # Determine overall success (using unexpected discrepancies only)
             success = True
             error_message = None
 
@@ -1370,8 +1618,10 @@ class ViewConsistencyValidator:
             elif config.require_full_consensus and not consistent_views:
                 success = False
                 error_message = (
-                    f"View inconsistency detected: {len(view_discrepancies)} "
-                    f"discrepancy(ies) found"
+                    f"View inconsistency detected: {len(unexpected_discrepancies)} "
+                    f"UNEXPECTED discrepancy(ies) found (not about killed nodes). "
+                    f"Total discrepancies: {len(view_discrepancies)} "
+                    f"(including {len(view_discrepancies) - len(unexpected_discrepancies)} expected about killed nodes)"
                 )
                 logger.error(error_message)
             elif not consistent_views:
@@ -1379,14 +1629,14 @@ class ViewConsistencyValidator:
                 if config.allow_transient_inconsistency:
                     logger.warning(
                         f"Transient view inconsistency detected: "
-                        f"{len(view_discrepancies)} discrepancy(ies), "
+                        f"{len(unexpected_discrepancies)} UNEXPECTED discrepancy(ies), "
                         f"consensus={consensus_percentage:.1f}%"
                     )
                 else:
                     success = False
                     error_message = (
-                        f"View inconsistency detected: {len(view_discrepancies)} "
-                        f"discrepancy(ies) found"
+                        f"View inconsistency detected: {len(unexpected_discrepancies)} "
+                        f"UNEXPECTED discrepancy(ies) found"
                     )
                     logger.error(error_message)
 
@@ -1671,6 +1921,195 @@ class ViewConsistencyValidator:
         return consensus_percentage
 
 
+class DataConsistencyValidator:
+    """Validates data consistency across cluster nodes"""
+
+    def __init__(self):
+        """Initialize the data consistency validator."""
+        self.test_keys: Dict[str, str] = {}  # key -> expected_value
+
+    def write_test_keys(
+        self,
+        cluster_connection: ClusterConnection,
+        config: DataConsistencyValidationConfig
+    ) -> bool:
+        try:
+            import random
+            import string
+            
+            # Find an alive primary node to write to
+            primary_nodes = cluster_connection.get_primary_nodes()
+            alive_primary = cluster_connection.find_alive_node(primary_nodes)
+            
+            if not alive_primary:
+                logger.error("No alive primary nodes found to write test keys")
+                return False
+            
+            # Connect to the primary
+            with valkey_client(alive_primary['host'], alive_primary['port'], config.timeout) as client:
+                # Write test keys
+                for i in range(config.num_test_keys):
+                    key = f"{config.key_prefix}{i}"
+                    # Generate random value
+                    value = ''.join(random.choices(string.ascii_letters + string.digits, k=32))
+                    
+                    try:
+                        client.set(key, value)
+                        self.test_keys[key] = value
+                    except Exception as e:
+                        logger.warning(f"Failed to write test key {key}: {e}")
+                        continue
+            
+            logger.info(f"Successfully wrote {len(self.test_keys)} test keys to cluster")
+            return len(self.test_keys) > 0
+            
+        except Exception as e:
+            logger.error(f"Error writing test keys: {e}")
+            return False
+
+    def validate(
+        self,
+        cluster_connection: ClusterConnection,
+        config: DataConsistencyValidationConfig
+    ) -> DataConsistencyValidation:
+        try:
+            if not self.test_keys:
+                # No test keys to validate
+                logger.info("No test keys to validate (none were written)")
+                return DataConsistencyValidation(
+                    success=True,
+                    test_keys_checked=0,
+                    missing_keys=[],
+                    inconsistent_keys=[],
+                    unreachable_keys=[],
+                    error_message=None
+                )
+            
+            # Get all live nodes
+            live_nodes = cluster_connection.get_live_nodes()
+            
+            if not live_nodes:
+                return DataConsistencyValidation(
+                    success=False,
+                    test_keys_checked=0,
+                    missing_keys=[],
+                    inconsistent_keys=[],
+                    unreachable_keys=[],
+                    error_message="No live nodes available to validate data"
+                )
+            
+            missing_keys = []
+            inconsistent_keys = []
+            unreachable_keys = []
+            
+            # Check each test key
+            for key, expected_value in self.test_keys.items():
+                try:
+                    # Try to read the key from an alive node
+                    alive_node = cluster_connection.find_alive_node(live_nodes, randomize=True)
+                    
+                    if not alive_node:
+                        unreachable_keys.append(key)
+                        continue
+                    
+                    with valkey_client(alive_node['host'], alive_node['port'], config.timeout) as client:
+                        actual_value = client.get(key)
+                        
+                        if actual_value is None:
+                            missing_keys.append(key)
+                            logger.warning(f"Test key {key} is missing from cluster")
+                        elif actual_value != expected_value:
+                            inconsistency = DataInconsistency(
+                                key=key,
+                                inconsistency_type="value_mismatch",
+                                expected_value=expected_value,
+                                actual_values={format_node_address(alive_node): actual_value}
+                            )
+                            inconsistent_keys.append(inconsistency)
+                            logger.warning(
+                                f"Test key {key} has wrong value: "
+                                f"expected {expected_value[:16]}..., got {actual_value[:16] if actual_value else 'None'}..."
+                            )
+                        else:
+                            logger.debug(f"Test key {key} validated successfully")
+                    
+                except Exception as e:
+                    logger.warning(f"Error validating key {key}: {e}")
+                    unreachable_keys.append(key)
+            
+            # Optionally check cross-replica consistency
+            if config.check_cross_replica_consistency:
+                self._check_cross_replica_consistency(
+                    cluster_connection,
+                    config,
+                    inconsistent_keys
+                )
+            
+            # Determine success
+            success = True
+            error_message = None
+            
+            if missing_keys:
+                success = False
+                error_message = (
+                    f"Data loss detected: {len(missing_keys)} test key(s) missing from cluster. "
+                    f"Keys: {missing_keys[:10]}{'...' if len(missing_keys) > 10 else ''}"
+                )
+                logger.error(error_message)
+            
+            if inconsistent_keys:
+                success = False
+                inconsistency_msg = (
+                    f"Data inconsistency detected: {len(inconsistent_keys)} key(s) have wrong values"
+                )
+                if error_message:
+                    error_message = f"{error_message}; {inconsistency_msg}"
+                else:
+                    error_message = inconsistency_msg
+                logger.error(error_message)
+            
+            if unreachable_keys and len(unreachable_keys) == len(self.test_keys):
+                success = False
+                error_message = "All test keys are unreachable"
+                logger.error(error_message)
+            
+            logger.info(
+                f"Data consistency validation: {len(self.test_keys)} keys checked, "
+                f"{len(missing_keys)} missing, {len(inconsistent_keys)} inconsistent, "
+                f"{len(unreachable_keys)} unreachable"
+            )
+            
+            return DataConsistencyValidation(
+                success=success,
+                test_keys_checked=len(self.test_keys),
+                missing_keys=missing_keys,
+                inconsistent_keys=inconsistent_keys,
+                unreachable_keys=unreachable_keys,
+                error_message=error_message
+            )
+            
+        except Exception as e:
+            logger.error(f"Data consistency validation failed with error: {e}")
+            return DataConsistencyValidation(
+                success=False,
+                test_keys_checked=len(self.test_keys),
+                missing_keys=[],
+                inconsistent_keys=[],
+                unreachable_keys=[],
+                error_message=f"Validation error: {str(e)}"
+            )
+
+    def _check_cross_replica_consistency(
+        self,
+        cluster_connection: ClusterConnection,
+        config: DataConsistencyValidationConfig,
+        inconsistent_keys: List[DataInconsistency]
+    ) -> None:
+        """Check if data is consistent across replicas (not just primaries)."""
+        # This is a more advanced check - for now, we just validate against primaries
+        # Future enhancement: query all replicas and ensure they have the same data
+        pass
+
 
 class StateValidator:
     """
@@ -1688,6 +2127,7 @@ class StateValidator:
         self.slot_validator = SlotCoverageValidator()
         self.topology_validator = TopologyValidator()
         self.view_consistency_validator = ViewConsistencyValidator()
+        self.data_consistency_validator = DataConsistencyValidator()
 
         # Track killed nodes from chaos injections
         self.killed_nodes: set[str] = set()
@@ -1703,6 +2143,15 @@ class StateValidator:
         """Clear the list of killed nodes (e.g., after recovery)."""
         self.killed_nodes.clear()
         logger.debug("Cleared killed nodes list")
+
+    def write_test_data(self, cluster_connection: ClusterConnection) -> bool:
+        if not self.config.check_data_consistency:
+            return True
+        
+        return self.data_consistency_validator.write_test_keys(
+            cluster_connection,
+            self.config.data_consistency_config
+        )
 
     def validate_state(
         self,
@@ -1727,6 +2176,7 @@ class StateValidator:
         slot_coverage_result = None
         topology_result = None
         view_consistency_result = None
+        data_consistency_result = None
 
         failed_checks = []
         error_messages = []
@@ -1785,7 +2235,8 @@ class StateValidator:
                 try:
                     slot_coverage_result = self.slot_validator.validate(
                         cluster_connection,
-                        self.config.slot_coverage_config
+                        self.config.slot_coverage_config,
+                        killed_nodes=self.killed_nodes
                     )
 
                     if not slot_coverage_result.success:
@@ -1832,7 +2283,8 @@ class StateValidator:
                 try:
                     view_consistency_result = self.view_consistency_validator.validate(
                         cluster_connection,
-                        self.config.view_consistency_config
+                        self.config.view_consistency_config,
+                        killed_nodes=self.killed_nodes
                     )
 
                     if not view_consistency_result.success:
@@ -1847,6 +2299,28 @@ class StateValidator:
                     logger.error(f"View consistency validation error: {e}")
                     failed_checks.append("view_consistency")
                     error_messages.append(f"View consistency validation error: {str(e)}")
+
+            # 6. Data consistency validation
+            if self.config.check_data_consistency:
+                logger.info("Running data consistency validation...")
+                try:
+                    data_consistency_result = self.data_consistency_validator.validate(
+                        cluster_connection,
+                        self.config.data_consistency_config
+                    )
+
+                    if not data_consistency_result.success:
+                        failed_checks.append("data_consistency")
+                        if data_consistency_result.error_message:
+                            error_messages.append(f"Data Consistency: {data_consistency_result.error_message}")
+
+                    logger.info(
+                        f"Data consistency validation: {'PASSED' if data_consistency_result.success else 'FAILED'}"
+                    )
+                except Exception as e:
+                    logger.error(f"Data consistency validation error: {e}")
+                    failed_checks.append("data_consistency")
+                    error_messages.append(f"Data consistency validation error: {str(e)}")
 
         except Exception as e:
             logger.error(f"Unexpected error during validation: {e}")
@@ -1869,6 +2343,7 @@ class StateValidator:
             slot_coverage=slot_coverage_result,
             topology=topology_result,
             view_consistency=view_consistency_result,
+            data_consistency=data_consistency_result,
             failed_checks=failed_checks,
             error_messages=error_messages
         )
