@@ -113,7 +113,8 @@ class ReplicationValidator:
     def validate(
         self,
         cluster_connection: ClusterConnection,
-        config: ReplicationValidationConfig
+        config: ReplicationValidationConfig,
+        killed_nodes: Optional[set[str]] = None
     ) -> ReplicationValidation:
         """Check replication status for all replica nodes in the cluster."""
         try:
@@ -256,7 +257,41 @@ class ReplicationValidator:
             success = True
             error_message = None
 
-            if config.require_all_replicas_synced:
+            # Initialize killed_nodes if not provided
+            if killed_nodes is None:
+                killed_nodes = set()
+
+            # Validate that disconnected replicas match killed nodes (if tracking)
+            if killed_nodes and disconnected_replicas:
+                disconnected_set = set(disconnected_replicas)
+                
+                # Check for unexpected disconnections (replicas that died but weren't killed)
+                unexpected_disconnections = disconnected_set - killed_nodes
+                if unexpected_disconnections:
+                    success = False
+                    error_message = (
+                        f"Unexpected replica disconnections detected: {unexpected_disconnections}. "
+                        f"These replicas failed but were not killed by chaos. "
+                        f"Expected killed nodes: {killed_nodes}"
+                    )
+                    logger.error(error_message)
+                
+                # Check for unexpected survivals (killed nodes that are still connected)
+                # This catches bugs where killed nodes incorrectly rejoin or weren't properly killed
+                expected_dead_replicas = killed_nodes & {format_node_address(r) for r in replica_nodes}
+                actually_dead_replicas = disconnected_set & expected_dead_replicas
+                unexpected_survivals = expected_dead_replicas - actually_dead_replicas
+                
+                if unexpected_survivals and success:  # Only report if no other errors
+                    success = False
+                    error_message = (
+                        f"Killed replicas unexpectedly still connected: {unexpected_survivals}. "
+                        f"These nodes were killed by chaos but are still reachable/synced. "
+                        f"This indicates improper node termination or unexpected recovery."
+                    )
+                    logger.error(error_message)
+
+            if success and config.require_all_replicas_synced:
                 # Strict mode: fail if any replica is not synced
                 if not all_replicas_synced:
                     success = False
@@ -264,7 +299,7 @@ class ReplicationValidator:
                         f"Not all replicas synced: {len(lagging_replicas)} lagging, "
                         f"{len(disconnected_replicas)} disconnected"
                     )
-            else:
+            elif success:
                 # Lenient mode: fail if there are lagging replicas OR all replicas are disconnected
                 # This ensures that excessive lag is still detected and reported as a failure
                 if lagging_replicas:
@@ -1704,7 +1739,8 @@ class StateValidator:
                 try:
                     replication_result = self.replication_validator.validate(
                         cluster_connection,
-                        self.config.replication_config
+                        self.config.replication_config,
+                        killed_nodes=self.killed_nodes
                     )
 
                     if not replication_result.success:

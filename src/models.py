@@ -433,11 +433,6 @@ class ClusterConnection:
 
         return None
 
-
-# ============================================================================
-# Post-Operation Validation Models
-# ============================================================================
-
 @dataclass
 class ReplicationValidationConfig:
     """Configuration for replication validation"""
@@ -471,7 +466,7 @@ class SlotCoverageValidationConfig:
 @dataclass
 class TopologyValidationConfig:
     """Configuration for topology validation"""
-    strict_mode: bool = False  # Strict matching of expected topology
+    strict_mode: bool = True  # Strict matching of expected topology - catches role/shard bugs
     allow_failed_nodes: bool = True  # Allow nodes to be failed after chaos
     timeout: float = 10.0
 
@@ -481,7 +476,7 @@ class ViewConsistencyValidationConfig:
     """Configuration for view consistency validation"""
     require_full_consensus: bool = True
     allow_transient_inconsistency: bool = True
-    max_inconsistency_duration: float = 10.0
+    max_inconsistency_duration: float = 5.0  # Tighter window to catch slow convergence bugs
     timeout: float = 15.0
 
 

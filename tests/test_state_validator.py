@@ -339,3 +339,40 @@ def test_state_validation_result_with_exception():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_killed_nodes_tracking():
+    """Test that StateValidator tracks killed nodes correctly"""
+    config = StateValidationConfig()
+    validator = StateValidator(config)
+    
+    # Initially no killed nodes
+    assert len(validator.killed_nodes) == 0
+    
+    # Register killed nodes
+    validator.register_killed_node("127.0.0.1:6379")
+    validator.register_killed_node("127.0.0.1:6380")
+    
+    assert len(validator.killed_nodes) == 2
+    assert "127.0.0.1:6379" in validator.killed_nodes
+    assert "127.0.0.1:6380" in validator.killed_nodes
+    
+    # Clear killed nodes
+    validator.clear_killed_nodes()
+    assert len(validator.killed_nodes) == 0
+
+
+def test_replication_validator_accepts_killed_nodes():
+    """Test that ReplicationValidator accepts killed_nodes parameter"""
+    from src.fuzzer_engine.state_validator import ReplicationValidator
+    from src.models import ReplicationValidationConfig
+    
+    config = ReplicationValidationConfig()
+    validator = ReplicationValidator()
+    
+    # Verify the validate method accepts killed_nodes parameter
+    import inspect
+    sig = inspect.signature(validator.validate)
+    params = list(sig.parameters.keys())
+    
+    assert 'killed_nodes' in params, "ReplicationValidator.validate should accept killed_nodes parameter"
