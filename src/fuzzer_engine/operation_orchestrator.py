@@ -179,6 +179,7 @@ class OperationOrchestrator(IOperationOrchestrator):
                             host=node['host'],
                             port=node['port'],
                             socket_timeout=3,
+                            socket_connect_timeout=3,
                             decode_responses=True
                         )
                         

@@ -300,6 +300,7 @@ class StateValidator(IStateValidator):
                     host=replica['host'],
                     port=replica['port'],
                     socket_timeout=2,  # Reduced timeout for dead nodes
+                    socket_connect_timeout=2,  # Fast-fail on unreachable nodes
                     decode_responses=True
                 )
                 
@@ -376,6 +377,7 @@ class StateValidator(IStateValidator):
                         host=node['host'],
                         port=node['port'],
                         socket_timeout=2,  # Reduced timeout for dead nodes
+                        socket_connect_timeout=2,  # Fast-fail on unreachable nodes
                         decode_responses=True
                     )
                     client.ping()
@@ -443,6 +445,7 @@ class StateValidator(IStateValidator):
                         host=node['host'],
                         port=node['port'],
                         socket_timeout=2,  # Reduced timeout
+                        socket_connect_timeout=2,  # Fast-fail on unreachable nodes
                         decode_responses=True
                     )
                     

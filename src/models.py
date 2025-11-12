@@ -285,7 +285,12 @@ class ClusterConnection:
         
         for node_info in self.startup_nodes:
             try:
-                client = valkey.Valkey(host=node_info['host'], port=node_info['port'], socket_timeout=2)
+                client = valkey.Valkey(
+                    host=node_info['host'],
+                    port=node_info['port'],
+                    socket_timeout=2,
+                    socket_connect_timeout=2
+                )
                 cluster_nodes_raw = client.execute_command('CLUSTER', 'NODES')
                 client.close()
                 
@@ -401,6 +406,7 @@ class ClusterConnection:
                 host=host,
                 port=port,
                 socket_timeout=timeout,
+                socket_connect_timeout=timeout,  # Fast-fail on unreachable nodes
                 decode_responses=True
             )
             client.ping()
