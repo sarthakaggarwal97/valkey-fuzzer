@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Any, Optional
 from enum import Enum
 import subprocess
+import random
 import valkey
 
 
@@ -401,7 +402,6 @@ class ClusterConnection:
     
     def is_node_alive(self, host: str, port: int, timeout: float = 2.0) -> bool:
         try:
-            import valkey
             client = valkey.Valkey(
                 host=host,
                 port=port,
@@ -423,7 +423,6 @@ class ClusterConnection:
         node_list = nodes.copy()
         
         if randomize:
-            import random
             random.shuffle(node_list)
         
         for node in node_list:

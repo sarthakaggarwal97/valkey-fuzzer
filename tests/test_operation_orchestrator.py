@@ -484,6 +484,8 @@ def test_execute_failover_shard_based_matching():
     ]
     mock_connection.get_current_nodes.return_value = nodes_list
     mock_connection.get_live_nodes.return_value = nodes_list
+    # Mock find_alive_node to return the replica
+    mock_connection.find_alive_node.return_value = nodes_list[2]  # Return the replica
     
     orchestrator.set_cluster_connection(mock_connection)
     
@@ -544,6 +546,8 @@ def test_execute_failover_port_matching():
     ]
     mock_connection.get_current_nodes.return_value = nodes_list
     mock_connection.get_live_nodes.return_value = nodes_list
+    # Mock find_alive_node to return the replica
+    mock_connection.find_alive_node.return_value = nodes_list[1]  # Return the replica
     
     orchestrator.set_cluster_connection(mock_connection)
     
