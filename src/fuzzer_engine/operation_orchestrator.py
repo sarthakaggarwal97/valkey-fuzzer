@@ -179,6 +179,7 @@ class OperationOrchestrator(IOperationOrchestrator):
                             host=node['host'],
                             port=node['port'],
                             socket_timeout=3,
+                            socket_connect_timeout=3,
                             decode_responses=True
                         )
                         
@@ -216,8 +217,15 @@ class OperationOrchestrator(IOperationOrchestrator):
                              f"Failover requires at least one replica to promote.")
                 return False
             
-            # Execute failover from first replica
-            replica = replica_nodes[0]
+            # Find a random alive replica to execute failover
+            replica = self.cluster_connection.find_alive_node(replica_nodes, randomize=True)
+            
+            if not replica:
+                logging.error(f"Cannot execute failover: No alive replicas found for primary {operation.target_node}")
+                return False
+            
+            logging.info(f"Selected alive replica at port {replica['port']} for failover")
+            
             logging.info(f"Executing failover from replica at port {replica['port']}")
             
             replica_client = valkey.Valkey(

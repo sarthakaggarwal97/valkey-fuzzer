@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Any, Optional
 from enum import Enum
 import subprocess
+import random
 import valkey
 
 
@@ -285,7 +286,12 @@ class ClusterConnection:
         
         for node_info in self.startup_nodes:
             try:
-                client = valkey.Valkey(host=node_info['host'], port=node_info['port'], socket_timeout=2)
+                client = valkey.Valkey(
+                    host=node_info['host'],
+                    port=node_info['port'],
+                    socket_timeout=2,
+                    socket_connect_timeout=2
+                )
                 cluster_nodes_raw = client.execute_command('CLUSTER', 'NODES')
                 client.close()
                 
@@ -393,3 +399,34 @@ class ClusterConnection:
     def get_replica_nodes(self) -> List[Dict]:
         """Get current replica nodes"""
         return [node for node in self.get_current_nodes() if node['role'] == 'replica']
+    
+    def is_node_alive(self, host: str, port: int, timeout: float = 2.0) -> bool:
+        try:
+            client = valkey.Valkey(
+                host=host,
+                port=port,
+                socket_timeout=timeout,
+                socket_connect_timeout=timeout,  # Fast-fail on unreachable nodes
+                decode_responses=True
+            )
+            client.ping()
+            client.close()
+            return True
+        except Exception:
+            return False
+    
+    def find_alive_node(self, nodes: List[Dict], randomize: bool = True) -> Optional[Dict]:
+        if not nodes:
+            return None
+        
+        # Make a copy to avoid modifying the original list
+        node_list = nodes.copy()
+        
+        if randomize:
+            random.shuffle(node_list)
+        
+        for node in node_list:
+            if self.is_node_alive(node['host'], node['port']):
+                return node
+        
+        return None
