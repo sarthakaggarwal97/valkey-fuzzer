@@ -1,6 +1,9 @@
 import logging
 import time
+import random
+import string
 import valkey
+from collections import Counter
 from typing import Dict, List, Optional, Callable, TypeVar, Any
 from contextlib import contextmanager
 from ..models import (
@@ -911,7 +914,6 @@ class SlotCoverageValidator:
 
                 if slot_owners:
                     # Use most common owner (consensus)
-                    from collections import Counter
                     owner_counts = Counter(slot_owners)
                     consensus_owner = owner_counts.most_common(1)[0][0]
 
@@ -1934,9 +1936,6 @@ class DataConsistencyValidator:
         config: DataConsistencyValidationConfig
     ) -> bool:
         try:
-            import random
-            import string
-            
             # Find an alive primary node to write to
             primary_nodes = cluster_connection.get_primary_nodes()
             alive_primary = cluster_connection.find_alive_node(primary_nodes)
