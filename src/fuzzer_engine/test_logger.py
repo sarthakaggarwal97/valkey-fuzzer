@@ -150,6 +150,180 @@ class FuzzerLogger:
                    f"replicas_synced={validation_result.replica_sync.all_replicas_synced}")
         self._write_log_to_disk(self.current_test_id)
     
+    def log_state_validation_result(self, validation_result, operation_number: int) -> None:
+        """Log a state validation result with detailed sub-check information."""
+        if not self.current_test_id:
+            logger.warning("No active test to log state validation result to")
+            return
+        
+        # Initialize state_validation_results list if not exists
+        if 'state_validation_results' not in self.test_logs[self.current_test_id]:
+            self.test_logs[self.current_test_id]['state_validation_results'] = []
+        
+        # Build detailed validation log
+        validation_log = {
+            'operation_number': operation_number,
+            'timestamp': validation_result.validation_timestamp,
+            'datetime': datetime.fromtimestamp(validation_result.validation_timestamp).isoformat(),
+            'duration': validation_result.validation_duration,
+            'overall_success': validation_result.overall_success,
+            'is_critical_failure': validation_result.is_critical_failure(),
+            'failed_checks': validation_result.failed_checks,
+            'error_messages': validation_result.error_messages,
+            'checks': {}
+        }
+        
+        # Log replication validation details
+        if validation_result.replication:
+            repl = validation_result.replication
+            validation_log['checks']['replication'] = {
+                'success': repl.success,
+                'all_replicas_synced': repl.all_replicas_synced,
+                'max_lag': repl.max_lag,
+                'lagging_replicas': [
+                    {
+                        'replica_node_id': lag.replica_node_id,
+                        'replica_address': lag.replica_address,
+                        'primary_node_id': lag.primary_node_id,
+                        'primary_address': lag.primary_address,
+                        'lag_seconds': lag.lag_seconds,
+                        'replication_offset_diff': lag.replication_offset_diff,
+                        'link_status': lag.link_status
+                    }
+                    for lag in repl.lagging_replicas
+                ],
+                'disconnected_replicas': repl.disconnected_replicas,
+                'error_message': repl.error_message
+            }
+        
+        # Log cluster status validation details
+        if validation_result.cluster_status:
+            status = validation_result.cluster_status
+            validation_log['checks']['cluster_status'] = {
+                'success': status.success,
+                'cluster_state': status.cluster_state,
+                'nodes_in_fail_state': status.nodes_in_fail_state,
+                'has_quorum': status.has_quorum,
+                'degraded_reason': status.degraded_reason,
+                'error_message': status.error_message
+            }
+        
+        # Log slot coverage validation details
+        if validation_result.slot_coverage:
+            slots = validation_result.slot_coverage
+            validation_log['checks']['slot_coverage'] = {
+                'success': slots.success,
+                'total_slots_assigned': slots.total_slots_assigned,
+                'unassigned_slots_count': len(slots.unassigned_slots),
+                'unassigned_slots': slots.unassigned_slots[:100] if len(slots.unassigned_slots) > 100 else slots.unassigned_slots,  # Limit for readability
+                'conflicting_slots': [
+                    {
+                        'slot': conflict.slot,
+                        'conflicting_nodes': conflict.conflicting_nodes
+                    }
+                    for conflict in slots.conflicting_slots
+                ],
+                'slot_distribution': {
+                    node_id: len(slot_list)
+                    for node_id, slot_list in slots.slot_distribution.items()
+                },
+                'error_message': slots.error_message
+            }
+        
+        # Log topology validation details
+        if validation_result.topology:
+            topo = validation_result.topology
+            validation_log['checks']['topology'] = {
+                'success': topo.success,
+                'expected_primaries': topo.expected_primaries,
+                'actual_primaries': topo.actual_primaries,
+                'expected_replicas': topo.expected_replicas,
+                'actual_replicas': topo.actual_replicas,
+                'topology_mismatches': [
+                    {
+                        'mismatch_type': mismatch.mismatch_type,
+                        'node_id': mismatch.node_id,
+                        'expected': mismatch.expected,
+                        'actual': mismatch.actual
+                    }
+                    for mismatch in topo.topology_mismatches
+                ],
+                'error_message': topo.error_message
+            }
+        
+        # Log view consistency validation details
+        if validation_result.view_consistency:
+            view = validation_result.view_consistency
+            validation_log['checks']['view_consistency'] = {
+                'success': view.success,
+                'nodes_checked': view.nodes_checked,
+                'consistent_views': view.consistent_views,
+                'split_brain_detected': view.split_brain_detected,
+                'consensus_percentage': view.consensus_percentage,
+                'view_discrepancies': [
+                    {
+                        'discrepancy_type': disc.discrepancy_type,
+                        'node_reporting': disc.node_reporting,
+                        'subject_node': disc.subject_node,
+                        'expected_value': disc.expected_value,
+                        'actual_value': disc.actual_value
+                    }
+                    for disc in view.view_discrepancies[:50]  # Limit for readability
+                ],
+                'error_message': view.error_message
+            }
+        
+        # Add to test logs
+        self.test_logs[self.current_test_id]['state_validation_results'].append(validation_log)
+        
+        # Log human-readable summary
+        status_str = "PASSED" if validation_result.overall_success else "FAILED"
+        critical_str = " (CRITICAL)" if validation_result.is_critical_failure() else ""
+        
+        logger.info(
+            f"Logged state validation result for operation {operation_number}: "
+            f"{status_str}{critical_str} - Duration: {validation_result.validation_duration:.2f}s"
+        )
+        
+        if not validation_result.overall_success:
+            logger.info(f"  Failed checks: {', '.join(validation_result.failed_checks)}")
+            
+            # Log detailed failure information for each check
+            if validation_result.replication and not validation_result.replication.success:
+                logger.info(
+                    f"  - Replication: {len(validation_result.replication.lagging_replicas)} lagging, "
+                    f"{len(validation_result.replication.disconnected_replicas)} disconnected"
+                )
+            
+            if validation_result.cluster_status and not validation_result.cluster_status.success:
+                logger.info(
+                    f"  - Cluster Status: state={validation_result.cluster_status.cluster_state}, "
+                    f"failed_nodes={len(validation_result.cluster_status.nodes_in_fail_state)}"
+                )
+            
+            if validation_result.slot_coverage and not validation_result.slot_coverage.success:
+                logger.info(
+                    f"  - Slot Coverage: {validation_result.slot_coverage.total_slots_assigned}/16384 assigned, "
+                    f"{len(validation_result.slot_coverage.unassigned_slots)} unassigned, "
+                    f"{len(validation_result.slot_coverage.conflicting_slots)} conflicts"
+                )
+            
+            if validation_result.topology and not validation_result.topology.success:
+                logger.info(
+                    f"  - Topology: {validation_result.topology.actual_primaries}/{validation_result.topology.expected_primaries} primaries, "
+                    f"{validation_result.topology.actual_replicas}/{validation_result.topology.expected_replicas} replicas, "
+                    f"{len(validation_result.topology.topology_mismatches)} mismatches"
+                )
+            
+            if validation_result.view_consistency and not validation_result.view_consistency.success:
+                logger.info(
+                    f"  - View Consistency: {validation_result.view_consistency.nodes_checked} nodes checked, "
+                    f"consensus={validation_result.view_consistency.consensus_percentage:.1f}%, "
+                    f"split_brain={validation_result.view_consistency.split_brain_detected}"
+                )
+        
+        self._write_log_to_disk(self.current_test_id)
+    
     def log_cluster_state_snapshot(self, cluster_status: ClusterStatus, label: str = "") -> None:
         """Log a snapshot of cluster state at a specific point in time."""
         if not self.current_test_id:

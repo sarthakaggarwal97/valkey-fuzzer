@@ -132,8 +132,11 @@ class TestFuzzerEngineE2E:
         # Check validation results
         if result.validation_results:
             final_validation = result.validation_results[-1]
-            logger.info(f"Final validation - Slot coverage: {final_validation.slot_coverage}")
-            logger.info(f"Final validation - Replicas synced: {final_validation.replica_sync.all_replicas_synced}")
+            # StateValidationResult has nested objects
+            if final_validation.slot_coverage:
+                logger.info(f"Final validation - Slot coverage: {final_validation.slot_coverage.success}")
+            if final_validation.replication:
+                logger.info(f"Final validation - Replicas synced: {final_validation.replication.all_replicas_synced}")
     
     def test_dsl_scenario_from_file(self):
         """
@@ -318,8 +321,10 @@ class TestFuzzerEngineE2E:
         if result.validation_results:
             logger.info("Validation results:")
             for i, validation in enumerate(result.validation_results):
-                logger.info(f"  Validation {i+1}: Slot coverage={validation.slot_coverage}, "
-                          f"Convergence time={validation.convergence_time:.2f}s")
+                slot_success = validation.slot_coverage.success if validation.slot_coverage else False
+                logger.info(f"  Validation {i+1}: Overall success={validation.overall_success}, "
+                          f"Slot coverage={slot_success}, "
+                          f"Duration={validation.validation_duration:.2f}s")
         
         if result.error_message:
             logger.warning(f"Error: {result.error_message}")

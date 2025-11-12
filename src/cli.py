@@ -14,7 +14,7 @@ from datetime import datetime
 
 from .main import ClusterBusFuzzer
 from .fuzzer_engine import DSLLoader
-from .models import ClusterConfig, ValidationConfig, WorkloadConfig, ExecutionResult, ValidationResult
+from .models import ClusterConfig, ValidationConfig, WorkloadConfig, ExecutionResult, ValidationResult, StateValidationResult
 
 
 class FuzzerCLI:
@@ -232,13 +232,55 @@ class FuzzerCLI:
         if result.validation_results:
             print("\nValidation Results:")
             final = result.validation_results[-1]
-            print(f"  Slot Coverage: {'[PASS]' if final.slot_coverage else '[FAIL]'}")
-            print(f"  Slot Conflicts: {len(final.slot_conflicts)}")
-            print(f"  Replicas Synced: {'[PASS]' if final.replica_sync.all_replicas_synced else '[FAIL]'}")
-            print(f"  Nodes Connected: {'[PASS]' if final.node_connectivity.all_nodes_connected else '[FAIL]'}")
-            print(f"  Data Consistent: {'[PASS]' if final.data_consistency.consistent else '[FAIL]'}")
-            print(f"  Convergence Time: {final.convergence_time:.2f}s")
-            print(f"  Replication Lag: {final.replication_lag:.2f}s")
+            
+            # Check if this is the new StateValidationResult or old ValidationResult
+            if hasattr(final, 'overall_success'):
+                # New StateValidationResult
+                print(f"  Overall: {'[PASS]' if final.overall_success else '[FAIL]'}")
+                
+                if final.slot_coverage:
+                    print(f"  Slot Coverage: {'[PASS]' if final.slot_coverage.success else '[FAIL]'}")
+                    if final.slot_coverage.conflicting_slots:
+                        print(f"    Conflicts: {len(final.slot_coverage.conflicting_slots)}")
+                    if final.slot_coverage.unassigned_slots:
+                        print(f"    Unassigned: {len(final.slot_coverage.unassigned_slots)}")
+                
+                if final.replication:
+                    print(f"  Replication: {'[PASS]' if final.replication.success else '[FAIL]'}")
+                    print(f"    All Synced: {final.replication.all_replicas_synced}")
+                    print(f"    Max Lag: {final.replication.max_lag:.2f}s")
+                    if final.replication.disconnected_replicas:
+                        print(f"    Disconnected: {len(final.replication.disconnected_replicas)}")
+                
+                if final.cluster_status:
+                    print(f"  Cluster Status: {'[PASS]' if final.cluster_status.success else '[FAIL]'}")
+                    print(f"    State: {final.cluster_status.cluster_state}")
+                    print(f"    Quorum: {final.cluster_status.has_quorum}")
+                
+                if final.topology:
+                    print(f"  Topology: {'[PASS]' if final.topology.success else '[FAIL]'}")
+                    print(f"    Primaries: {final.topology.actual_primaries}/{final.topology.expected_primaries}")
+                    print(f"    Replicas: {final.topology.actual_replicas}/{final.topology.expected_replicas}")
+                
+                if final.view_consistency:
+                    print(f"  View Consistency: {'[PASS]' if final.view_consistency.success else '[FAIL]'}")
+                    print(f"    Consensus: {final.view_consistency.consensus_percentage:.1f}%")
+                    if final.view_consistency.split_brain_detected:
+                        print(f"SPLIT-BRAIN DETECTED!")
+                
+                print(f"  Duration: {final.validation_duration:.2f}s")
+                
+                if final.failed_checks:
+                    print(f"  Failed Checks: {', '.join(final.failed_checks)}")
+            else:
+                # Old ValidationResult (backward compatibility)
+                print(f"  Slot Coverage: {'[PASS]' if final.slot_coverage else '[FAIL]'}")
+                print(f"  Slot Conflicts: {len(final.slot_conflicts)}")
+                print(f"  Replicas Synced: {'[PASS]' if final.replica_sync.all_replicas_synced else '[FAIL]'}")
+                print(f"  Nodes Connected: {'[PASS]' if final.node_connectivity.all_nodes_connected else '[FAIL]'}")
+                print(f"  Data Consistent: {'[PASS]' if final.data_consistency.consistent else '[FAIL]'}")
+                print(f"  Convergence Time: {final.convergence_time:.2f}s")
+                print(f"  Replication Lag: {final.replication_lag:.2f}s")
     
     def _print_aggregate_results(self, results: list):
         """Print aggregate statistics for multiple test runs"""

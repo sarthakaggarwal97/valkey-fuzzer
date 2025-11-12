@@ -1,490 +1,1930 @@
-"""
-State Validator - Validates cluster state and data consistency
-"""
-import time
 import logging
+import time
 import valkey
-from typing import List, Dict, Optional, Set
+from typing import Dict, List, Optional, Callable, TypeVar, Any
+from contextlib import contextmanager
 from ..models import (
-    ValidationResult, ValidationConfig, ClusterStatus, NodeInfo,
-    SlotConflict, ReplicationStatus, ConnectivityStatus, ConsistencyStatus,
-    ClusterConnection
+    ClusterConnection,
+    ReplicationValidation,
+    ReplicationValidationConfig,
+    ReplicaLagInfo,
+    ClusterStatusValidation,
+    ClusterStatusValidationConfig,
+    SlotCoverageValidation,
+    SlotCoverageValidationConfig,
+    SlotConflict,
+    TopologyValidation,
+    TopologyValidationConfig,
+    TopologyMismatch,
+    ViewConsistencyValidation,
+    ViewDiscrepancy,
+    ExpectedTopology,
+    StateValidationConfig,
+    StateValidationResult
 )
-from ..interfaces import IStateValidator
 
-logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+T = TypeVar('T')
+@contextmanager
+def valkey_client(host: str, port: int, timeout: float, decode_responses: bool = True):
+    client = None
+    try:
+        client = valkey.Valkey(
+            host=host,
+            port=port,
+            socket_timeout=timeout,
+            decode_responses=decode_responses
+        )
+        yield client
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass  # Ignore errors during cleanup
 
 
-class StateValidator(IStateValidator):
-    """Validates cluster state and data consistency"""
-    
-    def __init__(self, validation_config: Optional[ValidationConfig] = None):
-        """
-        Initialize state validator
-        """
-        self.validation_config = validation_config or ValidationConfig()
-        self.validation_cache: Dict[str, ValidationResult] = {}
-    
-    def validate_cluster_state(self, cluster_id: str, cluster_connection: ClusterConnection = None) -> ValidationResult:
-        """
-        Perform comprehensive cluster state validation
-        """
-        start_time = time.time()
-        
-        if not cluster_connection:
-            logging.error("No cluster connection provided")
-            return self._create_failed_validation(start_time)
-        
-        # Get ALL cluster nodes (including failed ones) for accurate validation
-        current_nodes = cluster_connection.get_current_nodes(include_failed=True)
-        if not current_nodes:
-            logging.error("No nodes available in cluster")
-            return self._create_failed_validation(start_time)
-        
-        # Check if any primary nodes are dead and wait for automatic failover if they are
-        dead_primaries = [n for n in current_nodes if n.get('role') == 'primary' and n.get('status') == 'failed']
-        if dead_primaries:
-            failover_wait = 15.0
-            logging.info(f"Detected {len(dead_primaries)} dead primary node(s), waiting {failover_wait}s for automatic failover")
-            time.sleep(failover_wait)
-            # Refresh node list after waiting
-            current_nodes = cluster_connection.get_current_nodes(include_failed=True)
-        
-        # Create cluster status from current nodes
-        cluster_status = self._build_cluster_status(cluster_id, current_nodes)
-        
-        # Perform validation checks
-        slot_coverage = True
-        slot_conflicts = []
-        if self.validation_config.check_slot_coverage or self.validation_config.check_slot_conflicts:
-            slot_coverage, slot_conflicts = self._validate_slots(cluster_status, current_nodes)
-        
-        replica_sync = ReplicationStatus(all_replicas_synced=True, max_lag=0.0, lagging_replicas=[])
-        if self.validation_config.check_replica_sync:
-            replica_sync = self._validate_replica_sync(cluster_status, current_nodes)
-        
-        node_connectivity = ConnectivityStatus(
-            all_nodes_connected=True,
-            disconnected_nodes=[],
-            partition_groups=[]
-        )
-        if self.validation_config.check_node_connectivity:
-            node_connectivity = self._validate_node_connectivity(cluster_status, current_nodes)
-        
-        data_consistency = ConsistencyStatus(
-            consistent=True,
-            inconsistent_keys=[],
-            node_data_mismatches={}
-        )
-        if self.validation_config.check_data_consistency:
-            data_consistency = self._validate_data_consistency(cluster_status, current_nodes)
-        
-        # Calculate convergence time and replication lag
-        convergence_time = time.time() - start_time
-        replication_lag = replica_sync.max_lag
-        
-        validation_result = ValidationResult(
-            slot_coverage=slot_coverage,
-            slot_conflicts=slot_conflicts,
-            replica_sync=replica_sync,
-            node_connectivity=node_connectivity,
-            data_consistency=data_consistency,
-            convergence_time=convergence_time,
-            replication_lag=replication_lag,
-            validation_timestamp=time.time()
-        )
-        
-        # Cache result
-        self.validation_cache[cluster_id] = validation_result
-        
-        return validation_result
-    
-    def _build_cluster_status(self, cluster_id: str, current_nodes: List[Dict]) -> ClusterStatus:
-        """Build ClusterStatus from current nodes"""
-        # Convert current nodes to NodeInfo objects (simplified)
-        node_infos = []
-        for node in current_nodes:
-            node_info = NodeInfo(
-                node_id=node.get('node_id', 'unknown'),
-                role=node.get('role', 'unknown'),
-                shard_id=0,  # Not available from current_nodes
-                port=node.get('port', 0),
-                bus_port=node.get('port', 0) + 10000,
-                pid=0,  # Not available
-                process=None,
-                data_dir="",
-                log_file=""
-            )
-            node_infos.append(node_info)
-        
-        return ClusterStatus(
-            cluster_id=cluster_id,
-            nodes=node_infos,
-            total_slots_assigned=0,  # Will be calculated
-            is_healthy=True,
-            formation_complete=True
-        )
-    
-    def _create_failed_validation(self, start_time: float) -> ValidationResult:
-        """Create a failed validation result"""
-        return ValidationResult(
-            slot_coverage=False,
-            slot_conflicts=[],
-            replica_sync=ReplicationStatus(
-                all_replicas_synced=False,
-                max_lag=float('inf'),
-                lagging_replicas=[]
-            ),
-            node_connectivity=ConnectivityStatus(
-                all_nodes_connected=False,
-                disconnected_nodes=[],
-                partition_groups=[]
-            ),
-            data_consistency=ConsistencyStatus(
-                consistent=False,
-                inconsistent_keys=[],
-                node_data_mismatches={}
-            ),
-            convergence_time=time.time() - start_time,
-            replication_lag=float('inf'),
-            validation_timestamp=time.time()
-        )
-    
-    def _validate_slots(self, cluster_status: ClusterStatus, current_nodes: List[Dict]) -> tuple:
-        """
-        Validate slot coverage and conflicts
-        
-        Returns:
-            Tuple of (slot_coverage: bool, slot_conflicts: List[SlotConflict])
-        """
-        if not current_nodes:
-            return False, []
-        
-        # Find a live node to query
-        live_node = None
-        for node in current_nodes:
-            if node.get('status') == 'connected':
-                live_node = node
-                break
-        
-        if not live_node:
-            logging.error("No live nodes available for slot validation")
-            return False, []
-        
+def safe_query_node(
+    node: Dict,
+    timeout: float,
+    query_func: Callable[[valkey.Valkey], T],
+    error_message: str = "Error querying node"
+) -> Optional[T]:
+    try:
+        with valkey_client(node['host'], node['port'], timeout) as client:
+            return query_func(client)
+    except Exception as e:
+        logger.debug(f"{error_message} {node['host']}:{node['port']}: {e}")
+        return None
+
+
+def format_node_address(node: Dict) -> str:
+    return f"{node['host']}:{node['port']}"
+
+
+def parse_slot_range(slot_info: str) -> List[int]:
+    try:
+        if '-' in slot_info:
+            start, end = slot_info.split('-')
+            return list(range(int(start), int(end) + 1))
+        return [int(slot_info)]
+    except (ValueError, IndexError):
+        return []
+
+
+def parse_cluster_nodes_line(line: str) -> Optional[Dict[str, Any]]:
+    if not line.strip():
+        return None
+
+    parts = line.split()
+    if len(parts) < 8:
+        return None
+
+    return {
+        'node_id': parts[0],
+        'address': parts[1],
+        'flags': parts[2],
+        'master_id': parts[3] if parts[3] != '-' else None,
+        'ping_sent': parts[4],
+        'pong_recv': parts[5],
+        'config_epoch': parts[6],
+        'link_state': parts[7],
+        'slots': parts[8:] if len(parts) > 8 else [],
+        'is_myself': 'myself' in parts[2],
+        'is_master': 'master' in parts[2],
+        'is_slave': 'slave' in parts[2],
+        'is_fail': 'fail' in parts[2]
+    }
+
+
+def parse_cluster_nodes_output(cluster_nodes_raw: str) -> List[Dict[str, Any]]:
+    nodes = []
+    for line in cluster_nodes_raw.split('\n'):
+        node = parse_cluster_nodes_line(line)
+        if node:
+            nodes.append(node)
+    return nodes
+
+
+class ReplicationValidator:
+    """Validates replication status between primaries and replicas"""
+
+    def validate(
+        self,
+        cluster_connection: ClusterConnection,
+        config: ReplicationValidationConfig
+    ) -> ReplicationValidation:
+        """Check replication status for all replica nodes in the cluster."""
         try:
-            # Connect to a live node to get cluster info
-            client = valkey.Valkey(
-                host=live_node['host'],
-                port=live_node['port'],
-                socket_timeout=5,
-                decode_responses=True
+            # Get all nodes from cluster INCLUDING failed ones to detect dead replicas
+            all_nodes = cluster_connection.get_current_nodes(include_failed=True)
+            
+            # Check if we could fetch any nodes at all
+            if not all_nodes:
+                # Unable to contact cluster - this is a failure
+                logger.error("Unable to fetch any nodes from cluster for replication validation")
+                return ReplicationValidation(
+                    success=False,
+                    all_replicas_synced=False,
+                    max_lag=-1.0,
+                    lagging_replicas=[],
+                    disconnected_replicas=[],
+                    error_message="Unable to contact cluster - no nodes reachable"
+                )
+            
+            replica_nodes = [node for node in all_nodes if node['role'] == 'replica']
+            
+            if not replica_nodes:
+                # Cluster is reachable but no replicas configured
+                logger.info("No replicas configured in cluster")
+                return ReplicationValidation(
+                    success=True,
+                    all_replicas_synced=True,
+                    max_lag=0.0,
+                    lagging_replicas=[],
+                    disconnected_replicas=[],
+                    error_message=None
+                )
+
+            # Build primary node lookup
+            primary_nodes = {node['node_id']: node for node in all_nodes if node['role'] == 'primary'}
+
+            lagging_replicas: List[ReplicaLagInfo] = []
+            disconnected_replicas: List[str] = []
+            max_lag = 0.0
+            all_replicas_synced = True
+
+            # Check each replica
+            for replica in replica_nodes:
+                replica_address = format_node_address(replica)
+
+                # Check if replica is marked as failed in topology
+                if replica.get('status') == 'failed':
+                    disconnected_replicas.append(replica_address)
+                    all_replicas_synced = False
+                    logger.warning(f"Replica {replica_address} is in failed state")
+                    continue
+
+                try:
+                    # Connect to replica and get replication info
+                    with valkey_client(replica['host'], replica['port'], config.timeout) as client:
+                        repl_info = client.info('replication')
+
+                    # Extract replication metrics
+                    master_link_status = repl_info.get('master_link_status', 'down')
+                    master_last_io_seconds_ago = repl_info.get('master_last_io_seconds_ago', -1)
+
+                    # Get master node ID from cluster nodes output
+                    master_node_id = self._get_master_node_id(replica, cluster_connection)
+
+                    if master_node_id and master_node_id in primary_nodes:
+                        primary_node = primary_nodes[master_node_id]
+                        primary_address = format_node_address(primary_node)
+                    else:
+                        primary_address = "unknown"
+
+                    # Check if replica is disconnected
+                    if master_link_status != 'up':
+                        disconnected_replicas.append(replica_address)
+                        all_replicas_synced = False
+                        logger.warning(
+                            f"Replica {replica_address} disconnected from primary "
+                            f"(link_status={master_link_status})"
+                        )
+                        continue
+
+                    # Calculate lag - cast to int first since decode_responses=True returns strings
+                    try:
+                        lag_seconds = float(master_last_io_seconds_ago) if int(master_last_io_seconds_ago) >= 0 else 0.0
+                    except (ValueError, TypeError):
+                        # If conversion fails, assume no lag data available
+                        lag_seconds = 0.0
+                        logger.debug(f"Could not parse master_last_io_seconds_ago: {master_last_io_seconds_ago}")
+
+                    # Get replication offset difference if configured
+                    replication_offset_diff = 0
+                    if config.check_replication_offset and master_node_id:
+                        replication_offset_diff = self._get_offset_difference(
+                            replica,
+                            primary_nodes.get(master_node_id),
+                            config.timeout
+                        )
+
+                    # Check if replica is lagging
+                    if lag_seconds > config.max_acceptable_lag:
+                        lag_info = ReplicaLagInfo(
+                            replica_node_id=replica['node_id'],
+                            replica_address=replica_address,
+                            primary_node_id=master_node_id or "unknown",
+                            primary_address=primary_address,
+                            lag_seconds=lag_seconds,
+                            replication_offset_diff=replication_offset_diff,
+                            link_status=master_link_status
+                        )
+                        lagging_replicas.append(lag_info)
+                        all_replicas_synced = False
+                        max_lag = max(max_lag, lag_seconds)
+
+                        logger.warning(
+                            f"Replica {replica_address} lagging behind primary "
+                            f"(lag={lag_seconds:.2f}s, offset_diff={replication_offset_diff})"
+                        )
+                    else:
+                        max_lag = max(max_lag, lag_seconds)
+                        logger.debug(
+                            f"Replica {replica_address} in sync "
+                            f"(lag={lag_seconds:.2f}s, offset_diff={replication_offset_diff})"
+                        )
+                
+                except Exception as e:
+                    # Replica unreachable or error querying
+                    replica_address = format_node_address(replica)
+                    disconnected_replicas.append(replica_address)
+                    all_replicas_synced = False
+                    logger.error(f"Error checking replica {replica_address}: {e}")
+
+            # Cross-validate: Query primaries for their view of replicas
+            self._cross_validate_with_primaries(
+                primary_nodes,
+                replica_nodes,
+                disconnected_replicas,
+                config
             )
+
+            # Determine overall success
+            success = True
+            error_message = None
+
+            if config.require_all_replicas_synced:
+                # Strict mode: fail if any replica is not synced
+                if not all_replicas_synced:
+                    success = False
+                    error_message = (
+                        f"Not all replicas synced: {len(lagging_replicas)} lagging, "
+                        f"{len(disconnected_replicas)} disconnected"
+                    )
+            else:
+                # Lenient mode: fail if there are lagging replicas OR all replicas are disconnected
+                # This ensures that excessive lag is still detected and reported as a failure
+                if lagging_replicas:
+                    success = False
+                    error_message = (
+                        f"{len(lagging_replicas)} replica(s) lagging beyond acceptable threshold "
+                        f"(max_lag={max_lag:.2f}s > {config.max_acceptable_lag:.2f}s)"
+                    )
+                elif len(disconnected_replicas) == len(replica_nodes) and replica_nodes:
+                    success = False
+                    error_message = "All replicas are disconnected"
+                elif disconnected_replicas:
+                    # Some replicas disconnected but not all - this is acceptable after chaos
+                    # Set all_replicas_synced to False but keep success=True
+                    logger.info(
+                        f"{len(disconnected_replicas)} replica(s) disconnected but cluster still functional"
+                    )
+
+            return ReplicationValidation(
+                success=success,
+                all_replicas_synced=all_replicas_synced,
+                max_lag=max_lag,
+                lagging_replicas=lagging_replicas,
+                disconnected_replicas=disconnected_replicas,
+                error_message=error_message
+            )
+
+        except Exception as e:
+            logger.error(f"Replication validation failed with error: {e}")
+            return ReplicationValidation(
+                success=False,
+                all_replicas_synced=False,
+                max_lag=-1.0,
+                lagging_replicas=[],
+                disconnected_replicas=[],
+                error_message=f"Validation error: {str(e)}"
+            )
+
+    def _cross_validate_with_primaries(
+        self,
+        primary_nodes: Dict[str, Dict],
+        replica_nodes: List[Dict],
+        disconnected_replicas: List[str],
+        config: ReplicationValidationConfig
+    ) -> None:
+        """Cross-validate replication by querying primaries for their view of replicas."""
+        logger.debug("Cross-validating replication from primary nodes' perspective")
+
+        # Build a map of which replicas belong to which primary
+        # by querying CLUSTER NODES from a reference node
+        replica_to_primary_map = {}
+        if replica_nodes:
+            # Use first available replica to get cluster topology
+            for replica in replica_nodes:
+                if format_node_address(replica) in disconnected_replicas:
+                    continue
+                
+                master_id = self._get_master_node_id(replica, None)
+                if master_id:
+                    replica_addr = format_node_address(replica)
+                    replica_to_primary_map[replica_addr] = master_id
+
+        # Now validate each primary
+        for primary_node_id, primary in primary_nodes.items():
+            client = None
+            try:
+                client = valkey.Valkey(
+                    host=primary['host'],
+                    port=primary['port'],
+                    socket_timeout=config.timeout,
+                    socket_connect_timeout=2,  # Fast-fail on unreachable nodesdecode_responses=True
+                )
+
+                # Get replication info from primary
+                repl_info = client.info('replication')
+
+                # Get number of connected replicas
+                connected_slaves = int(repl_info.get('connected_slaves', 0))
+
+                # Count expected replicas for this primary (excluding disconnected ones)
+                expected_replicas = sum(
+                    1 for replica_addr, master_id in replica_to_primary_map.items()
+                    if master_id == primary_node_id
+                    and replica_addr not in disconnected_replicas
+                )
+
+                if connected_slaves != expected_replicas:
+                    logger.debug(
+                        f"Primary {primary['host']}:{primary['port']} reports "
+                        f"{connected_slaves} connected replicas, expected {expected_replicas} "
+                        f"(may be transient during failover)"
+                    )
+                else:
+                    logger.debug(
+                        f"Primary {primary['host']}:{primary['port']} has "
+                        f"{connected_slaves} replicas connected (as expected)"
+                    )
+
+            except Exception as e:
+                logger.debug(
+                    f"Unable to cross-validate with primary "
+                    f"{primary['host']}:{primary['port']}: {e}"
+                )
+
+            finally:
+                if client is not None:
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+
+    def _get_master_node_id(
+        self,
+        replica: Dict,
+        cluster_connection: ClusterConnection
+    ) -> Optional[str]:
+        """Get the master node ID for a replica by parsing CLUSTER NODES output."""
+
+        def parse_master_id(client: valkey.Valkey) -> Optional[str]:
+            cluster_nodes_raw = client.execute_command('CLUSTER', 'NODES')
+
+            # Parse CLUSTER NODES to find this replica's master
+            nodes = parse_cluster_nodes_output(cluster_nodes_raw)
+            for node in nodes:
+                if node['is_myself'] and node['is_slave']:
+                    return node['master_id']
+            return None
+
+        return safe_query_node(
+            replica,
+            timeout=2.0,
+            query_func=parse_master_id,
+            error_message="Error getting master node ID for replica"
+        )
+
+    def _get_offset_difference(
+        self,
+        replica: Dict,
+        primary: Optional[Dict],
+        timeout: float
+    ) -> int:
+        """Calculate replication offset difference between primary and replica."""
+        if not primary:
+            return 0
+
+        try:
+            # Get replica offset
+            with valkey_client(replica['host'], replica['port'], timeout) as replica_client:
+                replica_info = replica_client.info('replication')
+
+                # Cast offsets to int since decode_responses=True returns strings
+                replica_offset = int(replica_info.get('master_repl_offset', 0))
+                if replica_offset == 0:
+                    # Replica might report slave_repl_offset instead
+                    replica_offset = int(replica_info.get('slave_repl_offset', 0))
+
+            # Get primary offset
+            with valkey_client(primary['host'], primary['port'], timeout) as primary_client:
+                primary_info = primary_client.info('replication')
+
+                # Cast to int since decode_responses=True returns strings
+                primary_offset = int(primary_info.get('master_repl_offset', 0))
+
+            # Calculate difference
+            offset_diff = primary_offset - replica_offset
+            return max(0, offset_diff)  # Return 0 if negative (shouldn't happen)
+
+        except Exception as e:
+            logger.debug(f"Error calculating offset difference: {e}")
+            return 0
+
+
+
+class ClusterStatusValidator:
+    """Validates overall cluster health status"""
+
+    def validate(
+        self,
+        cluster_connection: ClusterConnection,
+        config: ClusterStatusValidationConfig,
+        killed_nodes: Optional[set[str]] = None
+    ) -> ClusterStatusValidation:
+        """Check cluster health status from all reachable nodes."""
+        try:
+            # Get all nodes from cluster (including failed ones for comprehensive check)
+            all_nodes = cluster_connection.get_current_nodes(include_failed=True)
             
-            # Get cluster info
-            info = client.execute_command('CLUSTER', 'INFO')
-            info_dict = {}
-            for line in info.split('\r\n'):
-                if ':' in line:
-                    key, value = line.split(':', 1)
-                    info_dict[key] = value
+            if not all_nodes:
+                return ClusterStatusValidation(
+                    success=False,
+                    cluster_state="unknown",
+                    nodes_in_fail_state=[],
+                    has_quorum=False,
+                    degraded_reason="No nodes reachable",
+                    error_message="Unable to connect to any cluster nodes"
+                )
             
-            slots_assigned = int(info_dict.get('cluster_slots_assigned', 0))
-            slots_fail = int(info_dict.get('cluster_slots_fail', 0))
+            # Track cluster state from different nodes
+            cluster_states = {}
+            nodes_in_fail_state = []
+            reachable_nodes = []
             
-            # Get cluster nodes to check for conflicts
-            cluster_nodes = client.execute_command('CLUSTER', 'NODES')
+            # Query cluster info from all reachable nodes
+            for node in all_nodes:
+                try:
+                    with valkey_client(node['host'], node['port'], config.timeout) as client:
+                        # Get cluster info
+                        cluster_info = client.info('cluster')
+
+                        # Extract cluster state
+                        cluster_state = cluster_info.get('cluster_state', 'unknown')
+                        cluster_states[format_node_address(node)] = cluster_state
+                        reachable_nodes.append(node)
+
+                        logger.debug(
+                            f"Node {node['host']}:{node['port']} reports cluster_state={cluster_state}"
+                        )
+
+                except Exception as e:
+                    logger.debug(
+                        f"Unable to query cluster info from {node['host']}:{node['port']}: {e}"
+                    )
+                    # Node is unreachable, but we already know about failed nodes from get_current_nodes
+                    continue
+
+            # Identify nodes in fail state from cluster topology
+            for node in all_nodes:
+                if node['status'] == 'failed':
+                    node_address = format_node_address(node)
+                    nodes_in_fail_state.append(node_address)
+                    logger.warning(f"Node {node_address} is in fail state")
+
+            # Determine overall cluster state
+            # Use the most common state reported by reachable nodes
+            if cluster_states:
+                # Count occurrences of each state
+                state_counts = {}
+                for state in cluster_states.values():
+                    state_counts[state] = state_counts.get(state, 0) + 1
+
+                # Get the most common state
+                overall_cluster_state = max(state_counts, key=state_counts.get)
+
+                # Log if there's disagreement
+                if len(set(cluster_states.values())) > 1:
+                    logger.warning(
+                        f"Cluster state disagreement detected: {cluster_states}"
+                    )
+            else:
+                overall_cluster_state = "unknown"
+
+            # Check quorum
+            # A cluster has quorum if majority of primary nodes are reachable
+            primary_nodes = [n for n in all_nodes if n['role'] == 'primary']
+            reachable_primaries = [n for n in reachable_nodes if n['role'] == 'primary']
+
+            has_quorum = True
+            if config.require_quorum and primary_nodes:
+                # Need majority of primaries to be reachable
+                quorum_threshold = (len(primary_nodes) // 2) + 1
+                has_quorum = len(reachable_primaries) >= quorum_threshold
+
+                if not has_quorum:
+                    logger.warning(
+                        f"Quorum check failed: {len(reachable_primaries)}/{len(primary_nodes)} "
+                        f"primaries reachable (need {quorum_threshold})"
+                    )
+
+            # Determine success based on configuration
+            success = True
+            degraded_reason = None
+            error_message = None
+
+            # Initialize killed_nodes if not provided
+            if killed_nodes is None:
+                killed_nodes = set()
+
+            # Check if cluster state is acceptable
+            if overall_cluster_state not in config.acceptable_states:
+                # Special handling for "unknown" state when nodes were killed
+                if overall_cluster_state == 'unknown' and killed_nodes:
+                    # "unknown" state is expected when nodes are killed
+                    # Verify that the killed nodes are actually in fail state
+                    expected_failed_nodes = killed_nodes
+                    actual_failed_nodes = set(nodes_in_fail_state)
+
+                    # Check if all killed nodes are in fail state
+                    killed_but_not_failed = expected_failed_nodes - actual_failed_nodes
+                    failed_but_not_killed = actual_failed_nodes - expected_failed_nodes
+
+                    if killed_but_not_failed:
+                        # Killed nodes should be in fail state but aren't
+                        success = False
+                        error_message = (
+                            f"Killed nodes not in fail state: {killed_but_not_failed}"
+                        )
+                        logger.error(error_message)
+                    elif failed_but_not_killed:
+                        # Extra nodes in fail state that weren't killed
+                        success = False
+                        error_message = (
+                            f"Unexpected nodes in fail state: {failed_but_not_killed}"
+                        )
+                        logger.error(error_message)
+                    else:
+                        # All killed nodes are in fail state as expected
+                        degraded_reason = (
+                            f"Cluster in 'unknown' state due to {len(killed_nodes)} "
+                            f"killed node(s) - expected behavior"
+                        )
+                        logger.info(
+                            f"Cluster state 'unknown' is expected: killed nodes "
+                            f"{killed_nodes} are in fail state"
+                        )
+                elif config.allow_degraded and overall_cluster_state in ['fail', 'degraded']:
+                    # Degraded state is acceptable
+                    degraded_reason = f"Cluster in {overall_cluster_state} state"
+                    logger.info(f"Cluster in degraded state: {overall_cluster_state}")
+                else:
+                    success = False
+                    error_message = (
+                        f"Cluster state '{overall_cluster_state}' not in acceptable states: "
+                        f"{config.acceptable_states}"
+                    )
+                    logger.error(error_message)
+
+            # Check for nodes in fail state
+            if nodes_in_fail_state:
+                logger.warning(f"Nodes in fail state: {nodes_in_fail_state}")
+
+                # If we have killed nodes, verify they match the failed nodes
+                if killed_nodes:
+                    expected_failed_nodes = killed_nodes
+                    actual_failed_nodes = set(nodes_in_fail_state)
+
+                    if expected_failed_nodes == actual_failed_nodes:
+                        # Failed nodes match killed nodes - expected behavior
+                        if not degraded_reason:
+                            degraded_reason = (
+                                f"{len(nodes_in_fail_state)} node(s) in fail state "
+                                f"(killed by chaos) - expected behavior"
+                            )
+                    else:
+                        # Mismatch between killed and failed nodes
+                        if not degraded_reason:
+                            degraded_reason = (
+                                f"{len(nodes_in_fail_state)} node(s) in fail state "
+                                f"(expected {len(killed_nodes)} killed nodes)"
+                            )
+                else:
+                    # No killed nodes tracked, but nodes are in fail state
+                    # This is expected after chaos, so we don't fail validation
+                    # unless cluster state is also bad
+                    if not degraded_reason:
+                        degraded_reason = f"{len(nodes_in_fail_state)} node(s) in fail state"
+
+            # Check quorum
+            if not has_quorum:
+                success = False
+                error_message = (
+                    f"Cluster does not have quorum: {len(reachable_primaries)}/{len(primary_nodes)} "
+                    f"primaries reachable"
+                )
+                logger.error(error_message)
+
+            # Log overall result
+            if success:
+                logger.info(
+                    f"Cluster status validation passed: state={overall_cluster_state}, "
+                    f"quorum={has_quorum}, failed_nodes={len(nodes_in_fail_state)}"
+                )
+            else:
+                logger.error(
+                    f"Cluster status validation failed: state={overall_cluster_state}, "
+                    f"quorum={has_quorum}, failed_nodes={len(nodes_in_fail_state)}"
+                )
+
+            return ClusterStatusValidation(
+                success=success,
+                cluster_state=overall_cluster_state,
+                nodes_in_fail_state=nodes_in_fail_state,
+                has_quorum=has_quorum,
+                degraded_reason=degraded_reason,
+                error_message=error_message
+            )
+
+        except Exception as e:
+            logger.error(f"Cluster status validation failed with error: {e}")
+            return ClusterStatusValidation(
+                success=False,
+                cluster_state="unknown",
+                nodes_in_fail_state=[],
+                has_quorum=False,
+                degraded_reason=None,
+                error_message=f"Validation error: {str(e)}"
+            )
+
+
+
+class SlotCoverageValidator:
+    """Validates hash slot coverage and assignment"""
+
+    def validate(
+        self,
+        cluster_connection: ClusterConnection,
+        config: SlotCoverageValidationConfig
+    ) -> SlotCoverageValidation:
+        """Check slot coverage across the cluster from all nodes' perspectives."""
+        try:
+            # Get all nodes from cluster (only live nodes for slot assignment)
+            all_nodes = cluster_connection.get_current_nodes(include_failed=False)
+
+            if not all_nodes:
+                # Unable to contact cluster
+                logger.error("Unable to fetch any nodes from cluster for slot coverage validation")
+                return SlotCoverageValidation(
+                    success=False,
+                    total_slots_assigned=0,
+                    unassigned_slots=list(range(16384)),
+                    conflicting_slots=[],
+                    slot_distribution={},
+                    error_message="Unable to contact cluster - no nodes reachable"
+                )
+
+            primary_nodes = [node for node in all_nodes if node['role'] == 'primary']
             
-            # Parse slot assignments from ALL nodes, but track which are live
+            if not primary_nodes:
+                return SlotCoverageValidation(
+                    success=False,
+                    total_slots_assigned=0,
+                    unassigned_slots=list(range(16384)),
+                    conflicting_slots=[],
+                    slot_distribution={},
+                    error_message="No primary nodes available in cluster"
+                )
+            
+            # Track slot assignments from each node's perspective
+            # node_address -> {slot -> node_id}
+            node_perspectives: Dict[str, Dict[int, str]] = {}
+
+            # Track slot distribution per node: node_id -> list of slots
+            slot_distribution: Dict[str, List[int]] = {}
+
+            # Query ALL nodes (not just primaries) for their view of slot assignments
+            nodes_queried = 0
+            for node in all_nodes:
+                try:
+                    with valkey_client(node['host'], node['port'], config.timeout) as client:
+                        # Get cluster nodes output to parse slot assignments
+                        cluster_nodes_raw = client.execute_command('CLUSTER', 'NODES')
+
+                        # Parse ALL slot assignments from this node's perspective
+                        node_address = format_node_address(node)
+                        node_slot_view = self._parse_all_slot_assignments(cluster_nodes_raw)
+                        node_perspectives[node_address] = node_slot_view
+                        nodes_queried += 1
+
+                        logger.debug(
+                            f"Node {node_address} reports {len(node_slot_view)} slots assigned"
+                        )
+
+                except Exception as e:
+                    logger.warning(
+                        f"Error querying slots from node "
+                        f"{node['host']}:{node['port']}: {e}"
+                    )
+                    # Continue checking other nodes
+                    continue
+
+            if nodes_queried == 0:
+                return SlotCoverageValidation(
+                    success=False,
+                    total_slots_assigned=0,
+                    unassigned_slots=list(range(16384)),
+                    conflicting_slots=[],
+                    slot_distribution={},
+                    error_message="Unable to query slot assignments from any node"
+                )
+
+            # Build consensus view of slot assignments
+            # Use majority vote for each slot
             slot_assignments: Dict[int, List[str]] = {}
-            live_node_ids: Set[str] = set()
+            for slot in range(16384):
+                # Collect which node each perspective thinks owns this slot
+                slot_owners = []
+                for node_addr, slot_view in node_perspectives.items():
+                    if slot in slot_view:
+                        slot_owners.append(slot_view[slot])
+
+                if slot_owners:
+                    # Use most common owner (consensus)
+                    from collections import Counter
+                    owner_counts = Counter(slot_owners)
+                    consensus_owner = owner_counts.most_common(1)[0][0]
+
+                    if slot not in slot_assignments:
+                        slot_assignments[slot] = []
+
+                    # Check if there's disagreement
+                    if len(set(slot_owners)) > 1:
+                        # Multiple nodes claim this slot - record all claimants
+                        slot_assignments[slot] = list(set(slot_owners))
+                    else:
+                        slot_assignments[slot] = [consensus_owner]
+
+            # Build slot distribution from consensus view
+            for slot, owners in slot_assignments.items():
+                if len(owners) == 1:  # Only count non-conflicting slots
+                    owner = owners[0]
+                    if owner not in slot_distribution:
+                        slot_distribution[owner] = []
+                    slot_distribution[owner].append(slot)
+
+            # Analyze slot coverage
+            total_slots_assigned = len(slot_assignments)
+            unassigned_slots = []
+            conflicting_slots = []
+
+            # Check for unassigned slots
+            for slot in range(16384):
+                if slot not in slot_assignments:
+                    unassigned_slots.append(slot)
+                elif len(slot_assignments[slot]) > 1:
+                    # Slot has multiple assignments (conflict)
+                    conflict = SlotConflict(
+                        slot=slot,
+                        conflicting_nodes=slot_assignments[slot]
+                    )
+                    conflicting_slots.append(conflict)
+                    logger.warning(
+                        f"Slot {slot} has conflicting assignments: "
+                        f"{slot_assignments[slot]}"
+                    )
+
+            # Log unassigned slots summary
+            if unassigned_slots:
+                # Group consecutive unassigned slots into ranges for cleaner logging
+                ranges = self._group_slots_into_ranges(unassigned_slots)
+                logger.warning(
+                    f"Found {len(unassigned_slots)} unassigned slots: {ranges}"
+                )
+
+            # Determine success based on configuration
+            success = True
+            error_message = None
+
+            if config.require_full_coverage and unassigned_slots:
+                success = False
+                error_message = (
+                    f"{len(unassigned_slots)} slots are unassigned "
+                    f"(expected all 16384 slots to be assigned)"
+                )
+                logger.error(error_message)
+
+            if not config.allow_slot_conflicts and conflicting_slots:
+                success = False
+                conflict_msg = (
+                    f"{len(conflicting_slots)} slots have conflicting assignments"
+                )
+                if error_message:
+                    error_message = f"{error_message}; {conflict_msg}"
+                else:
+                    error_message = conflict_msg
+                logger.error(error_message)
+
+            # Log overall result
+            if success:
+                logger.info(
+                    f"Slot coverage validation passed: {total_slots_assigned}/16384 "
+                    f"slots assigned across {len(primary_nodes)} primaries"
+                )
+            else:
+                logger.error(
+                    f"Slot coverage validation failed: {total_slots_assigned}/16384 "
+                    f"slots assigned, {len(unassigned_slots)} unassigned, "
+                    f"{len(conflicting_slots)} conflicts"
+                )
+
+            return SlotCoverageValidation(
+                success=success,
+                total_slots_assigned=total_slots_assigned,
+                unassigned_slots=unassigned_slots,
+                conflicting_slots=conflicting_slots,
+                slot_distribution=slot_distribution,
+                error_message=error_message
+            )
+
+        except Exception as e:
+            logger.error(f"Slot coverage validation failed with error: {e}")
+            return SlotCoverageValidation(
+                success=False,
+                total_slots_assigned=0,
+                unassigned_slots=[],
+                conflicting_slots=[],
+                slot_distribution={},
+                error_message=f"Validation error: {str(e)}"
+            )
+
+    def _parse_node_slots(
+        self,
+        cluster_nodes_raw: str,
+        target_node_id: str
+    ) -> List[int]:
+        """Parse CLUSTER NODES output to extract slot assignments for a specific node."""
+        slots = []
+
+        try:
+            nodes = parse_cluster_nodes_output(cluster_nodes_raw)
+            for node in nodes:
+                if node['node_id'] == target_node_id and node['is_master']:
+                    # Parse slot ranges
+                    for slot_info in node['slots']:
+                        # Skip importing/migrating slot markers
+                        if slot_info.startswith('['):
+                            continue
+                        slots.extend(parse_slot_range(slot_info))
+                    break
+
+        except Exception as e:
+            logger.debug(f"Error parsing node slots: {e}")
+
+        return slots
+
+    def _parse_all_slot_assignments(
+        self,
+        cluster_nodes_raw: str
+    ) -> Dict[int, str]:
+        """Parse CLUSTER NODES output to extract all slot assignments.
+
+        Returns a dict mapping slot number to the node_id that owns it.
+        """
+        slot_to_owner: Dict[int, str] = {}
+
+        try:
+            nodes = parse_cluster_nodes_output(cluster_nodes_raw)
+            for node in nodes:
+                # Only primaries have slot assignments
+                if not node['is_master']:
+                    continue
+
+                # Parse slot ranges
+                for slot_info in node['slots']:
+                    # Skip importing/migrating slot markers
+                    if slot_info.startswith('['):
+                        continue
+
+                    # Parse and assign slots
+                    for slot in parse_slot_range(slot_info):
+                        slot_to_owner[slot] = node['node_id']
+
+        except Exception as e:
+            logger.debug(f"Error parsing all slot assignments: {e}")
+
+        return slot_to_owner
+
+    def _group_slots_into_ranges(self, slots: List[int]) -> str:
+        """Group consecutive slot numbers into ranges for cleaner display."""
+        if not slots:
+            return ""
+
+        sorted_slots = sorted(slots)
+        ranges = []
+        start = sorted_slots[0]
+        end = sorted_slots[0]
+
+        for slot in sorted_slots[1:]:
+            if slot == end + 1:
+                # Consecutive slot, extend range
+                end = slot
+            else:
+                # Gap found, save current range and start new one
+                if start == end:
+                    ranges.append(str(start))
+                else:
+                    ranges.append(f"{start}-{end}")
+                start = slot
+                end = slot
+
+        # Add the last range
+        if start == end:
+            ranges.append(str(start))
+        else:
+            ranges.append(f"{start}-{end}")
+
+        # Limit output length for very long lists
+        if len(ranges) > 10:
+            return f"{', '.join(ranges[:10])}... ({len(ranges)} ranges total)"
+        else:
+            return ', '.join(ranges)
+
+
+
+class TopologyValidator:
+    """Validates cluster topology against expectations"""
+
+    def validate(
+        self,
+        cluster_connection: ClusterConnection,
+        expected_topology: Optional['ExpectedTopology'],
+        config: 'TopologyValidationConfig'
+    ) -> 'TopologyValidation':
+        """Check topology against expectations."""
+        try:
+            # Get current cluster topology
+            # Include failed nodes if configured to allow them
+            all_nodes = cluster_connection.get_current_nodes(include_failed=config.allow_failed_nodes)
+
+            if not all_nodes:
+                return TopologyValidation(
+                    success=False,
+                    expected_primaries=expected_topology.num_primaries if expected_topology else 0,
+                    actual_primaries=0,
+                    expected_replicas=expected_topology.num_replicas if expected_topology else 0,
+                    actual_replicas=0,
+                    topology_mismatches=[],
+                    error_message="No nodes reachable in cluster"
+                )
+
+            # Count actual nodes by role
+            actual_primaries = len([n for n in all_nodes if n['role'] == 'primary'])
+            actual_replicas = len([n for n in all_nodes if n['role'] == 'replica'])
+
+            # If no expected topology provided, just report current state
+            if not expected_topology:
+                logger.info(
+                    f"Topology validation (no expectations): "
+                    f"{actual_primaries} primaries, {actual_replicas} replicas"
+                )
+                return TopologyValidation(
+                    success=True,
+                    expected_primaries=actual_primaries,
+                    actual_primaries=actual_primaries,
+                    expected_replicas=actual_replicas,
+                    actual_replicas=actual_replicas,
+                    topology_mismatches=[],
+                    error_message=None
+                )
+
+            # Compare against expected topology
+            topology_mismatches = []
+
+            # Check primary count
+            if actual_primaries != expected_topology.num_primaries:
+                mismatch = TopologyMismatch(
+                    mismatch_type="primary_count",
+                    node_id="cluster",
+                    expected=f"{expected_topology.num_primaries} primaries",
+                    actual=f"{actual_primaries} primaries"
+                )
+                topology_mismatches.append(mismatch)
+                logger.warning(
+                    f"Primary count mismatch: expected {expected_topology.num_primaries}, "
+                    f"got {actual_primaries}"
+                )
+
+            # Check replica count
+            if actual_replicas != expected_topology.num_replicas:
+                mismatch = TopologyMismatch(
+                    mismatch_type="replica_count",
+                    node_id="cluster",
+                    expected=f"{expected_topology.num_replicas} replicas",
+                    actual=f"{actual_replicas} replicas"
+                )
+                topology_mismatches.append(mismatch)
+                logger.warning(
+                    f"Replica count mismatch: expected {expected_topology.num_replicas}, "
+                    f"got {actual_replicas}"
+                )
+
+            # Validate shard structure if provided
+            if expected_topology.shard_structure:
+                shard_mismatches = self._validate_shard_structure(
+                    all_nodes,
+                    expected_topology.shard_structure,
+                    config
+                )
+                topology_mismatches.extend(shard_mismatches)
+
+            # Determine success
+            success = True
+            error_message = None
+
+            if config.strict_mode:
+                # In strict mode, any mismatch is a failure
+                if topology_mismatches:
+                    success = False
+                    error_message = (
+                        f"Topology validation failed in strict mode: "
+                        f"{len(topology_mismatches)} mismatch(es) found"
+                    )
+            else:
+                # In non-strict mode, allow some flexibility
+                # Only fail if there are critical mismatches
+                critical_mismatches = [
+                    m for m in topology_mismatches
+                    if m.mismatch_type in ['missing_primary', 'wrong_role']
+                ]
+
+                if critical_mismatches:
+                    success = False
+                    error_message = (
+                        f"Topology validation failed: "
+                        f"{len(critical_mismatches)} critical mismatch(es) found"
+                    )
+                elif topology_mismatches:
+                    # Non-critical mismatches, log but don't fail
+                    logger.info(
+                        f"Topology validation passed with {len(topology_mismatches)} "
+                        f"non-critical mismatch(es)"
+                    )
+
+            # Log overall result
+            if success:
+                logger.info(
+                    f"Topology validation passed: {actual_primaries} primaries, "
+                    f"{actual_replicas} replicas (expected {expected_topology.num_primaries} "
+                    f"primaries, {expected_topology.num_replicas} replicas)"
+                )
+            else:
+                logger.error(
+                    f"Topology validation failed: {actual_primaries} primaries, "
+                    f"{actual_replicas} replicas (expected {expected_topology.num_primaries} "
+                    f"primaries, {expected_topology.num_replicas} replicas), "
+                    f"{len(topology_mismatches)} mismatch(es)"
+                )
+
+            return TopologyValidation(
+                success=success,
+                expected_primaries=expected_topology.num_primaries,
+                actual_primaries=actual_primaries,
+                expected_replicas=expected_topology.num_replicas,
+                actual_replicas=actual_replicas,
+                topology_mismatches=topology_mismatches,
+                error_message=error_message
+            )
+
+        except Exception as e:
+            logger.error(f"Topology validation failed with error: {e}")
+            return TopologyValidation(
+                success=False,
+                expected_primaries=expected_topology.num_primaries if expected_topology else 0,
+                actual_primaries=0,
+                expected_replicas=expected_topology.num_replicas if expected_topology else 0,
+                actual_replicas=0,
+                topology_mismatches=[],
+                error_message=f"Validation error: {str(e)}"
+            )
+
+    def _validate_shard_structure(
+        self,
+        all_nodes: List[Dict],
+        expected_shards: Dict[int, 'ShardExpectation'],
+        config: 'TopologyValidationConfig'
+    ) -> List['TopologyMismatch']:
+        """Validate shard structure against expectations."""
+        mismatches = []
+
+        # Build actual shard structure
+        actual_shards: Dict[int, Dict] = {}
+        for node in all_nodes:
+            shard_id = node.get('shard_id')
+            if shard_id is None:
+                continue
+
+            if shard_id not in actual_shards:
+                actual_shards[shard_id] = {
+                    'primary': None,
+                    'replicas': []
+                }
+
+            if node['role'] == 'primary':
+                actual_shards[shard_id]['primary'] = node
+            else:
+                actual_shards[shard_id]['replicas'].append(node)
+
+        # Check each expected shard
+        for shard_id, expected_shard in expected_shards.items():
+            if shard_id not in actual_shards:
+                # Entire shard is missing
+                mismatch = TopologyMismatch(
+                    mismatch_type="missing_shard",
+                    node_id=f"shard_{shard_id}",
+                    expected=f"shard {shard_id} with primary and replicas",
+                    actual="shard not found"
+                )
+                mismatches.append(mismatch)
+                logger.warning(f"Expected shard {shard_id} not found in cluster")
+                continue
+
+            actual_shard = actual_shards[shard_id]
+
+            # Check primary node
+            if expected_shard.primary_node_id:
+                if not actual_shard['primary']:
+                    mismatch = TopologyMismatch(
+                        mismatch_type="missing_primary",
+                        node_id=expected_shard.primary_node_id,
+                        expected=f"primary for shard {shard_id}",
+                        actual="no primary found"
+                    )
+                    mismatches.append(mismatch)
+                    logger.warning(f"Shard {shard_id} has no primary node")
+                elif actual_shard['primary']['node_id'] != expected_shard.primary_node_id:
+                    # Different node is primary (could be due to failover)
+                    if config.strict_mode:
+                        mismatch = TopologyMismatch(
+                            mismatch_type="wrong_primary",
+                            node_id=actual_shard['primary']['node_id'],
+                            expected=f"primary: {expected_shard.primary_node_id}",
+                            actual=f"primary: {actual_shard['primary']['node_id']}"
+                        )
+                        mismatches.append(mismatch)
+                        logger.warning(
+                            f"Shard {shard_id} primary mismatch: "
+                            f"expected {expected_shard.primary_node_id}, "
+                            f"got {actual_shard['primary']['node_id']}"
+                        )
+
+            # Check replica nodes
+            actual_replica_ids = {r['node_id'] for r in actual_shard['replicas']}
+            expected_replica_ids = set(expected_shard.replica_node_ids)
+
+            # Check for missing replicas
+            missing_replicas = expected_replica_ids - actual_replica_ids
+            for replica_id in missing_replicas:
+                mismatch = TopologyMismatch(
+                    mismatch_type="missing_replica",
+                    node_id=replica_id,
+                    expected=f"replica for shard {shard_id}",
+                    actual="replica not found"
+                )
+                mismatches.append(mismatch)
+                logger.warning(
+                    f"Expected replica {replica_id} not found in shard {shard_id}"
+                )
+
+            # Check for extra replicas (only in strict mode)
+            if config.strict_mode:
+                extra_replicas = actual_replica_ids - expected_replica_ids
+                for replica_id in extra_replicas:
+                    mismatch = TopologyMismatch(
+                        mismatch_type="extra_replica",
+                        node_id=replica_id,
+                        expected="no replica",
+                        actual=f"replica in shard {shard_id}"
+                    )
+                    mismatches.append(mismatch)
+                    logger.warning(
+                        f"Unexpected replica {replica_id} found in shard {shard_id}"
+                    )
+
+        # Check for extra shards (only in strict mode)
+        if config.strict_mode:
+            extra_shard_ids = set(actual_shards.keys()) - set(expected_shards.keys())
+            for shard_id in extra_shard_ids:
+                mismatch = TopologyMismatch(
+                    mismatch_type="extra_shard",
+                    node_id=f"shard_{shard_id}",
+                    expected="no shard",
+                    actual=f"shard {shard_id} exists"
+                )
+                mismatches.append(mismatch)
+                logger.warning(f"Unexpected shard {shard_id} found in cluster")
+
+        return mismatches
+
+
+
+class ViewConsistencyValidator:
+    """Validates consistency of cluster view across all nodes"""
+
+    def validate(
+        self,
+        cluster_connection: ClusterConnection,
+        config: 'ViewConsistencyValidationConfig'
+    ) -> 'ViewConsistencyValidation':
+        """Check cluster view consistency across all reachable nodes."""
+        try:
+            # Get all nodes from cluster
+            all_nodes = cluster_connection.get_current_nodes(include_failed=False)
+
+            if not all_nodes:
+                return ViewConsistencyValidation(
+                    success=False,
+                    nodes_checked=0,
+                    consistent_views=False,
+                    split_brain_detected=False,
+                    view_discrepancies=[],
+                    consensus_percentage=0.0,
+                    error_message="No nodes reachable in cluster"
+                )
+
+            if len(all_nodes) == 1:
+                # Single node cluster, no view consistency to check
+                logger.info("Single node cluster, view consistency check skipped")
+                return ViewConsistencyValidation(
+                    success=True,
+                    nodes_checked=1,
+                    consistent_views=True,
+                    split_brain_detected=False,
+                    view_discrepancies=[],
+                    consensus_percentage=100.0,
+                    error_message=None
+                )
+
+            # Collect CLUSTER NODES output from all reachable nodes
+            node_views = {}
+            nodes_checked = 0
+
+            for node in all_nodes:
+                try:
+                    with valkey_client(node['host'], node['port'], config.timeout) as client:
+                        cluster_nodes_raw = client.execute_command('CLUSTER', 'NODES')
+
+                        # Parse the cluster nodes output
+                        parsed_view = self._parse_cluster_nodes(cluster_nodes_raw)
+                        node_address = format_node_address(node)
+                        node_views[node_address] = parsed_view
+                        nodes_checked += 1
+
+                        logger.debug(
+                            f"Collected cluster view from {node_address}: "
+                            f"{len(parsed_view)} nodes in view"
+                        )
+
+                except Exception as e:
+                    logger.warning(
+                        f"Unable to collect cluster view from "
+                        f"{node['host']}:{node['port']}: {e}"
+                    )
+                    # Continue checking other nodes
+                    continue
             
-            for line in cluster_nodes.split('\n'):
+            if nodes_checked == 0:
+                return ViewConsistencyValidation(
+                    success=False,
+                    nodes_checked=0,
+                    consistent_views=False,
+                    split_brain_detected=False,
+                    view_discrepancies=[],
+                    consensus_percentage=0.0,
+                    error_message="Unable to collect cluster view from any node"
+                )
+
+            # Compare views and identify discrepancies
+            view_discrepancies = self._compare_views(node_views)
+
+            # Check for split-brain scenarios
+            split_brain_detected = self._detect_split_brain(node_views)
+
+            if split_brain_detected:
+                logger.error("Split-brain scenario detected in cluster!")
+
+            # Calculate consensus percentage
+            consensus_percentage = self._calculate_consensus(node_views)
+
+            # Determine if views are consistent
+            consistent_views = len(view_discrepancies) == 0
+
+            # Determine overall success
+            success = True
+            error_message = None
+
+            if split_brain_detected:
+                success = False
+                error_message = "Split-brain scenario detected"
+                logger.error(error_message)
+            elif config.require_full_consensus and not consistent_views:
+                success = False
+                error_message = (
+                    f"View inconsistency detected: {len(view_discrepancies)} "
+                    f"discrepancy(ies) found"
+                )
+                logger.error(error_message)
+            elif not consistent_views:
+                # Allow transient inconsistency if configured
+                if config.allow_transient_inconsistency:
+                    logger.warning(
+                        f"Transient view inconsistency detected: "
+                        f"{len(view_discrepancies)} discrepancy(ies), "
+                        f"consensus={consensus_percentage:.1f}%"
+                    )
+                else:
+                    success = False
+                    error_message = (
+                        f"View inconsistency detected: {len(view_discrepancies)} "
+                        f"discrepancy(ies) found"
+                    )
+                    logger.error(error_message)
+
+            # Log overall result
+            if success:
+                logger.info(
+                    f"View consistency validation passed: {nodes_checked} nodes checked, "
+                    f"consensus={consensus_percentage:.1f}%, "
+                    f"discrepancies={len(view_discrepancies)}"
+                )
+            else:
+                logger.error(
+                    f"View consistency validation failed: {nodes_checked} nodes checked, "
+                    f"consensus={consensus_percentage:.1f}%, "
+                    f"discrepancies={len(view_discrepancies)}, "
+                    f"split_brain={split_brain_detected}"
+                )
+
+            return ViewConsistencyValidation(
+                success=success,
+                nodes_checked=nodes_checked,
+                consistent_views=consistent_views,
+                split_brain_detected=split_brain_detected,
+                view_discrepancies=view_discrepancies,
+                consensus_percentage=consensus_percentage,
+                error_message=error_message
+            )
+
+        except Exception as e:
+            logger.error(f"View consistency validation failed with error: {e}")
+            return ViewConsistencyValidation(
+                success=False,
+                nodes_checked=0,
+                consistent_views=False,
+                split_brain_detected=False,
+                view_discrepancies=[],
+                consensus_percentage=0.0,
+                error_message=f"Validation error: {str(e)}"
+            )
+    
+    def _parse_cluster_nodes(self, cluster_nodes_raw: str) -> Dict[str, Dict]:
+        """Parse CLUSTER NODES output into a structured format."""
+        parsed_nodes = {}
+
+        try:
+            for line in cluster_nodes_raw.split('\n'):
                 if not line.strip():
                     continue
+
                 parts = line.split()
                 if len(parts) < 8:
                     continue
-                
+
                 node_id = parts[0]
+                address = parts[1]
                 flags = parts[2]
-                link_state = parts[7] if len(parts) > 7 else 'connected'
-                
-                # Track live nodes - check for explicit fail/fail? tokens and disconnected link state
-                flag_list = flags.split(',')
-                has_fail_flag = 'fail' in flag_list or 'fail?' in flag_list
-                is_live = not has_fail_flag and link_state != 'disconnected'
-                if is_live:
-                    live_node_ids.add(node_id)
-                
-                # Slots are in parts[8:]
-                for slot_range in parts[8:]:
-                    if '-' in slot_range:
-                        # Range like "0-5461"
-                        start, end = slot_range.split('-')
-                        for slot in range(int(start), int(end) + 1):
-                            if slot not in slot_assignments:
-                                slot_assignments[slot] = []
-                            slot_assignments[slot].append((node_id, is_live))
+                master_id = parts[3] if parts[3] != '-' else None
+
+                # Extract role from flags
+                if 'master' in flags:
+                    role = 'primary'
+                elif 'slave' in flags:
+                    role = 'replica'
+                else:
+                    role = 'unknown'
+
+                # Extract state from flags
+                if 'fail' in flags:
+                    state = 'fail'
+                elif 'disconnected' in flags or 'noaddr' in flags:
+                    state = 'disconnected'
+                else:
+                    state = 'connected'
+
+                # Parse slot assignments (for primaries)
+                slots = []
+                for i in range(8, len(parts)):
+                    slot_info = parts[i]
+
+                    # Skip importing/migrating slot markers
+                    if slot_info.startswith('['):
+                        continue
+
+                    # Parse slot range
+                    if '-' in slot_info:
+                        start, end = slot_info.split('-')
+                        slots.extend(range(int(start), int(end) + 1))
                     else:
-                        # Single slot
                         try:
-                            slot = int(slot_range)
-                            if slot not in slot_assignments:
-                                slot_assignments[slot] = []
-                            slot_assignments[slot].append((node_id, is_live))
+                            slots.append(int(slot_info))
                         except ValueError:
-                            pass
-            
-            client.close()
-            
-            # Check for conflicts and slot coverage
-            conflicts = []
-            slots_covered_by_live_nodes = 0
-            
-            for slot, node_tuples in slot_assignments.items():
-                # Get live nodes for this slot
-                live_nodes_for_slot = [node_id for node_id, is_live in node_tuples if is_live]
-                
-                # Check for conflicts (multiple live nodes claiming same slot)
-                if len(live_nodes_for_slot) > 1:
-                    conflicts.append(SlotConflict(slot=slot, conflicting_nodes=live_nodes_for_slot))
-                
-                # Count slots covered by at least one live node
-                if len(live_nodes_for_slot) > 0:
-                    slots_covered_by_live_nodes += 1
-            
-            # Slot coverage is good if all 16384 slots are covered by live nodes
-            slot_coverage = (slots_covered_by_live_nodes == 16384)
-            
-            if not slot_coverage:
-                logging.warning(f"Slot coverage incomplete: {slots_covered_by_live_nodes}/16384 slots covered by live nodes")
-            
-            return slot_coverage, conflicts
-            
+                            # Not a slot number, skip
+                            continue
+
+                parsed_nodes[node_id] = {
+                    'node_id': node_id,
+                    'address': address,
+                    'role': role,
+                    'state': state,
+                    'master_id': master_id,
+                    'slots': slots,
+                    'flags': flags
+                }
+
         except Exception as e:
-            logging.error(f"Slot validation failed: {e}")
-            return False, []
-    
-    def validate_slot_coverage(self, cluster_status: ClusterStatus) -> bool:
-        """
-        Validate all slots are assigned
-        """
-        return cluster_status.total_slots_assigned == 16384
-    
-    def _validate_replica_sync(self, cluster_status: ClusterStatus, current_nodes: List[Dict]) -> ReplicationStatus:
-        """
-        Validate replica synchronization
-        """
-        replica_nodes = [n for n in current_nodes if n['role'] == 'replica']
-        
-        if not replica_nodes:
-            # No replicas, so all are synced by default
-            return ReplicationStatus(
-                all_replicas_synced=True,
-                max_lag=0.0,
-                lagging_replicas=[]
-            )
-        
-        lagging_replicas = []
-        max_lag = 0.0
-        dead_replicas = []
-        
-        for replica in replica_nodes:
-            # Check if node is marked as failed in topology
-            if replica.get('status') == 'failed':
-                dead_replicas.append(f"{replica['host']}:{replica['port']}")
+            logger.debug(f"Error parsing cluster nodes: {e}")
+
+        return parsed_nodes
+
+    def _compare_views(
+        self,
+        node_views: Dict[str, Dict[str, Dict]]
+    ) -> List['ViewDiscrepancy']:
+        """Compare cluster views from different nodes and identify discrepancies."""
+        discrepancies = []
+
+        if len(node_views) < 2:
+            return discrepancies
+
+        # Get a reference view (first node's view)
+        reference_address = list(node_views.keys())[0]
+        reference_view = node_views[reference_address]
+
+        # Compare each node's view against the reference
+        for node_address, node_view in node_views.items():
+            if node_address == reference_address:
                 continue
-            
-            try:
-                client = valkey.Valkey(
-                    host=replica['host'],
-                    port=replica['port'],
-                    socket_timeout=2,  # Reduced timeout for dead nodes
-                    socket_connect_timeout=2,  # Fast-fail on unreachable nodes
-                    decode_responses=True
+
+            # Check for membership discrepancies
+            reference_node_ids = set(reference_view.keys())
+            current_node_ids = set(node_view.keys())
+
+            # Nodes in reference but not in current view
+            missing_nodes = reference_node_ids - current_node_ids
+            for missing_node_id in missing_nodes:
+                discrepancy = ViewDiscrepancy(
+                    discrepancy_type="membership",
+                    node_reporting=node_address,
+                    subject_node=missing_node_id,
+                    expected_value="present in cluster",
+                    actual_value="not in view"
                 )
-                
-                # Get replication info
-                info = client.info('replication')
-                
-                master_link_status = info.get('master_link_status', 'down')
-                master_last_io_seconds = info.get('master_last_io_seconds_ago', float('inf'))
-                
-                if master_link_status != 'up':
-                    lagging_replicas.append(f"{replica['host']}:{replica['port']}")
-                
-                try:
-                    lag_value = float(master_last_io_seconds)
-                    max_lag = max(max_lag, lag_value)
-                except (ValueError, TypeError):
-                    pass
-                
-                client.close()
-                
-            except Exception as e:
-                # Node is dead or unreachable - this is expected after chaos
-                logging.debug(f"Replica {replica['host']}:{replica['port']} unreachable (likely dead): {e}")
-                dead_replicas.append(f"{replica['host']}:{replica['port']}")
-                # Don't add to lagging_replicas - dead nodes are handled separately
-        
-        # Consider sync successful if live replicas are synced
-        # Dead replicas are expected after chaos and shouldn't fail validation
-        all_synced = len(lagging_replicas) == 0 and max_lag <= self.validation_config.max_replication_lag
-        
-        if dead_replicas:
-            logging.info(f"Dead replicas detected (expected after chaos): {dead_replicas}")
-        
-        return ReplicationStatus(
-            all_replicas_synced=all_synced,
-            max_lag=max_lag,
-            lagging_replicas=lagging_replicas
+                discrepancies.append(discrepancy)
+                logger.warning(
+                    f"Node {node_address} missing node {missing_node_id} in its view"
+                )
+
+            # Nodes in current view but not in reference
+            extra_nodes = current_node_ids - reference_node_ids
+            for extra_node_id in extra_nodes:
+                discrepancy = ViewDiscrepancy(
+                    discrepancy_type="membership",
+                    node_reporting=node_address,
+                    subject_node=extra_node_id,
+                    expected_value="not in cluster",
+                    actual_value="present in view"
+                )
+                discrepancies.append(discrepancy)
+                logger.warning(
+                    f"Node {node_address} has extra node {extra_node_id} in its view"
+                )
+
+            # For common nodes, check for attribute discrepancies
+            common_node_ids = reference_node_ids & current_node_ids
+            for node_id in common_node_ids:
+                ref_node = reference_view[node_id]
+                curr_node = node_view[node_id]
+
+                # Check role discrepancy
+                if ref_node['role'] != curr_node['role']:
+                    discrepancy = ViewDiscrepancy(
+                        discrepancy_type="role",
+                        node_reporting=node_address,
+                        subject_node=node_id,
+                        expected_value=ref_node['role'],
+                        actual_value=curr_node['role']
+                    )
+                    discrepancies.append(discrepancy)
+                    logger.warning(
+                        f"Node {node_address} sees {node_id} as {curr_node['role']}, "
+                        f"but reference sees it as {ref_node['role']}"
+                    )
+
+                # Check state discrepancy
+                if ref_node['state'] != curr_node['state']:
+                    discrepancy = ViewDiscrepancy(
+                        discrepancy_type="state",
+                        node_reporting=node_address,
+                        subject_node=node_id,
+                        expected_value=ref_node['state'],
+                        actual_value=curr_node['state']
+                    )
+                    discrepancies.append(discrepancy)
+                    logger.warning(
+                        f"Node {node_address} sees {node_id} in state {curr_node['state']}, "
+                        f"but reference sees it in state {ref_node['state']}"
+                    )
+
+                # Check address discrepancy (excluding port differences for same host)
+                ref_addr = ref_node['address'].split('@')[0]  # Remove cluster bus port
+                curr_addr = curr_node['address'].split('@')[0]
+                if ref_addr != curr_addr:
+                    discrepancy = ViewDiscrepancy(
+                        discrepancy_type="address",
+                        node_reporting=node_address,
+                        subject_node=node_id,
+                        expected_value=ref_addr,
+                        actual_value=curr_addr
+                    )
+                    discrepancies.append(discrepancy)
+                    logger.warning(
+                        f"Node {node_address} sees {node_id} at {curr_addr}, "
+                        f"but reference sees it at {ref_addr}"
+                    )
+
+        return discrepancies
+
+    def _detect_split_brain(
+        self,
+        node_views: Dict[str, Dict[str, Dict]]
+    ) -> bool:
+        # Build a map of slots to primary nodes from each node's perspective
+        slot_primary_map: Dict[int, set] = {}
+
+        for node_address, node_view in node_views.items():
+            for node_id, node_info in node_view.items():
+                if node_info['role'] == 'primary' and node_info['slots']:
+                    for slot in node_info['slots']:
+                        if slot not in slot_primary_map:
+                            slot_primary_map[slot] = set()
+                        slot_primary_map[slot].add(node_id)
+
+        # Check if any slot has multiple primaries claiming it
+        for slot, primaries in slot_primary_map.items():
+            if len(primaries) > 1:
+                logger.error(
+                    f"Split-brain detected: slot {slot} claimed by multiple primaries: "
+                    f"{primaries}"
+                )
+                return True
+
+        return False
+
+    def _calculate_consensus(
+        self,
+        node_views: Dict[str, Dict[str, Dict]]
+    ) -> float:
+        """Calculate consensus percentage based on view agreement."""
+        if len(node_views) < 2:
+            return 100.0
+
+        # Count how many nodes agree on the cluster membership
+        # Use the most common view as the "majority view"
+
+        # Create a signature for each view based on node IDs and their roles
+        view_signatures = {}
+        for node_address, node_view in node_views.items():
+            # Create a frozenset of (node_id, role) tuples as signature
+            signature = frozenset(
+                (node_id, info['role'])
+                for node_id, info in node_view.items()
+            )
+
+            if signature not in view_signatures:
+                view_signatures[signature] = []
+            view_signatures[signature].append(node_address)
+
+        # Find the most common view
+        if not view_signatures:
+            return 0.0
+
+        max_agreement = max(len(nodes) for nodes in view_signatures.values())
+        total_nodes = len(node_views)
+
+        consensus_percentage = (max_agreement / total_nodes) * 100.0
+
+        logger.debug(
+            f"Consensus calculation: {max_agreement}/{total_nodes} nodes "
+            f"agree on cluster view ({consensus_percentage:.1f}%)"
         )
-    
-    def validate_replica_sync(self, cluster_status: ClusterStatus) -> bool:
-        """
-        Validate replica synchronization (simplified interface)
-        """
-        # This is a simplified version that would need actual cluster connection
-        # For now, return True as a placeholder
-        return True
-    
-    def _validate_node_connectivity(self, cluster_status: ClusterStatus, current_nodes: List[Dict]) -> ConnectivityStatus:
-        """
-        Validate node connectivity
-        """
-        if not current_nodes:
-            return ConnectivityStatus(
-                all_nodes_connected=False,
-                disconnected_nodes=[],
-                partition_groups=[]
+
+        return consensus_percentage
+
+
+
+class StateValidator:
+    """
+    Comprehensive cluster state validation coordinator.
+    Executes all validation checks and aggregates results.
+    """
+
+    def __init__(self, config: 'StateValidationConfig'):
+        """Initialize the state validator with configuration."""
+        self.config = config
+
+        # Initialize all sub-validators
+        self.replication_validator = ReplicationValidator()
+        self.cluster_status_validator = ClusterStatusValidator()
+        self.slot_validator = SlotCoverageValidator()
+        self.topology_validator = TopologyValidator()
+        self.view_consistency_validator = ViewConsistencyValidator()
+
+        # Track killed nodes from chaos injections
+        self.killed_nodes: set[str] = set()
+
+        logger.info("StateValidator initialized")
+
+    def register_killed_node(self, node_address: str) -> None:
+        """Register a node that was killed by chaos injection."""
+        self.killed_nodes.add(node_address)
+        logger.debug(f"Registered killed node: {node_address}")
+
+    def clear_killed_nodes(self) -> None:
+        """Clear the list of killed nodes (e.g., after recovery)."""
+        self.killed_nodes.clear()
+        logger.debug("Cleared killed nodes list")
+
+    def validate_state(
+        self,
+        cluster_connection: ClusterConnection,
+        expected_topology: Optional['ExpectedTopology'] = None,
+        operation_context: Optional['OperationContext'] = None
+    ) -> 'StateValidationResult':
+        """Execute all validation checks after an operation."""
+        validation_start = time.time()
+
+        # Optional stabilization wait before validation
+        if self.config.stabilization_wait > 0:
+            logger.info(
+                f"Waiting {self.config.stabilization_wait}s for cluster stabilization "
+                "before validation"
             )
-        
+            time.sleep(self.config.stabilization_wait)
+
+        # Track individual check results
+        replication_result = None
+        cluster_status_result = None
+        slot_coverage_result = None
+        topology_result = None
+        view_consistency_result = None
+
+        failed_checks = []
+        error_messages = []
+
+        # Execute enabled validation checks
         try:
-            # Try to connect to each node
-            disconnected_nodes = []
-            connected_nodes = []
-            
-            for node in current_nodes:
-                node_addr = f"{node['host']}:{node['port']}"
-                
-                # Check if node is marked as failed in topology
-                if node.get('status') == 'failed':
-                    disconnected_nodes.append(node_addr)
-                    continue
-                
+            # 1. Replication validation
+            if self.config.check_replication:
+                logger.info("Running replication validation...")
                 try:
-                    client = valkey.Valkey(
-                        host=node['host'],
-                        port=node['port'],
-                        socket_timeout=2,  # Reduced timeout for dead nodes
-                        socket_connect_timeout=2,  # Fast-fail on unreachable nodes
-                        decode_responses=True
+                    replication_result = self.replication_validator.validate(
+                        cluster_connection,
+                        self.config.replication_config
                     )
-                    client.ping()
-                    client.close()
-                    connected_nodes.append(node_addr)
+
+                    if not replication_result.success:
+                        failed_checks.append("replication")
+                        if replication_result.error_message:
+                            error_messages.append(f"Replication: {replication_result.error_message}")
+
+                    logger.info(
+                        f"Replication validation: {'PASSED' if replication_result.success else 'FAILED'}"
+                    )
                 except Exception as e:
-                    # Node is dead or unreachable - expected after chaos
-                    logging.debug(f"Node {node_addr} unreachable: {e}")
-                    disconnected_nodes.append(node_addr)
-            
-            # After chaos, some nodes being dead is expected and acceptable
-            # We consider connectivity good if at least one node per shard is reachable
-            # For now, we're lenient: as long as SOME nodes are connected, it's acceptable
-            all_connected = len(disconnected_nodes) == 0
-            
-            # For partition detection
-            partition_groups = []
-            if not all_connected and connected_nodes:
-                # Simple partition detection: connected vs disconnected
-                partition_groups.append(connected_nodes)
-                if disconnected_nodes:
-                    partition_groups.append(disconnected_nodes)
-            
-            if disconnected_nodes:
-                logging.info(f"Disconnected nodes detected (expected after chaos): {disconnected_nodes}")
-            
-            return ConnectivityStatus(
-                all_nodes_connected=all_connected,
-                disconnected_nodes=disconnected_nodes,
-                partition_groups=partition_groups
-            )
-            
+                    logger.error(f"Replication validation error: {e}")
+                    failed_checks.append("replication")
+                    error_messages.append(f"Replication validation error: {str(e)}")
+
+            # 2. Cluster status validation
+            if self.config.check_cluster_status:
+                logger.info("Running cluster status validation...")
+                try:
+                    cluster_status_result = self.cluster_status_validator.validate(
+                        cluster_connection,
+                        self.config.cluster_status_config,
+                        killed_nodes=self.killed_nodes
+                    )
+
+                    if not cluster_status_result.success:
+                        failed_checks.append("cluster_status")
+                        if cluster_status_result.error_message:
+                            error_messages.append(f"Cluster Status: {cluster_status_result.error_message}")
+
+                    logger.info(
+                        f"Cluster status validation: {'PASSED' if cluster_status_result.success else 'FAILED'}"
+                    )
+                except Exception as e:
+                    logger.error(f"Cluster status validation error: {e}")
+                    failed_checks.append("cluster_status")
+                    error_messages.append(f"Cluster status validation error: {str(e)}")
+
+            # 3. Slot coverage validation
+            if self.config.check_slot_coverage:
+                logger.info("Running slot coverage validation...")
+                try:
+                    slot_coverage_result = self.slot_validator.validate(
+                        cluster_connection,
+                        self.config.slot_coverage_config
+                    )
+
+                    if not slot_coverage_result.success:
+                        failed_checks.append("slot_coverage")
+                        if slot_coverage_result.error_message:
+                            error_messages.append(f"Slot Coverage: {slot_coverage_result.error_message}")
+
+                    logger.info(
+                        f"Slot coverage validation: {'PASSED' if slot_coverage_result.success else 'FAILED'}"
+                    )
+                except Exception as e:
+                    logger.error(f"Slot coverage validation error: {e}")
+                    failed_checks.append("slot_coverage")
+                    error_messages.append(f"Slot coverage validation error: {str(e)}")
+
+            # 4. Topology validation
+            if self.config.check_topology and expected_topology:
+                logger.info("Running topology validation...")
+                try:
+                    topology_result = self.topology_validator.validate(
+                        cluster_connection,
+                        expected_topology,
+                        self.config.topology_config
+                    )
+
+                    if not topology_result.success:
+                        failed_checks.append("topology")
+                        if topology_result.error_message:
+                            error_messages.append(f"Topology: {topology_result.error_message}")
+
+                    logger.info(
+                        f"Topology validation: {'PASSED' if topology_result.success else 'FAILED'}"
+                    )
+                except Exception as e:
+                    logger.error(f"Topology validation error: {e}")
+                    failed_checks.append("topology")
+                    error_messages.append(f"Topology validation error: {str(e)}")
+            elif self.config.check_topology and not expected_topology:
+                logger.info("Topology validation skipped (no expected topology provided)")
+
+            # 5. View consistency validation
+            if self.config.check_view_consistency:
+                logger.info("Running view consistency validation...")
+                try:
+                    view_consistency_result = self.view_consistency_validator.validate(
+                        cluster_connection,
+                        self.config.view_consistency_config
+                    )
+
+                    if not view_consistency_result.success:
+                        failed_checks.append("view_consistency")
+                        if view_consistency_result.error_message:
+                            error_messages.append(f"View Consistency: {view_consistency_result.error_message}")
+
+                    logger.info(
+                        f"View consistency validation: {'PASSED' if view_consistency_result.success else 'FAILED'}"
+                    )
+                except Exception as e:
+                    logger.error(f"View consistency validation error: {e}")
+                    failed_checks.append("view_consistency")
+                    error_messages.append(f"View consistency validation error: {str(e)}")
+
         except Exception as e:
-            logging.error(f"Connectivity validation failed: {e}")
-            return ConnectivityStatus(
-                all_nodes_connected=False,
-                disconnected_nodes=[],
-                partition_groups=[]
+            logger.error(f"Unexpected error during validation: {e}")
+            failed_checks.append("validation_framework")
+            error_messages.append(f"Unexpected validation error: {str(e)}")
+
+        # Calculate validation duration
+        validation_duration = time.time() - validation_start
+
+        # Determine overall success
+        overall_success = len(failed_checks) == 0
+
+        # Create comprehensive result
+        result = StateValidationResult(
+            overall_success=overall_success,
+            validation_timestamp=validation_start,
+            validation_duration=validation_duration,
+            replication=replication_result,
+            cluster_status=cluster_status_result,
+            slot_coverage=slot_coverage_result,
+            topology=topology_result,
+            view_consistency=view_consistency_result,
+            failed_checks=failed_checks,
+            error_messages=error_messages
+        )
+
+        # Log overall result
+        if overall_success:
+            logger.info(
+                f"State validation PASSED "
+                f"(duration: {validation_duration:.2f}s)"
             )
-    
-    def _validate_data_consistency(self, cluster_status: ClusterStatus, current_nodes: List[Dict]) -> ConsistencyStatus:
-        """
-        Validate data consistency across nodes
-        """
-        # Data consistency validation is complex and requires:
-        # 1. Identifying primary-replica pairs
-        # 2. Sampling keys from primaries
-        # 3. Comparing values on replicas
-        
-        # For now, implement a basic check
-        try:
-            primary_nodes = [n for n in current_nodes if n['role'] == 'primary']
-            
-            if not primary_nodes:
-                return ConsistencyStatus(
-                    consistent=True,
-                    inconsistent_keys=[],
-                    node_data_mismatches={}
+        else:
+            logger.error(
+                f"State validation FAILED "
+                f"(duration: {validation_duration:.2f}s, "
+                f"failed checks: {', '.join(failed_checks)})"
+            )
+
+            # Check for critical failures
+            if result.is_critical_failure():
+                logger.error(
+                    "CRITICAL FAILURE DETECTED: "
+                    "Slot coverage lost or split-brain scenario"
                 )
-            
-            # Try to connect to any available primary
-            for node in primary_nodes:
-                try:
-                    client = valkey.Valkey(
-                        host=node['host'],
-                        port=node['port'],
-                        socket_timeout=2,  # Reduced timeout
-                        socket_connect_timeout=2,  # Fast-fail on unreachable nodes
-                        decode_responses=True
-                    )
-                    
-                    # Get some keys to check
-                    keys = client.keys('*')[:10]  # Sample first 10 keys
-                    
-                    client.close()
-                    
-                    # For basic validation, if we can read keys, consider it consistent
-                    # Full validation would require comparing across replicas
-                    return ConsistencyStatus(
-                        consistent=True,
-                        inconsistent_keys=[],
-                        node_data_mismatches={}
-                    )
-                except Exception as e:
-                    # This primary is dead, try next one
-                    logging.debug(f"Primary {node['host']}:{node['port']} unreachable: {e}")
-                    continue
-            
-            # All primaries are dead - this is a problem
-            logging.warning("All primary nodes unreachable for consistency check")
-            return ConsistencyStatus(
-                consistent=False,
-                inconsistent_keys=[],
-                node_data_mismatches={}
+
+        return result
+
+
+    def validate_with_retry(
+        self,
+        cluster_connection: ClusterConnection,
+        expected_topology: Optional['ExpectedTopology'] = None,
+        operation_context: Optional['OperationContext'] = None
+    ) -> 'StateValidationResult':
+        """Execute validation with retry logic for transient failures."""
+        attempt = 0
+        max_attempts = self.config.max_retries + 1  # Initial attempt + retries
+
+        while attempt < max_attempts:
+            attempt += 1
+
+            if attempt > 1:
+                logger.info(f"Validation attempt {attempt}/{max_attempts}")
+
+            # Execute validation
+            result = self.validate_state(
+                cluster_connection,
+                expected_topology,
+                operation_context
             )
-            
-        except Exception as e:
-            logging.error(f"Data consistency validation failed: {e}")
-            return ConsistencyStatus(
-                consistent=False,
-                inconsistent_keys=[],
-                node_data_mismatches={}
-            )
-    
-    def validate_data_consistency(self, cluster_status: ClusterStatus) -> bool:
-        """
-        Validate data consistency (simplified interface)
-        """
-        # Simplified version
-        return True
+
+            # If validation passed, return immediately
+            if result.overall_success:
+                if attempt > 1:
+                    logger.info(
+                        f"Validation succeeded on attempt {attempt}/{max_attempts}"
+                    )
+                return result
+
+            # Check if this is a critical failure
+            if result.is_critical_failure():
+                logger.error(
+                    "Critical failure detected - skipping retry. "
+                    f"Failed checks: {', '.join(result.failed_checks)}"
+                )
+                return result
+
+            # If we have more attempts and retry is enabled, wait and retry
+            if attempt < max_attempts and self.config.retry_on_transient_failure:
+                # Calculate backoff delay (exponential backoff)
+                backoff_delay = self.config.retry_delay * (2 ** (attempt - 1))
+
+                logger.warning(
+                    f"Validation failed (attempt {attempt}/{max_attempts}), "
+                    f"retrying in {backoff_delay:.1f}s... "
+                    f"Failed checks: {', '.join(result.failed_checks)}"
+                )
+
+                time.sleep(backoff_delay)
+            else:
+                # No more retries or retry disabled
+                if not self.config.retry_on_transient_failure:
+                    logger.error(
+                        "Validation failed and retry is disabled. "
+                        f"Failed checks: {', '.join(result.failed_checks)}"
+                    )
+                else:
+                    logger.error(
+                        f"Validation failed after {max_attempts} attempt(s). "
+                        f"Failed checks: {', '.join(result.failed_checks)}"
+                    )
+                return result
+
+        # This should not be reached, but return the last result just in case
+        logger.error("Validation retry loop completed unexpectedly")
+        return result
