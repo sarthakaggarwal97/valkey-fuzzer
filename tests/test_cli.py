@@ -4,10 +4,7 @@ Tests for CLI functionality
 import pytest
 import json
 import yaml
-from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock
-from io import StringIO
-import sys
+from unittest.mock import Mock, patch
 
 from src.cli import FuzzerCLI, create_parser, main
 from src.models import ExecutionResult, ChaosResult
@@ -286,18 +283,48 @@ class TestCLIParser:
     def test_parse_commands(self):
         """Test parsing various CLI commands"""
         parser = create_parser()
+        assert parser.prog == 'valkey-fuzzer'
+    
+    def test_parse_random_command(self):
+        """Test parsing random command"""
+        parser = create_parser()
+        args = parser.parse_args(['cluster', '--seed', '42'])
         
-        # Random command
-        args = parser.parse_args(['random', '--seed', '42', '--iterations', '5'])
-        assert args.command == 'random'
+        assert args.command == 'cluster'
         assert args.seed == 42
-        assert args.iterations == 5
+    
+    def test_parse_random_with_iterations(self):
+        """Test parsing random command with iterations"""
+        parser = create_parser()
+        args = parser.parse_args(['cluster', '--random', '--iterations', '5'])
         
-        # DSL command
-        args = parser.parse_args(['dsl', 'test.yaml', '--verbose'])
-        assert args.command == 'dsl'
-        assert args.file == 'test.yaml'
-        assert args.verbose is True
+        assert args.command == 'cluster'
+        assert args.iterations == 5
+    
+    def test_parse_random_with_config(self):
+        """Test parsing random command with config"""
+        parser = create_parser()
+        args = parser.parse_args(['cluster', '--random', '--config', 'config.yaml'])
+        
+        assert args.command == 'cluster'
+        assert args.config == 'config.yaml'
+    
+    def test_parse_dsl_command(self):
+        """Test parsing DSL command"""
+        parser = create_parser()
+        args = parser.parse_args(['cluster', '--dsl', 'test.yaml'])
+        
+        assert args.command == 'cluster'
+        assert args.dsl == 'test.yaml'
+    
+    def test_parse_output_options(self):
+        """Test parsing output options"""
+        parser = create_parser()
+        args = parser.parse_args(['cluster', '--random', '--output', 'results.json', '--format', 'yaml'])
+        
+        assert args.command == 'cluster'
+        assert args.output == 'results.json'
+        assert args.format == 'yaml'
 
 
 class TestCLIMain:
@@ -310,7 +337,7 @@ class TestCLIMain:
         mock_cli.run_random_test.return_value = 0
         mock_cli_class.return_value = mock_cli
         
-        with patch('sys.argv', ['cli', 'random', '--seed', '42']):
+        with patch('sys.argv', ['cli', 'cluster', '--random', '--seed', '42']):
             result = main()
         
         assert result == 0
@@ -323,7 +350,7 @@ class TestCLIMain:
         mock_cli.run_dsl_test.return_value = 0
         mock_cli_class.return_value = mock_cli
         
-        with patch('sys.argv', ['cli', 'dsl', 'test.yaml']):
+        with patch('sys.argv', ['cli', 'cluster', '--dsl', 'test.yaml']):
             result = main()
         
         assert result == 0
@@ -342,7 +369,7 @@ class TestCLIMain:
         assert result == 0
         mock_cli.validate_dsl.assert_called_once()
     
-    def test_main_no_command(self, capsys):
+    def test_main_no_command(self):
         """Test main with no command"""
         with patch('sys.argv', ['cli']):
             result = main()
@@ -356,12 +383,10 @@ class TestCLIMain:
         mock_cli.run_random_test.side_effect = KeyboardInterrupt()
         mock_cli_class.return_value = mock_cli
         
-        with patch('sys.argv', ['cli', 'random']):
+        with patch('sys.argv', ['cli', 'cluster', '--random']):
             result = main()
         
         assert result == 130
-
-
 
 def test_print_detailed_with_validation():
     """Test that _print_detailed_result displays detailed validation info"""
