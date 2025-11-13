@@ -4,12 +4,8 @@ Cluster Coordinator - Manages cluster lifecycle and interfaces with Cluster Orch
 import logging
 import time
 from typing import List, Optional
-from ..models import (
-    ClusterConfig, ClusterInstance, ClusterStatus, NodeInfo, ClusterConnection
-)
-from ..cluster_orchestrator.orchestrator import (
-    ConfigurationManager, ClusterManager, PortManager
-)
+from ..models import ClusterConfig, ClusterInstance, ClusterStatus, NodeInfo, ClusterConnection
+from ..cluster_orchestrator.orchestrator import ConfigurationManager, ClusterManager, PortManager
 
 logging.basicConfig(format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', level=logging.INFO, force=True)
 logger = logging.getLogger(__name__)

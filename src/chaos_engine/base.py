@@ -87,7 +87,7 @@ class BaseChaosEngine(IChaosEngine, ABC):
         # Future chaos types (like network chaos) might need active cleanup
         
         del self.active_chaos[chaos_id]
-        logger.info(f"Stopped chaos {chaos_id}")
+        logger.debug(f"Stopped chaos with chaos ID: {chaos_id}")
         return True
     
     def cleanup_chaos(self, cluster_id: str) -> bool:

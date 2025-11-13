@@ -258,11 +258,11 @@ class TestFuzzerCLI:
         assert "not found" in captured.out
     
     @patch('src.cli.DSLLoader')
-    @patch('src.fuzzer_engine.ScenarioGenerator')
+    @patch('src.cli.ScenarioGenerator')
     def test_validate_dsl_success(self, mock_generator_class, mock_loader, tmp_path, capsys):
         """Test validating DSL configuration"""
         dsl_file = tmp_path / "test.yaml"
-        dsl_file.write_text("scenario:\n  id: test\n")
+        dsl_file.write_text("scenario_id: test\ncluster:\n  num_shards: 3\n  replicas_per_shard: 1\noperations:\n  - type: failover\n    target_node: node-0\n")
         
         mock_dsl_config = Mock(config_text="test config")
         mock_loader.load_from_file.return_value = mock_dsl_config

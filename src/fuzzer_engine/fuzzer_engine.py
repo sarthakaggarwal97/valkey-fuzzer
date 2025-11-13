@@ -18,6 +18,9 @@ from .error_handler import ErrorHandler, ErrorContext, ErrorCategory, ErrorSever
 logging.basicConfig(format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', level=logging.INFO, force=True)
 logger = logging.getLogger(__name__)
 
+cli_logger = logging.getLogger('cli')
+cli_logger.addHandler(logging.StreamHandler())
+cli_logger.propagate = False
 
 class FuzzerEngine(IFuzzerEngine):
     """
@@ -35,7 +38,7 @@ class FuzzerEngine(IFuzzerEngine):
         self.logger = FuzzerLogger()
         self.error_handler = ErrorHandler()
         
-        logger.info("Fuzzer Engine initialized")
+        logger.info("Fuzzer Engine Initialized")
     
     def generate_random_scenario(self, seed: Optional[int] = None) -> Scenario:
         """Generate a randomized test scenario with optional seed for reproducibility."""
@@ -124,13 +127,13 @@ class FuzzerEngine(IFuzzerEngine):
                 self.logger.log_cluster_state_snapshot(cluster_status, "initial_state")
             
             # Step 2: Validate cluster readiness
-            print()
+            cli_logger.info("")
             logger.info("Step 2: Validating cluster readiness")
             if not self._validate_cluster_readiness_with_retry(cluster_instance.cluster_id):
                 raise Exception("Cluster failed readiness validation")
             
             # Step 3: Load test data
-            print()
+            cli_logger.info("")
             logger.info("Step 3: Loading test data")
             self._load_test_data(cluster_connection)
             
@@ -140,7 +143,7 @@ class FuzzerEngine(IFuzzerEngine):
             self.operation_orchestrator.set_cluster_connection(cluster_connection)
             
             # Step 4: Execute operations with chaos coordination
-            print()
+            cli_logger.info("")
             logger.info(f"Step 4: Executing {len(scenario.operations)} operations")
             
             for i, operation in enumerate(scenario.operations):
@@ -159,7 +162,8 @@ class FuzzerEngine(IFuzzerEngine):
                     operation_chaos_events = self.chaos_coordinator.coordinate_chaos_with_operation(
                         operation,
                         scenario.chaos_config,
-                        cluster_instance.nodes
+                        cluster_instance.nodes,
+                        cluster_connection
                     )
                     chaos_events.extend(operation_chaos_events)
                     
@@ -211,7 +215,7 @@ class FuzzerEngine(IFuzzerEngine):
                     # Continue with next operation (graceful degradation)
             
             # Step 5: Final cluster validation
-            print()
+            cli_logger.info("")
             logger.info("Step 5: Final cluster validation")
             final_validation = self.state_validator.validate_cluster_state(
                 cluster_instance.cluster_id,
