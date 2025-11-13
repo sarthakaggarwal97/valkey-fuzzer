@@ -2101,22 +2101,43 @@ class DataConsistencyValidator:
                 
             except Exception as e:
                 logger.error(f"Failed to create cluster client: {e}")
+                logger.info("Falling back to manual slot routing")
+                
+                # Fetch slot assignments from cluster
+                slot_map = self._fetch_slot_assignments(live_nodes, config.timeout)
+                
+                if not slot_map:
+                    logger.error("Failed to fetch slot assignments - cannot validate keys")
+                    return DataConsistencyValidation(
+                        success=False,
+                        test_keys_checked=0,
+                        missing_keys=[],
+                        inconsistent_keys=[],
+                        unreachable_keys=list(self.test_keys.keys()),
+                        error_message="Failed to fetch slot assignments for fallback routing"
+                    )
+                
                 # Fall back to checking what we can with individual node connections
                 for key, expected_value in self.test_keys.items():
                     try:
                         # Compute slot and find the owning node
                         slot = self._compute_slot(key)
-                        owning_node = None
+                        owning_node_addr = slot_map.get(slot)
                         
+                        if not owning_node_addr:
+                            logger.debug(f"No owner found for slot {slot} (key {key})")
+                            unreachable_keys.append(key)
+                            continue
+                        
+                        # Find the node info from live_nodes
+                        owning_node = None
                         for node in live_nodes:
-                            if node['role'] != 'master':
-                                continue
-                            slots = node.get('slots', [])
-                            if any(slot >= s[0] and slot <= s[1] for s in slots):
+                            if format_node_address(node) == owning_node_addr:
                                 owning_node = node
                                 break
                         
                         if not owning_node:
+                            logger.debug(f"Owning node {owning_node_addr} not in live nodes")
                             unreachable_keys.append(key)
                             continue
                         
@@ -2286,6 +2307,69 @@ class DataConsistencyValidator:
         except Exception as e:
             logger.error(f"Error during cross-replica consistency check: {e}")
             # Don't fail the entire validation on cross-replica check errors
+    
+    def _compute_slot(self, key: str) -> int:
+        """Compute the Redis cluster slot for a key using CRC16."""
+        # Extract hash tag if present
+        start = key.find('{')
+        if start != -1:
+            end = key.find('}', start + 1)
+            if end != -1 and end > start + 1:
+                key = key[start + 1:end]
+        
+        # CRC16 XMODEM
+        crc = 0xFFFF
+        for byte in key.encode('utf-8'):
+            crc ^= byte << 8
+            for _ in range(8):
+                if crc & 0x8000:
+                    crc = (crc << 1) ^ 0x1021
+                else:
+                    crc = crc << 1
+                crc &= 0xFFFF
+        
+        return crc % 16384
+    
+    def _fetch_slot_assignments(self, live_nodes: List[Dict], timeout: float) -> Dict[int, str]:
+        """
+        Fetch slot-to-node mapping from cluster using CLUSTER SLOTS.
+        Returns dict mapping slot number to node address (host:port).
+        """
+        slot_map = {}
+        
+        for node in live_nodes:
+            try:
+                with valkey_client(node['host'], node['port'], timeout) as client:
+                    # CLUSTER SLOTS returns: [[start, end, [host, port, node_id], ...], ...]
+                    slots_info = client.execute_command('CLUSTER', 'SLOTS')
+                    
+                    for slot_range in slots_info:
+                        if len(slot_range) < 3:
+                            continue
+                        
+                        start_slot = slot_range[0]
+                        end_slot = slot_range[1]
+                        
+                        # First node in the list is the primary
+                        primary_info = slot_range[2]
+                        if len(primary_info) >= 2:
+                            primary_host = primary_info[0]
+                            primary_port = primary_info[1]
+                            primary_addr = f"{primary_host}:{primary_port}"
+                            
+                            # Map all slots in this range to the primary
+                            for slot in range(start_slot, end_slot + 1):
+                                slot_map[slot] = primary_addr
+                    
+                    logger.debug(f"Fetched {len(slot_map)} slot assignments from {format_node_address(node)}")
+                    return slot_map
+                    
+            except Exception as e:
+                logger.debug(f"Failed to fetch slots from {format_node_address(node)}: {e}")
+                continue
+        
+        logger.warning("Failed to fetch slot assignments from any node")
+        return {}
 
 
 class StateValidator:

@@ -403,7 +403,10 @@ class FuzzerEngine(IFuzzerEngine):
         )
         
         # Use StateValidator for validation
-        validator = StateValidator(StateValidationConfig())
+        # Disable data consistency check for standalone validation (no test data seeded)
+        validation_config = StateValidationConfig()
+        validation_config.check_data_consistency = False
+        validator = StateValidator(validation_config)
         
         # Build expected topology
         expected_topology = ExpectedTopology(
@@ -412,6 +415,7 @@ class FuzzerEngine(IFuzzerEngine):
             shard_structure={}
         )
         
+        logger.info("Running standalone validation (data consistency check disabled - no test data)")
         return validator.validate_state(cluster_connection, expected_topology, None)
     
     def _create_cluster_with_retry(self, scenario: Scenario, max_retries: int = 3):
