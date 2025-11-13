@@ -29,6 +29,17 @@ from ..models import (
     StateValidationConfig,
     StateValidationResult
 )
+from .state_validator_helpers import (
+    format_node_address,
+    validate_killed_vs_failed_nodes,
+    check_per_shard_redundancy,
+    group_slots_into_ranges,
+    detect_unexpected_failures,
+    create_topology_mismatch_for_unexpected_failure,
+    is_node_killed_by_chaos,
+    compute_cluster_slot,
+    fetch_cluster_slot_assignments
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,8 +77,7 @@ def safe_query_node(
         return None
 
 
-def format_node_address(node: Dict) -> str:
-    return f"{node['host']}:{node['port']}"
+# format_node_address moved to state_validator_helpers.py
 
 
 def parse_slot_range(slot_info: str) -> List[int]:
@@ -326,87 +336,19 @@ class ReplicationValidator:
                     )
                     logger.error(error_message)
 
-            # CRITICAL: Check per-shard redundancy (chaos-aware)
-            # Even if some replicas are allowed to be dead, we must ensure each shard has minimum redundancy
-            # BUT: Only fail if the redundancy loss is due to UNEXPECTED failures (not killed by chaos)
+            # CRITICAL: Check per-shard redundancy using helper function
             if success and config.min_replicas_per_shard > 0:
-                # First, identify all shards from primary nodes
-                all_shard_ids = set()
-                for node in all_nodes:
-                    if node['role'] == 'primary' and node.get('shard_id') is not None:
-                        all_shard_ids.add(node['shard_id'])
-                
-                # Group replicas by shard
-                shard_replicas: Dict[int, Dict[str, List]] = {}  # shard_id -> {alive: [], dead_expected: [], dead_unexpected: []}
-                
-                # Initialize all shards (even those with no replicas)
-                for shard_id in all_shard_ids:
-                    shard_replicas[shard_id] = {'alive': [], 'dead_expected': [], 'dead_unexpected': []}
-                
-                # Populate replica information
-                for replica in replica_nodes:
-                    shard_id = replica.get('shard_id')
-                    if shard_id is None or shard_id not in shard_replicas:
-                        continue
-                    
-                    replica_address = format_node_address(replica)
-                    if replica_address in disconnected_replicas:
-                        # Check if this was an expected death (killed by chaos)
-                        if replica_address in killed_nodes:
-                            shard_replicas[shard_id]['dead_expected'].append(replica_address)
-                        else:
-                            shard_replicas[shard_id]['dead_unexpected'].append(replica_address)
-                    else:
-                        shard_replicas[shard_id]['alive'].append(replica_address)
-                
-                # Check each shard has minimum redundancy
-                # ONLY fail if redundancy loss is due to unexpected failures
-                shards_without_redundancy = []
-                for shard_id, replicas in shard_replicas.items():
-                    alive_count = len(replicas['alive'])
-                    dead_expected_count = len(replicas['dead_expected'])
-                    dead_unexpected_count = len(replicas['dead_unexpected'])
-                    
-                    # Calculate what redundancy SHOULD be (accounting for killed nodes)
-                    total_replicas = alive_count + dead_expected_count + dead_unexpected_count
-                    expected_alive = total_replicas - dead_expected_count  # What we expect after chaos
-                    
-                    # Only fail if we have UNEXPECTED redundancy loss
-                    if alive_count < config.min_replicas_per_shard and dead_unexpected_count > 0:
-                        shards_without_redundancy.append({
-                            'shard_id': shard_id,
-                            'alive_replicas': alive_count,
-                            'dead_expected': dead_expected_count,
-                            'dead_unexpected': dead_unexpected_count,
-                            'dead_unexpected_addresses': replicas['dead_unexpected']
-                        })
-                        logger.error(
-                            f"Shard {shard_id} has insufficient redundancy due to UNEXPECTED failures: "
-                            f"{alive_count} alive replica(s) < {config.min_replicas_per_shard} required. "
-                            f"Dead (expected/chaos): {dead_expected_count}, "
-                            f"Dead (UNEXPECTED): {dead_unexpected_count} - {replicas['dead_unexpected']}"
-                        )
-                    elif alive_count < config.min_replicas_per_shard:
-                        # Redundancy loss is due to chaos only - log but don't fail
-                        logger.warning(
-                            f"Shard {shard_id} has reduced redundancy due to chaos: "
-                            f"{alive_count} alive replica(s) (killed by chaos: {dead_expected_count})"
-                        )
-                
-                if shards_without_redundancy:
+                redundancy_success, redundancy_error = check_per_shard_redundancy(
+                    all_nodes=all_nodes,
+                    replica_nodes=replica_nodes,
+                    disconnected_replicas=disconnected_replicas,
+                    killed_nodes=killed_nodes,
+                    min_replicas_per_shard=config.min_replicas_per_shard,
+                    context="replication"
+                )
+                if not redundancy_success:
                     success = False
-                    shard_details = ", ".join([
-                        f"shard {s['shard_id']} ({s['alive_replicas']} alive, "
-                        f"{s['dead_unexpected']} unexpected failures)"
-                        for s in shards_without_redundancy
-                    ])
-                    error_message = (
-                        f"CRITICAL: {len(shards_without_redundancy)} shard(s) have insufficient redundancy "
-                        f"due to UNEXPECTED failures (< {config.min_replicas_per_shard} alive replica per shard). "
-                        f"Affected shards: {shard_details}. "
-                        f"This indicates unexpected replica failures - not caused by chaos!"
-                    )
-                    logger.error(error_message)
+                    error_message = redundancy_error
 
             if success and config.require_all_replicas_synced:
                 # Strict mode: fail if any replica is not synced
@@ -698,28 +640,16 @@ class ClusterStatusValidator:
                 # Special handling for "unknown" state when nodes were killed
                 if overall_cluster_state == 'unknown' and killed_nodes:
                     # "unknown" state is expected when nodes are killed
-                    # Verify that the killed nodes are actually in fail state
-                    expected_failed_nodes = killed_nodes
-                    actual_failed_nodes = set(nodes_in_fail_state)
-
-                    # Check if all killed nodes are in fail state
-                    killed_but_not_failed = expected_failed_nodes - actual_failed_nodes
-                    failed_but_not_killed = actual_failed_nodes - expected_failed_nodes
-
-                    if killed_but_not_failed:
-                        # Killed nodes should be in fail state but aren't
+                    # Use helper to validate killed vs failed nodes
+                    validation_success, validation_error = validate_killed_vs_failed_nodes(
+                        killed_nodes=killed_nodes,
+                        failed_nodes=nodes_in_fail_state,
+                        context="cluster_status"
+                    )
+                    
+                    if not validation_success:
                         success = False
-                        error_message = (
-                            f"Killed nodes not in fail state: {killed_but_not_failed}"
-                        )
-                        logger.error(error_message)
-                    elif failed_but_not_killed:
-                        # Extra nodes in fail state that weren't killed
-                        success = False
-                        error_message = (
-                            f"Unexpected nodes in fail state: {failed_but_not_killed}"
-                        )
-                        logger.error(error_message)
+                        error_message = validation_error
                     else:
                         # All killed nodes are in fail state as expected
                         degraded_reason = (
@@ -746,50 +676,29 @@ class ClusterStatusValidator:
             if nodes_in_fail_state:
                 logger.warning(f"Nodes in fail state: {nodes_in_fail_state}")
 
-                # If we have killed nodes, verify they match the failed nodes
+                # Use helper to validate killed vs failed nodes
                 if killed_nodes:
-                    expected_failed_nodes = killed_nodes
-                    actual_failed_nodes = set(nodes_in_fail_state)
-
-                    if expected_failed_nodes == actual_failed_nodes:
+                    validation_success, validation_error = validate_killed_vs_failed_nodes(
+                        killed_nodes=killed_nodes,
+                        failed_nodes=nodes_in_fail_state,
+                        context="cluster_status"
+                    )
+                    
+                    if validation_success:
                         # Failed nodes match killed nodes - expected behavior
                         if not degraded_reason:
                             degraded_reason = (
                                 f"{len(nodes_in_fail_state)} node(s) in fail state "
                                 f"(killed by chaos) - expected behavior"
                             )
-                    else:
-                        killed_but_not_failed = expected_failed_nodes - actual_failed_nodes
-                        failed_but_not_killed = actual_failed_nodes - expected_failed_nodes
-                        
-                        if killed_but_not_failed and success:
-                            success = False
-                            error_message = (
-                                f"Killed nodes not in fail state: {killed_but_not_failed}. "
-                                f"These nodes were killed by chaos but are not marked as failed. "
-                                f"This indicates improper node termination or cluster state tracking bug."
-                            )
-                            logger.error(error_message)
-                        
-                        if failed_but_not_killed and success:
-                            success = False
-                            error_message = (
-                                f"Unexpected nodes in fail state: {failed_but_not_killed}. "
-                                f"These nodes failed but were not killed by chaos. "
-                                f"This indicates cascading failures or other clustering bugs. "
-                                f"Expected failed: {expected_failed_nodes}, Actual failed: {actual_failed_nodes}"
-                            )
-                            logger.error(error_message)
+                    elif success:  # Only update if not already failed
+                        success = False
+                        error_message = validation_error
                 else:
-                    # CRITICAL FIX: No killed nodes tracked, but nodes are in fail state
-                    # This could mean:
-                    # 1. We're not tracking chaos (old code path) - be lenient
-                    # 2. Spontaneous failures occurred - should fail!
-                    # 
-                    # If cluster state is "ok" but nodes are failed, this is a BUG
-                    # (cluster should not report "ok" with failed nodes)
+                    # No killed nodes tracked, but nodes are in fail state
+                    # If cluster state is "ok" but nodes are failed, this is suspicious
                     if success and overall_cluster_state in config.acceptable_states:
-                        # Cluster says it's OK but has failed nodes - this is suspicious
+                        # Cluster says it's OK but has failed nodes
                         # Only allow if explicitly configured to allow degraded state
                         if not config.allow_degraded:
                             success = False
@@ -999,7 +908,7 @@ class SlotCoverageValidator:
             # Log unassigned slots summary
             if unassigned_slots:
                 # Group consecutive unassigned slots into ranges for cleaner logging
-                ranges = self._group_slots_into_ranges(unassigned_slots)
+                ranges = group_slots_into_ranges(unassigned_slots)
                 logger.warning(
                     f"Found {len(unassigned_slots)} unassigned slots: {ranges}"
                 )
@@ -1033,7 +942,7 @@ class SlotCoverageValidator:
                         f"CRITICAL: {len(slots_on_killed_nodes)} slots still assigned to killed nodes. "
                         f"Killed nodes: {killed_nodes}. "
                         f"This indicates failover did not complete or slots were not reassigned. "
-                        f"Affected slots: {self._group_slots_into_ranges(slots_on_killed_nodes)}"
+                        f"Affected slots: {group_slots_into_ranges(slots_on_killed_nodes)}"
                     )
                     logger.error(error_message)
 
@@ -1146,40 +1055,7 @@ class SlotCoverageValidator:
 
         return slot_to_owner
 
-    def _group_slots_into_ranges(self, slots: List[int]) -> str:
-        """Group consecutive slot numbers into ranges for cleaner display."""
-        if not slots:
-            return ""
-
-        sorted_slots = sorted(slots)
-        ranges = []
-        start = sorted_slots[0]
-        end = sorted_slots[0]
-
-        for slot in sorted_slots[1:]:
-            if slot == end + 1:
-                # Consecutive slot, extend range
-                end = slot
-            else:
-                # Gap found, save current range and start new one
-                if start == end:
-                    ranges.append(str(start))
-                else:
-                    ranges.append(f"{start}-{end}")
-                start = slot
-                end = slot
-
-        # Add the last range
-        if start == end:
-            ranges.append(str(start))
-        else:
-            ranges.append(f"{start}-{end}")
-
-        # Limit output length for very long lists
-        if len(ranges) > 10:
-            return f"{', '.join(ranges[:10])}... ({len(ranges)} ranges total)"
-        else:
-            return ', '.join(ranges)
+    # _group_slots_into_ranges moved to state_validator_helpers.py
 
 
 
@@ -1224,24 +1100,12 @@ class TopologyValidator:
             live_nodes = [n for n in all_nodes if n['status'] != 'failed']
             failed_nodes = [n for n in all_nodes if n['status'] == 'failed']
             
-            # Helper function to check if a node was killed by chaos
-            # killed_nodes contains addresses (host:port), so we need to check both node_id and address
-            def is_killed_by_chaos(node):
-                node_id = node.get('node_id')
-                node_addr = format_node_address(node)
-                # Check both node_id and address since killed_nodes may contain either
-                return (node_id and node_id in killed_nodes) or (node_addr in killed_nodes)
-            
-            # Detect unexpected failures (failed but not in killed_nodes)
-            unexpected_failures = []
-            for node in failed_nodes:
-                if not is_killed_by_chaos(node):
-                    unexpected_failures.append(node)
-                    logger.warning(
-                        f"Unexpected node failure detected: {format_node_address(node)} "
-                        f"(role: {node['role']}, node_id: {node.get('node_id', 'unknown')}, "
-                        f"not in killed_nodes)"
-                    )
+            # Detect unexpected failures using helper function
+            unexpected_failures = detect_unexpected_failures(
+                all_nodes=all_nodes,
+                killed_nodes=killed_nodes,
+                context="topology"
+            )
             
             # Count nodes: ONLY live nodes
             # Failed nodes (even if killed by chaos) should not be counted as they're not functioning
@@ -1271,7 +1135,7 @@ class TopologyValidator:
             killed_replicas = 0
             
             for node in failed_nodes:
-                if is_killed_by_chaos(node):
+                if is_node_killed_by_chaos(node, killed_nodes):
                     if node['role'] == 'primary':
                         killed_primaries += 1
                     elif node['role'] == 'replica':
@@ -1328,12 +1192,7 @@ class TopologyValidator:
             # Report unexpected failures as topology mismatches
             if unexpected_failures:
                 for node in unexpected_failures:
-                    mismatch = TopologyMismatch(
-                        mismatch_type="unexpected_failure",
-                        node_id=node.get('node_id', 'unknown'),
-                        expected="node alive",
-                        actual=f"node failed (role: {node['role']}, addr: {format_node_address(node)})"
-                    )
+                    mismatch = create_topology_mismatch_for_unexpected_failure(node)
                     topology_mismatches.append(mismatch)
             
             # Validate shard structure if provided
@@ -2189,7 +2048,7 @@ class DataConsistencyValidator:
                 logger.info("Falling back to manual slot routing")
                 
                 # Fetch slot assignments from cluster
-                slot_map = self._fetch_slot_assignments(live_nodes, config.timeout)
+                slot_map = fetch_cluster_slot_assignments(live_nodes, config.timeout)
                 
                 if not slot_map:
                     logger.error("Failed to fetch slot assignments - cannot validate keys")
@@ -2206,7 +2065,7 @@ class DataConsistencyValidator:
                 for key, expected_value in self.test_keys.items():
                     try:
                         # Compute slot and find the owning node
-                        slot = self._compute_slot(key)
+                        slot = compute_cluster_slot(key)
                         owning_node_addr = slot_map.get(slot)
                         
                         if not owning_node_addr:
@@ -2393,68 +2252,7 @@ class DataConsistencyValidator:
             logger.error(f"Error during cross-replica consistency check: {e}")
             # Don't fail the entire validation on cross-replica check errors
     
-    def _compute_slot(self, key: str) -> int:
-        """Compute the Redis cluster slot for a key using CRC16."""
-        # Extract hash tag if present
-        start = key.find('{')
-        if start != -1:
-            end = key.find('}', start + 1)
-            if end != -1 and end > start + 1:
-                key = key[start + 1:end]
-        
-        # CRC16 XMODEM
-        crc = 0xFFFF
-        for byte in key.encode('utf-8'):
-            crc ^= byte << 8
-            for _ in range(8):
-                if crc & 0x8000:
-                    crc = (crc << 1) ^ 0x1021
-                else:
-                    crc = crc << 1
-                crc &= 0xFFFF
-        
-        return crc % 16384
-    
-    def _fetch_slot_assignments(self, live_nodes: List[Dict], timeout: float) -> Dict[int, str]:
-        """
-        Fetch slot-to-node mapping from cluster using CLUSTER SLOTS.
-        Returns dict mapping slot number to node address (host:port).
-        """
-        slot_map = {}
-        
-        for node in live_nodes:
-            try:
-                with valkey_client(node['host'], node['port'], timeout) as client:
-                    # CLUSTER SLOTS returns: [[start, end, [host, port, node_id], ...], ...]
-                    slots_info = client.execute_command('CLUSTER', 'SLOTS')
-                    
-                    for slot_range in slots_info:
-                        if len(slot_range) < 3:
-                            continue
-                        
-                        start_slot = slot_range[0]
-                        end_slot = slot_range[1]
-                        
-                        # First node in the list is the primary
-                        primary_info = slot_range[2]
-                        if len(primary_info) >= 2:
-                            primary_host = primary_info[0]
-                            primary_port = primary_info[1]
-                            primary_addr = f"{primary_host}:{primary_port}"
-                            
-                            # Map all slots in this range to the primary
-                            for slot in range(start_slot, end_slot + 1):
-                                slot_map[slot] = primary_addr
-                    
-                    logger.debug(f"Fetched {len(slot_map)} slot assignments from {format_node_address(node)}")
-                    return slot_map
-                    
-            except Exception as e:
-                logger.debug(f"Failed to fetch slots from {format_node_address(node)}: {e}")
-                continue
-        
-        logger.warning("Failed to fetch slot assignments from any node")
-        return {}
+    # _compute_slot and _fetch_slot_assignments moved to state_validator_helpers.py
 
 
 class StateValidator:
@@ -2499,6 +2297,52 @@ class StateValidator:
             self.config.data_consistency_config
         )
 
+    def _run_validation_check(
+        self,
+        check_name: str,
+        validator_func: Callable,
+        failed_checks: List[str],
+        error_messages: List[str],
+        display_name: Optional[str] = None
+    ) -> Any:
+        """
+        Run a validation check with consistent error handling and logging.
+        
+        Args:
+            check_name: Internal name for the check (e.g., "replication")
+            validator_func: Function that performs the validation
+            failed_checks: List to append failed check names to
+            error_messages: List to append error messages to
+            display_name: Human-readable name for logging (defaults to title-cased check_name)
+        
+        Returns:
+            Validation result object or None if validation failed with exception
+        """
+        if display_name is None:
+            display_name = check_name.replace('_', ' ').title()
+        
+        logger.info(f"Running {check_name.replace('_', ' ')} validation...")
+        
+        try:
+            result = validator_func()
+            
+            if not result.success:
+                failed_checks.append(check_name)
+                if result.error_message:
+                    error_messages.append(f"{display_name}: {result.error_message}")
+            
+            logger.info(
+                f"{display_name} validation: {'PASSED' if result.success else 'FAILED'}"
+            )
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"{display_name} validation error: {e}")
+            failed_checks.append(check_name)
+            error_messages.append(f"{display_name} validation error: {str(e)}")
+            return None
+
     def validate_state(
         self,
         cluster_connection: ClusterConnection,
@@ -2531,143 +2375,87 @@ class StateValidator:
         try:
             # 1. Replication validation
             if self.config.check_replication:
-                logger.info("Running replication validation...")
-                try:
-                    replication_result = self.replication_validator.validate(
+                replication_result = self._run_validation_check(
+                    check_name="replication",
+                    validator_func=lambda: self.replication_validator.validate(
                         cluster_connection,
                         self.config.replication_config,
                         killed_nodes=self.killed_nodes
-                    )
-
-                    if not replication_result.success:
-                        failed_checks.append("replication")
-                        if replication_result.error_message:
-                            error_messages.append(f"Replication: {replication_result.error_message}")
-
-                    logger.info(
-                        f"Replication validation: {'PASSED' if replication_result.success else 'FAILED'}"
-                    )
-                except Exception as e:
-                    logger.error(f"Replication validation error: {e}")
-                    failed_checks.append("replication")
-                    error_messages.append(f"Replication validation error: {str(e)}")
+                    ),
+                    failed_checks=failed_checks,
+                    error_messages=error_messages
+                )
 
             # 2. Cluster status validation
             if self.config.check_cluster_status:
-                logger.info("Running cluster status validation...")
-                try:
-                    cluster_status_result = self.cluster_status_validator.validate(
+                cluster_status_result = self._run_validation_check(
+                    check_name="cluster_status",
+                    validator_func=lambda: self.cluster_status_validator.validate(
                         cluster_connection,
                         self.config.cluster_status_config,
                         killed_nodes=self.killed_nodes
-                    )
-
-                    if not cluster_status_result.success:
-                        failed_checks.append("cluster_status")
-                        if cluster_status_result.error_message:
-                            error_messages.append(f"Cluster Status: {cluster_status_result.error_message}")
-
-                    logger.info(
-                        f"Cluster status validation: {'PASSED' if cluster_status_result.success else 'FAILED'}"
-                    )
-                except Exception as e:
-                    logger.error(f"Cluster status validation error: {e}")
-                    failed_checks.append("cluster_status")
-                    error_messages.append(f"Cluster status validation error: {str(e)}")
+                    ),
+                    failed_checks=failed_checks,
+                    error_messages=error_messages,
+                    display_name="Cluster Status"
+                )
 
             # 3. Slot coverage validation
             if self.config.check_slot_coverage:
-                logger.info("Running slot coverage validation...")
-                try:
-                    slot_coverage_result = self.slot_validator.validate(
+                slot_coverage_result = self._run_validation_check(
+                    check_name="slot_coverage",
+                    validator_func=lambda: self.slot_validator.validate(
                         cluster_connection,
                         self.config.slot_coverage_config,
                         killed_nodes=self.killed_nodes
-                    )
-
-                    if not slot_coverage_result.success:
-                        failed_checks.append("slot_coverage")
-                        if slot_coverage_result.error_message:
-                            error_messages.append(f"Slot Coverage: {slot_coverage_result.error_message}")
-
-                    logger.info(
-                        f"Slot coverage validation: {'PASSED' if slot_coverage_result.success else 'FAILED'}"
-                    )
-                except Exception as e:
-                    logger.error(f"Slot coverage validation error: {e}")
-                    failed_checks.append("slot_coverage")
-                    error_messages.append(f"Slot coverage validation error: {str(e)}")
+                    ),
+                    failed_checks=failed_checks,
+                    error_messages=error_messages,
+                    display_name="Slot Coverage"
+                )
 
             # 4. Topology validation
             if self.config.check_topology and expected_topology:
-                logger.info("Running topology validation...")
-                try:
-                    topology_result = self.topology_validator.validate(
+                topology_result = self._run_validation_check(
+                    check_name="topology",
+                    validator_func=lambda: self.topology_validator.validate(
                         cluster_connection,
                         expected_topology,
                         self.config.topology_config,
                         self.killed_nodes
-                    )
-
-                    if not topology_result.success:
-                        failed_checks.append("topology")
-                        if topology_result.error_message:
-                            error_messages.append(f"Topology: {topology_result.error_message}")
-
-                    logger.info(
-                        f"Topology validation: {'PASSED' if topology_result.success else 'FAILED'}"
-                    )
-                except Exception as e:
-                    logger.error(f"Topology validation error: {e}")
-                    failed_checks.append("topology")
-                    error_messages.append(f"Topology validation error: {str(e)}")
+                    ),
+                    failed_checks=failed_checks,
+                    error_messages=error_messages
+                )
             elif self.config.check_topology and not expected_topology:
                 logger.info("Topology validation skipped (no expected topology provided)")
 
             # 5. View consistency validation
             if self.config.check_view_consistency:
-                logger.info("Running view consistency validation...")
-                try:
-                    view_consistency_result = self.view_consistency_validator.validate(
+                view_consistency_result = self._run_validation_check(
+                    check_name="view_consistency",
+                    validator_func=lambda: self.view_consistency_validator.validate(
                         cluster_connection,
                         self.config.view_consistency_config,
                         killed_nodes=self.killed_nodes
-                    )
-
-                    if not view_consistency_result.success:
-                        failed_checks.append("view_consistency")
-                        if view_consistency_result.error_message:
-                            error_messages.append(f"View Consistency: {view_consistency_result.error_message}")
-
-                    logger.info(
-                        f"View consistency validation: {'PASSED' if view_consistency_result.success else 'FAILED'}"
-                    )
-                except Exception as e:
-                    logger.error(f"View consistency validation error: {e}")
-                    failed_checks.append("view_consistency")
-                    error_messages.append(f"View consistency validation error: {str(e)}")
+                    ),
+                    failed_checks=failed_checks,
+                    error_messages=error_messages,
+                    display_name="View Consistency"
+                )
 
             # 6. Data consistency validation
             if self.config.check_data_consistency:
-                logger.info("Running data consistency validation...")
-                try:
-                    data_consistency_result = self.data_consistency_validator.validate(
+                data_consistency_result = self._run_validation_check(
+                    check_name="data_consistency",
+                    validator_func=lambda: self.data_consistency_validator.validate(
                         cluster_connection,
                         self.config.data_consistency_config
-                    )
-
-                    if not data_consistency_result.success:
-                        failed_checks.append("data_consistency")
-                        if data_consistency_result.error_message:
-                            error_messages.append(f"Data Consistency: {data_consistency_result.error_message}")
-
-                    logger.info(
-                        f"Data consistency validation: {'PASSED' if data_consistency_result.success else 'FAILED'}"
-                    )
-                except Exception as e:
-                    logger.error(f"Data consistency validation error: {e}")
-                    failed_checks.append("data_consistency")
-                    error_messages.append(f"Data consistency validation error: {str(e)}")
+                    ),
+                    failed_checks=failed_checks,
+                    error_messages=error_messages,
+                    display_name="Data Consistency"
+                )
 
         except Exception as e:
             logger.error(f"Unexpected error during validation: {e}")

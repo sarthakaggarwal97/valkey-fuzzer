@@ -9,7 +9,7 @@ from src.fuzzer_engine.test_logger import FuzzerLogger
 from src.models import (
     Scenario, ClusterConfig, Operation, OperationType, OperationTiming,
     ChaosConfig, ChaosType, ProcessChaosType, TargetSelection, ChaosTiming, ChaosCoordination,
-    ValidationConfig, ChaosResult, ValidationResult, ExecutionResult,
+    ChaosResult, ValidationResult, ExecutionResult,
     SlotConflict, ReplicationStatus, ConnectivityStatus, ConsistencyStatus,
     ClusterStatus, NodeInfo
 )
@@ -46,7 +46,6 @@ def sample_scenario():
             coordination=ChaosCoordination(chaos_during_operation=True),
             process_chaos_type=ProcessChaosType.SIGKILL
         ),
-        validation_config=ValidationConfig(),
         seed=12345
     )
 
