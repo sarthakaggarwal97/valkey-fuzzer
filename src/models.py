@@ -503,7 +503,7 @@ class StateValidationConfig:
     check_data_consistency: bool = True
 
     # Timing configuration
-    stabilization_wait: float = 2.0  # Wait before validation
+    stabilization_wait: float = 5.0  # Wait before validation
     validation_timeout: float = 30.0  # Total validation timeout
 
     # Behavior configuration
