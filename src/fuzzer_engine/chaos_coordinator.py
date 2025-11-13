@@ -7,9 +7,10 @@ import time
 import random
 from typing import Optional, List
 from copy import deepcopy
-from ..models import
+from ..models import (
     Operation, ChaosConfig, ChaosResult, NodeInfo, ChaosCoordination,
     ProcessChaosType, ChaosType, TargetSelection
+)
 from ..chaos_engine.base import ProcessChaosEngine
 
 logging.basicConfig(format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', level=logging.INFO, force=True)
