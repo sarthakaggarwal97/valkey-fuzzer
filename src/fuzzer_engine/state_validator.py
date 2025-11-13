@@ -2143,10 +2143,70 @@ class DataConsistencyValidator:
         config: DataConsistencyValidationConfig,
         inconsistent_keys: List[DataInconsistency]
     ) -> None:
-        """Check if data is consistent across replicas (not just primaries)."""
-        # This is a more advanced check - for now, we just validate against primaries
-        # Future enhancement: query all replicas and ensure they have the same data
-        pass
+        try:
+            # Get all live nodes (primaries and replicas)
+            all_nodes = cluster_connection.get_live_nodes()
+            replica_nodes = [n for n in all_nodes if n['role'] == 'replica']
+            
+            if not replica_nodes:
+                logger.debug("No replicas to check for cross-replica consistency")
+                return
+            
+            # Sample a subset of test keys to check (checking all can be slow)
+            sample_size = min(20, len(self.test_keys))
+            import random
+            sampled_keys = random.sample(list(self.test_keys.keys()), sample_size)
+            
+            logger.debug(f"Checking cross-replica consistency for {sample_size} test keys across {len(replica_nodes)} replicas")
+            
+            # For each sampled key, check if replicas have the same value as expected
+            for key in sampled_keys:
+                expected_value = self.test_keys[key]
+                
+                # Check each replica
+                for replica in replica_nodes:
+                    try:
+                        with valkey_client(replica['host'], replica['port'], config.timeout) as client:
+                            actual_value = client.get(key)
+                            
+                            if actual_value is None:
+                                # Key missing on replica
+                                inconsistency = DataInconsistency(
+                                    key=key,
+                                    inconsistency_type="missing_on_replica",
+                                    expected_value=expected_value,
+                                    actual_values={format_node_address(replica): "None"}
+                                )
+                                inconsistent_keys.append(inconsistency)
+                                logger.warning(
+                                    f"Key {key} missing on replica {format_node_address(replica)}"
+                                )
+                            elif actual_value != expected_value:
+                                # Value mismatch on replica
+                                inconsistency = DataInconsistency(
+                                    key=key,
+                                    inconsistency_type="replica_divergence",
+                                    expected_value=expected_value,
+                                    actual_values={format_node_address(replica): actual_value}
+                                )
+                                inconsistent_keys.append(inconsistency)
+                                logger.warning(
+                                    f"Key {key} has diverged on replica {format_node_address(replica)}: "
+                                    f"expected {expected_value[:16]}..., got {actual_value[:16]}..."
+                                )
+                    except Exception as e:
+                        logger.debug(f"Error checking replica {format_node_address(replica)} for key {key}: {e}")
+                        # Don't fail on individual replica query errors
+                        continue
+            
+            if inconsistent_keys:
+                logger.warning(
+                    f"Cross-replica consistency check found {len(inconsistent_keys)} inconsistencies"
+                )
+        
+        except Exception as e:
+            logger.error(f"Error during cross-replica consistency check: {e}")
+            # Don't fail the entire validation on cross-replica check errors
 
 
 class StateValidator:

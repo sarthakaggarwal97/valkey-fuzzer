@@ -142,7 +142,13 @@ class FuzzerEngine(IFuzzerEngine):
             self.operation_orchestrator.set_cluster_connection(cluster_connection)
             
             # Create StateValidator with config from scenario or use defaults
-            validation_config = StateValidationConfig()
+            if hasattr(scenario, 'state_validation_config') and scenario.state_validation_config:
+                validation_config = scenario.state_validation_config
+                logger.info("Using scenario-specific StateValidationConfig")
+            else:
+                validation_config = StateValidationConfig()
+                logger.info("Using default StateValidationConfig")
+            
             state_validator = StateValidator(validation_config)
             logger.info("State validation initialized")
             
