@@ -221,12 +221,6 @@ def create_topology_mismatch_for_unexpected_failure(node: Dict) -> TopologyMisma
 def compute_cluster_slot(key: str) -> int:
     """
     Compute the Redis cluster slot for a key using CRC16.
-    
-    Args:
-        key: The key to compute slot for
-    
-    Returns:
-        Slot number (0-16383)
     """
     # Extract hash tag if present
     start = key.find('{')
@@ -250,16 +244,6 @@ def compute_cluster_slot(key: str) -> int:
 
 
 def fetch_cluster_slot_assignments(live_nodes: List[Dict], timeout: float) -> Dict[int, str]:
-    """
-    Fetch slot-to-node mapping from cluster using CLUSTER SLOTS.
-    
-    Args:
-        live_nodes: List of live cluster nodes
-        timeout: Connection timeout
-    
-    Returns:
-        Dict mapping slot number to node address (host:port)
-    """
     slot_map = {}
     
     for node in live_nodes:

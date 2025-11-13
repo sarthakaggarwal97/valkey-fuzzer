@@ -16,12 +16,6 @@ class ScenarioGenerator(ITestCaseGenerator):
     """Generates randomized and DSL-based test scenarios"""
     
     def __init__(self, random_seed: Optional[int] = None):
-        """
-        Initialize test case generator
-        
-        Args:
-            random_seed: Optional seed for reproducible random generation
-        """
         self.random_seed = random_seed
         if random_seed is not None:
             random.seed(random_seed)

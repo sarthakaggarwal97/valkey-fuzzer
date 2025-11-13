@@ -1069,15 +1069,6 @@ class TopologyValidator:
         config: 'TopologyValidationConfig',
         killed_nodes: Optional[set] = None
     ) -> 'TopologyValidation':
-        """
-        Check topology against expectations.
-        
-        Args:
-            cluster_connection: Connection to the cluster
-            expected_topology: Expected topology structure
-            config: Validation configuration
-            killed_nodes: Set of node_ids that were intentionally killed by chaos
-        """
         try:
             if killed_nodes is None:
                 killed_nodes = set()
@@ -2305,19 +2296,6 @@ class StateValidator:
         error_messages: List[str],
         display_name: Optional[str] = None
     ) -> Any:
-        """
-        Run a validation check with consistent error handling and logging.
-        
-        Args:
-            check_name: Internal name for the check (e.g., "replication")
-            validator_func: Function that performs the validation
-            failed_checks: List to append failed check names to
-            error_messages: List to append error messages to
-            display_name: Human-readable name for logging (defaults to title-cased check_name)
-        
-        Returns:
-            Validation result object or None if validation failed with exception
-        """
         if display_name is None:
             display_name = check_name.replace('_', ' ').title()
         
