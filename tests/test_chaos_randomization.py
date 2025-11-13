@@ -42,6 +42,27 @@ def cluster_nodes():
     ]
 
 @pytest.fixture
+def mock_cluster_connection(cluster_nodes):
+    """Create a mock cluster connection that returns cluster nodes."""
+    mock_conn = Mock()
+    # Convert NodeInfo objects to dict format (as ClusterConnection.get_live_nodes() returns)
+    live_nodes_dict = [
+        {
+            'node_id': node.node_id,
+            'host': '127.0.0.1',
+            'port': node.port,
+            'role': node.role,
+            'shard_id': node.shard_id,
+            'status': 'connected'
+        }
+        for node in cluster_nodes
+    ]
+    mock_conn.get_live_nodes.return_value = live_nodes_dict
+    mock_conn.initial_nodes = cluster_nodes
+    mock_conn.cluster_id = "test_cluster"
+    return mock_conn
+
+@pytest.fixture
 def base_chaos_config():
     """Create a base chaos configuration with randomization enabled."""
     return ChaosConfig(
@@ -176,7 +197,7 @@ def test_randomization_distribution(chaos_coordinator, base_chaos_config):
 # ============================================================================
 
 @patch('src.fuzzer_engine.chaos_coordinator.time.sleep')
-def test_coordinate_chaos_with_randomization_enabled(mock_sleep, chaos_coordinator, base_chaos_config, cluster_nodes):
+def test_coordinate_chaos_with_randomization_enabled(mock_sleep, chaos_coordinator, base_chaos_config, mock_cluster_connection):
     """Test that chaos is randomized when randomize_per_operation=True."""
     # Track what chaos types were used
     chaos_types_used = []
@@ -206,7 +227,7 @@ def test_coordinate_chaos_with_randomization_enabled(mock_sleep, chaos_coordinat
         chaos_coordinator.coordinate_chaos_with_operation(
             operation=operation,
             chaos_config=base_chaos_config,
-            cluster_nodes=cluster_nodes,
+            cluster_connection=mock_cluster_connection,
             cluster_id="test_cluster"
         )
     
@@ -216,7 +237,7 @@ def test_coordinate_chaos_with_randomization_enabled(mock_sleep, chaos_coordinat
 
 
 @patch('src.fuzzer_engine.chaos_coordinator.time.sleep')
-def test_coordinate_chaos_without_randomization(mock_sleep, chaos_coordinator, cluster_nodes):
+def test_coordinate_chaos_without_randomization(mock_sleep, chaos_coordinator, mock_cluster_connection):
     """Test that chaos is deterministic when randomize_per_operation=False."""
     chaos_types_used = []
     
@@ -252,7 +273,7 @@ def test_coordinate_chaos_without_randomization(mock_sleep, chaos_coordinator, c
     chaos_types_used.clear()
     for _ in range(5):
         chaos_coordinator.coordinate_chaos_with_operation(
-            operation, config_explicit, cluster_nodes, "test_cluster"
+            operation, config_explicit, mock_cluster_connection, "test_cluster"
         )
     assert all(ct == ProcessChaosType.SIGTERM for ct in chaos_types_used), "Explicit SIGTERM should be preserved"
     
@@ -269,13 +290,13 @@ def test_coordinate_chaos_without_randomization(mock_sleep, chaos_coordinator, c
     chaos_types_used.clear()
     for _ in range(5):
         chaos_coordinator.coordinate_chaos_with_operation(
-            operation, config_unset, cluster_nodes, "test_cluster"
+            operation, config_unset, mock_cluster_connection, "test_cluster"
         )
     assert all(ct == ProcessChaosType.SIGKILL for ct in chaos_types_used), "Unset should default to SIGKILL"
 
 
 @patch('src.fuzzer_engine.chaos_coordinator.time.sleep')
-def test_timing_delay_randomization(mock_sleep, chaos_coordinator, cluster_nodes):
+def test_timing_delay_randomization(mock_sleep, chaos_coordinator, mock_cluster_connection):
     """
     Test that timing delays are randomized within ±20% when randomization is enabled.
     """
@@ -320,7 +341,7 @@ def test_timing_delay_randomization(mock_sleep, chaos_coordinator, cluster_nodes
         chaos_coordinator.coordinate_chaos_with_operation(
             operation=operation,
             chaos_config=config,
-            cluster_nodes=cluster_nodes,
+            cluster_connection=mock_cluster_connection,
             cluster_id="test_cluster"
         )
         
@@ -336,7 +357,7 @@ def test_timing_delay_randomization(mock_sleep, chaos_coordinator, cluster_nodes
         assert 8.0 <= sleep_value <= 12.0, f"Sleep value {sleep_value} not in expected range [8.0, 12.0]"
 
 @patch('src.fuzzer_engine.chaos_coordinator.time.sleep')
-def test_chaos_randomization_across_operations(mock_sleep, chaos_coordinator, cluster_nodes):
+def test_chaos_randomization_across_operations(mock_sleep, chaos_coordinator, mock_cluster_connection):
     """
     Integration test: Verify that chaos is randomized across multiple operations.
     This test simulates executing multiple operations and verifies that:
@@ -393,7 +414,7 @@ def test_chaos_randomization_across_operations(mock_sleep, chaos_coordinator, cl
         chaos_coordinator.coordinate_chaos_with_operation(
             operation=operation,
             chaos_config=chaos_config,
-            cluster_nodes=cluster_nodes,
+            cluster_connection=mock_cluster_connection,
             cluster_id="test_cluster"
         )
     
@@ -427,7 +448,7 @@ def test_chaos_randomization_across_operations(mock_sleep, chaos_coordinator, cl
 
 
 @patch('src.fuzzer_engine.chaos_coordinator.time.sleep')
-def test_chaos_without_randomization_is_consistent(mock_sleep, chaos_coordinator, cluster_nodes):
+def test_chaos_without_randomization_is_consistent(mock_sleep, chaos_coordinator, mock_cluster_connection):
     """
     Integration test: Verify that when randomization is disabled, chaos remains consistent.
     """
@@ -483,7 +504,7 @@ def test_chaos_without_randomization_is_consistent(mock_sleep, chaos_coordinator
         chaos_coordinator.coordinate_chaos_with_operation(
             operation=operation,
             chaos_config=chaos_config,
-            cluster_nodes=cluster_nodes,
+            cluster_connection=mock_cluster_connection,
             cluster_id="test_cluster"
         )
     

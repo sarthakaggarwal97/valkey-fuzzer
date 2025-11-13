@@ -162,7 +162,6 @@ class FuzzerEngine(IFuzzerEngine):
                     operation_chaos_events = self.chaos_coordinator.coordinate_chaos_with_operation(
                         operation,
                         scenario.chaos_config,
-                        cluster_instance.nodes,
                         cluster_connection,
                         cluster_instance.cluster_id
                     )

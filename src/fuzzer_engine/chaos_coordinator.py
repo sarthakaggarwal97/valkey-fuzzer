@@ -72,8 +72,10 @@ class ChaosCoordinator:
                 chaos_config = self._randomize_chaos_config(chaos_config)
 
             # Refresh topology from live cluster connection
-            live_nodes = cluster_connection.get_live_nodes()
-            if live_nodes:
+            live_nodes_dict = cluster_connection.get_live_nodes()
+            if live_nodes_dict:
+                # Convert dict nodes to NodeInfo objects for the target selector
+                live_nodes = self._convert_dict_nodes_to_nodeinfo(live_nodes_dict, cluster_connection.initial_nodes)
                 self.chaos_engine.target_selector.update_cluster_topology(cluster_id, live_nodes)
                 logger.debug(f"Updated topology with {len(live_nodes)} live nodes from cluster")
             else:
@@ -249,6 +251,41 @@ class ChaosCoordinator:
                 end_time=time.time(),
                 error_message=f"Unsupported chaos type: {chaos_config.chaos_type}"
             )
+
+    def _convert_dict_nodes_to_nodeinfo(self, dict_nodes: List[dict], initial_nodes: List[NodeInfo]) -> List[NodeInfo]:
+        """
+        Convert dictionary nodes from ClusterConnection.get_live_nodes() to NodeInfo objects.
+        Uses initial_nodes to fill in missing process/pid information.
+        """
+        # Create a mapping from port to initial NodeInfo for quick lookup
+        port_to_nodeinfo = {node.port: node for node in initial_nodes}
+        
+        converted_nodes = []
+        for node_dict in dict_nodes:
+            port = node_dict['port']
+            
+            # Get the initial NodeInfo for this port to retrieve process/pid info
+            initial_node = port_to_nodeinfo.get(port)
+            
+            if initial_node:
+                # Create a NodeInfo object with current topology data and initial process info
+                node_info = NodeInfo(
+                    node_id=node_dict['node_id'],
+                    role=node_dict['role'],
+                    shard_id=node_dict.get('shard_id'),
+                    port=node_dict['port'],
+                    bus_port=initial_node.bus_port,  # Use initial bus_port
+                    pid=initial_node.pid,  # Use initial PID (may be stale after restart)
+                    process=initial_node.process,  # Use initial process handle
+                    data_dir=initial_node.data_dir,
+                    log_file=initial_node.log_file,
+                    cluster_node_id=node_dict['node_id']
+                )
+                converted_nodes.append(node_info)
+            else:
+                logger.warning(f"No initial node info found for port {port}, skipping node {node_dict['node_id']}")
+        
+        return converted_nodes
 
     def get_chaos_history(self) -> List[ChaosResult]:
         """

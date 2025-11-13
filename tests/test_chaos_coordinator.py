@@ -2,7 +2,7 @@
 Tests for Chaos Coordinator
 """
 import pytest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, MagicMock, patch
 from src.fuzzer_engine.chaos_coordinator import ChaosCoordinator
 from src.models import (
     Operation, OperationType, OperationTiming, ChaosConfig, ChaosType,
@@ -382,8 +382,13 @@ def test_coordinate_chaos_with_operation_no_target(mock_sleep):
         process_chaos_type=ProcessChaosType.SIGKILL
     )
     
+    # Mock cluster connection that returns empty node list
+    mock_connection = MagicMock()
+    mock_connection.get_live_nodes.return_value = []
+    mock_connection.initial_nodes = []
+    
     # Empty node list - no target will be found
-    results = coordinator.coordinate_chaos_with_operation(operation, chaos_config, [], None)
+    results = coordinator.coordinate_chaos_with_operation(operation, chaos_config, mock_connection, "test_cluster")
     
     assert len(results) == 0
 
