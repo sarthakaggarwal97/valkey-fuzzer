@@ -61,7 +61,7 @@ def test_state_validation_config_defaults():
     assert config.check_view_consistency is True
     
     # Check default timing values
-    assert config.stabilization_wait == 2.0
+    assert config.stabilization_wait == 5.0  # Increased for failover convergence
     assert config.validation_timeout == 30.0
     
     # Check default behavior
