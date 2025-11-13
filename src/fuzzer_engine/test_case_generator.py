@@ -248,10 +248,11 @@ class ScenarioGenerator(ITestCaseGenerator):
         process_chaos_type = None
         if chaos_type == ChaosType.PROCESS_KILL:
             pct_str = chaos_dict.get("process_chaos_type", "sigkill")
-            try:
-                process_chaos_type = ProcessChaosType(pct_str)
-            except ValueError:
-                raise ValueError(f"Invalid process chaos type: {pct_str}")
+            if pct_str is not None:
+                try:
+                    process_chaos_type = ProcessChaosType(pct_str)
+                except ValueError:
+                    raise ValueError(f"Invalid process chaos type: {pct_str}")
         
         randomize_per_operation = chaos_dict.get("randomize_per_operation", False)
         
