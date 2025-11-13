@@ -243,6 +243,13 @@ class FuzzerEngine(IFuzzerEngine):
                     # Log state validation result
                     self.logger.log_state_validation_result(validation_result, i+1)
                     
+                    # Clear killed nodes after validation
+                    # This ensures each operation starts with a clean slate
+                    # If a node was killed in operation N and recovers, then fails in operation N+1,
+                    # we want to detect that as an unexpected failure
+                    state_validator.clear_killed_nodes()
+                    logger.debug(f"Cleared killed nodes tracking after operation {i+1} validation")
+                    
                     # Check for validation failures
                     if not validation_result.overall_success:
                         # Determine severity

@@ -327,6 +327,7 @@ def test_state_validation_result_with_exception():
         slot_coverage=None,
         topology=None,
         view_consistency=None,
+        data_consistency=None,  # Added for new validator
         failed_checks=["validation_framework"],  # Should include framework failure
         error_messages=["Unexpected validation error: Test exception"]
     )

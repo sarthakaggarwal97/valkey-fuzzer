@@ -143,16 +143,44 @@ class ReplicationValidator:
             replica_nodes = [node for node in all_nodes if node['role'] == 'replica']
             
             if not replica_nodes:
-                # Cluster is reachable but no replicas configured
-                logger.info("No replicas configured in cluster")
-                return ReplicationValidation(
-                    success=True,
-                    all_replicas_synced=True,
-                    max_lag=0.0,
-                    lagging_replicas=[],
-                    disconnected_replicas=[],
-                    error_message=None
-                )
+                # No replicas found in cluster
+                # This could be:
+                # 1. Cluster genuinely has no replicas configured (OK)
+                # 2. All replicas disappeared/failed (BUG!)
+                
+                # Check if we expect replicas (min_replicas_per_shard > 0)
+                if config.min_replicas_per_shard > 0:
+                    # We expect replicas but found none - this is a failure!
+                    primary_nodes_list = [node for node in all_nodes if node['role'] == 'primary']
+                    num_shards = len(set(p.get('shard_id') for p in primary_nodes_list if p.get('shard_id') is not None))
+                    
+                    logger.error(
+                        f"CRITICAL: No replicas found in cluster but min_replicas_per_shard={config.min_replicas_per_shard}. "
+                        f"Expected at least {num_shards * config.min_replicas_per_shard} replicas for {num_shards} shards. "
+                        f"All replicas have disappeared!"
+                    )
+                    return ReplicationValidation(
+                        success=False,
+                        all_replicas_synced=False,
+                        max_lag=-1.0,
+                        lagging_replicas=[],
+                        disconnected_replicas=[],
+                        error_message=(
+                            f"All replicas missing: Expected at least {config.min_replicas_per_shard} replica(s) per shard "
+                            f"but found 0 replicas in entire cluster. This indicates complete replica loss."
+                        )
+                    )
+                else:
+                    # No replicas expected, this is OK
+                    logger.info("No replicas configured in cluster (none expected)")
+                    return ReplicationValidation(
+                        success=True,
+                        all_replicas_synced=True,
+                        max_lag=0.0,
+                        lagging_replicas=[],
+                        disconnected_replicas=[],
+                        error_message=None
+                    )
 
             # Build primary node lookup
             primary_nodes = {node['node_id']: node for node in all_nodes if node['role'] == 'primary'}
@@ -301,16 +329,24 @@ class ReplicationValidator:
             # Even if some replicas are allowed to be dead, we must ensure each shard has minimum redundancy
             # BUT: Only fail if the redundancy loss is due to UNEXPECTED failures (not killed by chaos)
             if success and config.min_replicas_per_shard > 0:
+                # First, identify all shards from primary nodes
+                all_shard_ids = set()
+                for node in all_nodes:
+                    if node['role'] == 'primary' and node.get('shard_id') is not None:
+                        all_shard_ids.add(node['shard_id'])
+                
                 # Group replicas by shard
                 shard_replicas: Dict[int, Dict[str, List]] = {}  # shard_id -> {alive: [], dead_expected: [], dead_unexpected: []}
                 
+                # Initialize all shards (even those with no replicas)
+                for shard_id in all_shard_ids:
+                    shard_replicas[shard_id] = {'alive': [], 'dead_expected': [], 'dead_unexpected': []}
+                
+                # Populate replica information
                 for replica in replica_nodes:
                     shard_id = replica.get('shard_id')
-                    if shard_id is None:
+                    if shard_id is None or shard_id not in shard_replicas:
                         continue
-                    
-                    if shard_id not in shard_replicas:
-                        shard_replicas[shard_id] = {'alive': [], 'dead_expected': [], 'dead_unexpected': []}
                     
                     replica_address = format_node_address(replica)
                     if replica_address in disconnected_replicas:
