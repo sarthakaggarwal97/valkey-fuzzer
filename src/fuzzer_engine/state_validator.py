@@ -868,8 +868,9 @@ class SlotCoverageValidator:
     ) -> SlotCoverageValidation:
         """Check slot coverage across the cluster from all nodes' perspectives."""
         try:
-            # Get all nodes from cluster (only live nodes for slot assignment)
-            all_nodes = cluster_connection.get_current_nodes(include_failed=False)
+            # Get all nodes from cluster INCLUDING failed ones
+            # We need failed nodes to check if slots are assigned to killed nodes
+            all_nodes = cluster_connection.get_current_nodes(include_failed=True)
 
             if not all_nodes:
                 # Unable to contact cluster
@@ -902,9 +903,11 @@ class SlotCoverageValidator:
             # Track slot distribution per node: node_id -> list of slots
             slot_distribution: Dict[str, List[int]] = {}
 
-            # Query ALL nodes (not just primaries) for their view of slot assignments
+            # Query live nodes (not failed ones) for their view of slot assignments
+            # But keep all_nodes (including failed) for killed node checking later
+            live_nodes = [node for node in all_nodes if node.get('status') != 'failed']
             nodes_queried = 0
-            for node in all_nodes:
+            for node in live_nodes:
                 try:
                     with valkey_client(node['host'], node['port'], config.timeout) as client:
                         # Get cluster nodes output to parse slot assignments

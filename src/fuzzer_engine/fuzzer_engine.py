@@ -146,6 +146,15 @@ class FuzzerEngine(IFuzzerEngine):
             state_validator = StateValidator(validation_config)
             logger.info("State validation initialized")
             
+            # Write test data for data consistency validation
+            if validation_config.check_data_consistency:
+                logger.info("Writing test data for data consistency validation")
+                test_data_written = state_validator.write_test_data(cluster_connection)
+                if test_data_written:
+                    logger.info("Test data written successfully")
+                else:
+                    logger.warning("Failed to write test data - data consistency validation will be skipped")
+            
             # Track killed nodes for chaos-aware validation
             killed_nodes_tracker = set()
             
