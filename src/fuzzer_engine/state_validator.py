@@ -1190,13 +1190,24 @@ class TopologyValidator:
         self,
         cluster_connection: ClusterConnection,
         expected_topology: Optional['ExpectedTopology'],
-        config: 'TopologyValidationConfig'
+        config: 'TopologyValidationConfig',
+        killed_nodes: Optional[set] = None
     ) -> 'TopologyValidation':
-        """Check topology against expectations."""
+        """
+        Check topology against expectations.
+        
+        Args:
+            cluster_connection: Connection to the cluster
+            expected_topology: Expected topology structure
+            config: Validation configuration
+            killed_nodes: Set of node_ids that were intentionally killed by chaos
+        """
         try:
-            # Get current cluster topology
-            # Include failed nodes if configured to allow them
-            all_nodes = cluster_connection.get_current_nodes(include_failed=config.allow_failed_nodes)
+            if killed_nodes is None:
+                killed_nodes = set()
+            
+            # Get all nodes including failed ones to detect unexpected failures
+            all_nodes = cluster_connection.get_current_nodes(include_failed=True)
 
             if not all_nodes:
                 return TopologyValidation(
@@ -1209,9 +1220,27 @@ class TopologyValidator:
                     error_message="No nodes reachable in cluster"
                 )
 
-            # Count actual nodes by role
-            actual_primaries = len([n for n in all_nodes if n['role'] == 'primary'])
-            actual_replicas = len([n for n in all_nodes if n['role'] == 'replica'])
+            # Separate nodes into live and failed
+            live_nodes = [n for n in all_nodes if n['status'] != 'failed']
+            failed_nodes = [n for n in all_nodes if n['status'] == 'failed']
+            
+            # Detect unexpected failures (failed but not in killed_nodes)
+            unexpected_failures = []
+            for node in failed_nodes:
+                node_id = node.get('node_id')
+                if node_id and node_id not in killed_nodes:
+                    unexpected_failures.append(node)
+                    logger.warning(
+                        f"Unexpected node failure detected: {format_node_address(node)} "
+                        f"(role: {node['role']}, not in killed_nodes)"
+                    )
+            
+            # Count nodes: live nodes + expected failures (killed by chaos)
+            # This way we count nodes that are supposed to be there
+            countable_nodes = live_nodes + [n for n in failed_nodes if n.get('node_id') in killed_nodes]
+            
+            actual_primaries = len([n for n in countable_nodes if n['role'] == 'primary'])
+            actual_replicas = len([n for n in countable_nodes if n['role'] == 'replica'])
 
             # If no expected topology provided, just report current state
             if not expected_topology:
@@ -1260,10 +1289,21 @@ class TopologyValidator:
                     f"got {actual_replicas}"
                 )
 
+            # Report unexpected failures as topology mismatches
+            if unexpected_failures:
+                for node in unexpected_failures:
+                    mismatch = TopologyMismatch(
+                        mismatch_type="unexpected_failure",
+                        node_id=node.get('node_id', 'unknown'),
+                        expected="node alive",
+                        actual=f"node failed (role: {node['role']}, addr: {format_node_address(node)})"
+                    )
+                    topology_mismatches.append(mismatch)
+            
             # Validate shard structure if provided
             if expected_topology.shard_structure:
                 shard_mismatches = self._validate_shard_structure(
-                    all_nodes,
+                    countable_nodes,  # Use countable_nodes (excludes unexpected failures)
                     expected_topology.shard_structure,
                     config
                 )
@@ -1272,10 +1312,19 @@ class TopologyValidator:
             # Determine success
             success = True
             error_message = None
+            
+            # Always fail on unexpected failures (spontaneous node loss is a bug)
+            if unexpected_failures:
+                success = False
+                error_message = (
+                    f"Unexpected node failures detected: {len(unexpected_failures)} node(s) failed "
+                    f"that were not killed by chaos"
+                )
+                logger.error(error_message)
 
             if config.strict_mode:
                 # In strict mode, any mismatch is a failure
-                if topology_mismatches:
+                if topology_mismatches and success:  # Don't override unexpected failure message
                     success = False
                     error_message = (
                         f"Topology validation failed in strict mode: "
@@ -2520,7 +2569,8 @@ class StateValidator:
                     topology_result = self.topology_validator.validate(
                         cluster_connection,
                         expected_topology,
-                        self.config.topology_config
+                        self.config.topology_config,
+                        killed_nodes
                     )
 
                     if not topology_result.success:
