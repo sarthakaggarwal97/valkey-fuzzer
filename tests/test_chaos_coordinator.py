@@ -100,7 +100,7 @@ def test_select_chaos_target_random(mock_live_process):
     coordinator.chaos_engine.target_selector.update_cluster_topology(cluster_id, nodes)
 
     target_selection = TargetSelection(strategy="random")
-    target = coordinator.chaos_engine.target_selector.select_target(cluster_id, target_selection, None)
+    target = coordinator.chaos_engine.target_selector.select_target(cluster_id, target_selection)
     
     assert target is not None
     assert target.node_id in ["node-0", "node-1"]
@@ -139,7 +139,7 @@ def test_select_chaos_target_primary_only(mock_live_process):
     coordinator.chaos_engine.target_selector.update_cluster_topology(cluster_id, nodes)
 
     target_selection = TargetSelection(strategy="primary_only")
-    target = coordinator.chaos_engine.target_selector.select_target(cluster_id, target_selection, None)
+    target = coordinator.chaos_engine.target_selector.select_target(cluster_id, target_selection)
     
     assert target is not None
     assert target.node_id == "node-0"
@@ -179,7 +179,7 @@ def test_select_chaos_target_replica_only(mock_live_process):
     coordinator.chaos_engine.target_selector.update_cluster_topology(cluster_id, nodes)
 
     target_selection = TargetSelection(strategy="replica_only")
-    target = coordinator.chaos_engine.target_selector.select_target(cluster_id, target_selection, None)
+    target = coordinator.chaos_engine.target_selector.select_target(cluster_id, target_selection)
     
     assert target is not None
     assert target.node_id == "node-1"
@@ -231,7 +231,7 @@ def test_select_chaos_target_specific(mock_live_process):
 
     # Test single specific node
     target_selection = TargetSelection(strategy="specific", specific_nodes=["node-1"])
-    target = coordinator.chaos_engine.target_selector.select_target(cluster_id, target_selection, None)
+    target = coordinator.chaos_engine.target_selector.select_target(cluster_id, target_selection)
     
     assert target is not None
     assert target.node_id == "node-1"
@@ -260,7 +260,7 @@ def test_select_chaos_target_empty_nodes():
     coordinator.chaos_engine.target_selector.update_cluster_topology(cluster_id, [])
 
     target_selection = TargetSelection(strategy="random")
-    target = coordinator.chaos_engine.target_selector.select_target(cluster_id, target_selection, None)
+    target = coordinator.chaos_engine.target_selector.select_target(cluster_id, target_selection)
     
     assert target is None
 
@@ -287,7 +287,7 @@ def test_select_chaos_target_no_primary():
     coordinator.chaos_engine.target_selector.update_cluster_topology(cluster_id, nodes)
 
     target_selection = TargetSelection(strategy="primary_only")
-    target = coordinator.chaos_engine.target_selector.select_target(cluster_id, target_selection, None)
+    target = coordinator.chaos_engine.target_selector.select_target(cluster_id, target_selection)
     
     assert target is None
 

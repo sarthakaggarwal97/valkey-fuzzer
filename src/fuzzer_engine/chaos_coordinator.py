@@ -51,8 +51,7 @@ class ChaosCoordinator:
         self, 
         operation: Operation, 
         chaos_config: ChaosConfig,
-        cluster_nodes: List[NodeInfo],
-        cluster_connection=None,
+        cluster_connection,
         cluster_id: str = "default",
         randomize_per_operation: Optional[bool] = None
     ) -> List[ChaosResult]:
@@ -72,9 +71,13 @@ class ChaosCoordinator:
             if should_randomize:
                 chaos_config = self._randomize_chaos_config(chaos_config)
 
-            # Update topology if needed (for backward compatibility with direct cluster_nodes parameter)
-            if cluster_nodes:
-                self.chaos_engine.target_selector.update_cluster_topology(cluster_id, cluster_nodes)
+            # Refresh topology from live cluster connection
+            live_nodes = cluster_connection.get_live_nodes()
+            if live_nodes:
+                self.chaos_engine.target_selector.update_cluster_topology(cluster_id, live_nodes)
+                logger.debug(f"Updated topology with {len(live_nodes)} live nodes from cluster")
+            else:
+                logger.warning("No live nodes available from cluster connection")
 
             # Select target node for chaos using ChaosTargetSelector
             target_node = self.chaos_engine.target_selector.select_target(cluster_id, chaos_config.target_selection)

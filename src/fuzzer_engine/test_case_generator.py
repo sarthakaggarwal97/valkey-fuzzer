@@ -116,7 +116,8 @@ class ScenarioGenerator(ITestCaseGenerator):
             target_selection=target_selection,
             timing=timing,
             coordination=coordination,
-            process_chaos_type=process_chaos_type
+            process_chaos_type=process_chaos_type,
+            randomize_per_operation=True
         )
     
     def parse_dsl_config(self, dsl_text: str) -> Scenario:
@@ -252,12 +253,15 @@ class ScenarioGenerator(ITestCaseGenerator):
             except ValueError:
                 raise ValueError(f"Invalid process chaos type: {pct_str}")
         
+        randomize_per_operation = chaos_dict.get("randomize_per_operation", False)
+        
         return ChaosConfig(
             chaos_type=chaos_type,
             target_selection=target_selection,
             timing=timing,
             coordination=coordination,
-            process_chaos_type=process_chaos_type
+            process_chaos_type=process_chaos_type,
+            randomize_per_operation=randomize_per_operation
         )
     
     def _parse_validation_config(self, validation_dict: Dict[str, Any]) -> ValidationConfig:
