@@ -207,5 +207,31 @@ def test_validate_scenario_no_operations():
         generator.validate_scenario(scenario)
 
 
+def test_validate_scenario_process_chaos_type_none_without_randomization():
+    """Test that None process_chaos_type is rejected when randomization is disabled"""
+    generator = ScenarioGenerator()
+    scenario = generator.generate_random_scenario(seed=42)
+    
+    # Set process_chaos_type to None without enabling randomization
+    scenario.chaos_config.process_chaos_type = None
+    scenario.chaos_config.randomize_per_operation = False
+    
+    with pytest.raises(ValueError, match="process_chaos_type required"):
+        generator.validate_scenario(scenario)
+
+
+def test_validate_scenario_process_chaos_type_none_with_randomization():
+    """Test that None process_chaos_type is allowed when randomization is enabled"""
+    generator = ScenarioGenerator()
+    scenario = generator.generate_random_scenario(seed=42)
+    
+    # Set process_chaos_type to None WITH randomization enabled
+    scenario.chaos_config.process_chaos_type = None
+    scenario.chaos_config.randomize_per_operation = True
+    
+    # Should not raise - randomization will handle it at runtime
+    assert generator.validate_scenario(scenario) is True
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

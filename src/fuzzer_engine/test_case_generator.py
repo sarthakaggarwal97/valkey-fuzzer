@@ -18,9 +18,6 @@ class ScenarioGenerator(ITestCaseGenerator):
     def __init__(self, random_seed: Optional[int] = None):
         """
         Initialize test case generator
-        
-        Args:
-            random_seed: Optional seed for reproducible random generation
         """
         self.random_seed = random_seed
         if random_seed is not None:
@@ -301,6 +298,8 @@ class ScenarioGenerator(ITestCaseGenerator):
         
         if scenario.chaos_config.chaos_type == ChaosType.PROCESS_KILL:
             if scenario.chaos_config.process_chaos_type is None:
-                raise ValueError("process_chaos_type required for PROCESS_KILL chaos")
+                # Allow None if randomization is enabled (will be randomized at runtime)
+                if not scenario.chaos_config.randomize_per_operation:
+                    raise ValueError("process_chaos_type required for PROCESS_KILL chaos (or enable randomize_per_operation)")
         
         return True

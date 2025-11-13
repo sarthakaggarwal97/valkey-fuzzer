@@ -163,7 +163,8 @@ class FuzzerEngine(IFuzzerEngine):
                         operation,
                         scenario.chaos_config,
                         cluster_instance.nodes,
-                        cluster_connection
+                        cluster_connection,
+                        cluster_instance.cluster_id
                     )
                     chaos_events.extend(operation_chaos_events)
                     

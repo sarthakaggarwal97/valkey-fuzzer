@@ -69,7 +69,8 @@ def test_register_cluster_nodes():
 def test_select_chaos_target_random(mock_live_process):
     """Test selecting chaos target with random strategy"""
     coordinator = ChaosCoordinator()
-    
+    cluster_id = "test-cluster"
+
     nodes = [
         NodeInfo(
             node_id="node-0",
@@ -95,8 +96,11 @@ def test_select_chaos_target_random(mock_live_process):
         )
     ]
     
+    # Register nodes with the target selector
+    coordinator.chaos_engine.target_selector.update_cluster_topology(cluster_id, nodes)
+
     target_selection = TargetSelection(strategy="random")
-    target = coordinator._select_chaos_target(nodes, target_selection, None)
+    target = coordinator.chaos_engine.target_selector.select_target(cluster_id, target_selection, None)
     
     assert target is not None
     assert target.node_id in ["node-0", "node-1"]
@@ -105,7 +109,8 @@ def test_select_chaos_target_random(mock_live_process):
 def test_select_chaos_target_primary_only(mock_live_process):
     """Test selecting chaos target with primary_only strategy"""
     coordinator = ChaosCoordinator()
-    
+    cluster_id = "test-cluster"
+
     nodes = [
         NodeInfo(
             node_id="node-0",
@@ -131,8 +136,10 @@ def test_select_chaos_target_primary_only(mock_live_process):
         )
     ]
     
+    coordinator.chaos_engine.target_selector.update_cluster_topology(cluster_id, nodes)
+
     target_selection = TargetSelection(strategy="primary_only")
-    target = coordinator._select_chaos_target(nodes, target_selection, None)
+    target = coordinator.chaos_engine.target_selector.select_target(cluster_id, target_selection, None)
     
     assert target is not None
     assert target.node_id == "node-0"
@@ -142,7 +149,8 @@ def test_select_chaos_target_primary_only(mock_live_process):
 def test_select_chaos_target_replica_only(mock_live_process):
     """Test selecting chaos target with replica_only strategy"""
     coordinator = ChaosCoordinator()
-    
+    cluster_id = "test-cluster"
+
     nodes = [
         NodeInfo(
             node_id="node-0",
@@ -168,8 +176,10 @@ def test_select_chaos_target_replica_only(mock_live_process):
         )
     ]
     
+    coordinator.chaos_engine.target_selector.update_cluster_topology(cluster_id, nodes)
+
     target_selection = TargetSelection(strategy="replica_only")
-    target = coordinator._select_chaos_target(nodes, target_selection, None)
+    target = coordinator.chaos_engine.target_selector.select_target(cluster_id, target_selection, None)
     
     assert target is not None
     assert target.node_id == "node-1"
@@ -179,7 +189,8 @@ def test_select_chaos_target_replica_only(mock_live_process):
 def test_select_chaos_target_specific(mock_live_process):
     """Test selecting chaos target with specific strategy"""
     coordinator = ChaosCoordinator()
-    
+    cluster_id = "test-cluster"
+
     nodes = [
         NodeInfo(
             node_id="node-0",
@@ -202,22 +213,54 @@ def test_select_chaos_target_specific(mock_live_process):
             process=mock_live_process,
             data_dir="/tmp/test",
             log_file="/tmp/test.log"
+        ),
+        NodeInfo(
+            node_id="node-2",
+            role="replica",
+            shard_id=1,
+            port=7002,
+            bus_port=17002,
+            pid=12347,
+            process=Mock(),
+            data_dir="/tmp/test",
+            log_file="/tmp/test.log"
         )
     ]
     
+    coordinator.chaos_engine.target_selector.update_cluster_topology(cluster_id, nodes)
+
+    # Test single specific node
     target_selection = TargetSelection(strategy="specific", specific_nodes=["node-1"])
-    target = coordinator._select_chaos_target(nodes, target_selection, None)
+    target = coordinator.chaos_engine.target_selector.select_target(cluster_id, target_selection, None)
     
     assert target is not None
     assert target.node_id == "node-1"
+
+    # Test multiple specific nodes - should randomly select from them
+    target_selection_multi = TargetSelection(strategy="specific", specific_nodes=["node-0", "node-2"])
+    selected_nodes = set()
+
+    # Run multiple times to verify it can select different nodes
+    for _ in range(20):
+        target = coordinator.chaos_engine.target_selector.select_target(cluster_id, target_selection_multi)
+        assert target is not None
+        assert target.node_id in ["node-0", "node-2"], "Should only select from specified nodes"
+        selected_nodes.add(target.node_id)
+
+    # With 20 iterations, we should see both nodes (very high probability)
+    assert len(selected_nodes) > 1, "Should randomly select from multiple specific nodes"
 
 
 def test_select_chaos_target_empty_nodes():
     """Test selecting chaos target with empty node list"""
     coordinator = ChaosCoordinator()
-    
+    cluster_id = "test-cluster"
+
+    # Register empty node list
+    coordinator.chaos_engine.target_selector.update_cluster_topology(cluster_id, [])
+
     target_selection = TargetSelection(strategy="random")
-    target = coordinator._select_chaos_target([], target_selection, None)
+    target = coordinator.chaos_engine.target_selector.select_target(cluster_id, target_selection, None)
     
     assert target is None
 
@@ -225,7 +268,8 @@ def test_select_chaos_target_empty_nodes():
 def test_select_chaos_target_no_primary():
     """Test selecting chaos target when no primary nodes exist"""
     coordinator = ChaosCoordinator()
-    
+    cluster_id = "test-cluster"
+
     nodes = [
         NodeInfo(
             node_id="node-0",
@@ -240,8 +284,10 @@ def test_select_chaos_target_no_primary():
         )
     ]
     
+    coordinator.chaos_engine.target_selector.update_cluster_topology(cluster_id, nodes)
+
     target_selection = TargetSelection(strategy="primary_only")
-    target = coordinator._select_chaos_target(nodes, target_selection, None)
+    target = coordinator.chaos_engine.target_selector.select_target(cluster_id, target_selection, None)
     
     assert target is None
 

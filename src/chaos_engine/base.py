@@ -213,15 +213,22 @@ class ChaosTargetSelector:
         strategy = target_selection.strategy
         
         if target_selection.strategy == "specific" and target_selection.specific_nodes:
-            # Find the first available node from the specific list
+            # Find all matching nodes from the specific list
+            matching_nodes = []
             for node_id in target_selection.specific_nodes:
                 for node in nodes:
                     if node.node_id == node_id:
-                        logger.info(f"Selected specific node: {node.node_id}")
-                        return node
+                        matching_nodes.append(node)
+                        break  # Found this node, move to next node_id
             
-            logger.warning(f"None of the specified nodes found: {target_selection.specific_nodes}")
-            return None
+            if not matching_nodes:
+                logger.warning(f"None of the specified nodes found: {target_selection.specific_nodes}")
+                return None
+            
+            # Randomly select from matching nodes (consistent with other strategies)
+            selected = random.choice(matching_nodes)
+            logger.info(f"Selected specific node: {selected.node_id} (from {len(matching_nodes)} specified)")
+            return selected
         
         elif target_selection.strategy == "random":
             selected = random.choice(nodes)
