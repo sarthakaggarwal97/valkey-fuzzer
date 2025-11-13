@@ -374,7 +374,9 @@ class ClusterConnection:
                                 shard_id = port_to_shard.get(port)
                     else:
                         # Fallback for nodes not in our mapping
-                        role = 'primary' if 'master' in flags else 'replica'
+                        # Parse flags properly - check for 'master' or 'slave' as discrete flags
+                        flag_list = flags.split(',')
+                        role = 'primary' if 'master' in flag_list else 'replica'
                         shard_id = port_to_shard.get(port)
                     
                     current_nodes.append({
@@ -695,6 +697,11 @@ class StateValidationResult:
             # Check for critical topology issues
             for mismatch in self.topology.topology_mismatches:
                 if mismatch.mismatch_type in ['missing_shard', 'missing_primary', 'primary_count']:
+                    return True
+            
+            # Unexpected failures ARE critical (spontaneous node crashes)
+            for mismatch in self.topology.topology_mismatches:
+                if mismatch.mismatch_type == 'unexpected_failure':
                     return True
         
         # 6. Data loss detected

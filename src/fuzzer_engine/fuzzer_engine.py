@@ -103,6 +103,9 @@ class FuzzerEngine(IFuzzerEngine):
         
         logger.info(f"Starting test execution: {scenario.scenario_id}")
         
+        # Reinitialize chaos coordinator with scenario seed for deterministic chaos selection
+        self.chaos_coordinator = ChaosCoordinator(seed=scenario.seed)
+        
         # Log test start
         self.logger.log_test_start(scenario)
         

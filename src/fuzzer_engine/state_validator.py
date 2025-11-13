@@ -1224,23 +1224,30 @@ class TopologyValidator:
             live_nodes = [n for n in all_nodes if n['status'] != 'failed']
             failed_nodes = [n for n in all_nodes if n['status'] == 'failed']
             
+            # Helper function to check if a node was killed by chaos
+            # killed_nodes contains addresses (host:port), so we need to check both node_id and address
+            def is_killed_by_chaos(node):
+                node_id = node.get('node_id')
+                node_addr = format_node_address(node)
+                # Check both node_id and address since killed_nodes may contain either
+                return (node_id and node_id in killed_nodes) or (node_addr in killed_nodes)
+            
             # Detect unexpected failures (failed but not in killed_nodes)
             unexpected_failures = []
             for node in failed_nodes:
-                node_id = node.get('node_id')
-                if node_id and node_id not in killed_nodes:
+                if not is_killed_by_chaos(node):
                     unexpected_failures.append(node)
                     logger.warning(
                         f"Unexpected node failure detected: {format_node_address(node)} "
-                        f"(role: {node['role']}, not in killed_nodes)"
+                        f"(role: {node['role']}, node_id: {node.get('node_id', 'unknown')}, "
+                        f"not in killed_nodes)"
                     )
             
-            # Count nodes: live nodes + expected failures (killed by chaos)
-            # This way we count nodes that are supposed to be there
-            countable_nodes = live_nodes + [n for n in failed_nodes if n.get('node_id') in killed_nodes]
-            
-            actual_primaries = len([n for n in countable_nodes if n['role'] == 'primary'])
-            actual_replicas = len([n for n in countable_nodes if n['role'] == 'replica'])
+            # Count nodes: ONLY live nodes
+            # Failed nodes (even if killed by chaos) should not be counted as they're not functioning
+            # The cluster should have promoted replacements for any killed primaries
+            actual_primaries = len([n for n in live_nodes if n['role'] == 'primary'])
+            actual_replicas = len([n for n in live_nodes if n['role'] == 'replica'])
 
             # If no expected topology provided, just report current state
             if not expected_topology:
@@ -1258,34 +1265,63 @@ class TopologyValidator:
                     error_message=None
                 )
 
+            # Adjust expected topology to account for killed nodes
+            # Count total killed nodes (both primaries and replicas)
+            killed_primaries = 0
+            killed_replicas = 0
+            
+            for node in failed_nodes:
+                if is_killed_by_chaos(node):
+                    if node['role'] == 'primary':
+                        killed_primaries += 1
+                    elif node['role'] == 'replica':
+                        killed_replicas += 1
+            
+            total_killed_nodes = killed_primaries + killed_replicas
+            
+            # Adjust expectations:
+            # - Primary count stays the same (failover promotes replicas to replace killed primaries)
+            # - Replica count reduces by ALL killed nodes:
+            #   * Each killed replica directly reduces replica count
+            #   * Each killed primary causes a replica to promote (also reduces replica count)
+            adjusted_expected_primaries = expected_topology.num_primaries
+            adjusted_expected_replicas = expected_topology.num_replicas - total_killed_nodes
+            
+            if total_killed_nodes > 0:
+                logger.info(
+                    f"Adjusting expected topology for chaos: "
+                    f"{killed_primaries} primary(s) killed, {killed_replicas} replica(s) killed. "
+                    f"Adjusted expected: {adjusted_expected_primaries} primaries, {adjusted_expected_replicas} replicas"
+                )
+            
             # Compare against expected topology
             topology_mismatches = []
 
             # Check primary count
-            if actual_primaries != expected_topology.num_primaries:
+            if actual_primaries != adjusted_expected_primaries:
                 mismatch = TopologyMismatch(
                     mismatch_type="primary_count",
                     node_id="cluster",
-                    expected=f"{expected_topology.num_primaries} primaries",
+                    expected=f"{adjusted_expected_primaries} primaries",
                     actual=f"{actual_primaries} primaries"
                 )
                 topology_mismatches.append(mismatch)
                 logger.warning(
-                    f"Primary count mismatch: expected {expected_topology.num_primaries}, "
+                    f"Primary count mismatch: expected {adjusted_expected_primaries}, "
                     f"got {actual_primaries}"
                 )
 
             # Check replica count
-            if actual_replicas != expected_topology.num_replicas:
+            if actual_replicas != adjusted_expected_replicas:
                 mismatch = TopologyMismatch(
                     mismatch_type="replica_count",
                     node_id="cluster",
-                    expected=f"{expected_topology.num_replicas} replicas",
+                    expected=f"{adjusted_expected_replicas} replicas",
                     actual=f"{actual_replicas} replicas"
                 )
                 topology_mismatches.append(mismatch)
                 logger.warning(
-                    f"Replica count mismatch: expected {expected_topology.num_replicas}, "
+                    f"Replica count mismatch: expected {adjusted_expected_replicas}, "
                     f"got {actual_replicas}"
                 )
 
@@ -2570,7 +2606,7 @@ class StateValidator:
                         cluster_connection,
                         expected_topology,
                         self.config.topology_config,
-                        killed_nodes
+                        self.killed_nodes
                     )
 
                     if not topology_result.success:
