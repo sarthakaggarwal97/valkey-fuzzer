@@ -159,7 +159,8 @@ class FuzzerEngine(IFuzzerEngine):
                 if test_data_written:
                     logger.info("Test data written successfully")
                 else:
-                    logger.warning("Failed to write test data - data consistency validation will be skipped")
+                    logger.warning("Failed to write test data - disabling data consistency validation")
+                    validation_config.check_data_consistency = False
             
             # Track killed nodes for chaos-aware validation
             killed_nodes_tracker = set()

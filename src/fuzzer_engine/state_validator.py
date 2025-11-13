@@ -3,6 +3,7 @@ import time
 import random
 import string
 import valkey
+from valkey.cluster import ClusterNode
 from collections import Counter
 from typing import Dict, List, Optional, Callable, TypeVar, Any
 from contextlib import contextmanager
@@ -2012,15 +2013,15 @@ class DataConsistencyValidator:
     ) -> DataConsistencyValidation:
         try:
             if not self.test_keys:
-                # No test keys to validate
-                logger.info("No test keys to validate (none were written)")
+                # No test keys to validate - this is a failure because we couldn't seed data
+                logger.warning("No test keys to validate - data consistency check cannot run")
                 return DataConsistencyValidation(
-                    success=True,
+                    success=False,
                     test_keys_checked=0,
                     missing_keys=[],
                     inconsistent_keys=[],
                     unreachable_keys=[],
-                    error_message=None
+                    error_message="No test keys available - data seeding failed or was skipped"
                 )
             
             # Get all live nodes
@@ -2040,40 +2041,109 @@ class DataConsistencyValidator:
             inconsistent_keys = []
             unreachable_keys = []
             
-            # Check each test key
-            for key, expected_value in self.test_keys.items():
-                try:
-                    # Try to read the key from an alive node
-                    alive_node = cluster_connection.find_alive_node(live_nodes, randomize=True)
-                    
-                    if not alive_node:
-                        unreachable_keys.append(key)
-                        continue
-                    
-                    with valkey_client(alive_node['host'], alive_node['port'], config.timeout) as client:
-                        actual_value = client.get(key)
+            # Use cluster-aware client to properly route requests to the correct nodes
+            startup_nodes = [
+                ClusterNode(host=node['host'], port=node['port'])
+                for node in live_nodes[:3]  # Use first 3 live nodes as startup nodes
+            ]
+            
+            if not startup_nodes:
+                logger.error("No live nodes available for cluster client")
+                return DataConsistencyValidation(
+                    success=False,
+                    test_keys_checked=0,
+                    missing_keys=[],
+                    inconsistent_keys=[],
+                    unreachable_keys=list(self.test_keys.keys()),
+                    error_message="No live nodes available"
+                )
+            
+            try:
+                # Create cluster-aware client that handles MOVED redirects automatically
+                cluster_client = valkey.ValkeyCluster(
+                    startup_nodes=startup_nodes,
+                    decode_responses=True,
+                    skip_full_coverage_check=True,
+                    read_from_replicas=False,  # Read from primaries for authoritative values
+                    socket_timeout=config.timeout
+                )
+                
+                # Check each test key using cluster-aware routing
+                for key, expected_value in self.test_keys.items():
+                    try:
+                        actual_value = cluster_client.get(key)
                         
                         if actual_value is None:
                             missing_keys.append(key)
                             logger.warning(f"Test key {key} is missing from cluster")
                         elif actual_value != expected_value:
+                            # Determine which node served this key for logging
+                            slot = self._compute_slot(key)
                             inconsistency = DataInconsistency(
                                 key=key,
                                 inconsistency_type="value_mismatch",
                                 expected_value=expected_value,
-                                actual_values={format_node_address(alive_node): actual_value}
+                                actual_values={f"slot_{slot}": actual_value}
                             )
                             inconsistent_keys.append(inconsistency)
                             logger.warning(
-                                f"Test key {key} has wrong value: "
+                                f"Test key {key} (slot {slot}) has wrong value: "
                                 f"expected {expected_value[:16]}..., got {actual_value[:16] if actual_value else 'None'}..."
                             )
                         else:
                             logger.debug(f"Test key {key} validated successfully")
-                    
-                except Exception as e:
-                    logger.warning(f"Error validating key {key}: {e}")
-                    unreachable_keys.append(key)
+                        
+                    except Exception as e:
+                        logger.warning(f"Error validating key {key}: {e}")
+                        unreachable_keys.append(key)
+                
+                cluster_client.close()
+                
+            except Exception as e:
+                logger.error(f"Failed to create cluster client: {e}")
+                # Fall back to checking what we can with individual node connections
+                for key, expected_value in self.test_keys.items():
+                    try:
+                        # Compute slot and find the owning node
+                        slot = self._compute_slot(key)
+                        owning_node = None
+                        
+                        for node in live_nodes:
+                            if node['role'] != 'master':
+                                continue
+                            slots = node.get('slots', [])
+                            if any(slot >= s[0] and slot <= s[1] for s in slots):
+                                owning_node = node
+                                break
+                        
+                        if not owning_node:
+                            unreachable_keys.append(key)
+                            continue
+                        
+                        with valkey_client(owning_node['host'], owning_node['port'], config.timeout) as client:
+                            actual_value = client.get(key)
+                            
+                            if actual_value is None:
+                                missing_keys.append(key)
+                                logger.warning(f"Test key {key} is missing from cluster")
+                            elif actual_value != expected_value:
+                                inconsistency = DataInconsistency(
+                                    key=key,
+                                    inconsistency_type="value_mismatch",
+                                    expected_value=expected_value,
+                                    actual_values={format_node_address(owning_node): actual_value}
+                                )
+                                inconsistent_keys.append(inconsistency)
+                                logger.warning(
+                                    f"Test key {key} has wrong value: "
+                                    f"expected {expected_value[:16]}..., got {actual_value[:16] if actual_value else 'None'}..."
+                                )
+                            else:
+                                logger.debug(f"Test key {key} validated successfully")
+                        
+                    except Exception as e:
+                        logger.warning(f"Error validating key {key}: {e}")
+                        unreachable_keys.append(key)
             
             # Optionally check cross-replica consistency
             if config.check_cross_replica_consistency:
@@ -2106,9 +2176,18 @@ class DataConsistencyValidator:
                     error_message = inconsistency_msg
                 logger.error(error_message)
             
-            if unreachable_keys and len(unreachable_keys) == len(self.test_keys):
+            # Fail if too many keys are unreachable (indicates routing/cluster issues)
+            unreachable_threshold = max(1, len(self.test_keys) * 0.1)  # Allow up to 10% unreachable
+            if len(unreachable_keys) >= unreachable_threshold:
                 success = False
-                error_message = "All test keys are unreachable"
+                unreachable_msg = (
+                    f"{len(unreachable_keys)} test key(s) unreachable "
+                    f"(threshold: {int(unreachable_threshold)})"
+                )
+                if error_message:
+                    error_message = f"{error_message}; {unreachable_msg}"
+                else:
+                    error_message = unreachable_msg
                 logger.error(error_message)
             
             logger.info(
