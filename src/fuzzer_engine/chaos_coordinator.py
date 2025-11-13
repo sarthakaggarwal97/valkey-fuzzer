@@ -77,7 +77,7 @@ class ChaosCoordinator:
                 self.chaos_engine.target_selector.update_cluster_topology(cluster_id, cluster_nodes)
 
             # Select target node for chaos using ChaosTargetSelector
-            target_node = self.chaos_engine.target_selector.select_target(cluster_id, chaos_config.target_selection, cluster_connection)
+            target_node = self.chaos_engine.target_selector.select_target(cluster_id, chaos_config.target_selection)
             
             if not target_node:
                 logger.warning("No suitable chaos target found")
