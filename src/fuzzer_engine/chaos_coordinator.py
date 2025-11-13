@@ -270,16 +270,16 @@ class ChaosCoordinator:
             if initial_node:
                 # Create a NodeInfo object with current topology data and initial process info
                 node_info = NodeInfo(
-                    node_id=node_dict['node_id'],
-                    role=node_dict['role'],
-                    shard_id=node_dict.get('shard_id'),
+                    node_id=initial_node.node_id,  # Keep orchestrator ID for process registration
+                    role=node_dict['role'],  # Use current role (may change after failover)
+                    shard_id=node_dict.get('shard_id'),  # Use current shard_id
                     port=node_dict['port'],
-                    bus_port=initial_node.bus_port,  # Use initial bus_port
+                    bus_port=initial_node.bus_port,
                     pid=initial_node.pid,  # Use initial PID (may be stale after restart)
                     process=initial_node.process,  # Use initial process handle
                     data_dir=initial_node.data_dir,
                     log_file=initial_node.log_file,
-                    cluster_node_id=node_dict['node_id']
+                    cluster_node_id=node_dict['node_id']  # Store Valkey cluster node ID
                 )
                 converted_nodes.append(node_info)
             else:
