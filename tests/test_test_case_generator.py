@@ -207,5 +207,112 @@ def test_validate_scenario_no_operations():
         generator.validate_scenario(scenario)
 
 
+def test_validate_scenario_process_chaos_type_none_without_randomization():
+    """Test that None process_chaos_type is rejected when randomization is disabled"""
+    generator = ScenarioGenerator()
+    scenario = generator.generate_random_scenario(seed=42)
+    
+    # Set process_chaos_type to None without enabling randomization
+    scenario.chaos_config.process_chaos_type = None
+    scenario.chaos_config.randomize_per_operation = False
+    
+    with pytest.raises(ValueError, match="process_chaos_type required"):
+        generator.validate_scenario(scenario)
+
+
+def test_validate_scenario_process_chaos_type_none_with_randomization():
+    """Test that None process_chaos_type is allowed when randomization is enabled"""
+    generator = ScenarioGenerator()
+    scenario = generator.generate_random_scenario(seed=42)
+    
+    # Set process_chaos_type to None WITH randomization enabled
+    scenario.chaos_config.process_chaos_type = None
+    scenario.chaos_config.randomize_per_operation = True
+    
+    # Should not raise - randomization will handle it at runtime
+    assert generator.validate_scenario(scenario) is True
+
+
+def test_parse_dsl_with_null_process_chaos_type():
+    """Test parsing DSL with null process_chaos_type for randomization"""
+    dsl_text = """
+scenario_id: test-randomization
+cluster:
+  num_shards: 3
+  replicas_per_shard: 1
+operations:
+  - type: failover
+    target_node: shard-0-primary
+chaos:
+  type: process_kill
+  process_chaos_type: null
+  randomize_per_operation: true
+  target_selection:
+    strategy: random
+  coordination:
+    chaos_during_operation: true
+"""
+    
+    generator = ScenarioGenerator()
+    scenario = generator.parse_dsl_config(dsl_text)
+    
+    # Should parse successfully with None process_chaos_type
+    assert scenario.chaos_config.process_chaos_type is None
+    assert scenario.chaos_config.randomize_per_operation is True
+    assert scenario.chaos_config.chaos_type == ChaosType.PROCESS_KILL
+
+
+def test_parse_dsl_with_omitted_process_chaos_type():
+    """Test parsing DSL with omitted process_chaos_type field (defaults to sigkill)"""
+    dsl_text = """
+scenario_id: test-default
+cluster:
+  num_shards: 3
+  replicas_per_shard: 1
+operations:
+  - type: failover
+    target_node: shard-0-primary
+chaos:
+  type: process_kill
+  target_selection:
+    strategy: random
+  coordination:
+    chaos_during_operation: true
+"""
+    
+    generator = ScenarioGenerator()
+    scenario = generator.parse_dsl_config(dsl_text)
+    
+    # Should default to SIGKILL when omitted
+    assert scenario.chaos_config.process_chaos_type == ProcessChaosType.SIGKILL
+    assert scenario.chaos_config.chaos_type == ChaosType.PROCESS_KILL
+
+
+def test_dsl_roundtrip_with_none_process_chaos_type(tmp_path):
+    """Test that scenarios with None process_chaos_type can round-trip through DSL"""
+    from src.fuzzer_engine.dsl_utils import DSLLoader
+    
+    generator = ScenarioGenerator()
+    
+    # Create a scenario with None process_chaos_type and randomization enabled
+    scenario = generator.generate_random_scenario(seed=42)
+    scenario.chaos_config.process_chaos_type = None
+    scenario.chaos_config.randomize_per_operation = True
+    
+    # Save to DSL file
+    dsl_file = tmp_path / "test_scenario.yaml"
+    DSLLoader.save_scenario_as_dsl(scenario, dsl_file)
+    
+    # Load back from DSL file
+    dsl_config = DSLLoader.load_from_file(dsl_file)
+    loaded_scenario = generator.parse_dsl_config(dsl_config.config_text)
+    
+    # Verify the loaded scenario has None process_chaos_type
+    assert loaded_scenario.chaos_config.process_chaos_type is None
+    assert loaded_scenario.chaos_config.randomize_per_operation is True
+    assert loaded_scenario.scenario_id == scenario.scenario_id
+    assert loaded_scenario.seed == scenario.seed
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

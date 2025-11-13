@@ -1,20 +1,16 @@
 """
 Chaos Coordinator - Core chaos injection coordination for fuzzer engine
-
-This is the main chaos coordinator used by the fuzzer engine for operation-based
-chaos injection. It handles:
-- Target node selection
-- Timing coordination (before/during/after operations)
-- Chaos injection execution
-- Chaos history tracking
-
 For scenario-based testing with state management, see chaos_engine.coordinator.
 """
 import logging
 import time
 import random
 from typing import Optional, List
-from ..models import Operation, ChaosConfig, ChaosResult, NodeInfo, ProcessChaosType, ChaosType, TargetSelection
+from copy import deepcopy
+from ..models import (
+    Operation, ChaosConfig, ChaosResult, NodeInfo, ChaosCoordination,
+    ProcessChaosType, ChaosType, TargetSelection
+)
 from ..chaos_engine.base import ProcessChaosEngine
 
 logging.basicConfig(format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', level=logging.INFO, force=True)
@@ -55,8 +51,9 @@ class ChaosCoordinator:
         self, 
         operation: Operation, 
         chaos_config: ChaosConfig,
-        cluster_nodes: List[NodeInfo],
-        cluster_connection=None
+        cluster_connection,
+        cluster_id: str = "default",
+        randomize_per_operation: Optional[bool] = None
     ) -> List[ChaosResult]:
         """
         Coordinate chaos injection with a cluster operation based on timing configuration.
@@ -66,8 +63,26 @@ class ChaosCoordinator:
         logger.info(f"Coordinating chaos with operation {operation.type.value} on {operation.target_node}")
         
         try:
-            # Select target node for chaos
-            target_node = self._select_chaos_target(cluster_nodes, chaos_config.target_selection, cluster_connection)
+            # Determine if randomization should be enabled
+            # Priority: explicit parameter > config flag > default (False)
+            should_randomize = randomize_per_operation if randomize_per_operation is not None else chaos_config.randomize_per_operation
+
+            # Randomize chaos configuration for this operation if enabled
+            if should_randomize:
+                chaos_config = self._randomize_chaos_config(chaos_config)
+
+            # Refresh topology from live cluster connection
+            live_nodes_dict = cluster_connection.get_live_nodes()
+            if live_nodes_dict:
+                # Convert dict nodes to NodeInfo objects for the target selector
+                live_nodes = self._convert_dict_nodes_to_nodeinfo(live_nodes_dict, cluster_connection.initial_nodes)
+                self.chaos_engine.target_selector.update_cluster_topology(cluster_id, live_nodes)
+                logger.debug(f"Updated topology with {len(live_nodes)} live nodes from cluster")
+            else:
+                logger.warning("No live nodes available from cluster connection")
+
+            # Select target node for chaos using ChaosTargetSelector
+            target_node = self.chaos_engine.target_selector.select_target(cluster_id, chaos_config.target_selection)
             
             if not target_node:
                 logger.warning("No suitable chaos target found")
@@ -77,12 +92,20 @@ class ChaosCoordinator:
             coordination = chaos_config.coordination
             timing = chaos_config.timing
             
+            # Add slight randomization to timing if enabled (±20%)
+            if should_randomize:
+                delay_before = timing.delay_before_operation * random.uniform(0.8, 1.2)
+                delay_after = timing.delay_after_operation * random.uniform(0.8, 1.2)
+            else:
+                delay_before = timing.delay_before_operation
+                delay_after = timing.delay_after_operation
+
             # Chaos before operation
             if coordination.chaos_before_operation:
-                logger.info(f"Injecting chaos before operation (delay: {timing.delay_before_operation:.2f}s)")
-                time.sleep(timing.delay_before_operation)
+                logger.info(f"Injecting chaos before operation (delay: {delay_before:.2f}s)")
+                time.sleep(delay_before)
                 
-                result = self._inject_chaos(target_node, chaos_config)
+                result = self._inject_chaos(target_node, chaos_config, should_randomize)
                 chaos_results.append(result)
                 
                 if result.success:
@@ -92,7 +115,7 @@ class ChaosCoordinator:
             if coordination.chaos_during_operation:
                 logger.info("Injecting chaos during operation execution")
                 
-                result = self._inject_chaos(target_node, chaos_config)
+                result = self._inject_chaos(target_node, chaos_config, should_randomize)
                 chaos_results.append(result)
                 
                 if result.success:
@@ -100,10 +123,10 @@ class ChaosCoordinator:
             
             # Chaos after operation
             if coordination.chaos_after_operation:
-                logger.info(f"Injecting chaos after operation (delay: {timing.delay_after_operation:.2f}s)")
-                time.sleep(timing.delay_after_operation)
+                logger.info(f"Injecting chaos after operation (delay: {delay_after:.2f}s)")
+                time.sleep(delay_after)
                 
-                result = self._inject_chaos(target_node, chaos_config)
+                result = self._inject_chaos(target_node, chaos_config, should_randomize)
                 chaos_results.append(result)
                 
                 if result.success:
@@ -117,30 +140,104 @@ class ChaosCoordinator:
         
         return chaos_results
     
-    def execute_chaos_during_operation(self, target_node: NodeInfo, chaos_config: ChaosConfig) -> ChaosResult:
+    def execute_chaos_during_operation(
+        self,
+        target_node: NodeInfo,
+        chaos_config: ChaosConfig,
+        randomize: bool = False
+    ) -> ChaosResult:
         """
         Execute chaos injection during operation execution.
         This is typically called by the operation orchestrator at the appropriate time.
         """
         logger.info(f"Executing chaos during operation on {target_node.node_id}")
         
-        result = self._inject_chaos(target_node, chaos_config)
+        result = self._inject_chaos(target_node, chaos_config, randomize)
         self.chaos_history.append(result)
         
         return result
     
-    def _inject_chaos(self, target_node: NodeInfo, chaos_config: ChaosConfig) -> ChaosResult:
+    def _randomize_chaos_config(self, chaos_config: ChaosConfig) -> ChaosConfig:
+        """Create a randomized copy of the chaos config for this operation."""
+        # Create a copy to avoid modifying the original
+        randomized_config = deepcopy(chaos_config)
+
+        # Randomize process chaos type (if process kill chaos)
+        if randomized_config.chaos_type == ChaosType.PROCESS_KILL:
+            # 50/50 chance between SIGKILL and SIGTERM
+            randomized_config.process_chaos_type = random.choice([
+                ProcessChaosType.SIGKILL,
+                ProcessChaosType.SIGTERM
+            ])
+            logger.info(f"Randomized chaos type: {randomized_config.process_chaos_type.value}")
+
+        # Randomize chaos timing coordination (30% chance for each timing option)
+        # At least one must be True
+        chaos_before = random.random() < 0.3
+        chaos_during = random.random() < 0.5  # Higher probability for during
+        chaos_after = random.random() < 0.3
+
+        # Ensure at least one is True
+        if not (chaos_before or chaos_during or chaos_after):
+            chaos_during = True
+
+        randomized_config.coordination = ChaosCoordination(
+            chaos_before_operation=chaos_before,
+            chaos_during_operation=chaos_during,
+            chaos_after_operation=chaos_after
+        )
+
+        timing_desc = []
+        if chaos_before:
+            timing_desc.append("before")
+        if chaos_during:
+            timing_desc.append("during")
+        if chaos_after:
+            timing_desc.append("after")
+        logger.info(f"Randomized chaos timing: {', '.join(timing_desc)}")
+
+        # Randomize target selection strategy (if not specific nodes)
+        if randomized_config.target_selection.strategy != "specific":
+            # Choose randomly between different strategies
+            strategies = ["random", "primary_only", "replica_only"]
+            new_strategy = random.choice(strategies)
+
+            randomized_config.target_selection = TargetSelection(
+                strategy=new_strategy,
+                specific_nodes=None
+            )
+            logger.info(f"Randomized target strategy: {new_strategy}")
+
+        return randomized_config
+
+    def _inject_chaos(
+        self,
+        target_node: NodeInfo,
+        chaos_config: ChaosConfig,
+        randomize: bool = False
+    ) -> ChaosResult:
         """
         Inject chaos on the target node based on configuration.
         """
         if chaos_config.chaos_type == ChaosType.PROCESS_KILL:
-            # Determine process chaos type
-            process_chaos_type = chaos_config.process_chaos_type or ProcessChaosType.SIGKILL
+            # Use process chaos type from config (may have been randomized)
+            if chaos_config.process_chaos_type:
+                process_chaos_type = chaos_config.process_chaos_type
+            else:
+                # Fallback behavior depends on randomization flag
+                if randomize:
+                    # Randomize when explicitly requested
+                    process_chaos_type = random.choice([ProcessChaosType.SIGKILL, ProcessChaosType.SIGTERM])
+                    logger.info(f"Randomized fallback chaos type: {process_chaos_type.value}")
+                else:
+                    # Deterministic default for backward compatibility
+                    process_chaos_type = ProcessChaosType.SIGKILL
+                    logger.debug(f"Using default chaos type: {process_chaos_type.value}")
             
             logger.info(f"Injecting {process_chaos_type.value} on {target_node.node_id}")
             
             result = self.chaos_engine.inject_process_chaos(target_node, process_chaos_type)
-            
+
             return result
         else:
             # Future chaos types (network chaos, etc.)
@@ -154,72 +251,42 @@ class ChaosCoordinator:
                 end_time=time.time(),
                 error_message=f"Unsupported chaos type: {chaos_config.chaos_type}"
             )
-    
-    def _select_chaos_target(self, cluster_nodes: List[NodeInfo], target_selection: TargetSelection, cluster_connection=None) -> Optional[NodeInfo]:
+
+    def _convert_dict_nodes_to_nodeinfo(self, dict_nodes: List[dict], initial_nodes: List[NodeInfo]) -> List[NodeInfo]:
         """
-        Select a target node for chaos injection based on selection strategy.
-        Uses live cluster topology to get accurate role information after failovers.
+        Convert dictionary nodes from ClusterConnection.get_live_nodes() to NodeInfo objects.
+        Uses initial_nodes to fill in missing process/pid information.
         """
-        if not cluster_nodes:
-            return None
+        # Create a mapping from port to initial NodeInfo for quick lookup
+        port_to_nodeinfo = {node.port: node for node in initial_nodes}
         
-        # Filter to only live nodes
-        live_nodes = [node for node in cluster_nodes if node.process and node.process.poll() is None]
-        
-        if not live_nodes:
-            logger.warning("No live nodes available for chaos injection")
-            return None
-        
-        # Get current cluster topology with updated roles if connection available
-        current_topology = None
-        if cluster_connection:
-            try:
-                current_topology = cluster_connection.get_live_nodes()
-            except Exception as e:
-                logger.debug(f"Could not get live topology: {e}")
-        
-        strategy = target_selection.strategy
-        
-        if strategy == "specific":
-            # Select from specific nodes
-            if target_selection.specific_nodes:
-                for node in live_nodes:
-                    if node.node_id in target_selection.specific_nodes:
-                        return node
-            return None
-        
-        elif strategy == "primary_only":
-            # Use current topology for accurate role information
-            if current_topology:
-                primary_ports = [n['port'] for n in current_topology if n['role'] == 'primary']
-                primary_nodes = [node for node in live_nodes if node.port in primary_ports]
-            else:
-                primary_nodes = [node for node in live_nodes if node.role == 'primary']
+        converted_nodes = []
+        for node_dict in dict_nodes:
+            port = node_dict['port']
             
-            if primary_nodes:
-                return random.choice(primary_nodes)
-            return None
-        
-        elif strategy == "replica_only":
-            # Use current topology for accurate role information
-            if current_topology:
-                replica_ports = [n['port'] for n in current_topology if n['role'] == 'replica']
-                replica_nodes = [node for node in live_nodes if node.port in replica_ports]
-            else:
-                replica_nodes = [node for node in live_nodes if node.role == 'replica']
+            # Get the initial NodeInfo for this port to retrieve process/pid info
+            initial_node = port_to_nodeinfo.get(port)
             
-            if replica_nodes:
-                return random.choice(replica_nodes)
-            return None
+            if initial_node:
+                # Create a NodeInfo object with current topology data and initial process info
+                node_info = NodeInfo(
+                    node_id=initial_node.node_id,  # Keep orchestrator ID for process registration
+                    role=node_dict['role'],  # Use current role (may change after failover)
+                    shard_id=node_dict.get('shard_id'),  # Use current shard_id
+                    port=node_dict['port'],
+                    bus_port=initial_node.bus_port,
+                    pid=initial_node.pid,  # Use initial PID (may be stale after restart)
+                    process=initial_node.process,  # Use initial process handle
+                    data_dir=initial_node.data_dir,
+                    log_file=initial_node.log_file,
+                    cluster_node_id=node_dict['node_id']  # Store Valkey cluster node ID
+                )
+                converted_nodes.append(node_info)
+            else:
+                logger.warning(f"No initial node info found for port {port}, skipping node {node_dict['node_id']}")
         
-        elif strategy == "random":
-            # Select randomly from all live nodes
-            return random.choice(live_nodes)
-        
-        else:
-            logger.warning(f"Unknown target selection strategy: {strategy}")
-            return None
-    
+        return converted_nodes
+
     def get_chaos_history(self) -> List[ChaosResult]:
         """
         Get the history of all chaos injections.

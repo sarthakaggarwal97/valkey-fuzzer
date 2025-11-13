@@ -116,6 +116,7 @@ class ChaosConfig:
     timing: ChaosTiming
     coordination: ChaosCoordination
     process_chaos_type: Optional[ProcessChaosType] = None  # For process chaos
+    randomize_per_operation: bool = False  # Enable randomization of chaos parameters per operation
 
 
 @dataclass

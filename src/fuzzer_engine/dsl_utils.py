@@ -79,6 +79,7 @@ class DSLLoader:
             'chaos': {
                 'type': scenario.chaos_config.chaos_type.value,
                 'process_chaos_type': scenario.chaos_config.process_chaos_type.value if scenario.chaos_config.process_chaos_type else None,
+                'randomize_per_operation': scenario.chaos_config.randomize_per_operation,
                 'target_selection': {
                     'strategy': scenario.chaos_config.target_selection.strategy,
                     'specific_nodes': scenario.chaos_config.target_selection.specific_nodes

@@ -18,9 +18,6 @@ class ScenarioGenerator(ITestCaseGenerator):
     def __init__(self, random_seed: Optional[int] = None):
         """
         Initialize test case generator
-        
-        Args:
-            random_seed: Optional seed for reproducible random generation
         """
         self.random_seed = random_seed
         if random_seed is not None:
@@ -119,7 +116,8 @@ class ScenarioGenerator(ITestCaseGenerator):
             target_selection=target_selection,
             timing=timing,
             coordination=coordination,
-            process_chaos_type=process_chaos_type
+            process_chaos_type=process_chaos_type,
+            randomize_per_operation=True
         )
     
     def parse_dsl_config(self, dsl_text: str) -> Scenario:
@@ -250,17 +248,21 @@ class ScenarioGenerator(ITestCaseGenerator):
         process_chaos_type = None
         if chaos_type == ChaosType.PROCESS_KILL:
             pct_str = chaos_dict.get("process_chaos_type", "sigkill")
-            try:
-                process_chaos_type = ProcessChaosType(pct_str)
-            except ValueError:
-                raise ValueError(f"Invalid process chaos type: {pct_str}")
+            if pct_str is not None:
+                try:
+                    process_chaos_type = ProcessChaosType(pct_str)
+                except ValueError:
+                    raise ValueError(f"Invalid process chaos type: {pct_str}")
+        
+        randomize_per_operation = chaos_dict.get("randomize_per_operation", False)
         
         return ChaosConfig(
             chaos_type=chaos_type,
             target_selection=target_selection,
             timing=timing,
             coordination=coordination,
-            process_chaos_type=process_chaos_type
+            process_chaos_type=process_chaos_type,
+            randomize_per_operation=randomize_per_operation
         )
     
     def _parse_validation_config(self, validation_dict: Dict[str, Any]) -> ValidationConfig:
@@ -301,6 +303,8 @@ class ScenarioGenerator(ITestCaseGenerator):
         
         if scenario.chaos_config.chaos_type == ChaosType.PROCESS_KILL:
             if scenario.chaos_config.process_chaos_type is None:
-                raise ValueError("process_chaos_type required for PROCESS_KILL chaos")
+                # Allow None if randomization is enabled (will be randomized at runtime)
+                if not scenario.chaos_config.randomize_per_operation:
+                    raise ValueError("process_chaos_type required for PROCESS_KILL chaos (or enable randomize_per_operation)")
         
         return True
