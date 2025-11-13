@@ -11,6 +11,14 @@ from src.models import (
 )
 
 
+@pytest.fixture
+def mock_live_process():
+    """Create a mock process that appears alive (poll returns None)"""
+    mock = Mock()
+    mock.poll.return_value = None
+    return mock
+
+
 def test_chaos_coordinator_initialization():
     """Test chaos coordinator initialization"""
     coordinator = ChaosCoordinator()
@@ -58,7 +66,7 @@ def test_register_cluster_nodes():
     assert coordinator.chaos_engine.node_processes["node-1"] == 12346
 
 
-def test_select_chaos_target_random():
+def test_select_chaos_target_random(mock_live_process):
     """Test selecting chaos target with random strategy"""
     coordinator = ChaosCoordinator()
     
@@ -70,7 +78,7 @@ def test_select_chaos_target_random():
             port=7000,
             bus_port=17000,
             pid=12345,
-            process=Mock(),
+            process=mock_live_process,
             data_dir="/tmp/test",
             log_file="/tmp/test.log"
         ),
@@ -81,20 +89,20 @@ def test_select_chaos_target_random():
             port=7001,
             bus_port=17001,
             pid=12346,
-            process=Mock(),
+            process=mock_live_process,
             data_dir="/tmp/test",
             log_file="/tmp/test.log"
         )
     ]
     
     target_selection = TargetSelection(strategy="random")
-    target = coordinator._select_chaos_target(nodes, target_selection)
+    target = coordinator._select_chaos_target(nodes, target_selection, None)
     
     assert target is not None
     assert target.node_id in ["node-0", "node-1"]
 
 
-def test_select_chaos_target_primary_only():
+def test_select_chaos_target_primary_only(mock_live_process):
     """Test selecting chaos target with primary_only strategy"""
     coordinator = ChaosCoordinator()
     
@@ -106,7 +114,7 @@ def test_select_chaos_target_primary_only():
             port=7000,
             bus_port=17000,
             pid=12345,
-            process=Mock(),
+            process=mock_live_process,
             data_dir="/tmp/test",
             log_file="/tmp/test.log"
         ),
@@ -117,21 +125,21 @@ def test_select_chaos_target_primary_only():
             port=7001,
             bus_port=17001,
             pid=12346,
-            process=Mock(),
+            process=mock_live_process,
             data_dir="/tmp/test",
             log_file="/tmp/test.log"
         )
     ]
     
     target_selection = TargetSelection(strategy="primary_only")
-    target = coordinator._select_chaos_target(nodes, target_selection)
+    target = coordinator._select_chaos_target(nodes, target_selection, None)
     
     assert target is not None
     assert target.node_id == "node-0"
     assert target.role == "primary"
 
 
-def test_select_chaos_target_replica_only():
+def test_select_chaos_target_replica_only(mock_live_process):
     """Test selecting chaos target with replica_only strategy"""
     coordinator = ChaosCoordinator()
     
@@ -143,7 +151,7 @@ def test_select_chaos_target_replica_only():
             port=7000,
             bus_port=17000,
             pid=12345,
-            process=Mock(),
+            process=mock_live_process,
             data_dir="/tmp/test",
             log_file="/tmp/test.log"
         ),
@@ -154,21 +162,21 @@ def test_select_chaos_target_replica_only():
             port=7001,
             bus_port=17001,
             pid=12346,
-            process=Mock(),
+            process=mock_live_process,
             data_dir="/tmp/test",
             log_file="/tmp/test.log"
         )
     ]
     
     target_selection = TargetSelection(strategy="replica_only")
-    target = coordinator._select_chaos_target(nodes, target_selection)
+    target = coordinator._select_chaos_target(nodes, target_selection, None)
     
     assert target is not None
     assert target.node_id == "node-1"
     assert target.role == "replica"
 
 
-def test_select_chaos_target_specific():
+def test_select_chaos_target_specific(mock_live_process):
     """Test selecting chaos target with specific strategy"""
     coordinator = ChaosCoordinator()
     
@@ -180,7 +188,7 @@ def test_select_chaos_target_specific():
             port=7000,
             bus_port=17000,
             pid=12345,
-            process=Mock(),
+            process=mock_live_process,
             data_dir="/tmp/test",
             log_file="/tmp/test.log"
         ),
@@ -191,14 +199,14 @@ def test_select_chaos_target_specific():
             port=7001,
             bus_port=17001,
             pid=12346,
-            process=Mock(),
+            process=mock_live_process,
             data_dir="/tmp/test",
             log_file="/tmp/test.log"
         )
     ]
     
     target_selection = TargetSelection(strategy="specific", specific_nodes=["node-1"])
-    target = coordinator._select_chaos_target(nodes, target_selection)
+    target = coordinator._select_chaos_target(nodes, target_selection, None)
     
     assert target is not None
     assert target.node_id == "node-1"
@@ -209,7 +217,7 @@ def test_select_chaos_target_empty_nodes():
     coordinator = ChaosCoordinator()
     
     target_selection = TargetSelection(strategy="random")
-    target = coordinator._select_chaos_target([], target_selection)
+    target = coordinator._select_chaos_target([], target_selection, None)
     
     assert target is None
 
@@ -233,7 +241,7 @@ def test_select_chaos_target_no_primary():
     ]
     
     target_selection = TargetSelection(strategy="primary_only")
-    target = coordinator._select_chaos_target(nodes, target_selection)
+    target = coordinator._select_chaos_target(nodes, target_selection, None)
     
     assert target is None
 
@@ -329,7 +337,7 @@ def test_coordinate_chaos_with_operation_no_target(mock_sleep):
     )
     
     # Empty node list - no target will be found
-    results = coordinator.coordinate_chaos_with_operation(operation, chaos_config, [])
+    results = coordinator.coordinate_chaos_with_operation(operation, chaos_config, [], None)
     
     assert len(results) == 0
 

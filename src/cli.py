@@ -8,12 +8,13 @@ import sys
 import argparse
 import json
 import yaml
+import traceback
 from pathlib import Path
 from typing import Optional, Dict, Any
 from datetime import datetime
 
 from .main import ClusterBusFuzzer
-from .fuzzer_engine import DSLLoader
+from .fuzzer_engine import DSLLoader, ScenarioGenerator
 from .models import ClusterConfig, ValidationConfig, WorkloadConfig, ExecutionResult, ValidationResult
 
 
@@ -59,6 +60,7 @@ class FuzzerCLI:
         else:
             print("Seed: Random")
         
+        # Default number of iterations is 1
         if args.iterations:
             print(f"Iterations: {args.iterations}")
         
@@ -86,7 +88,6 @@ class FuzzerCLI:
             except Exception as e:
                 print(f"Test failed with exception: {e}")
                 if args.verbose:
-                    import traceback
                     traceback.print_exc()
                 return 1
         
@@ -107,7 +108,7 @@ class FuzzerCLI:
         
         dsl_path = Path(args.file)
         if not dsl_path.exists():
-            print(f"[FAIL] DSL file not found: {args.file}")
+            print(f"DSL file not found: {args.file}")
             return 1
         
         try:
@@ -133,7 +134,6 @@ class FuzzerCLI:
         except Exception as e:
             print(f"DSL test failed: {e}")
             if args.verbose:
-                import traceback
                 traceback.print_exc()
             return 1
     
@@ -143,7 +143,7 @@ class FuzzerCLI:
         
         dsl_path = Path(args.file)
         if not dsl_path.exists():
-            print(f"[FAIL] DSL file not found: {args.file}")
+            print(f"DSL file not found: {args.file}")
             return 1
         
         try:
@@ -152,7 +152,6 @@ class FuzzerCLI:
             print("DSL file loaded successfully")
             
             # Parse and validate
-            from .fuzzer_engine import ScenarioGenerator
             generator = ScenarioGenerator()
             
             scenario = generator.parse_dsl_config(dsl_config.config_text)
@@ -183,7 +182,6 @@ class FuzzerCLI:
         except Exception as e:
             print(f"\nValidation Failed: {e}")
             if args.verbose:
-                import traceback
                 traceback.print_exc()
             return 1
     
@@ -214,7 +212,7 @@ class FuzzerCLI:
             print(f"Error: {result.error_message}")
     
     def _print_detailed_result(self, result: ExecutionResult):
-        """Print detailed test result"""
+        """Print detailed test result when --verbose flag is specified"""
         self._print_summary_result(result)
         
         # Print chaos events
@@ -282,10 +280,10 @@ class FuzzerCLI:
                 elif format == 'yaml':
                     yaml.dump(data, f, default_flow_style=False)
             
-            print(f"\n[PASS] Results saved to {output_path}")
+            print(f"\nResults saved to {output_path}")
             
         except Exception as e:
-            print(f"\n[FAIL] Failed to save results: {e}")
+            print(f"\nFailed to save results: {e}")
     
     def _result_to_dict(self, result: ExecutionResult) -> Dict[str, Any]:
         """Convert ExecutionResult to dictionary"""
@@ -318,7 +316,7 @@ Examples:
   # Run multiple iterations
   valkey-fuzzer random --iterations 10
   
-  # Run with configuration file
+  # Run with configuration file and store results to output file
   valkey-fuzzer random --config config.yaml --output results.json
   
   # Run DSL-based test
@@ -446,7 +444,6 @@ def main():
     except Exception as e:
         print(f"\nUnexpected error: {e}")
         if hasattr(args, 'verbose') and args.verbose:
-            import traceback
             traceback.print_exc()
         return 1
     
