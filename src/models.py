@@ -120,27 +120,14 @@ class ChaosConfig:
 
 
 @dataclass
-class ValidationConfig:
-    """Configuration for cluster state validation"""
-    check_slot_coverage: bool = True
-    check_slot_conflicts: bool = True
-    check_replica_sync: bool = True
-    check_node_connectivity: bool = True
-    check_data_consistency: bool = True
-    convergence_timeout: float = 60.0
-    max_replication_lag: float = 5.0
-
-
-@dataclass
 class Scenario:
     """Complete test scenario configuration"""
     scenario_id: str
     cluster_config: ClusterConfig
     operations: List[Operation]
     chaos_config: ChaosConfig
-    validation_config: ValidationConfig
     seed: Optional[int] = None  # For reproducibility
-    state_validation_config: Optional['StateValidationConfig'] = None  # New comprehensive validation
+    state_validation_config: Optional['StateValidationConfig'] = None
 
 
 @dataclass

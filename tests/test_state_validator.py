@@ -5,7 +5,7 @@ import pytest
 import time
 from src.fuzzer_engine.state_validator import StateValidator
 from src.models import (
-    ValidationConfig, StateValidationConfig, ClusterStatus, NodeInfo, ReplicationStatus,
+    StateValidationConfig, ClusterStatus, NodeInfo, ReplicationStatus,
     ConnectivityStatus, ConsistencyStatus
 )
 
@@ -105,32 +105,7 @@ def test_state_validation_config_selective_checks():
     assert config.check_view_consistency is False
 
 
-def test_validation_config_defaults():
-    """Test validation configuration defaults"""
-    config = ValidationConfig()
-    
-    assert config.check_slot_coverage is True
-    assert config.check_slot_conflicts is True
-    assert config.check_replica_sync is True
-    assert config.check_node_connectivity is True
-    assert config.check_data_consistency is True
-    assert config.convergence_timeout == 60.0
-    assert config.max_replication_lag == 5.0
 
-
-def test_validation_config_custom():
-    """Test validation configuration with custom values"""
-    config = ValidationConfig(
-        check_slot_coverage=False,
-        check_replica_sync=False,
-        convergence_timeout=120.0,
-        max_replication_lag=10.0
-    )
-    
-    assert config.check_slot_coverage is False
-    assert config.check_replica_sync is False
-    assert config.convergence_timeout == 120.0
-    assert config.max_replication_lag == 10.0
 
 
 def test_replication_status_all_synced():

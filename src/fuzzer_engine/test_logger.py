@@ -44,7 +44,7 @@ class FuzzerLogger:
             'cluster_config': self._serialize_cluster_config(scenario.cluster_config),
             'operations': self._serialize_operations(scenario.operations),
             'chaos_config': self._serialize_chaos_config(scenario.chaos_config),
-            'validation_config': self._serialize_validation_config(scenario.validation_config),
+            'state_validation_config': self._serialize_state_validation_config(scenario.state_validation_config) if scenario.state_validation_config else None,
             'operation_logs': [],
             'chaos_events': [],
             'validation_results': [],
@@ -510,16 +510,23 @@ class FuzzerLogger:
             'process_chaos_type': config.process_chaos_type.value if config.process_chaos_type else None
         }
     
-    def _serialize_validation_config(self, config) -> Dict[str, Any]:
-        """Serialize validation configuration to dictionary"""
+    def _serialize_state_validation_config(self, config) -> Dict[str, Any]:
+        """Serialize state validation configuration to dictionary"""
+        if config is None:
+            return None
         return {
+            'check_replication': config.check_replication,
+            'check_cluster_status': config.check_cluster_status,
             'check_slot_coverage': config.check_slot_coverage,
-            'check_slot_conflicts': config.check_slot_conflicts,
-            'check_replica_sync': config.check_replica_sync,
-            'check_node_connectivity': config.check_node_connectivity,
+            'check_topology': config.check_topology,
+            'check_view_consistency': config.check_view_consistency,
             'check_data_consistency': config.check_data_consistency,
             'convergence_timeout': config.convergence_timeout,
-            'max_replication_lag': config.max_replication_lag
+            'replication_config': {
+                'max_replication_lag': config.replication_config.max_replication_lag,
+                'check_link_status': config.replication_config.check_link_status,
+                'strict_mode': config.replication_config.strict_mode
+            } if config.replication_config else None
         }
     
     def _log_scenario_summary(self, scenario: Scenario) -> None:

@@ -13,7 +13,7 @@ from src.fuzzer_engine import FuzzerEngine, DSLLoader
 from src.models import (
     ClusterConfig, Scenario, Operation, OperationType, OperationTiming,
     ChaosConfig, ChaosType, ProcessChaosType, TargetSelection, ChaosTiming,
-    ChaosCoordination, ValidationConfig, DSLConfig
+    ChaosCoordination, DSLConfig
 )
 
 logging.basicConfig(format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', level=logging.INFO, force=True)

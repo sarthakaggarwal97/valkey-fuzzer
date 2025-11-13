@@ -94,15 +94,20 @@ class DSLLoader:
                     'chaos_after_operation': scenario.chaos_config.coordination.chaos_after_operation
                 }
             },
-            'validation': {
-                'check_slot_coverage': scenario.validation_config.check_slot_coverage,
-                'check_slot_conflicts': scenario.validation_config.check_slot_conflicts,
-                'check_replica_sync': scenario.validation_config.check_replica_sync,
-                'check_node_connectivity': scenario.validation_config.check_node_connectivity,
-                'check_data_consistency': scenario.validation_config.check_data_consistency,
-                'convergence_timeout': scenario.validation_config.convergence_timeout,
-                'max_replication_lag': scenario.validation_config.max_replication_lag
-            }
+            'state_validation': {
+                'check_replication': scenario.state_validation_config.check_replication,
+                'check_cluster_status': scenario.state_validation_config.check_cluster_status,
+                'check_slot_coverage': scenario.state_validation_config.check_slot_coverage,
+                'check_topology': scenario.state_validation_config.check_topology,
+                'check_view_consistency': scenario.state_validation_config.check_view_consistency,
+                'check_data_consistency': scenario.state_validation_config.check_data_consistency,
+                'convergence_timeout': scenario.state_validation_config.convergence_timeout,
+                'replication_config': {
+                    'max_replication_lag': scenario.state_validation_config.replication_config.max_replication_lag,
+                    'check_link_status': scenario.state_validation_config.replication_config.check_link_status,
+                    'strict_mode': scenario.state_validation_config.replication_config.strict_mode
+                } if scenario.state_validation_config.replication_config else None
+            } if scenario.state_validation_config else None
         }
         
         with open(file_path, 'w') as f:
