@@ -7,7 +7,7 @@ from src.fuzzer_engine import FuzzerEngine, DSLLoader
 from src.models import (
     Scenario, ClusterConfig, Operation, OperationType, OperationTiming,
     ChaosConfig, ChaosType, ProcessChaosType, TargetSelection, ChaosTiming,
-    ChaosCoordination, ValidationConfig
+    ChaosCoordination
 )
 
 
@@ -27,7 +27,6 @@ class TestFuzzerEngineIntegration:
         assert scenario.cluster_config is not None
         assert len(scenario.operations) > 0
         assert scenario.chaos_config is not None
-        assert scenario.validation_config is not None
     
     def test_random_scenario_reproducibility(self):
         """Test that same seed produces same scenario"""
@@ -146,8 +145,7 @@ operations:
                 timing=ChaosTiming(),
                 coordination=ChaosCoordination(),
                 process_chaos_type=ProcessChaosType.SIGKILL
-            ),
-            validation_config=ValidationConfig()
+            )
         )
         
         # Should validate successfully
@@ -164,8 +162,7 @@ operations:
                 timing=ChaosTiming(),
                 coordination=ChaosCoordination(),
                 process_chaos_type=ProcessChaosType.SIGKILL
-            ),
-            validation_config=ValidationConfig()
+            )
         )
         
         with pytest.raises(ValueError, match="Scenario must have at least one operation"):
@@ -287,8 +284,7 @@ class TestErrorHandling:
                 timing=ChaosTiming(),
                 coordination=ChaosCoordination(),
                 process_chaos_type=ProcessChaosType.SIGKILL
-            ),
-            validation_config=ValidationConfig()
+            )
         )
         
         # Should raise validation error
@@ -316,8 +312,7 @@ class TestErrorHandling:
                 timing=ChaosTiming(),
                 coordination=ChaosCoordination(),
                 process_chaos_type=None  # Missing!
-            ),
-            validation_config=ValidationConfig()
+            )
         )
         
         with pytest.raises(ValueError, match="process_chaos_type required"):

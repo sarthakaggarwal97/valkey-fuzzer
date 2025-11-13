@@ -7,7 +7,7 @@ from typing import Optional, List, Dict, Any
 from ..models import (
     Scenario, ClusterConfig, Operation, OperationType, OperationTiming,
     ChaosConfig, ChaosType, ProcessChaosType, TargetSelection, ChaosTiming,
-    ChaosCoordination, ValidationConfig
+    ChaosCoordination
 )
 from ..interfaces import ITestCaseGenerator
 
@@ -16,12 +16,6 @@ class ScenarioGenerator(ITestCaseGenerator):
     """Generates randomized and DSL-based test scenarios"""
     
     def __init__(self, random_seed: Optional[int] = None):
-        """
-        Initialize test case generator
-        
-        Args:
-            random_seed: Optional seed for reproducible random generation
-        """
         self.random_seed = random_seed
         if random_seed is not None:
             random.seed(random_seed)
@@ -40,14 +34,12 @@ class ScenarioGenerator(ITestCaseGenerator):
         cluster_config = self._generate_random_cluster_config()
         operations = self._generate_random_operations(cluster_config)
         chaos_config = self._generate_random_chaos_config()
-        validation_config = ValidationConfig()
         
         scenario = Scenario(
             scenario_id=str(scenario_seed),
             cluster_config=cluster_config,
             operations=operations,
             chaos_config=chaos_config,
-            validation_config=validation_config,
             seed=scenario_seed
         )
         
@@ -139,7 +131,6 @@ class ScenarioGenerator(ITestCaseGenerator):
         cluster_config = self._parse_cluster_config(config["cluster"])
         operations = self._parse_operations(config["operations"])
         chaos_config = self._parse_chaos_config(config.get("chaos", {}))
-        validation_config = self._parse_validation_config(config.get("validation", {}))
         seed = config.get("seed")
         
         return Scenario(
@@ -147,7 +138,6 @@ class ScenarioGenerator(ITestCaseGenerator):
             cluster_config=cluster_config,
             operations=operations,
             chaos_config=chaos_config,
-            validation_config=validation_config,
             seed=seed
         )
     
@@ -263,17 +253,7 @@ class ScenarioGenerator(ITestCaseGenerator):
             process_chaos_type=process_chaos_type
         )
     
-    def _parse_validation_config(self, validation_dict: Dict[str, Any]) -> ValidationConfig:
-        """Parse validation configuration from DSL"""
-        return ValidationConfig(
-            check_slot_coverage=validation_dict.get("check_slot_coverage", True),
-            check_slot_conflicts=validation_dict.get("check_slot_conflicts", True),
-            check_replica_sync=validation_dict.get("check_replica_sync", True),
-            check_node_connectivity=validation_dict.get("check_node_connectivity", True),
-            check_data_consistency=validation_dict.get("check_data_consistency", True),
-            convergence_timeout=validation_dict.get("convergence_timeout", 60.0),
-            max_replication_lag=validation_dict.get("max_replication_lag", 5.0)
-        )
+
     
     def validate_scenario(self, scenario: Scenario) -> bool:
         """Validate test scenario configuration, raises ValueError if invalid."""

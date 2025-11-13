@@ -25,10 +25,13 @@ logger = logging.getLogger(__name__)
 
 
 class ChaosCoordinator:
-    def __init__(self):
+    def __init__(self, seed: Optional[int] = None):
         self.chaos_engine = ProcessChaosEngine()
         self.active_chaos_scenarios: dict[str, List[ChaosResult]] = {}
         self.chaos_history: List[ChaosResult] = []
+        self.rng = random.Random(seed)  # Dedicated RNG for reproducible chaos selection
+        if seed is not None:
+            logger.info(f"ChaosCoordinator initialized with seed {seed} for deterministic target selection")
     
     def register_cluster_nodes(self, cluster_id: str, nodes: List[NodeInfo]) -> None:
         """
@@ -191,19 +194,19 @@ class ChaosCoordinator:
             # Select only from primary nodes
             primary_nodes = [node for node in cluster_nodes if node.role == 'primary']
             if primary_nodes:
-                return random.choice(primary_nodes)
+                return self.rng.choice(primary_nodes)
             return None
         
         elif strategy == "replica_only":
             # Select only from replica nodes
             replica_nodes = [node for node in cluster_nodes if node.role == 'replica']
             if replica_nodes:
-                return random.choice(replica_nodes)
+                return self.rng.choice(replica_nodes)
             return None
         
         elif strategy == "random":
             # Select randomly from all nodes
-            return random.choice(cluster_nodes)
+            return self.rng.choice(cluster_nodes)
         
         else:
             logger.warning(f"Unknown target selection strategy: {strategy}")

@@ -45,6 +45,7 @@ class NodeInfo:
     process: subprocess.Popen
     data_dir: str
     log_file: str
+    host: str = "127.0.0.1"  # Host address (default localhost, can be container IP)
     slot_start: Optional[int] = None
     slot_end: Optional[int] = None
     master_node_id: Optional[str] = None
@@ -119,26 +120,14 @@ class ChaosConfig:
 
 
 @dataclass
-class ValidationConfig:
-    """Configuration for cluster state validation"""
-    check_slot_coverage: bool = True
-    check_slot_conflicts: bool = True
-    check_replica_sync: bool = True
-    check_node_connectivity: bool = True
-    check_data_consistency: bool = True
-    convergence_timeout: float = 60.0
-    max_replication_lag: float = 5.0
-
-
-@dataclass
 class Scenario:
     """Complete test scenario configuration"""
     scenario_id: str
     cluster_config: ClusterConfig
     operations: List[Operation]
     chaos_config: ChaosConfig
-    validation_config: ValidationConfig
     seed: Optional[int] = None  # For reproducibility
+    state_validation_config: Optional['StateValidationConfig'] = None
 
 
 @dataclass
@@ -256,7 +245,7 @@ class ExecutionResult:
     end_time: float
     operations_executed: int
     chaos_events: List[ChaosResult]
-    validation_results: List[ValidationResult]
+    validation_results: List['StateValidationResult']
     error_message: Optional[str] = None
     seed: Optional[int] = None
 
@@ -372,7 +361,9 @@ class ClusterConnection:
                                 shard_id = port_to_shard.get(port)
                     else:
                         # Fallback for nodes not in our mapping
-                        role = 'primary' if 'master' in flags else 'replica'
+                        # Parse flags properly - check for 'master' or 'slave' as discrete flags
+                        flag_list = flags.split(',')
+                        role = 'primary' if 'master' in flag_list else 'replica'
                         shard_id = port_to_shard.get(port)
                     
                     current_nodes.append({
@@ -399,7 +390,7 @@ class ClusterConnection:
     def get_replica_nodes(self) -> List[Dict]:
         """Get current replica nodes"""
         return [node for node in self.get_current_nodes() if node['role'] == 'replica']
-    
+
     def is_node_alive(self, host: str, port: int, timeout: float = 2.0) -> bool:
         try:
             client = valkey.Valkey(
@@ -414,19 +405,320 @@ class ClusterConnection:
             return True
         except Exception:
             return False
-    
+
     def find_alive_node(self, nodes: List[Dict], randomize: bool = True) -> Optional[Dict]:
         if not nodes:
             return None
-        
+
         # Make a copy to avoid modifying the original list
         node_list = nodes.copy()
-        
+
         if randomize:
             random.shuffle(node_list)
-        
+
         for node in node_list:
             if self.is_node_alive(node['host'], node['port']):
                 return node
-        
+
         return None
+
+@dataclass
+class ReplicationValidationConfig:
+    """Configuration for replication validation"""
+    max_acceptable_lag: float = 5.0  # seconds
+    require_all_replicas_synced: bool = False  # Allow dead replicas after chaos
+    check_replication_offset: bool = True
+    min_replicas_per_shard: int = 1  # Minimum live replicas per shard (0 = no check)
+    timeout: float = 10.0
+
+
+@dataclass
+class ClusterStatusValidationConfig:
+    """Configuration for cluster status validation"""
+    acceptable_states: List[str] = None
+    allow_degraded: bool = False
+    require_quorum: bool = True
+    timeout: float = 10.0
+
+    def __post_init__(self):
+        if self.acceptable_states is None:
+            self.acceptable_states = ['ok']
+
+
+@dataclass
+class SlotCoverageValidationConfig:
+    """Configuration for slot coverage validation"""
+    require_full_coverage: bool = True
+    allow_slot_conflicts: bool = False
+    timeout: float = 10.0
+
+
+@dataclass
+class TopologyValidationConfig:
+    """Configuration for topology validation"""
+    strict_mode: bool = True  # Strict matching of expected topology
+    allow_failed_nodes: bool = True  # Allow nodes to be failed after chaos
+    timeout: float = 10.0
+
+
+@dataclass
+class ViewConsistencyValidationConfig:
+    """Configuration for view consistency validation"""
+    require_full_consensus: bool = True
+    allow_transient_inconsistency: bool = True
+    max_inconsistency_duration: float = 5.0
+    timeout: float = 15.0
+
+
+@dataclass
+class DataConsistencyValidationConfig:
+    """Configuration for data consistency validation"""
+    check_test_keys: bool = True  # Validate test keys written before chaos
+    check_cross_replica_consistency: bool = True  # Validate data matches across replicas
+    num_test_keys: int = 100  # Number of test keys to write/validate
+    key_prefix: str = "fuzzer:test:"  # Prefix for test keys
+    timeout: float = 10.0
+
+
+@dataclass
+class StateValidationConfig:
+    """Configuration for post-operation validation"""
+    # Enable/disable individual checks
+    check_replication: bool = True
+    check_cluster_status: bool = True
+    check_slot_coverage: bool = True
+    check_topology: bool = True
+    check_view_consistency: bool = True
+    check_data_consistency: bool = True
+
+    # Timing configuration
+    stabilization_wait: float = 5.0  # Wait before validation
+    validation_timeout: float = 30.0  # Total validation timeout
+
+    # Behavior configuration
+    blocking_on_failure: bool = False  # Halt execution on failure
+    retry_on_transient_failure: bool = True
+    max_retries: int = 3
+    retry_delay: float = 2.0
+
+    # Sub-component configurations
+    replication_config: ReplicationValidationConfig = None
+    cluster_status_config: ClusterStatusValidationConfig = None
+    slot_coverage_config: SlotCoverageValidationConfig = None
+    topology_config: TopologyValidationConfig = None
+    view_consistency_config: ViewConsistencyValidationConfig = None
+    data_consistency_config: DataConsistencyValidationConfig = None
+
+    def __post_init__(self):
+        if self.replication_config is None:
+            self.replication_config = ReplicationValidationConfig()
+        if self.cluster_status_config is None:
+            self.cluster_status_config = ClusterStatusValidationConfig()
+        if self.slot_coverage_config is None:
+            self.slot_coverage_config = SlotCoverageValidationConfig()
+        if self.topology_config is None:
+            self.topology_config = TopologyValidationConfig()
+        if self.view_consistency_config is None:
+            self.view_consistency_config = ViewConsistencyValidationConfig()
+        if self.data_consistency_config is None:
+            self.data_consistency_config = DataConsistencyValidationConfig()
+
+
+@dataclass
+class ReplicaLagInfo:
+    """Information about replica lag"""
+    replica_node_id: str
+    replica_address: str
+    primary_node_id: str
+    primary_address: str
+    lag_seconds: float
+    replication_offset_diff: int
+    link_status: str
+
+
+@dataclass
+class ReplicationValidation:
+    """Replication validation result"""
+    success: bool
+    all_replicas_synced: bool
+    max_lag: float
+    lagging_replicas: List[ReplicaLagInfo]
+    disconnected_replicas: List[str]
+    error_message: Optional[str] = None
+
+
+@dataclass
+class ClusterStatusValidation:
+    """Cluster status validation result"""
+    success: bool
+    cluster_state: str
+    nodes_in_fail_state: List[str]
+    has_quorum: bool
+    degraded_reason: Optional[str] = None
+    error_message: Optional[str] = None
+
+
+@dataclass
+class SlotCoverageValidation:
+    """Slot coverage validation result"""
+    success: bool
+    total_slots_assigned: int
+    unassigned_slots: List[int]
+    conflicting_slots: List[SlotConflict]
+    slot_distribution: Dict[str, List[int]]  # node_id -> slot ranges
+    error_message: Optional[str] = None
+
+
+@dataclass
+class TopologyMismatch:
+    """Describes a topology mismatch"""
+    mismatch_type: str  # "missing_node", "extra_node", "wrong_role", "wrong_shard"
+    node_id: str
+    expected: str
+    actual: str
+
+
+@dataclass
+class TopologyValidation:
+    """Topology validation result"""
+    success: bool
+    expected_primaries: int
+    actual_primaries: int
+    expected_replicas: int
+    actual_replicas: int
+    topology_mismatches: List[TopologyMismatch]
+    error_message: Optional[str] = None
+
+
+@dataclass
+class ViewDiscrepancy:
+    """Describes a view discrepancy between nodes"""
+    discrepancy_type: str  # "membership", "role", "state", "address"
+    node_reporting: str
+    subject_node: str
+    expected_value: str
+    actual_value: str
+
+
+@dataclass
+class ViewConsistencyValidation:
+    """View consistency validation result"""
+    success: bool
+    nodes_checked: int
+    consistent_views: bool
+    split_brain_detected: bool
+    view_discrepancies: List[ViewDiscrepancy]
+    consensus_percentage: float  # Percentage of nodes with majority view
+    error_message: Optional[str] = None
+
+
+@dataclass
+class DataInconsistency:
+    """Describes a data inconsistency"""
+    key: str
+    inconsistency_type: str  # "missing", "value_mismatch", "unreachable"
+    expected_value: Optional[str]
+    actual_values: Dict[str, str]  # node_address -> value
+
+
+@dataclass
+class DataConsistencyValidation:
+    """Data consistency validation result"""
+    success: bool
+    test_keys_checked: int
+    missing_keys: List[str]
+    inconsistent_keys: List[DataInconsistency]
+    unreachable_keys: List[str]
+    error_message: Optional[str] = None
+
+
+@dataclass
+class StateValidationResult:
+    """Comprehensive validation result"""
+    overall_success: bool
+    validation_timestamp: float
+    validation_duration: float
+
+    # Individual check results
+    replication: Optional[ReplicationValidation]
+    cluster_status: Optional[ClusterStatusValidation]
+    slot_coverage: Optional[SlotCoverageValidation]
+    topology: Optional[TopologyValidation]
+    view_consistency: Optional[ViewConsistencyValidation]
+    data_consistency: Optional[DataConsistencyValidation]
+
+    # Failure information
+    failed_checks: List[str]
+    error_messages: List[str]
+
+    def is_critical_failure(self) -> bool:
+        """Determine if failure is critical and should halt execution.
+        
+        Critical failures indicate the cluster is in a broken state where
+        continuing operations could cause data loss or corruption.
+        """
+        # 1. Slot coverage lost - data is unreachable
+        if self.slot_coverage and not self.slot_coverage.success:
+            return True
+        
+        # 2. Split-brain detected - cluster partitioned
+        if self.view_consistency and self.view_consistency.split_brain_detected:
+            return True
+        
+        # 3. Quorum lost - cluster cannot make decisions
+        if self.cluster_status and not self.cluster_status.success:
+            if self.cluster_status.has_quorum is False:
+                return True
+        
+        # 4. All replicas down for any shard - zero redundancy
+        if self.replication and not self.replication.success:
+            # Check if error message indicates zero redundancy
+            if self.replication.error_message:
+                if "insufficient redundancy" in self.replication.error_message.lower():
+                    return True
+                if "all replicas are disconnected" in self.replication.error_message.lower():
+                    return True
+        
+        # 5. Missing shards or wrong primary count - topology broken
+        if self.topology and not self.topology.success:
+            # Check for critical topology issues
+            for mismatch in self.topology.topology_mismatches:
+                if mismatch.mismatch_type in ['missing_shard', 'missing_primary', 'primary_count']:
+                    return True
+            
+            # Unexpected failures ARE critical (spontaneous node crashes)
+            for mismatch in self.topology.topology_mismatches:
+                if mismatch.mismatch_type == 'unexpected_failure':
+                    return True
+        
+        # 6. Data loss detected
+        if self.data_consistency and not self.data_consistency.success:
+            if self.data_consistency.missing_keys:
+                return True
+        
+        return False
+
+
+@dataclass
+class ShardExpectation:
+    """Expected state of a shard"""
+    primary_node_id: Optional[str]
+    replica_node_ids: List[str]
+    slot_ranges: List[tuple]  # List of (start, end) tuples
+
+
+@dataclass
+class ExpectedTopology:
+    """Expected cluster topology after an operation"""
+    num_primaries: int
+    num_replicas: int
+    shard_structure: Dict[int, ShardExpectation]  # shard_id -> expectation
+
+
+@dataclass
+class OperationContext:
+    """Context about the operation that was executed"""
+    operation_type: OperationType
+    target_node: str
+    operation_success: bool
+    operation_timestamp: float

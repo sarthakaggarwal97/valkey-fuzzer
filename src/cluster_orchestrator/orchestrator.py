@@ -182,6 +182,7 @@ class ConfigurationManager:
             try:
                 process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 
+                # Note: host defaults to 127.0.0.1 in NodeInfo
                 node_info = NodeInfo(
                     node_id=plan.node_id,
                     role=plan.role,
