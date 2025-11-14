@@ -8,6 +8,8 @@ from typing import Dict, Optional
 from ..models import Operation, OperationType, ClusterStatus, NodeInfo, ClusterConnection
 from ..interfaces import IOperationOrchestrator
 from ..cluster_orchestrator.orchestrator import ClusterManager
+from ..utils.valkey_utils import valkey_client, query_cluster_nodes
+from ..utils.cluster_utils import find_primary_node_by_identifier
 
 logging.basicConfig(level=logging.INFO)
 
@@ -80,48 +82,11 @@ class OperationOrchestrator(IOperationOrchestrator):
         # Get only live cluster nodes for operation execution
         current_nodes = self.cluster_connection.get_live_nodes()
         
-        # Find target node using exact matching
-        target_node = None
-        
-        # Strategy 1: Try exact node_id match
-        for node in current_nodes:
-            if node.get('node_id') == operation.target_node:
-                target_node = node
-                break
-        
-        # Strategy 2: Try exact port match
-        if not target_node:
-            try:
-                target_port = int(operation.target_node)
-                for node in current_nodes:
-                    if node.get('port') == target_port:
-                        target_node = node
-                        break
-            except ValueError:
-                pass  # target_node is not a port number
-        
-        # Strategy 3: Try shard-based matching (e.g., "shard-0-primary")
-        if not target_node:
-            try:
-                if 'shard-' in operation.target_node and '-primary' in operation.target_node:
-                    # Extract shard number from "shard-X-primary" format
-                    shard_num = int(operation.target_node.split('shard-')[1].split('-primary')[0])
-                    # Find primary node with matching shard_id
-                    for node in current_nodes:
-                        if node['role'] == 'primary' and node.get('shard_id') == shard_num:
-                            target_node = node
-                            logging.info(f"Matched target to shard {shard_num} primary at port {target_node['port']}")
-                            break
-            except (ValueError, IndexError):
-                pass
+        # Find target primary node using helper function
+        target_node = find_primary_node_by_identifier(current_nodes, operation.target_node)
         
         if not target_node:
-            logging.error(f"Target node {operation.target_node} not found in cluster")
-            return False
-        
-        # Check if target is a primary node
-        if target_node['role'] != 'primary':
-            logging.error(f"Target node is not a primary: {target_node['role']}")
+            logging.error(f"Target primary node {operation.target_node} not found in cluster")
             return False
         
         # Get replicas of this primary to execute failover
@@ -174,43 +139,22 @@ class OperationOrchestrator(IOperationOrchestrator):
                 
                 # Query nodes in priority order
                 for node in nodes_to_query:
-                    try:
-                        client = valkey.Valkey(
-                            host=node['host'],
-                            port=node['port'],
-                            socket_timeout=3,
-                            socket_connect_timeout=3,
-                            decode_responses=True
-                        )
-                        
-                        # Get cluster nodes to find replicas
-                        cluster_nodes_raw = client.execute_command('CLUSTER', 'NODES')
-                        
-                        # Parse to find replicas of our target primary
-                        for line in cluster_nodes_raw.split('\n'):
-                            if not line.strip():
-                                continue
-                            parts = line.split()
-                            if len(parts) >= 4:
-                                # Check if this is a replica of our target primary
-                                if 'slave' in parts[2] and parts[3] == target_node_id:
-                                    host_port = parts[1].split('@')[0].split(':')
-                                    replica_nodes.append({
-                                        'host': host_port[0],
-                                        'port': int(host_port[1]),
-                                        'node_id': parts[0]
-                                    })
-                                    logging.info(f"Found replica via CLUSTER NODES from {node['port']}: port {host_port[1]}")
-                        
-                        client.close()
+                    parsed_nodes = query_cluster_nodes(node, timeout=3.0)
+                    
+                    if parsed_nodes:
+                        # Find replicas of our target primary
+                        for parsed_node in parsed_nodes:
+                            if parsed_node['is_slave'] and parsed_node['master_id'] == target_node_id:
+                                replica_nodes.append({
+                                    'host': parsed_node['host'],
+                                    'port': parsed_node['port'],
+                                    'node_id': parsed_node['node_id']
+                                })
+                                logging.info(f"Found replica via CLUSTER NODES from {node['port']}: port {parsed_node['port']}")
                         
                         # If we found replicas, break out of the loop
                         if replica_nodes:
                             break
-                            
-                    except Exception as e:
-                        logging.debug(f"Could not query node {node.get('node_id', 'unknown')} at port {node.get('port')}: {e}")
-                        continue
             
             if not replica_nodes:
                 logging.error(f"Cannot execute failover: No replicas found for primary {operation.target_node}. "
@@ -228,23 +172,15 @@ class OperationOrchestrator(IOperationOrchestrator):
             
             logging.info(f"Executing failover from replica at port {replica['port']}")
             
-            replica_client = valkey.Valkey(
-                host=replica['host'],
-                port=replica['port'],
-                socket_timeout=5,
-                decode_responses=True
-            )
-            
-            # Execute CLUSTER FAILOVER command
-            force = operation.parameters.get('force', False)
-            if force:
-                replica_client.execute_command('CLUSTER', 'FAILOVER', 'FORCE')
-                logging.info("Executed FORCE failover")
-            else:
-                replica_client.execute_command('CLUSTER', 'FAILOVER')
-                logging.info("Executed graceful failover")
-            
-            replica_client.close()
+            with valkey_client(replica['host'], replica['port'], timeout=5.0, decode_responses=True) as replica_client:
+                # Execute CLUSTER FAILOVER command
+                force = operation.parameters.get('force', False)
+                if force:
+                    replica_client.execute_command('CLUSTER', 'FAILOVER', 'FORCE')
+                    logging.info("Executed FORCE failover")
+                else:
+                    replica_client.execute_command('CLUSTER', 'FAILOVER')
+                    logging.info("Executed graceful failover")
             
             # Wait for failover to complete then validate cluster slots and replication links
             return self.wait_for_operation_completion(operation, self.cluster_connection.cluster_id, operation.timing.timeout)

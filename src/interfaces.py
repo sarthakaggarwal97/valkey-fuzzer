@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from typing import List, Optional
 from dataclasses import dataclass
 from .models import (
-    Scenario, ExecutionResult, DSLConfig, ValidationResult,
+    Scenario, ExecutionResult, DSLConfig, StateValidationResult,
     ClusterConfig, ClusterInstance, ClusterStatus, ClusterConnection,
     NodeInfo, NodePlan, ChaosConfig, ChaosResult, ProcessChaosType,
     WorkloadConfig, WorkloadSession, WorkloadMetrics, Operation
@@ -31,7 +31,7 @@ class IFuzzerEngine(ABC):
         pass
     
     @abstractmethod
-    def validate_cluster_state(self, cluster_id: str) -> ValidationResult:
+    def validate_cluster_state(self, cluster_id: str) -> StateValidationResult:
         """Validate current cluster state"""
         pass
 
@@ -160,23 +160,13 @@ class IStateValidator(ABC):
     """Interface for cluster state validation"""
     
     @abstractmethod
-    def validate_cluster_state(self, cluster_id: str) -> ValidationResult:
+    def validate_state(self, cluster_connection, expected_topology, operation_context) -> StateValidationResult:
         """Perform comprehensive cluster state validation"""
         pass
     
     @abstractmethod
-    def validate_slot_coverage(self, cluster_status: ClusterStatus) -> bool:
-        """Validate all slots are assigned"""
-        pass
-    
-    @abstractmethod
-    def validate_replica_sync(self, cluster_status: ClusterStatus) -> bool:
-        """Validate replica synchronization"""
-        pass
-    
-    @abstractmethod
-    def validate_data_consistency(self, cluster_status: ClusterStatus) -> bool:
-        """Validate data consistency across nodes"""
+    def validate_with_retry(self, cluster_connection, expected_topology, operation_context) -> StateValidationResult:
+        """Perform validation with retry logic for transient failures"""
         pass
 
 
@@ -198,10 +188,7 @@ class ILogger(ABC):
         """Log chaos injection event"""
         pass
     
-    @abstractmethod
-    def log_validation_result(self, validation_result: ValidationResult) -> None:
-        """Log validation result"""
-        pass
+
     
     @abstractmethod
     def log_test_completion(self, test_result: ExecutionResult) -> None:

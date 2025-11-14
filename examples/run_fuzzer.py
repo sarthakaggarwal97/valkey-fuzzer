@@ -37,7 +37,6 @@ def run_random_test(seed=None):
     print(f"Duration: {result.end_time - result.start_time:.2f}s")
     print(f"Operations Executed: {result.operations_executed}")
     print(f"Chaos Events: {len(result.chaos_events)}")
-    print(f"Validations: {len(result.validation_results)}")
     
     if result.seed:
         print(f"\nReproduction Seed: {result.seed}")
@@ -72,7 +71,6 @@ def run_dsl_test(dsl_file):
         print(f"Duration: {result.end_time - result.start_time:.2f}s")
         print(f"Operations Executed: {result.operations_executed}")
         print(f"Chaos Events: {len(result.chaos_events)}")
-        print(f"Validations: {len(result.validation_results)}")
         
         if result.error_message:
             print(f"\nError: {result.error_message}")
