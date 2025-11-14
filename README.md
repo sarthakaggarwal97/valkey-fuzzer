@@ -51,7 +51,7 @@ graph TB
 
 ### Prerequisites
 
-- Python 3.8+
+- Python 3.9+
 - Valkey server binaries
 - valkey-benchmark utility
 
@@ -127,11 +127,11 @@ chaos:
     coordination: "before_failover"
     delay: 5.0
 
-validation:
-  - slot_coverage: true
-  - replica_sync: true
-  - data_consistency: true
-  - max_convergence_time: 30.0
+state_validation:
+  check_slot_coverage: true
+  check_replication: true
+  check_data_consistency: true
+  validation_timeout: 30.0
 ```
 
 #### Complex Multi-Operation Test
@@ -177,12 +177,13 @@ workload:
   intensity: "medium"
   duration: 120.0
 
-validation:
-  - slot_coverage: true
-  - replica_sync: true
-  - data_consistency: true
-  - max_convergence_time: 45.0
-  - max_replication_lag: 5.0
+state_validation:
+  check_slot_coverage: true
+  check_replication: true
+  check_data_consistency: true
+  validation_timeout: 45.0
+  replication_config:
+    max_acceptable_lag: 5.0
 ```
 
 ### Expected Output Formats

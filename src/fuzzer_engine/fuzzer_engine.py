@@ -3,17 +3,21 @@ Fuzzer Engine - Main orchestrator for test scenario execution
 """
 import time
 import logging
+from copy import deepcopy
 from typing import Optional
-from ..models import Scenario, ExecutionResult, DSLConfig, ValidationResult, ClusterConnection, ClusterStatus
+from ..models import Scenario, ExecutionResult, DSLConfig, ClusterConnection, ClusterStatus
 from ..interfaces import IFuzzerEngine
 from ..valkey_client.load_data import load_all_slots
 from .test_case_generator import ScenarioGenerator
 from .cluster_coordinator import ClusterCoordinator
 from .chaos_coordinator import ChaosCoordinator
 from .operation_orchestrator import OperationOrchestrator
-from .state_validator import StateValidator
 from .test_logger import FuzzerLogger
 from .error_handler import ErrorHandler, ErrorContext, ErrorCategory, ErrorSeverity, RetryConfig
+from .state_validator import StateValidator
+from ..models import (
+    StateValidationConfig, ExpectedTopology, OperationContext, ChaosType
+)
 
 logging.basicConfig(format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', level=logging.INFO, force=True)
 logger = logging.getLogger(__name__)
@@ -34,7 +38,6 @@ class FuzzerEngine(IFuzzerEngine):
         self.cluster_coordinator = ClusterCoordinator()
         self.chaos_coordinator = ChaosCoordinator()
         self.operation_orchestrator = OperationOrchestrator()
-        self.state_validator = StateValidator()
         self.logger = FuzzerLogger()
         self.error_handler = ErrorHandler()
         
@@ -68,7 +71,6 @@ class FuzzerEngine(IFuzzerEngine):
                 end_time=time.time(),
                 operations_executed=0,
                 chaos_events=[],
-                validation_results=[],
                 error_message=f"DSL parsing error: {e}"
             )
         except Exception as e:
@@ -80,7 +82,6 @@ class FuzzerEngine(IFuzzerEngine):
                 end_time=time.time(),
                 operations_executed=0,
                 chaos_events=[],
-                validation_results=[],
                 error_message=f"Execution error: {e}"
             )
     
@@ -98,11 +99,15 @@ class FuzzerEngine(IFuzzerEngine):
         start_time = time.time()
         operations_executed = 0
         chaos_events = []
-        validation_results = []
+        validation_results = []  # Collect validation results for each operation
+        final_validation = None
         cluster_instance = None
         cluster_connection = None
         
         logger.info(f"Starting test execution: {scenario.scenario_id}")
+        
+        # Reinitialize chaos coordinator with scenario seed for deterministic chaos selection
+        self.chaos_coordinator = ChaosCoordinator(seed=scenario.seed)
         
         # Log test start
         self.logger.log_test_start(scenario)
@@ -142,6 +147,44 @@ class FuzzerEngine(IFuzzerEngine):
             # Set cluster connection for operation orchestrator
             self.operation_orchestrator.set_cluster_connection(cluster_connection)
             
+            # Create StateValidator with config from scenario or use defaults
+            if hasattr(scenario, 'state_validation_config') and scenario.state_validation_config:
+                validation_config = deepcopy(scenario.state_validation_config)
+                logger.info("Using scenario-specific StateValidationConfig (copied)")
+            else:
+                validation_config = StateValidationConfig()
+                logger.info("Using default StateValidationConfig")
+            
+            # Adjust replication validation config based on cluster topology
+            # If the cluster has no replicas, disable the min_replicas_per_shard check
+            expected_replicas_per_shard = scenario.cluster_config.replicas_per_shard
+            if expected_replicas_per_shard == 0:
+                validation_config.replication_config.min_replicas_per_shard = 0
+                logger.info("Cluster has no replicas - disabled min_replicas_per_shard check")
+            elif validation_config.replication_config.min_replicas_per_shard > expected_replicas_per_shard:
+                # Don't require more replicas than the cluster is configured to have
+                validation_config.replication_config.min_replicas_per_shard = expected_replicas_per_shard
+                logger.info(
+                    f"Adjusted min_replicas_per_shard to {expected_replicas_per_shard} "
+                    f"to match cluster configuration"
+                )
+            
+            state_validator = StateValidator(validation_config)
+            logger.info("State validation initialized")
+            
+            # Write test data for data consistency validation
+            if validation_config.check_data_consistency:
+                logger.info("Writing test data for data consistency validation")
+                test_data_written = state_validator.write_test_data(cluster_connection)
+                if test_data_written:
+                    logger.info("Test data written successfully")
+                else:
+                    logger.warning("Failed to write test data - disabling data consistency validation for this run")
+                    state_validator.config.check_data_consistency = False
+            
+            # Track killed nodes for chaos-aware validation
+            killed_nodes_tracker = set()
+            
             # Step 4: Execute operations with chaos coordination
             cli_logger.info("")
             logger.info(f"Step 4: Executing {len(scenario.operations)} operations")
@@ -166,6 +209,19 @@ class FuzzerEngine(IFuzzerEngine):
                         cluster_instance.cluster_id
                     )
                     chaos_events.extend(operation_chaos_events)
+                    
+                    # Register killed nodes with state validator for chaos-aware validation
+                    for chaos_event in operation_chaos_events:
+                        if chaos_event.success and chaos_event.chaos_type == ChaosType.PROCESS_KILL:
+                            # Find the node address from target_node (node_id)
+                            target_node_id = chaos_event.target_node
+                            for node in cluster_instance.nodes:
+                                if node.node_id == target_node_id:
+                                    node_address = f"{node.host}:{node.port}"
+                                    state_validator.register_killed_node(node_address)
+                                    killed_nodes_tracker.add(node_address)
+                                    logger.info(f"Registered killed node for validation: {node_address}")
+                                    break
                     
                     # Execute operation
                     operation_success = self.operation_orchestrator.execute_operation(
@@ -193,18 +249,64 @@ class FuzzerEngine(IFuzzerEngine):
                             f"after_operation_{i+1}"
                         )
                     
-                    # Validate cluster state after operation
-                    validation_result = self.state_validator.validate_cluster_state(
-                        cluster_instance.cluster_id,
-                        cluster_connection
-                    )
-                    validation_results.append(validation_result)
-                    self.logger.log_validation_result(validation_result)
+                    # State validation
+                    logger.info(f"Running state validation after operation {i+1}")
                     
-                    # Check if validation failed critically
-                    if not validation_result.slot_coverage:
-                        logger.error("Critical validation failure: slot coverage lost")
-                        # Continue with graceful degradation
+                    # Build expected topology from cluster config
+                    expected_topology = ExpectedTopology(
+                        num_primaries=scenario.cluster_config.num_shards,
+                        num_replicas=scenario.cluster_config.num_shards * scenario.cluster_config.replicas_per_shard,
+                        shard_structure={}
+                    )
+                    
+                    # Create operation context
+                    operation_context = OperationContext(
+                        operation_type=operation.type,
+                        target_node=operation.target_node,
+                        operation_success=operation_success,
+                        operation_timestamp=time.time()
+                    )
+                    
+                    # Execute state validation with retry
+                    validation_result = state_validator.validate_with_retry(
+                        cluster_connection,
+                        expected_topology,
+                        operation_context
+                    )
+                    
+                    # Collect validation result for API consumers
+                    validation_results.append(validation_result)
+                    
+                    # Log state validation result
+                    self.logger.log_state_validation_result(validation_result, i+1)
+                    
+                    # NOTE: We do NOT clear killed_nodes here!
+                    # Killed nodes should remain tracked throughout the scenario because:
+                    # 1. Nodes killed in operation N may still be down in operation N+1 (expected)
+                    # 2. Final validation needs to know which nodes were killed
+                    # 3. Clearing would cause false positives for nodes that haven't recovered yet
+                    
+                    # Check for validation failures
+                    if not validation_result.overall_success:
+                        # Determine severity
+                        is_critical = validation_result.is_critical_failure()
+                        severity = "CRITICAL" if is_critical else "NON-CRITICAL"
+                        
+                        logger.error(
+                            f"{severity} VALIDATION FAILURE after operation {i+1}: "
+                            f"{', '.join(validation_result.failed_checks)}"
+                        )
+                        
+                        # Check if we should halt execution on ANY failure (not just critical)
+                        if state_validator.config.blocking_on_failure:
+                            logger.error(
+                                f"Halting execution due to validation failure "
+                                f"(blocking_on_failure=True)"
+                            )
+                            raise Exception(
+                                f"Validation failure after operation {i+1}: "
+                                f"{', '.join(validation_result.failed_checks)}"
+                            )
                     
                 except Exception as e:
                     logger.error(f"Operation {i+1} execution failed: {e}")
@@ -212,29 +314,49 @@ class FuzzerEngine(IFuzzerEngine):
                         f"Operation {i+1} failed",
                         {"operation": operation.type.value, "error": str(e)}
                     )
-                    # Continue with next operation (graceful degradation)
+                    
+                    # Check if this is a validation failure that should halt execution
+                    if "Validation failure" in str(e) and state_validator.config.blocking_on_failure:
+                        logger.error("Re-raising validation failure to halt scenario execution")
+                        raise  # Re-raise to stop the scenario
+                    
+                    # For other errors, continue with next operation (graceful degradation)
             
             # Step 5: Final cluster validation
             cli_logger.info("")
             logger.info("Step 5: Final cluster validation")
-            final_validation = self.state_validator.validate_cluster_state(
-                cluster_instance.cluster_id,
-                cluster_connection
+            
+            # Build expected topology for final validation
+            expected_topology = ExpectedTopology(
+                num_primaries=scenario.cluster_config.num_shards,
+                num_replicas=scenario.cluster_config.num_shards * scenario.cluster_config.replicas_per_shard,
+                shard_structure={}
             )
-            validation_results.append(final_validation)
-            self.logger.log_validation_result(final_validation)
+            
+            # Execute final validation with retry (consistent with per-operation validation)
+            final_validation_result = state_validator.validate_with_retry(
+                cluster_connection,
+                expected_topology,
+                None
+            )
+            
+            # Store final validation for API consumers
+            final_validation = final_validation_result
+            
+            # Log final validation result
+            self.logger.log_state_validation_result(final_validation_result, "final")
             
             # Determine overall success
-            # Success means: operations executed and cluster remains operational (all slots covered)
-            # We don't require all replicas to be synced because chaos may have killed nodes
+            # Success means: operations executed and validation passed
+            # Use the validation's overall_success which respects enabled/disabled checks
             success = (
                 operations_executed > 0 and
-                final_validation.slot_coverage
+                final_validation_result.overall_success
             )
             
             end_time = time.time()
             
-            # Create execution result
+            # Create execution result with validation results
             result = ExecutionResult(
                 scenario_id=scenario.scenario_id,
                 success=success,
@@ -242,8 +364,9 @@ class FuzzerEngine(IFuzzerEngine):
                 end_time=end_time,
                 operations_executed=operations_executed,
                 chaos_events=chaos_events,
+                seed=scenario.seed,
                 validation_results=validation_results,
-                seed=scenario.seed
+                final_validation=final_validation
             )
             
             logger.info(f"Test execution completed: {'SUCCESS' if success else 'FAILED'}")
@@ -269,7 +392,6 @@ class FuzzerEngine(IFuzzerEngine):
                 end_time=end_time,
                 operations_executed=operations_executed,
                 chaos_events=chaos_events,
-                validation_results=validation_results,
                 error_message=str(e),
                 seed=scenario.seed
             )
@@ -284,7 +406,7 @@ class FuzzerEngine(IFuzzerEngine):
             logger.info("Step 5: Cleaning up resources")
             self._cleanup_resources(cluster_instance, cluster_connection)
     
-    def validate_cluster_state(self, cluster_id: str) -> ValidationResult:
+    def validate_cluster_state(self, cluster_id: str):
         """Validate current cluster state and return validation result."""
         logger.info(f"Validating cluster state: {cluster_id}")
         
@@ -301,7 +423,44 @@ class FuzzerEngine(IFuzzerEngine):
             cluster_id=cluster_id
         )
         
-        return self.state_validator.validate_cluster_state(cluster_id, cluster_connection)
+        # Use StateValidator for validation
+        # Disable data consistency check for standalone validation (no test data seeded)
+        validation_config = StateValidationConfig()
+        validation_config.check_data_consistency = False
+        
+        # Adjust replication validation config based on actual cluster topology
+        # This ensures zero-replica clusters can pass validation
+        actual_replicas = len([n for n in cluster_instance.nodes if n.role == 'replica'])
+        actual_primaries = len([n for n in cluster_instance.nodes if n.role == 'primary'])
+        
+        # Calculate replicas per shard from actual topology
+        if actual_primaries > 0:
+            replicas_per_shard = actual_replicas // actual_primaries
+        else:
+            replicas_per_shard = 0
+        
+        if replicas_per_shard == 0:
+            validation_config.replication_config.min_replicas_per_shard = 0
+            logger.info("Cluster has no replicas - disabled min_replicas_per_shard check")
+        elif validation_config.replication_config.min_replicas_per_shard > replicas_per_shard:
+            # Don't require more replicas than the cluster actually has
+            validation_config.replication_config.min_replicas_per_shard = replicas_per_shard
+            logger.info(
+                f"Adjusted min_replicas_per_shard to {replicas_per_shard} "
+                f"to match actual cluster topology"
+            )
+        
+        validator = StateValidator(validation_config)
+        
+        # Build expected topology
+        expected_topology = ExpectedTopology(
+            num_primaries=actual_primaries,
+            num_replicas=actual_replicas,
+            shard_structure={}
+        )
+        
+        logger.info("Running standalone validation (data consistency check disabled - no test data)")
+        return validator.validate_state(cluster_connection, expected_topology, None)
     
     def _create_cluster_with_retry(self, scenario: Scenario, max_retries: int = 3):
         """

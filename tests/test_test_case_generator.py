@@ -98,9 +98,9 @@ chaos:
     chaos_duration: 10.0
   coordination:
     chaos_during_operation: true
-validation:
+state_validation:
   check_slot_coverage: true
-  convergence_timeout: 60.0
+  validation_timeout: 60.0
 """
     
     generator = ScenarioGenerator()

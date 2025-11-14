@@ -9,8 +9,7 @@ from src.fuzzer_engine.test_logger import FuzzerLogger
 from src.models import (
     Scenario, ClusterConfig, Operation, OperationType, OperationTiming,
     ChaosConfig, ChaosType, ProcessChaosType, TargetSelection, ChaosTiming, ChaosCoordination,
-    ValidationConfig, ChaosResult, ValidationResult, ExecutionResult,
-    SlotConflict, ReplicationStatus, ConnectivityStatus, ConsistencyStatus,
+    ChaosResult, ExecutionResult,
     ClusterStatus, NodeInfo
 )
 
@@ -46,7 +45,6 @@ def sample_scenario():
             coordination=ChaosCoordination(chaos_during_operation=True),
             process_chaos_type=ProcessChaosType.SIGKILL
         ),
-        validation_config=ValidationConfig(),
         seed=12345
     )
 
@@ -123,45 +121,6 @@ def test_log_chaos_event(test_logger, sample_scenario):
     assert chaos_log['duration'] is not None
 
 
-def test_log_validation_result(test_logger, sample_scenario):
-    """Test logging validation result"""
-    test_logger.log_test_start(sample_scenario)
-    
-    validation_result = ValidationResult(
-        slot_coverage=True,
-        slot_conflicts=[],
-        replica_sync=ReplicationStatus(
-            all_replicas_synced=True,
-            max_lag=0.5,
-            lagging_replicas=[]
-        ),
-        node_connectivity=ConnectivityStatus(
-            all_nodes_connected=True,
-            disconnected_nodes=[],
-            partition_groups=[]
-        ),
-        data_consistency=ConsistencyStatus(
-            consistent=True,
-            inconsistent_keys=[],
-            node_data_mismatches={}
-        ),
-        convergence_time=2.5,
-        replication_lag=0.3,
-        validation_timestamp=time.time()
-    )
-    
-    test_logger.log_validation_result(validation_result)
-    
-    log = test_logger.test_logs["test-scenario-1"]
-    assert len(log['validation_results']) == 1
-    
-    val_log = log['validation_results'][0]
-    assert val_log['slot_coverage'] is True
-    assert val_log['replica_sync']['all_replicas_synced'] is True
-    assert val_log['node_connectivity']['all_nodes_connected'] is True
-    assert val_log['data_consistency']['consistent'] is True
-
-
 def test_log_cluster_state_snapshot(test_logger, sample_scenario):
     """Test logging cluster state snapshot"""
     test_logger.log_test_start(sample_scenario)
@@ -228,7 +187,6 @@ def test_log_test_completion(test_logger, sample_scenario):
         end_time=end_time,
         operations_executed=1,
         chaos_events=[],
-        validation_results=[],
         seed=12345
     )
     
@@ -254,7 +212,6 @@ def test_generate_report(test_logger):
             end_time=5.0,
             operations_executed=2,
             chaos_events=[],
-            validation_results=[],
             seed=111
         ),
         ExecutionResult(
@@ -264,7 +221,6 @@ def test_generate_report(test_logger):
             end_time=3.0,
             operations_executed=1,
             chaos_events=[],
-            validation_results=[],
             error_message="Test failed",
             seed=222
         ),
@@ -275,7 +231,6 @@ def test_generate_report(test_logger):
             end_time=7.0,
             operations_executed=3,
             chaos_events=[],
-            validation_results=[],
             seed=333
         )
     ]
@@ -360,3 +315,114 @@ def test_log_file_persistence(test_logger, sample_scenario):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_serialize_state_validation_config_complete(test_logger):
+    """Test that _serialize_state_validation_config includes all nested configs"""
+    from src.models import (
+        StateValidationConfig, ReplicationValidationConfig, 
+        ClusterStatusValidationConfig, SlotCoverageValidationConfig,
+        TopologyValidationConfig, ViewConsistencyValidationConfig,
+        DataConsistencyValidationConfig
+    )
+    
+    # Create a config with all nested configs customized
+    config = StateValidationConfig(
+        check_replication=True,
+        check_cluster_status=True,
+        check_slot_coverage=True,
+        check_topology=True,
+        check_view_consistency=True,
+        check_data_consistency=True,
+        stabilization_wait=10.0,
+        validation_timeout=60.0,
+        replication_config=ReplicationValidationConfig(
+            max_acceptable_lag=3.0,
+            require_all_replicas_synced=True,
+            min_replicas_per_shard=2,
+            timeout=15.0
+        ),
+        cluster_status_config=ClusterStatusValidationConfig(
+            acceptable_states=['ok', 'degraded'],
+            allow_degraded=True,
+            require_quorum=False,
+            timeout=20.0
+        ),
+        slot_coverage_config=SlotCoverageValidationConfig(
+            require_full_coverage=False,
+            allow_slot_conflicts=True,
+            timeout=25.0
+        ),
+        topology_config=TopologyValidationConfig(
+            strict_mode=False,
+            allow_failed_nodes=True,
+            timeout=30.0
+        ),
+        view_consistency_config=ViewConsistencyValidationConfig(
+            require_full_consensus=False,
+            allow_transient_inconsistency=True,
+            max_inconsistency_duration=5.0,
+            timeout=35.0
+        ),
+        data_consistency_config=DataConsistencyValidationConfig(
+            check_test_keys=True,
+            check_cross_replica_consistency=True,
+            num_test_keys=200,
+            key_prefix="custom_test_",
+            timeout=40.0
+        )
+    )
+    
+    # Serialize the config
+    serialized = test_logger._serialize_state_validation_config(config)
+    
+    # Verify top-level fields
+    assert serialized['check_replication'] is True
+    assert serialized['check_cluster_status'] is True
+    assert serialized['check_slot_coverage'] is True
+    assert serialized['check_topology'] is True
+    assert serialized['check_view_consistency'] is True
+    assert serialized['check_data_consistency'] is True
+    assert serialized['stabilization_wait'] == 10.0
+    assert serialized['validation_timeout'] == 60.0
+    
+    # Verify replication config
+    assert 'replication_config' in serialized
+    assert serialized['replication_config']['max_acceptable_lag'] == 3.0
+    assert serialized['replication_config']['require_all_replicas_synced'] is True
+    assert serialized['replication_config']['min_replicas_per_shard'] == 2
+    assert serialized['replication_config']['timeout'] == 15.0
+    
+    # Verify cluster status config
+    assert 'cluster_status_config' in serialized
+    assert serialized['cluster_status_config']['acceptable_states'] == ['ok', 'degraded']
+    assert serialized['cluster_status_config']['allow_degraded'] is True
+    assert serialized['cluster_status_config']['require_quorum'] is False
+    assert serialized['cluster_status_config']['timeout'] == 20.0
+    
+    # Verify slot coverage config
+    assert 'slot_coverage_config' in serialized
+    assert serialized['slot_coverage_config']['require_full_coverage'] is False
+    assert serialized['slot_coverage_config']['allow_slot_conflicts'] is True
+    assert serialized['slot_coverage_config']['timeout'] == 25.0
+    
+    # Verify topology config
+    assert 'topology_config' in serialized
+    assert serialized['topology_config']['strict_mode'] is False
+    assert serialized['topology_config']['allow_failed_nodes'] is True
+    assert serialized['topology_config']['timeout'] == 30.0
+    
+    # Verify view consistency config
+    assert 'view_consistency_config' in serialized
+    assert serialized['view_consistency_config']['require_full_consensus'] is False
+    assert serialized['view_consistency_config']['allow_transient_inconsistency'] is True
+    assert serialized['view_consistency_config']['max_inconsistency_duration'] == 5.0
+    assert serialized['view_consistency_config']['timeout'] == 35.0
+    
+    # Verify data consistency config
+    assert 'data_consistency_config' in serialized
+    assert serialized['data_consistency_config']['check_test_keys'] is True
+    assert serialized['data_consistency_config']['check_cross_replica_consistency'] is True
+    assert serialized['data_consistency_config']['num_test_keys'] == 200
+    assert serialized['data_consistency_config']['key_prefix'] == "custom_test_"
+    assert serialized['data_consistency_config']['timeout'] == 40.0

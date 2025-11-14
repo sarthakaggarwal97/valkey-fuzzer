@@ -15,7 +15,7 @@ from datetime import datetime
 
 from .main import ClusterBusFuzzer
 from .fuzzer_engine import DSLLoader, ScenarioGenerator
-from .models import ClusterConfig, ValidationConfig, WorkloadConfig, ExecutionResult, ValidationResult
+from .models import ClusterConfig, WorkloadConfig, ExecutionResult, StateValidationResult
 
 
 class FuzzerCLI:
@@ -203,11 +203,22 @@ class FuzzerCLI:
         print(f"Duration: {duration:.2f}s")
         print(f"Operations: {result.operations_executed}")
         print(f"Chaos Events: {len(result.chaos_events)}")
-        print(f"Validations: {len(result.validation_results)}")
         
         if result.seed:
             print(f"Seed: {result.seed} (use to reproduce)")
         
+        # Print final validation summary
+        if result.final_validation:
+            val = result.final_validation
+            val_status = "PASSED" if val.overall_success else "FAILED"
+            print(f"\nFinal Validation: {val_status}")
+
+            if not val.overall_success and val.failed_checks:
+                print(f"Failed Checks: {', '.join(val.failed_checks)}")
+
+            if val.error_messages:
+                print(f"Validation Errors: {len(val.error_messages)}")
+
         if result.error_message:
             print(f"Error: {result.error_message}")
     
@@ -226,17 +237,57 @@ class FuzzerCLI:
                 if event.error_message:
                     print(f"    Error: {event.error_message}")
         
-        # Print validation results
-        if result.validation_results:
-            print("\nValidation Results:")
-            final = result.validation_results[-1]
-            print(f"  Slot Coverage: {'[PASS]' if final.slot_coverage else '[FAIL]'}")
-            print(f"  Slot Conflicts: {len(final.slot_conflicts)}")
-            print(f"  Replicas Synced: {'[PASS]' if final.replica_sync.all_replicas_synced else '[FAIL]'}")
-            print(f"  Nodes Connected: {'[PASS]' if final.node_connectivity.all_nodes_connected else '[FAIL]'}")
-            print(f"  Data Consistent: {'[PASS]' if final.data_consistency.consistent else '[FAIL]'}")
-            print(f"  Convergence Time: {final.convergence_time:.2f}s")
-            print(f"  Replication Lag: {final.replication_lag:.2f}s")
+        # Print detailed validation results
+        if result.final_validation:
+            print("\nFinal Validation Details:")
+            val = result.final_validation
+
+            # Print individual check results
+            checks = []
+            if val.replication:
+                status = "PASS" if val.replication.success else "FAIL"
+                checks.append(f"  Replication: {status}")
+                if not val.replication.success and val.replication.error_message:
+                    checks.append(f"    → {val.replication.error_message}")
+
+            if val.cluster_status:
+                status = "PASS" if val.cluster_status.success else "FAIL"
+                checks.append(f"  Cluster Status: {status}")
+                if not val.cluster_status.success and val.cluster_status.error_message:
+                    checks.append(f"    → {val.cluster_status.error_message}")
+
+            if val.slot_coverage:
+                status = "PASS" if val.slot_coverage.success else "FAIL"
+                checks.append(f"  Slot Coverage: {status}")
+                if not val.slot_coverage.success and val.slot_coverage.error_message:
+                    checks.append(f"    → {val.slot_coverage.error_message}")
+
+            if val.topology:
+                status = "PASS" if val.topology.success else "FAIL"
+                checks.append(f"  Topology: {status}")
+                if not val.topology.success and val.topology.error_message:
+                    checks.append(f"    → {val.topology.error_message}")
+
+            if val.view_consistency:
+                status = "PASS" if val.view_consistency.success else "FAIL"
+                checks.append(f"  View Consistency: {status}")
+                if not val.view_consistency.success and val.view_consistency.error_message:
+                    checks.append(f"    → {val.view_consistency.error_message}")
+
+            if val.data_consistency:
+                status = "PASS" if val.data_consistency.success else "FAIL"
+                checks.append(f"  Data Consistency: {status}")
+                if not val.data_consistency.success and val.data_consistency.error_message:
+                    checks.append(f"    → {val.data_consistency.error_message}")
+
+            for check in checks:
+                print(check)
+
+            # Print all error messages if any
+            if val.error_messages:
+                print("\n  Validation Error Messages:")
+                for msg in val.error_messages:
+                    print(f"    • {msg}")
     
     def _print_aggregate_results(self, results: list):
         """Print aggregate statistics for multiple test runs"""
@@ -287,16 +338,101 @@ class FuzzerCLI:
     
     def _result_to_dict(self, result: ExecutionResult) -> Dict[str, Any]:
         """Convert ExecutionResult to dictionary"""
-        return {
+        data = {
             'scenario_id': result.scenario_id,
             'success': result.success,
             'duration': result.end_time - result.start_time,
             'operations_executed': result.operations_executed,
             'chaos_events': len(result.chaos_events),
-            'validations': len(result.validation_results),
             'seed': result.seed,
             'error_message': result.error_message
         }
+
+        # Add final validation results if available
+        if result.final_validation:
+            data['final_validation'] = self._validation_to_dict(result.final_validation)
+
+        # Add per-operation validation results if available
+        if result.validation_results:
+            data['per_operation_validations'] = [
+                self._validation_to_dict(val) for val in result.validation_results
+            ]
+
+        return data
+
+    def _validation_to_dict(self, val: StateValidationResult) -> Dict[str, Any]:
+        """Convert StateValidationResult to dictionary"""
+        validation_data = {
+            'overall_success': val.overall_success,
+            'failed_checks': val.failed_checks,
+            'error_messages': val.error_messages,
+            'duration': val.validation_duration,
+            'timestamp': val.validation_timestamp,
+            'checks': {}
+        }
+
+        # Add individual check results
+        if val.replication:
+            validation_data['checks']['replication'] = {
+                'success': val.replication.success,
+                'all_replicas_synced': val.replication.all_replicas_synced,
+                'max_lag': val.replication.max_lag,
+                'lagging_replicas_count': len(val.replication.lagging_replicas),
+                'disconnected_replicas_count': len(val.replication.disconnected_replicas),
+                'error': val.replication.error_message
+            }
+
+        if val.cluster_status:
+            validation_data['checks']['cluster_status'] = {
+                'success': val.cluster_status.success,
+                'cluster_state': val.cluster_status.cluster_state,
+                'has_quorum': val.cluster_status.has_quorum,
+                'nodes_in_fail_state_count': len(val.cluster_status.nodes_in_fail_state),
+                'error': val.cluster_status.error_message
+            }
+
+        if val.slot_coverage:
+            validation_data['checks']['slot_coverage'] = {
+                'success': val.slot_coverage.success,
+                'total_slots_assigned': val.slot_coverage.total_slots_assigned,
+                'unassigned_slots_count': len(val.slot_coverage.unassigned_slots),
+                'conflicting_slots_count': len(val.slot_coverage.conflicting_slots),
+                'error': val.slot_coverage.error_message
+            }
+
+        if val.topology:
+            validation_data['checks']['topology'] = {
+                'success': val.topology.success,
+                'expected_primaries': val.topology.expected_primaries,
+                'actual_primaries': val.topology.actual_primaries,
+                'expected_replicas': val.topology.expected_replicas,
+                'actual_replicas': val.topology.actual_replicas,
+                'mismatches_count': len(val.topology.topology_mismatches),
+                'error': val.topology.error_message
+            }
+
+        if val.view_consistency:
+            validation_data['checks']['view_consistency'] = {
+                'success': val.view_consistency.success,
+                'nodes_checked': val.view_consistency.nodes_checked,
+                'consistent_views': val.view_consistency.consistent_views,
+                'split_brain_detected': val.view_consistency.split_brain_detected,
+                'consensus_percentage': val.view_consistency.consensus_percentage,
+                'discrepancies_count': len(val.view_consistency.view_discrepancies),
+                'error': val.view_consistency.error_message
+            }
+
+        if val.data_consistency:
+            validation_data['checks']['data_consistency'] = {
+                'success': val.data_consistency.success,
+                'test_keys_checked': val.data_consistency.test_keys_checked,
+                'missing_keys_count': len(val.data_consistency.missing_keys),
+                'inconsistent_keys_count': len(val.data_consistency.inconsistent_keys),
+                'unreachable_keys_count': len(val.data_consistency.unreachable_keys),
+                'error': val.data_consistency.error_message
+            }
+
+        return validation_data
 
 
 def create_parser() -> argparse.ArgumentParser:
