@@ -19,10 +19,10 @@ logger = logging.getLogger(__name__)
 
 class ChaosCoordinator:
     def __init__(self, seed: Optional[int] = None):
-        self.chaos_engine = ProcessChaosEngine()
+        self.rng = random.Random(seed)  # Dedicated RNG for reproducible chaos selection
+        self.chaos_engine = ProcessChaosEngine(self.rng)
         self.active_chaos_scenarios: dict[str, List[ChaosResult]] = {}
         self.chaos_history: List[ChaosResult] = []
-        self.rng = random.Random(seed)  # Dedicated RNG for reproducible chaos selection
         if seed is not None:
             logger.info(f"ChaosCoordinator initialized with seed {seed} for deterministic target selection")
 
@@ -97,8 +97,8 @@ class ChaosCoordinator:
             
             # Add slight randomization to timing if enabled (±20%)
             if should_randomize:
-                delay_before = timing.delay_before_operation * random.uniform(0.8, 1.2)
-                delay_after = timing.delay_after_operation * random.uniform(0.8, 1.2)
+                delay_before = timing.delay_before_operation * self.rng.uniform(0.8, 1.2)
+                delay_after = timing.delay_after_operation * self.rng.uniform(0.8, 1.2)
             else:
                 delay_before = timing.delay_before_operation
                 delay_after = timing.delay_after_operation
@@ -194,7 +194,7 @@ class ChaosCoordinator:
         # Randomize process chaos type (if process kill chaos)
         if randomized_config.chaos_type == ChaosType.PROCESS_KILL:
             # 50/50 chance between SIGKILL and SIGTERM
-            randomized_config.process_chaos_type = random.choice([
+            randomized_config.process_chaos_type = self.rng.choice([
                 ProcessChaosType.SIGKILL,
                 ProcessChaosType.SIGTERM
             ])
@@ -202,9 +202,9 @@ class ChaosCoordinator:
 
         # Randomize chaos timing coordination (30% chance for each timing option)
         # At least one must be True
-        chaos_before = random.random() < 0.3
-        chaos_during = random.random() < 0.5  # Higher probability for during
-        chaos_after = random.random() < 0.3
+        chaos_before = self.rng.random() < 0.3
+        chaos_during = self.rng.random() < 0.5  # Higher probability for during
+        chaos_after = self.rng.random() < 0.3
 
         # Ensure at least one is True
         if not (chaos_before or chaos_during or chaos_after):
@@ -229,7 +229,7 @@ class ChaosCoordinator:
         if randomized_config.target_selection.strategy != "specific":
             # Choose randomly between different strategies
             strategies = ["random", "primary_only", "replica_only"]
-            new_strategy = random.choice(strategies)
+            new_strategy = self.rng.choice(strategies)
 
             randomized_config.target_selection = TargetSelection(
                 strategy=new_strategy,
@@ -256,7 +256,7 @@ class ChaosCoordinator:
                 # Fallback behavior depends on randomization flag
                 if randomize:
                     # Randomize when explicitly requested
-                    process_chaos_type = random.choice([ProcessChaosType.SIGKILL, ProcessChaosType.SIGTERM])
+                    process_chaos_type = self.rng.choice([ProcessChaosType.SIGKILL, ProcessChaosType.SIGTERM])
                     logger.info(f"Randomized fallback chaos type: {process_chaos_type.value}")
                 else:
                     # Deterministic default for backward compatibility
