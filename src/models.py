@@ -558,10 +558,18 @@ class StateValidationResult:
         if self.view_consistency and self.view_consistency.split_brain_detected:
             return True
         
-        # 3. Quorum lost - cluster cannot make decisions
+        # 3. Cluster status failures - cluster in unhealthy state
         if self.cluster_status and not self.cluster_status.success:
             if self.cluster_status.has_quorum is False:
                 return True
+                
+            # Cluster state is fail or unknown - cluster is broken
+            if self.cluster_status.cluster_state in ['fail', 'unknown']:
+                return True
+            
+            # Nodes in fail state - cluster has failed nodes
+            if self.cluster_status.nodes_in_fail_state:
+                return True                
         
         # 4. All replicas down for any shard - zero redundancy
         if self.replication and not self.replication.success:
