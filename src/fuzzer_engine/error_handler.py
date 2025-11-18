@@ -6,6 +6,8 @@ and cleanup procedures for all component failure scenarios.
 """
 import time
 import logging
+import random
+import signal
 from typing import Optional, Callable, Any, Dict, List
 from enum import Enum
 from dataclasses import dataclass
@@ -155,7 +157,6 @@ class ErrorHandler:
                     
                     # Add jitter if enabled
                     if config.jitter:
-                        import random
                         backoff_delay *= (0.5 + random.random())
                     
                     logger.info(f"Retrying in {backoff_delay:.2f} seconds...")
@@ -291,8 +292,6 @@ class ErrorHandler:
     
     def _force_cleanup_processes(self, cluster_instance):
         """Force cleanup of any remaining cluster processes"""
-        import signal
-        
         for node in cluster_instance.nodes:
             try:
                 if node.process and node.process.poll() is None:

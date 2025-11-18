@@ -8,6 +8,7 @@ import logging
 import traceback
 from typing import List, Dict, Optional, Tuple
 from ..models import ClusterConfig, NodePlan, NodeInfo, ClusterConnection
+from ..utils.valkey_utils import valkey_client
 
 logging.basicConfig(format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', level=logging.INFO, force=True)
 logger = logging.getLogger(__name__)
@@ -182,6 +183,7 @@ class ConfigurationManager:
             try:
                 process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 
+                # Note: host defaults to 127.0.0.1 in NodeInfo
                 node_info = NodeInfo(
                     node_id=plan.node_id,
                     role=plan.role,
@@ -217,17 +219,11 @@ class ConfigurationManager:
                     break
                 
                 try:
-                    client = valkey.Valkey(
-                        host='127.0.0.1',
-                        port=node.port,
-                        socket_timeout=3,
-                        decode_responses=True
-                    )
-                    
-                    if client.ping():
-                        logger.debug(f"Node {node.node_id} is active")
-                        ready = True
-                        break
+                    with valkey_client('127.0.0.1', node.port, timeout=3.0, decode_responses=True) as client:
+                        if client.ping():
+                            logger.debug(f"Node {node.node_id} is active")
+                            ready = True
+                            break
                 except (valkey.ConnectionError, valkey.TimeoutError):
                     pass
                 
@@ -286,17 +282,11 @@ class ConfigurationManager:
                         raise Exception(f"Node {node.node_id} process died during restart")
                     
                     try:
-                        client = valkey.Valkey(
-                            host='127.0.0.1',
-                            port=node.port,
-                            socket_timeout=3,
-                            decode_responses=True
-                        )
-                        
-                        if client.ping():
-                            logger.info(f"Node {node.node_id} is ready after restart")
-                            ready = True
-                            break
+                        with valkey_client('127.0.0.1', node.port, timeout=3.0, decode_responses=True) as client:
+                            if client.ping():
+                                logger.info(f"Node {node.node_id} is ready after restart")
+                                ready = True
+                                break
                     except (valkey.ConnectionError, valkey.TimeoutError):
                         pass
                     

@@ -7,7 +7,7 @@ from src.fuzzer_engine import FuzzerEngine, DSLLoader
 from src.models import (
     Scenario, ClusterConfig, Operation, OperationType, OperationTiming,
     ChaosConfig, ChaosType, ProcessChaosType, TargetSelection, ChaosTiming,
-    ChaosCoordination, ValidationConfig
+    ChaosCoordination
 )
 
 
@@ -27,7 +27,6 @@ class TestFuzzerEngineIntegration:
         assert scenario.cluster_config is not None
         assert len(scenario.operations) > 0
         assert scenario.chaos_config is not None
-        assert scenario.validation_config is not None
     
     def test_random_scenario_reproducibility(self):
         """Test that same seed produces same scenario"""
@@ -74,14 +73,17 @@ chaos:
     chaos_before_operation: false
     chaos_during_operation: true
     chaos_after_operation: false
-validation:
+state_validation:
   check_slot_coverage: true
-  check_slot_conflicts: true
-  check_replica_sync: true
-  check_node_connectivity: true
+  check_cluster_status: true
+  check_replication: true
+  check_topology: true
+  check_view_consistency: true
   check_data_consistency: true
-  convergence_timeout: 60.0
-  max_replication_lag: 5.0
+  stabilization_wait: 5.0
+  validation_timeout: 60.0
+  replication_config:
+    max_acceptable_lag: 5.0
 """
         
         from src.models import DSLConfig
@@ -146,8 +148,7 @@ operations:
                 timing=ChaosTiming(),
                 coordination=ChaosCoordination(),
                 process_chaos_type=ProcessChaosType.SIGKILL
-            ),
-            validation_config=ValidationConfig()
+            )
         )
         
         # Should validate successfully
@@ -164,8 +165,7 @@ operations:
                 timing=ChaosTiming(),
                 coordination=ChaosCoordination(),
                 process_chaos_type=ProcessChaosType.SIGKILL
-            ),
-            validation_config=ValidationConfig()
+            )
         )
         
         with pytest.raises(ValueError, match="Scenario must have at least one operation"):
@@ -287,8 +287,7 @@ class TestErrorHandling:
                 timing=ChaosTiming(),
                 coordination=ChaosCoordination(),
                 process_chaos_type=ProcessChaosType.SIGKILL
-            ),
-            validation_config=ValidationConfig()
+            )
         )
         
         # Should raise validation error
@@ -316,8 +315,7 @@ class TestErrorHandling:
                 timing=ChaosTiming(),
                 coordination=ChaosCoordination(),
                 process_chaos_type=None  # Missing!
-            ),
-            validation_config=ValidationConfig()
+            )
         )
         
         with pytest.raises(ValueError, match="process_chaos_type required"):

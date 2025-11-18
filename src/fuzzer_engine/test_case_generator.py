@@ -7,7 +7,10 @@ from typing import Optional, List, Dict, Any
 from ..models import (
     Scenario, ClusterConfig, Operation, OperationType, OperationTiming,
     ChaosConfig, ChaosType, ProcessChaosType, TargetSelection, ChaosTiming,
-    ChaosCoordination, ValidationConfig
+    ChaosCoordination, StateValidationConfig, ReplicationValidationConfig,
+    ClusterStatusValidationConfig, SlotCoverageValidationConfig,
+    TopologyValidationConfig, ViewConsistencyValidationConfig,
+    DataConsistencyValidationConfig
 )
 from ..interfaces import ITestCaseGenerator
 
@@ -16,9 +19,6 @@ class ScenarioGenerator(ITestCaseGenerator):
     """Generates randomized and DSL-based test scenarios"""
     
     def __init__(self, random_seed: Optional[int] = None):
-        """
-        Initialize test case generator
-        """
         self.random_seed = random_seed
         if random_seed is not None:
             random.seed(random_seed)
@@ -37,14 +37,12 @@ class ScenarioGenerator(ITestCaseGenerator):
         cluster_config = self._generate_random_cluster_config()
         operations = self._generate_random_operations(cluster_config)
         chaos_config = self._generate_random_chaos_config()
-        validation_config = ValidationConfig()
         
         scenario = Scenario(
             scenario_id=str(scenario_seed),
             cluster_config=cluster_config,
             operations=operations,
             chaos_config=chaos_config,
-            validation_config=validation_config,
             seed=scenario_seed
         )
         
@@ -137,7 +135,7 @@ class ScenarioGenerator(ITestCaseGenerator):
         cluster_config = self._parse_cluster_config(config["cluster"])
         operations = self._parse_operations(config["operations"])
         chaos_config = self._parse_chaos_config(config.get("chaos", {}))
-        validation_config = self._parse_validation_config(config.get("validation", {}))
+        state_validation_config = self._parse_state_validation_config(config.get("state_validation"))
         seed = config.get("seed")
         
         return Scenario(
@@ -145,7 +143,7 @@ class ScenarioGenerator(ITestCaseGenerator):
             cluster_config=cluster_config,
             operations=operations,
             chaos_config=chaos_config,
-            validation_config=validation_config,
+            state_validation_config=state_validation_config,
             seed=seed
         )
     
@@ -248,14 +246,17 @@ class ScenarioGenerator(ITestCaseGenerator):
         process_chaos_type = None
         if chaos_type == ChaosType.PROCESS_KILL:
             pct_str = chaos_dict.get("process_chaos_type", "sigkill")
-            if pct_str is not None:
+            # Allow None for randomization (will be set at runtime)
+            if pct_str is None:
+                process_chaos_type = None
+            else:
                 try:
                     process_chaos_type = ProcessChaosType(pct_str)
                 except ValueError:
                     raise ValueError(f"Invalid process chaos type: {pct_str}")
         
         randomize_per_operation = chaos_dict.get("randomize_per_operation", False)
-        
+
         return ChaosConfig(
             chaos_type=chaos_type,
             target_selection=target_selection,
@@ -265,16 +266,112 @@ class ScenarioGenerator(ITestCaseGenerator):
             randomize_per_operation=randomize_per_operation
         )
     
-    def _parse_validation_config(self, validation_dict: Dict[str, Any]) -> ValidationConfig:
-        """Parse validation configuration from DSL"""
-        return ValidationConfig(
+    def _parse_state_validation_config(self, validation_dict: Optional[Dict[str, Any]]) -> Optional[StateValidationConfig]:
+        """Parse state validation configuration from DSL"""
+        if not validation_dict:
+            return None
+
+        # Validate numeric fields
+        if 'stabilization_wait' in validation_dict:
+            value = validation_dict['stabilization_wait']
+            if not isinstance(value, (int, float)) or value < 0:
+                raise ValueError("state_validation.stabilization_wait: Must be a non-negative number")
+        
+        if 'validation_timeout' in validation_dict:
+            value = validation_dict['validation_timeout']
+            if not isinstance(value, (int, float)) or value <= 0:
+                raise ValueError("state_validation.validation_timeout: Must be a positive number")
+        
+        if 'retry_delay' in validation_dict:
+            value = validation_dict['retry_delay']
+            if not isinstance(value, (int, float)) or value < 0:
+                raise ValueError("state_validation.retry_delay: Must be a non-negative number")
+
+        # Parse replication config if present
+        replication_config = None
+        if "replication_config" in validation_dict and validation_dict["replication_config"]:
+            rep_dict = validation_dict["replication_config"]
+            replication_config = ReplicationValidationConfig(
+                max_acceptable_lag=rep_dict.get("max_acceptable_lag", 5.0),
+                require_all_replicas_synced=rep_dict.get("require_all_replicas_synced", False),
+                check_replication_offset=rep_dict.get("check_replication_offset", True),
+                min_replicas_per_shard=rep_dict.get("min_replicas_per_shard", 1),
+                timeout=rep_dict.get("timeout", 10.0)
+            )
+
+        # Parse cluster status config if present
+        cluster_status_config = None
+        if "cluster_status_config" in validation_dict and validation_dict["cluster_status_config"]:
+            cs_dict = validation_dict["cluster_status_config"]
+            cluster_status_config = ClusterStatusValidationConfig(
+                acceptable_states=cs_dict.get("acceptable_states"),
+                allow_degraded=cs_dict.get("allow_degraded", False),
+                require_quorum=cs_dict.get("require_quorum", True),
+                timeout=cs_dict.get("timeout", 10.0)
+            )
+
+        # Parse slot coverage config if present
+        slot_coverage_config = None
+        if "slot_coverage_config" in validation_dict and validation_dict["slot_coverage_config"]:
+            sc_dict = validation_dict["slot_coverage_config"]
+            slot_coverage_config = SlotCoverageValidationConfig(
+                require_full_coverage=sc_dict.get("require_full_coverage", True),
+                allow_slot_conflicts=sc_dict.get("allow_slot_conflicts", False),
+                timeout=sc_dict.get("timeout", 10.0)
+            )
+
+        # Parse topology config if present
+        topology_config = None
+        if "topology_config" in validation_dict and validation_dict["topology_config"]:
+            topo_dict = validation_dict["topology_config"]
+            topology_config = TopologyValidationConfig(
+                strict_mode=topo_dict.get("strict_mode", True),
+                allow_failed_nodes=topo_dict.get("allow_failed_nodes", True),
+                timeout=topo_dict.get("timeout", 10.0)
+            )
+
+        # Parse view consistency config if present
+        view_consistency_config = None
+        if "view_consistency_config" in validation_dict and validation_dict["view_consistency_config"]:
+            vc_dict = validation_dict["view_consistency_config"]
+            view_consistency_config = ViewConsistencyValidationConfig(
+                require_full_consensus=vc_dict.get("require_full_consensus", True),
+                allow_transient_inconsistency=vc_dict.get("allow_transient_inconsistency", True),
+                max_inconsistency_duration=vc_dict.get("max_inconsistency_duration", 5.0),
+                timeout=vc_dict.get("timeout", 15.0)
+            )
+
+        # Parse data consistency config if present
+        data_consistency_config = None
+        if "data_consistency_config" in validation_dict and validation_dict["data_consistency_config"]:
+            dc_dict = validation_dict["data_consistency_config"]
+            data_consistency_config = DataConsistencyValidationConfig(
+                check_test_keys=dc_dict.get("check_test_keys", True),
+                check_cross_replica_consistency=dc_dict.get("check_cross_replica_consistency", True),
+                num_test_keys=dc_dict.get("num_test_keys", 100),
+                key_prefix=dc_dict.get("key_prefix", "fuzzer:test:"),
+                timeout=dc_dict.get("timeout", 10.0)
+            )
+
+        return StateValidationConfig(
+            check_replication=validation_dict.get("check_replication", True),
+            check_cluster_status=validation_dict.get("check_cluster_status", True),
             check_slot_coverage=validation_dict.get("check_slot_coverage", True),
-            check_slot_conflicts=validation_dict.get("check_slot_conflicts", True),
-            check_replica_sync=validation_dict.get("check_replica_sync", True),
-            check_node_connectivity=validation_dict.get("check_node_connectivity", True),
+            check_topology=validation_dict.get("check_topology", True),
+            check_view_consistency=validation_dict.get("check_view_consistency", True),
             check_data_consistency=validation_dict.get("check_data_consistency", True),
-            convergence_timeout=validation_dict.get("convergence_timeout", 60.0),
-            max_replication_lag=validation_dict.get("max_replication_lag", 5.0)
+            stabilization_wait=validation_dict.get("stabilization_wait", 5.0),
+            validation_timeout=validation_dict.get("validation_timeout", 30.0),
+            blocking_on_failure=validation_dict.get("blocking_on_failure", False),
+            retry_on_transient_failure=validation_dict.get("retry_on_transient_failure", True),
+            max_retries=validation_dict.get("max_retries", 3),
+            retry_delay=validation_dict.get("retry_delay", 2.0),
+            replication_config=replication_config,
+            cluster_status_config=cluster_status_config,
+            slot_coverage_config=slot_coverage_config,
+            topology_config=topology_config,
+            view_consistency_config=view_consistency_config,
+            data_consistency_config=data_consistency_config
         )
     
     def validate_scenario(self, scenario: Scenario) -> bool:

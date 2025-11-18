@@ -5,7 +5,7 @@ import pytest
 from src.models import (
     ClusterConfig, NodePlan, NodeInfo, OperationType, ChaosType,
     Scenario, Operation, OperationTiming, ChaosConfig,
-    TargetSelection, ChaosTiming, ChaosCoordination, ValidationConfig
+    TargetSelection, ChaosTiming, ChaosCoordination
 )
 
 
@@ -91,16 +91,12 @@ def test_scenario_creation():
         coordination=ChaosCoordination()
     )
     
-    # Create validation config
-    validation_config = ValidationConfig()
-    
     # Create test scenario
     scenario = Scenario(
         scenario_id="test-001",
         cluster_config=cluster_config,
         operations=[operation],
         chaos_config=chaos_config,
-        validation_config=validation_config,
         seed=12345
     )
     

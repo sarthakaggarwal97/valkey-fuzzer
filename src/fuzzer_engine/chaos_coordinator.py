@@ -18,11 +18,14 @@ logger = logging.getLogger(__name__)
 
 
 class ChaosCoordinator:
-    def __init__(self):
-        self.chaos_engine = ProcessChaosEngine()
+    def __init__(self, seed: Optional[int] = None):
+        self.rng = random.Random(seed)  # Dedicated RNG for reproducible chaos selection
+        self.chaos_engine = ProcessChaosEngine(self.rng)
         self.active_chaos_scenarios: dict[str, List[ChaosResult]] = {}
         self.chaos_history: List[ChaosResult] = []
-    
+        if seed is not None:
+            logger.info(f"ChaosCoordinator initialized with seed {seed} for deterministic target selection")
+
     def register_cluster_nodes(self, cluster_id: str, nodes: List[NodeInfo]) -> None:
         """
         Register cluster nodes with the chaos engine for chaos injection.
@@ -94,8 +97,8 @@ class ChaosCoordinator:
             
             # Add slight randomization to timing if enabled (±20%)
             if should_randomize:
-                delay_before = timing.delay_before_operation * random.uniform(0.8, 1.2)
-                delay_after = timing.delay_after_operation * random.uniform(0.8, 1.2)
+                delay_before = timing.delay_before_operation * self.rng.uniform(0.8, 1.2)
+                delay_after = timing.delay_after_operation * self.rng.uniform(0.8, 1.2)
             else:
                 delay_before = timing.delay_before_operation
                 delay_after = timing.delay_after_operation
@@ -157,6 +160,32 @@ class ChaosCoordinator:
         
         return result
     
+    def _convert_dict_nodes_to_nodeinfo(self, live_nodes_dict: List[dict], initial_nodes: List[NodeInfo]) -> List[NodeInfo]:
+        """Convert dictionary node representations to NodeInfo objects."""
+        node_info_list = []
+        for node_dict in live_nodes_dict:
+            # Find matching initial node to get full info
+            matching_node = next(
+                (n for n in initial_nodes if n.node_id == node_dict['node_id']),
+                None
+            )
+            if matching_node:
+                node_info_list.append(matching_node)
+            else:
+                # Create a basic NodeInfo from the dict if no match found
+                node_info_list.append(NodeInfo(
+                    node_id=node_dict['node_id'],
+                    role=node_dict.get('role', 'unknown'),
+                    shard_id=node_dict.get('shard_id', 0),
+                    port=node_dict.get('port', 0),
+                    bus_port=node_dict.get('bus_port', 0),
+                    pid=node_dict.get('pid', 0),
+                    process=None,
+                    data_dir=f"/tmp/{node_dict['node_id']}",
+                    log_file=f"/tmp/{node_dict['node_id']}.log"
+                ))
+        return node_info_list
+
     def _randomize_chaos_config(self, chaos_config: ChaosConfig) -> ChaosConfig:
         """Create a randomized copy of the chaos config for this operation."""
         # Create a copy to avoid modifying the original
@@ -165,7 +194,7 @@ class ChaosCoordinator:
         # Randomize process chaos type (if process kill chaos)
         if randomized_config.chaos_type == ChaosType.PROCESS_KILL:
             # 50/50 chance between SIGKILL and SIGTERM
-            randomized_config.process_chaos_type = random.choice([
+            randomized_config.process_chaos_type = self.rng.choice([
                 ProcessChaosType.SIGKILL,
                 ProcessChaosType.SIGTERM
             ])
@@ -173,9 +202,9 @@ class ChaosCoordinator:
 
         # Randomize chaos timing coordination (30% chance for each timing option)
         # At least one must be True
-        chaos_before = random.random() < 0.3
-        chaos_during = random.random() < 0.5  # Higher probability for during
-        chaos_after = random.random() < 0.3
+        chaos_before = self.rng.random() < 0.3
+        chaos_during = self.rng.random() < 0.5  # Higher probability for during
+        chaos_after = self.rng.random() < 0.3
 
         # Ensure at least one is True
         if not (chaos_before or chaos_during or chaos_after):
@@ -200,7 +229,7 @@ class ChaosCoordinator:
         if randomized_config.target_selection.strategy != "specific":
             # Choose randomly between different strategies
             strategies = ["random", "primary_only", "replica_only"]
-            new_strategy = random.choice(strategies)
+            new_strategy = self.rng.choice(strategies)
 
             randomized_config.target_selection = TargetSelection(
                 strategy=new_strategy,
@@ -227,7 +256,7 @@ class ChaosCoordinator:
                 # Fallback behavior depends on randomization flag
                 if randomize:
                     # Randomize when explicitly requested
-                    process_chaos_type = random.choice([ProcessChaosType.SIGKILL, ProcessChaosType.SIGTERM])
+                    process_chaos_type = self.rng.choice([ProcessChaosType.SIGKILL, ProcessChaosType.SIGTERM])
                     logger.info(f"Randomized fallback chaos type: {process_chaos_type.value}")
                 else:
                     # Deterministic default for backward compatibility
@@ -252,41 +281,49 @@ class ChaosCoordinator:
                 error_message=f"Unsupported chaos type: {chaos_config.chaos_type}"
             )
 
-    def _convert_dict_nodes_to_nodeinfo(self, dict_nodes: List[dict], initial_nodes: List[NodeInfo]) -> List[NodeInfo]:
+    def _select_chaos_target(
+        self,
+        cluster_nodes: List[NodeInfo],
+        target_selection: TargetSelection
+    ) -> Optional[NodeInfo]:
         """
-        Convert dictionary nodes from ClusterConnection.get_live_nodes() to NodeInfo objects.
-        Uses initial_nodes to fill in missing process/pid information.
+        Select a target node for chaos injection based on selection strategy.
         """
-        # Create a mapping from port to initial NodeInfo for quick lookup
-        port_to_nodeinfo = {node.port: node for node in initial_nodes}
-        
-        converted_nodes = []
-        for node_dict in dict_nodes:
-            port = node_dict['port']
-            
-            # Get the initial NodeInfo for this port to retrieve process/pid info
-            initial_node = port_to_nodeinfo.get(port)
-            
-            if initial_node:
-                # Create a NodeInfo object with current topology data and initial process info
-                node_info = NodeInfo(
-                    node_id=initial_node.node_id,  # Keep orchestrator ID for process registration
-                    role=node_dict['role'],  # Use current role (may change after failover)
-                    shard_id=node_dict.get('shard_id'),  # Use current shard_id
-                    port=node_dict['port'],
-                    bus_port=initial_node.bus_port,
-                    pid=initial_node.pid,  # Use initial PID (may be stale after restart)
-                    process=initial_node.process,  # Use initial process handle
-                    data_dir=initial_node.data_dir,
-                    log_file=initial_node.log_file,
-                    cluster_node_id=node_dict['node_id']  # Store Valkey cluster node ID
-                )
-                converted_nodes.append(node_info)
-            else:
-                logger.warning(f"No initial node info found for port {port}, skipping node {node_dict['node_id']}")
-        
-        return converted_nodes
+        if not cluster_nodes:
+            return None
 
+        strategy = target_selection.strategy
+        
+        if strategy == "specific":
+            # Select from specific nodes
+            if target_selection.specific_nodes:
+                for node in cluster_nodes:
+                    if node.node_id in target_selection.specific_nodes:
+                        return node
+            return None
+        
+        elif strategy == "primary_only":
+            # Select only from primary nodes
+            primary_nodes = [node for node in cluster_nodes if node.role == 'primary']
+            if primary_nodes:
+                return self.rng.choice(primary_nodes)
+            return None
+
+        elif strategy == "replica_only":
+            # Select only from replica nodes
+            replica_nodes = [node for node in cluster_nodes if node.role == 'replica']
+            if replica_nodes:
+                return self.rng.choice(replica_nodes)
+            return None
+
+        elif strategy == "random":
+            # Select randomly from all nodes
+            return self.rng.choice(cluster_nodes)
+        
+        else:
+            logger.warning(f"Unknown target selection strategy: {strategy}")
+            return None
+    
     def get_chaos_history(self) -> List[ChaosResult]:
         """
         Get the history of all chaos injections.

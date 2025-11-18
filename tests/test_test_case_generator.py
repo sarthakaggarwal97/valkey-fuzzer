@@ -98,9 +98,9 @@ chaos:
     chaos_duration: 10.0
   coordination:
     chaos_during_operation: true
-validation:
+state_validation:
   check_slot_coverage: true
-  convergence_timeout: 60.0
+  validation_timeout: 60.0
 """
     
     generator = ScenarioGenerator()
@@ -312,6 +312,73 @@ def test_dsl_roundtrip_with_none_process_chaos_type(tmp_path):
     assert loaded_scenario.chaos_config.randomize_per_operation is True
     assert loaded_scenario.scenario_id == scenario.scenario_id
     assert loaded_scenario.seed == scenario.seed
+
+
+def test_parse_dsl_with_zero_stabilization_wait():
+    """Test that stabilization_wait: 0 is accepted (to skip the wait)"""
+    dsl_text = """
+scenario_id: test-zero-stabilization
+cluster:
+  num_shards: 3
+  replicas_per_shard: 1
+operations:
+  - type: failover
+    target_node: shard-0-primary
+state_validation:
+  stabilization_wait: 0
+  validation_timeout: 30.0
+"""
+    
+    generator = ScenarioGenerator()
+    scenario = generator.parse_dsl_config(dsl_text)
+    
+    # Should parse successfully with 0 stabilization_wait
+    assert scenario.state_validation_config.stabilization_wait == 0
+    assert scenario.state_validation_config.validation_timeout == 30.0
+
+
+def test_parse_dsl_with_negative_stabilization_wait():
+    """Test that negative stabilization_wait is rejected"""
+    dsl_text = """
+scenario_id: test-negative-stabilization
+cluster:
+  num_shards: 3
+  replicas_per_shard: 1
+operations:
+  - type: failover
+    target_node: shard-0-primary
+state_validation:
+  stabilization_wait: -1.0
+  validation_timeout: 30.0
+"""
+    
+    generator = ScenarioGenerator()
+    
+    # Should raise validation error for negative value
+    with pytest.raises(ValueError, match="stabilization_wait.*non-negative"):
+        generator.parse_dsl_config(dsl_text)
+
+
+def test_parse_dsl_with_zero_validation_timeout():
+    """Test that validation_timeout: 0 is rejected (must be positive)"""
+    dsl_text = """
+scenario_id: test-zero-timeout
+cluster:
+  num_shards: 3
+  replicas_per_shard: 1
+operations:
+  - type: failover
+    target_node: shard-0-primary
+state_validation:
+  stabilization_wait: 5.0
+  validation_timeout: 0
+"""
+    
+    generator = ScenarioGenerator()
+    
+    # Should raise validation error for zero timeout
+    with pytest.raises(ValueError, match="validation_timeout.*positive"):
+        generator.parse_dsl_config(dsl_text)
 
 
 if __name__ == "__main__":

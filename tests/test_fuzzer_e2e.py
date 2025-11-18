@@ -13,7 +13,7 @@ from src.fuzzer_engine import FuzzerEngine, DSLLoader
 from src.models import (
     ClusterConfig, Scenario, Operation, OperationType, OperationTiming,
     ChaosConfig, ChaosType, ProcessChaosType, TargetSelection, ChaosTiming,
-    ChaosCoordination, ValidationConfig, DSLConfig
+    ChaosCoordination, DSLConfig, StateValidationConfig
 )
 
 logging.basicConfig(format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', level=logging.INFO, force=True)
@@ -51,7 +51,6 @@ class TestFuzzerEngineE2E:
         logger.info(f"Duration: {result.end_time - result.start_time:.2f}s")
         logger.info(f"Operations executed: {result.operations_executed}")
         logger.info(f"Chaos events: {len(result.chaos_events)}")
-        logger.info(f"Validations: {len(result.validation_results)}")
         
         if result.error_message:
             logger.warning(f"Error message: {result.error_message}")
@@ -102,14 +101,10 @@ class TestFuzzerEngineE2E:
                 ),
                 process_chaos_type=ProcessChaosType.SIGKILL
             ),
-            validation_config=ValidationConfig(
+            state_validation_config=StateValidationConfig(
                 check_slot_coverage=True,
-                check_slot_conflicts=True,
-                check_replica_sync=True,
-                check_node_connectivity=True,
                 check_data_consistency=False,  # Skip expensive check
-                convergence_timeout=30.0,
-                max_replication_lag=5.0
+                validation_timeout=30.0
             ),
             seed=123
         )
@@ -128,12 +123,6 @@ class TestFuzzerEngineE2E:
         
         if result.error_message:
             logger.warning(f"Error: {result.error_message}")
-        
-        # Check validation results
-        if result.validation_results:
-            final_validation = result.validation_results[-1]
-            logger.info(f"Final validation - Slot coverage: {final_validation.slot_coverage}")
-            logger.info(f"Final validation - Replicas synced: {final_validation.replica_sync.all_replicas_synced}")
     
     def test_dsl_scenario_from_file(self):
         """
@@ -212,8 +201,8 @@ class TestFuzzerEngineE2E:
                 ),
                 process_chaos_type=ProcessChaosType.SIGKILL
             ),
-            validation_config=ValidationConfig(
-                convergence_timeout=60.0,
+            state_validation_config=StateValidationConfig(
+                validation_timeout=60.0,
                 check_data_consistency=False
             ),
             seed=456
@@ -294,8 +283,8 @@ class TestFuzzerEngineE2E:
                 ),
                 process_chaos_type=ProcessChaosType.SIGKILL
             ),
-            validation_config=ValidationConfig(
-                convergence_timeout=45.0,
+            state_validation_config=StateValidationConfig(
+                validation_timeout=45.0,
                 check_data_consistency=False
             ),
             seed=789
@@ -312,14 +301,6 @@ class TestFuzzerEngineE2E:
         logger.info(f"Test completed: {'SUCCESS' if result.success else 'FAILED'}")
         logger.info(f"Duration: {result.end_time - result.start_time:.2f}s")
         logger.info(f"Operations executed: {result.operations_executed} / {len(scenario.operations)}")
-        logger.info(f"Validations performed: {len(result.validation_results)}")
-        
-        # Check that validations were performed after each operation
-        if result.validation_results:
-            logger.info("Validation results:")
-            for i, validation in enumerate(result.validation_results):
-                logger.info(f"  Validation {i+1}: Slot coverage={validation.slot_coverage}, "
-                          f"Convergence time={validation.convergence_time:.2f}s")
         
         if result.error_message:
             logger.warning(f"Error: {result.error_message}")
@@ -402,7 +383,7 @@ class TestFuzzerErrorRecovery:
                 coordination=ChaosCoordination(),
                 process_chaos_type=ProcessChaosType.SIGKILL
             ),
-            validation_config=ValidationConfig()
+            state_validation_config=StateValidationConfig()
         )
         
         # Execute - should handle retries internally

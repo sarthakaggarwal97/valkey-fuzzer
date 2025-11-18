@@ -177,9 +177,9 @@ class BaseChaosEngine(IChaosEngine, ABC):
 class ProcessChaosEngine(BaseChaosEngine):
     """Concrete implementation of process chaos injection"""
     
-    def __init__(self):
+    def __init__(self, rng: Optional[random.Random] = None):
         super().__init__()
-        self.target_selector = ChaosTargetSelector()
+        self.target_selector = ChaosTargetSelector(rng)
     
     def _select_chaos_target(self, cluster_id: str, target_selection: TargetSelection) -> Optional[NodeInfo]:
         """Select target node for chaos injection based on cluster topology"""
@@ -189,8 +189,9 @@ class ProcessChaosEngine(BaseChaosEngine):
 class ChaosTargetSelector:
     """Utility class for selecting chaos targets based on cluster topology"""
     
-    def __init__(self):
+    def __init__(self, rng: Optional[random.Random] = None):
         self.cluster_nodes: Dict[str, List[NodeInfo]] = {}
+        self.rng = rng if rng is not None else random.Random()
     
     def update_cluster_topology(self, cluster_id: str, nodes: List[NodeInfo]) -> None:
         """Update cluster topology information"""
@@ -226,12 +227,12 @@ class ChaosTargetSelector:
                 return None
             
             # Randomly select from matching nodes (consistent with other strategies)
-            selected = random.choice(matching_nodes)
+            selected = self.rng.choice(matching_nodes)
             logger.info(f"Selected specific node: {selected.node_id} (from {len(matching_nodes)} specified)")
             return selected
         
         elif target_selection.strategy == "random":
-            selected = random.choice(nodes)
+            selected = self.rng.choice(nodes)
             logger.info(f"Selected random node: node id: {selected.node_id}, role: ({selected.role}, shard: {selected.shard_id})")
             return selected
         
@@ -243,7 +244,7 @@ class ChaosTargetSelector:
                 return None
             
             # Randomly select from primaries
-            selected = random.choice(primaries)
+            selected = self.rng.choice(primaries)
             logger.info(f"Selected random primary: {selected.node_id} (shard {selected.shard_id})")
             return selected
         
@@ -255,7 +256,7 @@ class ChaosTargetSelector:
                 return None
             
             # Randomly select from replicas
-            selected = random.choice(replicas)
+            selected = self.rng.choice(replicas)
             logger.info(f"Selected random replica: {selected.node_id} (shard {selected.shard_id})")
             return selected
         

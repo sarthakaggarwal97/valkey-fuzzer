@@ -48,6 +48,80 @@ class DSLLoader:
         return True
     
     @staticmethod
+    def _serialize_state_validation_config(config) -> dict:
+        """Serialize StateValidationConfig and all nested configs to dictionary."""
+        result = {
+            'check_replication': config.check_replication,
+            'check_cluster_status': config.check_cluster_status,
+            'check_slot_coverage': config.check_slot_coverage,
+            'check_topology': config.check_topology,
+            'check_view_consistency': config.check_view_consistency,
+            'check_data_consistency': config.check_data_consistency,
+            'stabilization_wait': config.stabilization_wait,
+            'validation_timeout': config.validation_timeout,
+            'blocking_on_failure': config.blocking_on_failure,
+            'retry_on_transient_failure': config.retry_on_transient_failure,
+            'max_retries': config.max_retries,
+            'retry_delay': config.retry_delay
+        }
+        
+        # Serialize replication config
+        if config.replication_config:
+            result['replication_config'] = {
+                'max_acceptable_lag': config.replication_config.max_acceptable_lag,
+                'require_all_replicas_synced': config.replication_config.require_all_replicas_synced,
+                'check_replication_offset': config.replication_config.check_replication_offset,
+                'min_replicas_per_shard': config.replication_config.min_replicas_per_shard,
+                'timeout': config.replication_config.timeout
+            }
+        
+        # Serialize cluster status config
+        if config.cluster_status_config:
+            result['cluster_status_config'] = {
+                'acceptable_states': config.cluster_status_config.acceptable_states,
+                'allow_degraded': config.cluster_status_config.allow_degraded,
+                'require_quorum': config.cluster_status_config.require_quorum,
+                'timeout': config.cluster_status_config.timeout
+            }
+        
+        # Serialize slot coverage config
+        if config.slot_coverage_config:
+            result['slot_coverage_config'] = {
+                'require_full_coverage': config.slot_coverage_config.require_full_coverage,
+                'allow_slot_conflicts': config.slot_coverage_config.allow_slot_conflicts,
+                'timeout': config.slot_coverage_config.timeout
+            }
+        
+        # Serialize topology config
+        if config.topology_config:
+            result['topology_config'] = {
+                'strict_mode': config.topology_config.strict_mode,
+                'allow_failed_nodes': config.topology_config.allow_failed_nodes,
+                'timeout': config.topology_config.timeout
+            }
+        
+        # Serialize view consistency config
+        if config.view_consistency_config:
+            result['view_consistency_config'] = {
+                'require_full_consensus': config.view_consistency_config.require_full_consensus,
+                'allow_transient_inconsistency': config.view_consistency_config.allow_transient_inconsistency,
+                'max_inconsistency_duration': config.view_consistency_config.max_inconsistency_duration,
+                'timeout': config.view_consistency_config.timeout
+            }
+        
+        # Serialize data consistency config
+        if config.data_consistency_config:
+            result['data_consistency_config'] = {
+                'check_test_keys': config.data_consistency_config.check_test_keys,
+                'check_cross_replica_consistency': config.data_consistency_config.check_cross_replica_consistency,
+                'num_test_keys': config.data_consistency_config.num_test_keys,
+                'key_prefix': config.data_consistency_config.key_prefix,
+                'timeout': config.data_consistency_config.timeout
+            }
+        
+        return result
+    
+    @staticmethod
     def save_scenario_as_dsl(scenario: Scenario, file_path: Union[str, Path]) -> None:
         """Save a scenario as a DSL YAML file for reproducibility."""
         file_path = Path(file_path)
@@ -95,15 +169,7 @@ class DSLLoader:
                     'chaos_after_operation': scenario.chaos_config.coordination.chaos_after_operation
                 }
             },
-            'validation': {
-                'check_slot_coverage': scenario.validation_config.check_slot_coverage,
-                'check_slot_conflicts': scenario.validation_config.check_slot_conflicts,
-                'check_replica_sync': scenario.validation_config.check_replica_sync,
-                'check_node_connectivity': scenario.validation_config.check_node_connectivity,
-                'check_data_consistency': scenario.validation_config.check_data_consistency,
-                'convergence_timeout': scenario.validation_config.convergence_timeout,
-                'max_replication_lag': scenario.validation_config.max_replication_lag
-            }
+            'state_validation': DSLLoader._serialize_state_validation_config(scenario.state_validation_config) if scenario.state_validation_config else None
         }
         
         with open(file_path, 'w') as f:
@@ -141,9 +207,9 @@ class DSLValidator:
             chaos_errors = DSLValidator._validate_chaos(config_dict['chaos'])
             errors.extend(chaos_errors)
         
-        # Validate validation configuration (optional)
-        if 'validation' in config_dict:
-            validation_errors = DSLValidator._validate_validation(config_dict['validation'])
+        # Validate state validation configuration (optional)
+        if 'state_validation' in config_dict:
+            validation_errors = DSLValidator._validate_state_validation(config_dict['state_validation'])
             errors.extend(validation_errors)
         
         return errors
@@ -224,29 +290,46 @@ class DSLValidator:
         return errors
     
     @staticmethod
-    def _validate_validation(validation_dict: dict) -> list:
-        """Validate validation configuration"""
+    def _validate_state_validation(validation_dict: dict) -> list:
+        """Validate state validation configuration"""
         errors = []
         
         if not isinstance(validation_dict, dict):
-            errors.append("validation: Must be a dictionary")
+            errors.append("state_validation: Must be a dictionary")
             return errors
         
         # All fields are optional booleans or floats, just check types if present
         bool_fields = [
-            'check_slot_coverage', 'check_slot_conflicts', 'check_replica_sync',
-            'check_node_connectivity', 'check_data_consistency'
+            'check_replication', 'check_cluster_status', 'check_slot_coverage',
+            'check_topology', 'check_view_consistency', 'check_data_consistency',
+            'blocking_on_failure', 'retry_on_transient_failure'
         ]
         
         for field in bool_fields:
             if field in validation_dict and not isinstance(validation_dict[field], bool):
-                errors.append(f"validation.{field}: Must be a boolean")
+                errors.append(f"state_validation.{field}: Must be a boolean")
         
-        float_fields = ['convergence_timeout', 'max_replication_lag']
-        for field in float_fields:
+        # Fields that must be strictly positive (> 0)
+        positive_fields = ['validation_timeout']
+        for field in positive_fields:
             if field in validation_dict:
                 value = validation_dict[field]
                 if not isinstance(value, (int, float)) or value <= 0:
-                    errors.append(f"validation.{field}: Must be a positive number")
+                    errors.append(f"state_validation.{field}: Must be a positive number")
+        
+        # Fields that must be non-negative (>= 0)
+        non_negative_fields = ['stabilization_wait', 'retry_delay']
+        for field in non_negative_fields:
+            if field in validation_dict:
+                value = validation_dict[field]
+                if not isinstance(value, (int, float)) or value < 0:
+                    errors.append(f"state_validation.{field}: Must be a non-negative number")
+        
+        int_fields = ['max_retries']
+        for field in int_fields:
+            if field in validation_dict:
+                value = validation_dict[field]
+                if not isinstance(value, int) or value < 0:
+                    errors.append(f"state_validation.{field}: Must be a non-negative integer")
         
         return errors
