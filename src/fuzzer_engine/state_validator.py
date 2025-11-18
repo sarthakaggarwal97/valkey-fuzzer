@@ -60,14 +60,25 @@ def validation_timeout(seconds: float):
     
     # Only use signal-based timeout on Unix systems
     if hasattr(signal, 'SIGALRM'):
-        # Set the signal handler and alarm
+        # Set the signal handler
         old_handler = signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(math.ceil(seconds))
+        
+        # Use setitimer for sub-second precision instead of alarm (which only supports integer seconds)
+        # setitimer(ITIMER_REAL, seconds) sets a real-time timer that delivers SIGALRM
+        if hasattr(signal, 'setitimer'):
+            signal.setitimer(signal.ITIMER_REAL, seconds)
+        else:
+            # Fallback to alarm with ceiling for systems without setitimer
+            signal.alarm(math.ceil(seconds))
+        
         try:
             yield
         finally:
-            # Disable the alarm and restore old handler
-            signal.alarm(0)
+            # Disable the timer and restore old handler
+            if hasattr(signal, 'setitimer'):
+                signal.setitimer(signal.ITIMER_REAL, 0)
+            else:
+                signal.alarm(0)
             signal.signal(signal.SIGALRM, old_handler)
     else:
         # On Windows or systems without SIGALRM, just yield without timeout

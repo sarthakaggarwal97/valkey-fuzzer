@@ -13,13 +13,18 @@ from src.models import (
 )
 
 def test_validation_timeout_sub_second():
-    """Test that sub-second timeouts are properly enforced (not truncated to zero)"""
+    """Test that sub-second timeouts are properly enforced (not rounded up to 1 second)"""
     def slow_operation():
         time.sleep(2.0)
     
+    start = time.time()
     with pytest.raises(ValidationTimeoutError):
         with validation_timeout(0.25):
             slow_operation()
+    elapsed = time.time() - start
+    
+    # Should timeout close to 0.25s, not be rounded up to 1.0s
+    assert elapsed < 0.5, f"Timeout took {elapsed}s, should be close to 0.25s (not rounded to 1s)"
 
 
 def test_stabilization_wait_respects_timeout():
