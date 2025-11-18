@@ -160,6 +160,32 @@ class ChaosCoordinator:
         
         return result
     
+    def _convert_dict_nodes_to_nodeinfo(self, live_nodes_dict: List[dict], initial_nodes: List[NodeInfo]) -> List[NodeInfo]:
+        """Convert dictionary node representations to NodeInfo objects."""
+        node_info_list = []
+        for node_dict in live_nodes_dict:
+            # Find matching initial node to get full info
+            matching_node = next(
+                (n for n in initial_nodes if n.node_id == node_dict['node_id']),
+                None
+            )
+            if matching_node:
+                node_info_list.append(matching_node)
+            else:
+                # Create a basic NodeInfo from the dict if no match found
+                node_info_list.append(NodeInfo(
+                    node_id=node_dict['node_id'],
+                    role=node_dict.get('role', 'unknown'),
+                    shard_id=node_dict.get('shard_id', 0),
+                    port=node_dict.get('port', 0),
+                    bus_port=node_dict.get('bus_port', 0),
+                    pid=node_dict.get('pid', 0),
+                    process=None,
+                    data_dir=f"/tmp/{node_dict['node_id']}",
+                    log_file=f"/tmp/{node_dict['node_id']}.log"
+                ))
+        return node_info_list
+
     def _randomize_chaos_config(self, chaos_config: ChaosConfig) -> ChaosConfig:
         """Create a randomized copy of the chaos config for this operation."""
         # Create a copy to avoid modifying the original

@@ -246,10 +246,14 @@ class ScenarioGenerator(ITestCaseGenerator):
         process_chaos_type = None
         if chaos_type == ChaosType.PROCESS_KILL:
             pct_str = chaos_dict.get("process_chaos_type", "sigkill")
-            try:
-                process_chaos_type = ProcessChaosType(pct_str)
-            except ValueError:
-                raise ValueError(f"Invalid process chaos type: {pct_str}")
+            # Allow None for randomization (will be set at runtime)
+            if pct_str is None:
+                process_chaos_type = None
+            else:
+                try:
+                    process_chaos_type = ProcessChaosType(pct_str)
+                except ValueError:
+                    raise ValueError(f"Invalid process chaos type: {pct_str}")
         
         randomize_per_operation = chaos_dict.get("randomize_per_operation", False)
 
@@ -266,6 +270,22 @@ class ScenarioGenerator(ITestCaseGenerator):
         """Parse state validation configuration from DSL"""
         if not validation_dict:
             return None
+
+        # Validate numeric fields
+        if 'stabilization_wait' in validation_dict:
+            value = validation_dict['stabilization_wait']
+            if not isinstance(value, (int, float)) or value < 0:
+                raise ValueError("state_validation.stabilization_wait: Must be a non-negative number")
+        
+        if 'validation_timeout' in validation_dict:
+            value = validation_dict['validation_timeout']
+            if not isinstance(value, (int, float)) or value <= 0:
+                raise ValueError("state_validation.validation_timeout: Must be a positive number")
+        
+        if 'retry_delay' in validation_dict:
+            value = validation_dict['retry_delay']
+            if not isinstance(value, (int, float)) or value < 0:
+                raise ValueError("state_validation.retry_delay: Must be a non-negative number")
 
         # Parse replication config if present
         replication_config = None

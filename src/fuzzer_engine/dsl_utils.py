@@ -309,12 +309,21 @@ class DSLValidator:
             if field in validation_dict and not isinstance(validation_dict[field], bool):
                 errors.append(f"state_validation.{field}: Must be a boolean")
         
-        float_fields = ['stabilization_wait', 'validation_timeout', 'retry_delay']
-        for field in float_fields:
+        # Fields that must be strictly positive (> 0)
+        positive_fields = ['validation_timeout']
+        for field in positive_fields:
             if field in validation_dict:
                 value = validation_dict[field]
                 if not isinstance(value, (int, float)) or value <= 0:
                     errors.append(f"state_validation.{field}: Must be a positive number")
+        
+        # Fields that must be non-negative (>= 0)
+        non_negative_fields = ['stabilization_wait', 'retry_delay']
+        for field in non_negative_fields:
+            if field in validation_dict:
+                value = validation_dict[field]
+                if not isinstance(value, (int, float)) or value < 0:
+                    errors.append(f"state_validation.{field}: Must be a non-negative number")
         
         int_fields = ['max_retries']
         for field in int_fields:
