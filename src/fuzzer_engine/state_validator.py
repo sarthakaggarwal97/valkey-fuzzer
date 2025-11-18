@@ -2288,6 +2288,9 @@ class StateValidator:
             
             return result
             
+        except ValidationTimeoutError:
+            # Re-raise timeout exceptions so they propagate to validate_state
+            raise
         except Exception as e:
             logger.error(f"{display_name} validation error: {e}")
             failed_checks.append(check_name)
