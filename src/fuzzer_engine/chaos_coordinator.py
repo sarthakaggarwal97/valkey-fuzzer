@@ -165,14 +165,22 @@ class ChaosCoordinator:
         node_info_list = []
         for node_dict in live_nodes_dict:
             # Find matching initial node to get full info
+            # Note: node_dict['node_id'] contains the Valkey cluster ID (40-char hex),
+            # which matches NodeInfo.cluster_node_id, not NodeInfo.node_id (logical name)
             matching_node = next(
-                (n for n in initial_nodes if n.node_id == node_dict['node_id']),
+                (n for n in initial_nodes if n.cluster_node_id == node_dict['node_id']),
                 None
             )
             if matching_node:
                 node_info_list.append(matching_node)
             else:
                 # Create a basic NodeInfo from the dict if no match found
+                # This should rarely happen - it means a node exists in the cluster
+                # but wasn't in our initial node list
+                logger.warning(
+                    f"No matching initial node found for cluster node {node_dict['node_id']} "
+                    f"(port {node_dict.get('port')}). Creating fallback NodeInfo without process info."
+                )
                 node_info_list.append(NodeInfo(
                     node_id=node_dict['node_id'],
                     role=node_dict.get('role', 'unknown'),
@@ -182,7 +190,8 @@ class ChaosCoordinator:
                     pid=node_dict.get('pid', 0),
                     process=None,
                     data_dir=f"/tmp/{node_dict['node_id']}",
-                    log_file=f"/tmp/{node_dict['node_id']}.log"
+                    log_file=f"/tmp/{node_dict['node_id']}.log",
+                    cluster_node_id=node_dict['node_id']
                 ))
         return node_info_list
 
