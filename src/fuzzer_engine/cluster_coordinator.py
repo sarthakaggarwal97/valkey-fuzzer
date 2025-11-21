@@ -4,7 +4,7 @@ Cluster Coordinator - Manages cluster lifecycle and interfaces with Cluster Orch
 import logging
 import time
 from typing import List, Optional
-from ..models import ClusterConfig, ClusterInstance, ClusterStatus, NodeInfo, ClusterConnection
+from ..models import ClusterConfig, ClusterInstance, ClusterStatus, NodeInfo
 from ..cluster_orchestrator.orchestrator import ConfigurationManager, ClusterManager, PortManager
 
 logging.basicConfig(format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', level=logging.INFO, force=True)
@@ -70,7 +70,6 @@ class ClusterCoordinator:
                 'config_manager': config_manager
             }
             
-            logger.info(f"Cluster {cluster_instance.cluster_id} created successfully with {len(nodes)} nodes")
             return cluster_instance
             
         except Exception as e:
@@ -245,7 +244,6 @@ class ClusterCoordinator:
             # Remove from active clusters
             del self.active_clusters[cluster_id]
             
-            logger.info(f"Cluster {cluster_id} destroyed successfully")
             return True
             
         except Exception as e:

@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
-from ..models import Scenario, Operation, ChaosResult, ExecutionResult, ClusterStatus, NodeInfo
+from ..models import Scenario, Operation, ChaosResult, ExecutionResult, ClusterStatus
 
 
 logging.basicConfig(format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', level=logging.INFO, force=True)
