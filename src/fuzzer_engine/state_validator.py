@@ -10,26 +10,13 @@ from typing import Dict, List, Optional, Callable, TypeVar, Any
 import signal
 from contextlib import contextmanager
 from ..models import (
-    ClusterConnection,
-    ReplicationValidation,
-    ReplicationValidationConfig,
-    ReplicaLagInfo,
-    ClusterStatusValidation,
-    ClusterStatusValidationConfig,
-    SlotCoverageValidation,
-    SlotCoverageValidationConfig,
-    SlotConflict,
-    TopologyValidation,
-    TopologyValidationConfig,
-    TopologyMismatch,
-    ViewConsistencyValidation,
-    ViewDiscrepancy,
-    DataConsistencyValidation,
-    DataConsistencyValidationConfig,
-    DataInconsistency,
-    ExpectedTopology,
-    StateValidationConfig,
-    StateValidationResult
+    ClusterConnection, ReplicationValidation, ReplicationValidationConfig, ReplicaLagInfo,
+    ClusterStatusValidation, ClusterStatusValidationConfig,
+    SlotCoverageValidation, SlotCoverageValidationConfig, SlotConflict,
+    TopologyValidation, TopologyValidationConfig, TopologyMismatch,
+    ViewConsistencyValidation, ViewDiscrepancy,
+    DataConsistencyValidation, DataConsistencyValidationConfig, DataInconsistency,
+    ExpectedTopology, StateValidationConfig, StateValidationResult
 )
 from .state_validator_helpers import (
     format_node_address,
@@ -185,7 +172,6 @@ class ReplicationValidator:
                 if replica.get('status') == 'failed':
                     disconnected_replicas.append(replica_address)
                     all_replicas_synced = False
-                    logger.warning(f"Replica {replica_address} is in failed state")
                     continue
 
                 try:
@@ -431,11 +417,7 @@ class ReplicationValidator:
                         f"{connected_slaves} replicas connected (as expected)"
                     )
 
-    def _get_master_node_id(
-        self,
-        replica: Dict,
-        cluster_connection: ClusterConnection
-    ) -> Optional[str]:
+    def _get_master_node_id(self, replica: Dict, cluster_connection: ClusterConnection) -> Optional[str]:
         """Get the master node ID for a replica by parsing CLUSTER NODES output."""
         nodes = query_cluster_nodes(replica, timeout=2.0)
         
@@ -446,12 +428,7 @@ class ReplicationValidator:
         
         return None
 
-    def _get_offset_difference(
-        self,
-        replica: Dict,
-        primary: Optional[Dict],
-        timeout: float
-    ) -> int:
+    def _get_offset_difference(self, replica: Dict, primary: Optional[Dict], timeout: float) -> int:
         """Calculate replication offset difference between primary and replica."""
         if not primary:
             return 0
@@ -949,11 +926,7 @@ class SlotCoverageValidator:
                 error_message=f"Validation error: {str(e)}"
             )
 
-    def _parse_node_slots(
-        self,
-        cluster_nodes_raw: str,
-        target_node_id: str
-    ) -> List[int]:
+    def _parse_node_slots(self, cluster_nodes_raw: str, target_node_id: str) -> List[int]:
         """Parse CLUSTER NODES output to extract slot assignments for a specific node."""
         slots = []
 
@@ -974,10 +947,7 @@ class SlotCoverageValidator:
 
         return slots
 
-    def _parse_all_slot_assignments(
-        self,
-        cluster_nodes_raw: str
-    ) -> Dict[int, str]:
+    def _parse_all_slot_assignments(self, cluster_nodes_raw: str) -> Dict[int, str]:
         """Parse CLUSTER NODES output to extract all slot assignments.
 
         Returns a dict mapping slot number to the node_id that owns it.
@@ -1708,10 +1678,7 @@ class ViewConsistencyValidator:
 
         return parsed_nodes
 
-    def _compare_views(
-        self,
-        node_views: Dict[str, Dict[str, Dict]]
-    ) -> List['ViewDiscrepancy']:
+    def _compare_views(self, node_views: Dict[str, Dict[str, Dict]]) -> List['ViewDiscrepancy']:
         """Compare cluster views from different nodes and identify discrepancies."""
         discrepancies = []
 
@@ -1816,10 +1783,7 @@ class ViewConsistencyValidator:
 
         return discrepancies
 
-    def _detect_split_brain(
-        self,
-        node_views: Dict[str, Dict[str, Dict]]
-    ) -> bool:
+    def _detect_split_brain(self, node_views: Dict[str, Dict[str, Dict]]) -> bool:
         # Build a map of slots to primary nodes from each node's perspective
         slot_primary_map: Dict[int, set] = {}
 
@@ -1842,10 +1806,7 @@ class ViewConsistencyValidator:
 
         return False
 
-    def _calculate_consensus(
-        self,
-        node_views: Dict[str, Dict[str, Dict]]
-    ) -> float:
+    def _calculate_consensus(self, node_views: Dict[str, Dict[str, Dict]]) -> float:
         """Calculate consensus percentage based on view agreement."""
         if len(node_views) < 2:
             return 100.0
@@ -1890,34 +1851,41 @@ class DataConsistencyValidator:
         """Initialize the data consistency validator."""
         self.test_keys: Dict[str, str] = {}  # key -> expected_value
 
-    def write_test_keys(
-        self,
-        cluster_connection: ClusterConnection,
-        config: DataConsistencyValidationConfig
-    ) -> bool:
+    def write_test_keys(self, cluster_connection: ClusterConnection, config: DataConsistencyValidationConfig) -> bool:
         try:
-            # Find an alive primary node to write to
-            primary_nodes = cluster_connection.get_primary_nodes()
-            alive_primary = cluster_connection.find_alive_node(primary_nodes)
+            # Get live nodes for cluster client
+            live_nodes = cluster_connection.get_live_nodes()
             
-            if not alive_primary:
-                logger.error("No alive primary nodes found to write test keys")
+            if not live_nodes:
+                logger.error("No live nodes found to write test keys")
                 return False
             
-            # Connect to the primary
-            with valkey_client(alive_primary['host'], alive_primary['port'], config.timeout) as client:
-                # Write test keys
-                for i in range(config.num_test_keys):
-                    key = f"{config.key_prefix}{i}"
-                    # Generate random value
-                    value = ''.join(random.choices(string.ascii_letters + string.digits, k=32))
-                    
-                    try:
-                        client.set(key, value)
-                        self.test_keys[key] = value
-                    except Exception as e:
-                        logger.warning(f"Failed to write test key {key}: {e}")
-                        continue
+            # Use cluster-aware client that handles MOVED redirects
+            startup_nodes = [
+                ClusterNode(host=node['host'], port=node['port'])
+                for node in live_nodes[:3]
+            ]
+            
+            cluster_client = valkey.ValkeyCluster(
+                startup_nodes=startup_nodes,
+                decode_responses=True,
+                skip_full_coverage_check=True,
+                socket_timeout=config.timeout
+            )
+            
+            # Write test keys
+            for i in range(config.num_test_keys):
+                key = f"{config.key_prefix}{i}"
+                value = ''.join(random.choices(string.ascii_letters + string.digits, k=32))
+                
+                try:
+                    cluster_client.set(key, value)
+                    self.test_keys[key] = value
+                except Exception as e:
+                    logger.warning(f"Failed to write test key {key}: {e}")
+                    continue
+            
+            cluster_client.close()
             
             logger.info(f"Successfully wrote {len(self.test_keys)} test keys to cluster")
             return len(self.test_keys) > 0
@@ -1926,11 +1894,7 @@ class DataConsistencyValidator:
             logger.error(f"Error writing test keys: {e}")
             return False
 
-    def validate(
-        self,
-        cluster_connection: ClusterConnection,
-        config: DataConsistencyValidationConfig
-    ) -> DataConsistencyValidation:
+    def validate(self, cluster_connection: ClusterConnection, config: DataConsistencyValidationConfig) -> DataConsistencyValidation:
         try:
             if not self.test_keys:
                 # No test keys to validate - this is a failure because we couldn't seed data
@@ -2008,7 +1972,7 @@ class DataConsistencyValidator:
                             inconsistent_keys.append(inconsistency)
                             logger.warning(
                                 f"Test key {key} (slot {slot}) has wrong value: "
-                                f"expected {expected_value[:16]}..., got {actual_value[:16] if actual_value else 'None'}..."
+                                f"expected {expected_value[:16]}, got {actual_value[:16] if actual_value else 'None'}"
                             )
                         else:
                             logger.debug(f"Test key {key} validated successfully")
@@ -2077,7 +2041,7 @@ class DataConsistencyValidator:
                                 inconsistent_keys.append(inconsistency)
                                 logger.warning(
                                     f"Test key {key} has wrong value: "
-                                    f"expected {expected_value[:16]}..., got {actual_value[:16] if actual_value else 'None'}..."
+                                    f"expected {expected_value[:16]}, got {actual_value[:16] if actual_value else 'None'}"
                                 )
                             else:
                                 logger.debug(f"Test key {key} validated successfully")
@@ -2211,7 +2175,7 @@ class DataConsistencyValidator:
                                 inconsistent_keys.append(inconsistency)
                                 logger.warning(
                                     f"Key {key} has diverged on replica {format_node_address(replica)}: "
-                                    f"expected {expected_value[:16]}..., got {actual_value[:16]}..."
+                                    f"expected {expected_value[:16]}, got {actual_value[:16]}"
                                 )
                     except Exception as e:
                         logger.debug(f"Error checking replica {format_node_address(replica)} for key {key}: {e}")
@@ -2251,7 +2215,7 @@ class StateValidator:
         # Track killed nodes from chaos injections
         self.killed_nodes: set[str] = set()
 
-        logger.info("StateValidator initialized")
+        logger.debug("StateValidator initialized")
 
     def register_killed_node(self, node_address: str) -> None:
         """Register a node that was killed by chaos injection."""
@@ -2283,7 +2247,7 @@ class StateValidator:
         if display_name is None:
             display_name = check_name.replace('_', ' ').title()
         
-        logger.info(f"Running {check_name.replace('_', ' ')} validation...")
+        logger.info(f"Running {check_name.replace('_', ' ')} validation")
         
         try:
             result = validator_func()
@@ -2570,6 +2534,7 @@ class StateValidator:
         """Execute validation with retry logic for transient failures."""
         attempt = 0
         max_attempts = self.config.max_retries + 1  # Initial attempt + retries
+        last_failed_checks = set()
 
         while attempt < max_attempts:
             attempt += 1
@@ -2600,6 +2565,16 @@ class StateValidator:
                 )
                 return result
 
+            # Check if the same checks are failing repeatedly (deterministic failure)
+            current_failed_checks = set(result.failed_checks)
+            if attempt > 1 and current_failed_checks == last_failed_checks:
+                logger.error(
+                    f"Same checks failing repeatedly (attempt {attempt}): {', '.join(result.failed_checks)}. "
+                    "This appears to be a deterministic failure, not a transient issue. Skipping further retries."
+                )
+                return result
+            last_failed_checks = current_failed_checks
+
             # If we have more attempts and retry is enabled, wait and retry
             if attempt < max_attempts and self.config.retry_on_transient_failure:
                 # Calculate backoff delay (exponential backoff)
@@ -2607,7 +2582,7 @@ class StateValidator:
 
                 logger.warning(
                     f"Validation failed (attempt {attempt}/{max_attempts}), "
-                    f"retrying in {backoff_delay:.1f}s... "
+                    f"retrying in {backoff_delay:.1f}s "
                     f"Failed checks: {', '.join(result.failed_checks)}"
                 )
 

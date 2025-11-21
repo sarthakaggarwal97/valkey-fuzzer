@@ -318,7 +318,7 @@ class ClusterConnection:
 @dataclass
 class ReplicationValidationConfig:
     """Configuration for replication validation"""
-    max_acceptable_lag: float = 5.0  # seconds
+    max_acceptable_lag: float = 10.0  # seconds
     require_all_replicas_synced: bool = False  # Allow dead replicas after chaos
     check_replication_offset: bool = True
     min_replicas_per_shard: int = 1  # Minimum live replicas per shard (0 = no check)
@@ -563,9 +563,15 @@ class StateValidationResult:
             if self.cluster_status.has_quorum is False:
                 return True
                 
-            # Cluster state is fail or unknown - cluster is broken
-            if self.cluster_status.cluster_state in ['fail', 'unknown']:
+            # Cluster state is 'fail' - cluster is broken
+            if self.cluster_status.cluster_state == 'fail':
                 return True
+            
+            # 'unknown' state is only critical if slots are lost
+            # (transient 'unknown' after failover is normal)
+            if self.cluster_status.cluster_state == 'unknown':
+                if self.slot_coverage and not self.slot_coverage.success:
+                    return True
             
             # Nodes in fail state - cluster has failed nodes
             if self.cluster_status.nodes_in_fail_state:

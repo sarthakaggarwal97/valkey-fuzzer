@@ -159,7 +159,7 @@ class ErrorHandler:
                     if config.jitter:
                         backoff_delay *= (0.5 + random.random())
                     
-                    logger.info(f"Retrying in {backoff_delay:.2f} seconds...")
+                    logger.info(f"Retrying in {backoff_delay:.2f} seconds")
                     time.sleep(backoff_delay)
         
         # All attempts failed
@@ -252,7 +252,7 @@ class ErrorHandler:
         # Stop all chaos injections
         if chaos_coordinator:
             try:
-                logger.info("Stopping all active chaos injections")
+                logger.debug("Stopping all active chaos injections")
                 chaos_coordinator.stop_all_chaos()
             except Exception as e:
                 logger.error(f"Failed to stop chaos: {e}")
@@ -277,7 +277,7 @@ class ErrorHandler:
         # Force cleanup of any remaining processes
         if cluster_instance:
             try:
-                logger.info("Force cleaning up any remaining processes")
+                logger.debug("Force cleaning up any remaining processes")
                 self._force_cleanup_processes(cluster_instance)
             except Exception as e:
                 logger.error(f"Failed to force cleanup processes: {e}")

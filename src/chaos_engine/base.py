@@ -8,10 +8,8 @@ import logging
 from abc import ABC
 from typing import Dict, List, Optional
 from ..interfaces import IChaosEngine
-from ..models import (
-    NodeInfo, ChaosResult, ChaosType, ProcessChaosType, 
-    Operation, ChaosConfig, TargetSelection
-)
+from ..models import NodeInfo, ChaosResult, ChaosType, ProcessChaosType, Operation, ChaosConfig, TargetSelection
+
 
 logging.basicConfig(format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', level=logging.INFO, force=True)
 logger = logging.getLogger(__name__)
@@ -233,7 +231,7 @@ class ChaosTargetSelector:
         
         elif target_selection.strategy == "random":
             selected = self.rng.choice(nodes)
-            logger.info(f"Selected random node: node id: {selected.node_id}, role: ({selected.role}, shard: {selected.shard_id})")
+            logger.info(f"Selected random node: node id: {selected.node_id}, shard: {selected.shard_id}, role: {selected.role}, port: {selected.port}")
             return selected
         
         elif target_selection.strategy == "primary_only":
