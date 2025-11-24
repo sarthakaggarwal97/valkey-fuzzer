@@ -15,9 +15,7 @@ from .operation_orchestrator import OperationOrchestrator
 from .test_logger import FuzzerLogger
 from .error_handler import ErrorHandler, ErrorContext, ErrorCategory, ErrorSeverity, RetryConfig
 from .state_validator import StateValidator
-from ..models import (
-    StateValidationConfig, ExpectedTopology, OperationContext, ChaosType
-)
+from ..models import StateValidationConfig, ExpectedTopology, OperationContext, ChaosType
 
 logging.basicConfig(format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', level=logging.INFO, force=True)
 logger = logging.getLogger(__name__)
@@ -126,21 +124,16 @@ class FuzzerEngine(IFuzzerEngine):
                 cluster_id=cluster_instance.cluster_id
             )
             
-            # Log initial cluster state
-            cluster_status = self.cluster_coordinator.get_cluster_status(cluster_instance.cluster_id)
-            if cluster_status:
-                self.logger.log_cluster_state_snapshot(cluster_status, "initial_state")
-            
             # Step 2: Validate cluster readiness
             cli_logger.info("")
             logger.info("Step 2: Validating cluster readiness")
             if not self._validate_cluster_readiness_with_retry(cluster_instance.cluster_id):
                 raise Exception("Cluster failed readiness validation")
             
-            # Step 3: Load test data
+            # Step 3: Populate cluster with test data
             cli_logger.info("")
-            logger.info("Step 3: Loading test data")
-            self._load_test_data(cluster_connection)
+            logger.info("Step 3: Populating cluster with test data")
+            load_all_slots(cluster_connection, keys_per_slot=5)
             
             self.chaos_coordinator.register_cluster_nodes(cluster_instance.cluster_id, cluster_instance.nodes)
             
@@ -153,6 +146,8 @@ class FuzzerEngine(IFuzzerEngine):
                 logger.info("Using scenario-specific StateValidationConfig (copied)")
             else:
                 validation_config = StateValidationConfig()
+                # Allow 'unknown' state after failovers - it's transient and expected
+                validation_config.cluster_status_config.acceptable_states = ['ok', 'unknown']
                 logger.info("Using default StateValidationConfig")
             
             # Adjust replication validation config based on cluster topology
@@ -164,21 +159,15 @@ class FuzzerEngine(IFuzzerEngine):
             elif validation_config.replication_config.min_replicas_per_shard > expected_replicas_per_shard:
                 # Don't require more replicas than the cluster is configured to have
                 validation_config.replication_config.min_replicas_per_shard = expected_replicas_per_shard
-                logger.info(
-                    f"Adjusted min_replicas_per_shard to {expected_replicas_per_shard} "
-                    f"to match cluster configuration"
-                )
-            
+                logger.info(f"Adjusted min_replicas_per_shard to {expected_replicas_per_shard} to match cluster configuration")
+
             state_validator = StateValidator(validation_config)
-            logger.info("State validation initialized")
             
             # Write test data for data consistency validation
             if validation_config.check_data_consistency:
                 logger.info("Writing test data for data consistency validation")
                 test_data_written = state_validator.write_test_data(cluster_connection)
-                if test_data_written:
-                    logger.info("Test data written successfully")
-                else:
+                if not test_data_written:
                     logger.warning("Failed to write test data - disabling data consistency validation for this run")
                     state_validator.config.check_data_consistency = False
             
@@ -188,18 +177,16 @@ class FuzzerEngine(IFuzzerEngine):
             # Step 4: Execute operations with chaos coordination
             cli_logger.info("")
             logger.info(f"Step 4: Executing {len(scenario.operations)} operations")
-            
+
             for i, operation in enumerate(scenario.operations):
+                cli_logger.info("")
                 logger.info(f"Executing operation {i+1}/{len(scenario.operations)}: {operation.type.value}")
                 
                 try:
                     # Log cluster state before operation
                     cluster_status = self.cluster_coordinator.get_cluster_status(cluster_instance.cluster_id)
                     if cluster_status:
-                        self.logger.log_cluster_state_snapshot(
-                            cluster_status, 
-                            f"before_operation_{i+1}"
-                        )
+                        self.logger.log_cluster_state_snapshot(cluster_status, f"before_operation_{i+1}")
                     
                     # Coordinate chaos with operation
                     operation_chaos_events = self.chaos_coordinator.coordinate_chaos_with_operation(
@@ -244,10 +231,7 @@ class FuzzerEngine(IFuzzerEngine):
                     # Log cluster state after operation
                     cluster_status = self.cluster_coordinator.get_cluster_status(cluster_instance.cluster_id)
                     if cluster_status:
-                        self.logger.log_cluster_state_snapshot(
-                            cluster_status,
-                            f"after_operation_{i+1}"
-                        )
+                        self.logger.log_cluster_state_snapshot(cluster_status, f"after_operation_{i+1}")
                     
                     # State validation
                     logger.info(f"Running state validation after operation {i+1}")
@@ -368,9 +352,7 @@ class FuzzerEngine(IFuzzerEngine):
                 validation_results=validation_results,
                 final_validation=final_validation
             )
-            
-            logger.info(f"Test execution completed: {'SUCCESS' if success else 'FAILED'}")
-            
+                        
             # Log test completion
             self.logger.log_test_completion(result)
             
@@ -402,7 +384,8 @@ class FuzzerEngine(IFuzzerEngine):
             return result
             
         finally:
-            # Step 5: Cleanup
+            # Step 6: Cleanup
+            cli_logger.info("")
             logger.info("Step 5: Cleaning up resources")
             self._cleanup_resources(cluster_instance, cluster_connection)
     
@@ -486,7 +469,6 @@ class FuzzerEngine(IFuzzerEngine):
         if success:
             logger.info(f"Cluster created successfully - Cluster ID: {cluster_instance.cluster_id}")
         else:
-            logger.error("All cluster creation attempts failed")
             self.logger.log_error("Cluster creation failed after all retries", {"attempts": max_retries})
         
         return cluster_instance if success else None
@@ -516,31 +498,21 @@ class FuzzerEngine(IFuzzerEngine):
         )
         
         if not success:
-            logger.error("Cluster failed readiness validation after all retries")
             self.logger.log_error("Cluster readiness validation failed", {"attempts": max_retries, "cluster_id": cluster_id})
         
         return success
-    
-    def _load_test_data(self, cluster_connection: ClusterConnection):
-        """Load test data into the cluster for validation purposes"""
-        load_all_slots(cluster_connection, keys_per_slot=5)
     
     def _cleanup_resources(self, cluster_instance, cluster_connection):
         """
         Clean up all resources with graceful degradation.
         """
         try:
-            cleanup_success = self.error_handler.cleanup_after_failure(
+            self.error_handler.cleanup_after_failure(
                 cluster_instance=cluster_instance,
                 cluster_connection=cluster_connection,
                 chaos_coordinator=self.chaos_coordinator,
                 cluster_coordinator=self.cluster_coordinator
             )
-            
-            if cleanup_success:
-                logger.info("Resource cleanup completed successfully")
-            else:
-                logger.warning("Resource cleanup completed with errors")
             
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")

@@ -94,7 +94,7 @@ class OperationOrchestrator(IOperationOrchestrator):
         target_node_id = target_node['node_id']
         target_shard_id = target_node.get('shard_id')
         
-        logging.info(f"Finding replicas for primary {operation.target_node} (node_id: {target_node_id}, shard: {target_shard_id})")
+        logging.info(f"Finding replicas for primary {operation.target_node} (node_id: {target_node_id})")
         
         try:
             # Get fresh cluster topology from any live node

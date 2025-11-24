@@ -7,10 +7,7 @@ import time
 import random
 from typing import Optional, List
 from copy import deepcopy
-from ..models import (
-    Operation, ChaosConfig, ChaosResult, NodeInfo, ChaosCoordination,
-    ProcessChaosType, ChaosType, TargetSelection
-)
+from ..models import Operation, ChaosConfig, ChaosResult, NodeInfo, ChaosCoordination, ProcessChaosType, ChaosType, TargetSelection
 from ..chaos_engine.base import ProcessChaosEngine
 
 logging.basicConfig(format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', level=logging.INFO, force=True)
@@ -23,6 +20,7 @@ class ChaosCoordinator:
         self.chaos_engine = ProcessChaosEngine(self.rng)
         self.active_chaos_scenarios: dict[str, List[ChaosResult]] = {}
         self.chaos_history: List[ChaosResult] = []
+        
         if seed is not None:
             logger.info(f"ChaosCoordinator initialized with seed {seed} for deterministic target selection")
 
@@ -36,7 +34,7 @@ class ChaosCoordinator:
             # Register node process with chaos engine
             self.chaos_engine.register_node_process(node.node_id, node.pid)
         
-        # Update cluster topology for target selection
+        # Update cluster topology for target selection so that it only contains live nodes
         self.chaos_engine.target_selector.update_cluster_topology(cluster_id, nodes)
         
         logger.info(f"Successfully registered {len(nodes)} nodes for chaos injection")
@@ -55,7 +53,7 @@ class ChaosCoordinator:
         operation: Operation, 
         chaos_config: ChaosConfig,
         cluster_connection,
-        cluster_id: str = "default",
+        cluster_id: str,
         randomize_per_operation: Optional[bool] = None
     ) -> List[ChaosResult]:
         """
@@ -343,7 +341,7 @@ class ChaosCoordinator:
         """
         Clean up chaos effects for a cluster.
         """
-        logger.info(f"Cleaning up chaos for cluster {cluster_id}")
+        logger.debug(f"Cleaning up chaos for cluster {cluster_id}")
         
         try:
             success = self.chaos_engine.cleanup_chaos(cluster_id)
@@ -351,7 +349,6 @@ class ChaosCoordinator:
             if cluster_id in self.active_chaos_scenarios:
                 del self.active_chaos_scenarios[cluster_id]
             
-            logger.info(f"Chaos cleanup completed for cluster {cluster_id}")
             return success
             
         except Exception as e:

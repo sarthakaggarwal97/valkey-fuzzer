@@ -13,6 +13,10 @@ from ..utils.valkey_utils import valkey_client
 logging.basicConfig(format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', level=logging.INFO, force=True)
 logger = logging.getLogger(__name__)
 
+cli_logger = logging.getLogger('cli')
+cli_logger.addHandler(logging.StreamHandler())
+cli_logger.propagate = False
+
 class PortManager:
     """Manages port allocation for Valkey cluster nodes"""
     
@@ -169,7 +173,7 @@ class ConfigurationManager:
     
     def spawn_all_nodes(self, node_plans: List[NodePlan]) -> List[NodeInfo]:
         """Spawn all Valkey processes and wait for them to be ready"""
-        print()
+        cli_logger.info("")
         logger.info(f"Spawning {len(node_plans)} nodes")
         node_info_list = []
         
@@ -304,7 +308,6 @@ class ConfigurationManager:
     
     def cleanup_cluster(self, nodes_in_cluster: List[NodeInfo]) -> None:
         """Clean up cluster by terminating nodes and releasing resources"""
-        print()
         logger.info(f"Cleaning up cluster {self.cluster_id}")
         
         for node in nodes_in_cluster:
@@ -376,7 +379,7 @@ class ClusterManager:
         first_node = nodes_in_cluster[0]
         first_node_client = self.get_client(first_node)
 
-        print()
+        cli_logger.info("")
         logger.info(f"Connecting {len(nodes_in_cluster)} nodes with CLUSTER MEET using {first_node.node_id} as starting node")
                 
         for node in nodes_in_cluster[1:]:
@@ -431,7 +434,7 @@ class ClusterManager:
             logger.info("No primary nodes to assign slots to")
             return {}
         
-        print()
+        cli_logger.info("")
         logger.info(f"Assigning slots to {len(primary_nodes)} primaries")
         
         node_ids = {}
@@ -487,7 +490,7 @@ class ClusterManager:
             logger.info("No replicas to configure")
             return
         
-        print()
+        cli_logger.info("")
         logger.info(f"Configuring {len(replicas)} replicas")
         
         for replica in replicas:
@@ -567,7 +570,7 @@ class ClusterManager:
         if not nodes_in_cluster:
             return False
         
-        print()
+        cli_logger.info("")
         logger.info("CLUSTER VALIDATION")
         deadline = time.time() + timeout
         last_states: List[Dict[str, object]] = []
@@ -675,7 +678,7 @@ class ClusterManager:
     
     def form_cluster(self, nodes_in_cluster: List[NodeInfo], cluster_id: str) -> ClusterConnection:
         """Form a complete cluster from spawned nodes"""
-        print()
+        cli_logger.info("")
         logger.info("FORMING CLUSTER")
         
         try:
@@ -688,6 +691,8 @@ class ClusterManager:
             
             if not self.validate_cluster(nodes_in_cluster):
                 raise Exception("Cluster validation failed")
+            
+            logger.info("Cluster initial state: Healthy")
             
             return ClusterConnection(nodes_in_cluster, cluster_id)
         
