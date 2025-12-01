@@ -330,8 +330,17 @@ class ReplicationValidator:
                         f"(max_lag={max_lag:.2f}s > {config.max_acceptable_lag:.2f}s)"
                     )
                 elif len(disconnected_replicas) == len(replica_nodes) and replica_nodes:
-                    success = False
-                    error_message = "All replicas are disconnected"
+                    # Only fail if there are unexpected disconnections (not killed by chaos)
+                    disconnected_set = set(disconnected_replicas)
+                    unexpected_disconnections = disconnected_set - killed_nodes
+                    if unexpected_disconnections:
+                        success = False
+                        error_message = "All replicas are disconnected"
+                    else:
+                        # All disconnections are due to chaos - this is expected
+                        logger.info(
+                            f"All {len(replica_nodes)} replica(s) disconnected but all were killed by chaos (expected)"
+                        )
                 elif disconnected_replicas:
                     # Some replicas disconnected but not all - check if redundancy is maintained
                     logger.info(
