@@ -207,30 +207,17 @@ class ChaosCoordinator:
             ])
             logger.info(f"Randomized chaos type: {randomized_config.process_chaos_type.value}")
 
-        # Randomize chaos timing coordination (30% chance for each timing option)
-        # At least one must be True
-        chaos_before = self.rng.random() < 0.3
-        chaos_during = self.rng.random() < 0.5  # Higher probability for during
-        chaos_after = self.rng.random() < 0.3
-
-        # Ensure at least one is True
-        if not (chaos_before or chaos_during or chaos_after):
-            chaos_during = True
+        # Randomize chaos timing coordination - select exactly ONE timing option
+        timing_options = ['before', 'during', 'after']
+        selected_timing = self.rng.choice(timing_options)
 
         randomized_config.coordination = ChaosCoordination(
-            chaos_before_operation=chaos_before,
-            chaos_during_operation=chaos_during,
-            chaos_after_operation=chaos_after
+            chaos_before_operation=(selected_timing == 'before'),
+            chaos_during_operation=(selected_timing == 'during'),
+            chaos_after_operation=(selected_timing == 'after')
         )
 
-        timing_desc = []
-        if chaos_before:
-            timing_desc.append("before")
-        if chaos_during:
-            timing_desc.append("during")
-        if chaos_after:
-            timing_desc.append("after")
-        logger.info(f"Randomized chaos timing: {', '.join(timing_desc)}")
+        logger.info(f"Randomized chaos timing: {selected_timing}")
 
         # Randomize target selection strategy (if not specific nodes)
         if randomized_config.target_selection.strategy != "specific":
