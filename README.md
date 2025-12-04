@@ -101,6 +101,13 @@ valkey-fuzzer cluster --random --iterations 10
 
 # Run with configuration file
 valkey-fuzzer cluster --seed 42 --config config.yaml --output results.json
+
+# Verbose output
+valkey-fuzzer cluster --seed 42 --verbose
+
+# Run with iterations 
+valkey-fuzzer cluster --seed 42 --iterations 2 --verbose
+
 ```
 
 ### DSL-Based Test Execution
@@ -113,9 +120,6 @@ valkey-fuzzer cluster --dsl test_scenario.yaml
 
 # Validate DSL configuration
 valkey-fuzzer validate test_scenario.yaml
-
-# Verbose output
-valkey-fuzzer cluster --seed 42 --verbose
 ```
 
 ### DSL Configuration Examples
