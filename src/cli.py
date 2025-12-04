@@ -10,12 +10,12 @@ import json
 import yaml
 import traceback
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Dict, Any
 from datetime import datetime
 
 from .main import ClusterBusFuzzer
 from .fuzzer_engine import DSLLoader, ScenarioGenerator
-from .models import ClusterConfig, WorkloadConfig, ExecutionResult, StateValidationResult
+from .models import ExecutionResult
 
 
 class FuzzerCLI:
@@ -50,7 +50,9 @@ class FuzzerCLI:
                 self.config = self.load_config_file(args.config)
                 print(f"Loaded configuration from {args.config}")
             except Exception as e:
-                print(f"Failed to load config: {e}")
+                print(f"Error: Failed to load config file: {e}")
+                print(f"\nConfig file must be YAML (.yaml, .yml) or JSON (.json)")
+                print(f"Example: valkey-fuzzer cluster --seed 42 --config config.yaml")
                 return 1
         
         # Display test parameters
@@ -108,7 +110,9 @@ class FuzzerCLI:
         
         dsl_path = Path(args.file)
         if not dsl_path.exists():
-            print(f"DSL file not found: {args.file}")
+            print(f"Error: DSL file not found: {args.file}")
+            print(f"\nMake sure the file path is correct.")
+            print(f"Example: valkey-fuzzer cluster --dsl examples/simple_failover.yaml")
             return 1
         
         try:
@@ -132,7 +136,9 @@ class FuzzerCLI:
             return 0 if result.success else 1
             
         except Exception as e:
-            print(f"DSL test failed: {e}")
+            print(f"Error: DSL test failed: {e}")
+            print(f"\nTry validating your DSL file first:")
+            print(f"  valkey-fuzzer validate {args.file}")
             if args.verbose:
                 traceback.print_exc()
             return 1
@@ -143,7 +149,9 @@ class FuzzerCLI:
         
         dsl_path = Path(args.file)
         if not dsl_path.exists():
-            print(f"DSL file not found: {args.file}")
+            print(f"Error: DSL file not found: {args.file}")
+            print(f"\nMake sure the file path is correct.")
+            print(f"Example: valkey-fuzzer validate examples/simple_failover.yaml")
             return 1
         
         try:
@@ -180,7 +188,8 @@ class FuzzerCLI:
             return 0
             
         except Exception as e:
-            print(f"\nValidation Failed: {e}")
+            print(f"\nError: Validation failed: {e}")
+            print(f"\nCheck your DSL file syntax. See examples in the examples/ directory.")
             if args.verbose:
                 traceback.print_exc()
             return 1
@@ -547,13 +556,27 @@ def main():
     args = parser.parse_args()
     
     if not args.command:
+        print("Error: No command specified\n")
         parser.print_help()
+        print("\nCommon commands:")
+        print("  valkey-fuzzer cluster --random          # Run random test")
+        print("  valkey-fuzzer cluster --seed 42         # Run with specific seed")
+        print("  valkey-fuzzer validate <file.yaml>      # Validate DSL file")
         return 1
     
     cli = FuzzerCLI()
     
     try:
         if args.command == 'cluster':
+            # Validate cluster command arguments
+            if not args.dsl and not args.seed and not args.random:
+                print("Error: cluster command requires either --dsl, --seed, or --random\n")
+                print("Examples:")
+                print("  valkey-fuzzer cluster --random")
+                print("  valkey-fuzzer cluster --seed 42")
+                print("  valkey-fuzzer cluster --dsl test.yaml")
+                return 1
+            
             # Determine which cluster test mode to run
             if args.dsl:
                 # Run DSL-based test
