@@ -14,7 +14,7 @@ from typing import Dict, Any
 from datetime import datetime
 
 from .main import ClusterBusFuzzer
-from .fuzzer_engine import DSLLoader, ScenarioGenerator
+from .fuzzer_engine import DSLLoader
 from .models import ExecutionResult
 
 
@@ -461,7 +461,7 @@ Examples:
   # Run multiple iterations
   valkey-fuzzer cluster --random --iterations 10
   
-  # Run with configuration file
+  # Run with configuration file and output results to another file
   valkey-fuzzer cluster --seed 42 --config config.yaml --output results.json
   
   # Run DSL-based test
