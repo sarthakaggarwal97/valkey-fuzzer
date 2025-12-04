@@ -15,7 +15,7 @@ from datetime import datetime
 
 from .main import ClusterBusFuzzer
 from .fuzzer_engine import DSLLoader
-from .models import ExecutionResult
+from .models import ExecutionResult, StateValidationResult
 
 
 class FuzzerCLI:
