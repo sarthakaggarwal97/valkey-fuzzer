@@ -612,6 +612,11 @@ def main():
                     print("Error: --dsl mode cannot be combined with --seed, --iterations, or --config\n")
                     return 1
                 
+                if args.export_dsl:
+                    print("Error: --dsl mode cannot be combined with --export-dsl\n")
+                    print("The --export-dsl option is only for randomly generated scenarios.")
+                    return 1
+                
                 # Run DSL-based test
                 dsl_args = type('obj', (object,), {
                     'file': args.dsl,
