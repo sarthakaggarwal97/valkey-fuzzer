@@ -570,7 +570,7 @@ def main():
     try:
         if args.command == 'cluster':
             # Validate cluster command arguments
-            if not args.dsl and not args.seed and not args.random:
+            if not args.dsl and args.seed is None and not args.random:
                 print("Error: cluster command requires either --dsl, --seed, or --random\n")
                 print("Examples:")
                 print("  valkey-fuzzer cluster --random")
