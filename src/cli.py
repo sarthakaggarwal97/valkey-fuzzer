@@ -67,6 +67,9 @@ class FuzzerCLI:
         if args.iterations:
             print(f"Iterations: {args.iterations}")
         
+        if args.export_dsl:
+            print(f"DSL Export: {args.export_dsl}")
+        
         print()
         
         # Run test(s)
@@ -101,6 +104,10 @@ class FuzzerCLI:
         # Save results if output specified
         if args.output:
             self._save_results(results, args.output, args.format)
+        
+        # Export scenario to DSL if requested
+        if args.export_dsl and self.fuzzer.last_scenario:
+            self._export_scenario_to_dsl(self.fuzzer.last_scenario, args.export_dsl)
         
         # Return success if all tests passed
         return 0 if all(r.success for r in results) else 1
@@ -320,6 +327,18 @@ class FuzzerCLI:
         print(f"Average Operations: {avg_operations:.1f}")
         print(f"Average Chaos Events: {avg_chaos:.1f}")
     
+    def _export_scenario_to_dsl(self, scenario, export_path: str):
+        """Export scenario to DSL YAML file"""
+        try:
+            export_path = Path(export_path)
+            export_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            DSLLoader.save_scenario_as_dsl(scenario, export_path)
+            print(f"\nScenario exported to DSL: {export_path}")
+        
+        except Exception as e:
+            print(f"\nFailed to export scenario to DSL: {e}")
+    
     def _save_results(self, results: list, output_path: str, format: str):
         """Save test results to file"""
         try:
@@ -467,6 +486,9 @@ Examples:
   
   # Run DSL-based test
   valkey-fuzzer cluster --dsl examples/simple_failover.yaml
+
+  # Export scenario to DSL File
+  valkey-fuzzer cluster --random --export-dsl dsl_file.yml
   
   # Validate DSL file
   valkey-fuzzer validate examples/simple_failover.yaml
@@ -531,6 +553,12 @@ Examples:
         '--verbose',
         action='store_true',
         help='Enable verbose output'
+    )
+    cluster_parser.add_argument(
+        '--export-dsl',
+        type=str,
+        metavar='FILE',
+        help='Export the generated scenario to a DSL YAML file'
     )
     
     # Validate command

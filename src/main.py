@@ -13,13 +13,16 @@ class ClusterBusFuzzer:
         Initialize the fuzzer with the main fuzzer engine
         """
         self.fuzzer_engine = FuzzerEngine()
+        self.last_scenario = None
     
     def run_random_test(self, seed: int = None):
         """
         Run a randomized test scenario.
         """
         scenario = self.fuzzer_engine.generate_random_scenario(seed)
-        return self.fuzzer_engine.execute_test(scenario)
+        result = self.fuzzer_engine.execute_test(scenario)
+        self.last_scenario = scenario
+        return result
     
     def run_dsl_test(self, dsl_config: DSLConfig):
         """

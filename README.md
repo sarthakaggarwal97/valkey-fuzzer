@@ -104,6 +104,7 @@ valkey-fuzzer cluster --seed 42 --config config.yaml --output results.json
 
 # Verbose output
 valkey-fuzzer cluster --seed 42 --verbose
+valkey-fuzzer cluster --random --verbose
 
 # Run with iterations 
 valkey-fuzzer cluster --seed 42 --iterations 2 --verbose
@@ -120,6 +121,21 @@ valkey-fuzzer cluster --dsl test_scenario.yaml
 
 # Validate DSL configuration
 valkey-fuzzer validate test_scenario.yaml
+```
+
+### Exporting Random Scenarios
+
+Capture randomly generated test scenarios as DSL files for reproducibility and sharing:
+
+```bash
+# Export a random scenario
+valkey-fuzzer cluster --random --export-dsl captured_scenario.yaml
+
+# Export with specific seed
+valkey-fuzzer cluster --seed 12345 --export-dsl seed_12345_scenario.yaml
+
+# Reproduce the exact scenario
+valkey-fuzzer cluster --dsl captured_scenario.yaml
 ```
 
 ### DSL Configuration Examples

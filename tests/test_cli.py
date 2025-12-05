@@ -90,6 +90,7 @@ class TestFuzzerCLI:
         """Test running random test successfully"""
         mock_fuzzer = Mock()
         mock_fuzzer.run_random_test.return_value = mock_result
+        mock_fuzzer.last_scenario = Mock()
         mock_fuzzer_class.return_value = mock_fuzzer
         
         cli = FuzzerCLI()
@@ -98,7 +99,8 @@ class TestFuzzerCLI:
             iterations=1,
             config=None,
             output=None,
-            verbose=False
+            verbose=False,
+            export_dsl=None
         )
         
         result = cli.run_random_test(args)
@@ -118,6 +120,7 @@ class TestFuzzerCLI:
         
         mock_fuzzer = Mock()
         mock_fuzzer.run_random_test.return_value = mock_result
+        mock_fuzzer.last_scenario = Mock()
         mock_fuzzer_class.return_value = mock_fuzzer
         
         cli = FuzzerCLI()
@@ -126,7 +129,8 @@ class TestFuzzerCLI:
             iterations=1,
             config=str(config_file),
             output=None,
-            verbose=False
+            verbose=False,
+            export_dsl=None
         )
         
         result = cli.run_random_test(args)
@@ -139,6 +143,7 @@ class TestFuzzerCLI:
         """Test running multiple test iterations"""
         mock_fuzzer = Mock()
         mock_fuzzer.run_random_test.return_value = mock_result
+        mock_fuzzer.last_scenario = Mock()
         mock_fuzzer_class.return_value = mock_fuzzer
         
         cli = FuzzerCLI()
@@ -147,7 +152,8 @@ class TestFuzzerCLI:
             iterations=3,
             config=None,
             output=None,
-            verbose=False
+            verbose=False,
+            export_dsl=None
         )
         
         result = cli.run_random_test(args)
@@ -162,6 +168,7 @@ class TestFuzzerCLI:
         
         mock_fuzzer = Mock()
         mock_fuzzer.run_random_test.return_value = mock_result
+        mock_fuzzer.last_scenario = Mock()
         mock_fuzzer_class.return_value = mock_fuzzer
         
         cli = FuzzerCLI()
@@ -171,7 +178,8 @@ class TestFuzzerCLI:
             config=None,
             output=str(output_file),
             format='json',
-            verbose=False
+            verbose=False,
+            export_dsl=None
         )
         
         result = cli.run_random_test(args)
@@ -185,6 +193,33 @@ class TestFuzzerCLI:
         assert data['total_tests'] == 1
         assert data['passed'] == 1
         assert len(data['results']) == 1
+    
+    @patch('src.cli.DSLLoader.save_scenario_as_dsl')
+    @patch('src.cli.ClusterBusFuzzer')
+    def test_run_random_test_with_export_dsl(self, mock_fuzzer_class, mock_save_dsl, mock_result, tmp_path):
+        """Test exporting random scenario to DSL file"""
+        export_file = tmp_path / "scenario.yaml"
+        
+        mock_scenario = Mock()
+        mock_fuzzer = Mock()
+        mock_fuzzer.run_random_test.return_value = mock_result
+        mock_fuzzer.last_scenario = mock_scenario
+        mock_fuzzer_class.return_value = mock_fuzzer
+        
+        cli = FuzzerCLI()
+        args = Mock(
+            seed=42,
+            iterations=1,
+            config=None,
+            output=None,
+            verbose=False,
+            export_dsl=str(export_file)
+        )
+        
+        result = cli.run_random_test(args)
+        
+        assert result == 0
+        mock_save_dsl.assert_called_once_with(mock_scenario, export_file)
     
     @patch('src.cli.ClusterBusFuzzer')
     @patch('src.cli.DSLLoader')
@@ -325,6 +360,14 @@ class TestCLIParser:
         assert args.command == 'cluster'
         assert args.output == 'results.json'
         assert args.format == 'yaml'
+    
+    def test_parse_export_dsl_option(self):
+        """Test parsing export-dsl option"""
+        parser = create_parser()
+        args = parser.parse_args(['cluster', '--random', '--export-dsl', 'scenario.yaml'])
+        
+        assert args.command == 'cluster'
+        assert args.export_dsl == 'scenario.yaml'
 
 
 class TestCLIMain:
