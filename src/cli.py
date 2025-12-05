@@ -10,12 +10,13 @@ import json
 import yaml
 import traceback
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Dict, Any
 from datetime import datetime
 
 from .main import ClusterBusFuzzer
-from .fuzzer_engine import DSLLoader, ScenarioGenerator
-from .models import ClusterConfig, WorkloadConfig, ExecutionResult, StateValidationResult
+from .fuzzer_engine import DSLLoader
+from .fuzzer_engine.test_case_generator import ScenarioGenerator
+from .models import ExecutionResult, StateValidationResult
 
 
 class FuzzerCLI:
@@ -50,7 +51,9 @@ class FuzzerCLI:
                 self.config = self.load_config_file(args.config)
                 print(f"Loaded configuration from {args.config}")
             except Exception as e:
-                print(f"Failed to load config: {e}")
+                print(f"Error: Failed to load config file: {e}")
+                print(f"\nConfig file must be YAML (.yaml, .yml) or JSON (.json)")
+                print(f"Example: valkey-fuzzer cluster --seed 42 --config config.yaml")
                 return 1
         
         # Display test parameters
@@ -108,7 +111,9 @@ class FuzzerCLI:
         
         dsl_path = Path(args.file)
         if not dsl_path.exists():
-            print(f"DSL file not found: {args.file}")
+            print(f"Error: DSL file not found: {args.file}")
+            print(f"\nMake sure the file path is correct.")
+            print(f"Example: valkey-fuzzer cluster --dsl examples/simple_failover.yaml")
             return 1
         
         try:
@@ -132,7 +137,9 @@ class FuzzerCLI:
             return 0 if result.success else 1
             
         except Exception as e:
-            print(f"DSL test failed: {e}")
+            print(f"Error: DSL test failed: {e}")
+            print(f"\nTry validating your DSL file first:")
+            print(f"  valkey-fuzzer validate {args.file}")
             if args.verbose:
                 traceback.print_exc()
             return 1
@@ -143,7 +150,9 @@ class FuzzerCLI:
         
         dsl_path = Path(args.file)
         if not dsl_path.exists():
-            print(f"DSL file not found: {args.file}")
+            print(f"Error: DSL file not found: {args.file}")
+            print(f"\nMake sure the file path is correct.")
+            print(f"Example: valkey-fuzzer validate examples/simple_failover.yaml")
             return 1
         
         try:
@@ -180,7 +189,8 @@ class FuzzerCLI:
             return 0
             
         except Exception as e:
-            print(f"\nValidation Failed: {e}")
+            print(f"\nError: Validation failed: {e}")
+            print(f"\nCheck your DSL file syntax. See examples in the examples/ directory.")
             if args.verbose:
                 traceback.print_exc()
             return 1
@@ -443,26 +453,26 @@ def create_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run a random test
-  valkey-fuzzer random
+  # Run a random cluster test
+  valkey-fuzzer cluster --random
   
   # Run with specific seed for reproducibility
-  valkey-fuzzer random --seed 42
+  valkey-fuzzer cluster --seed 42
   
   # Run multiple iterations
-  valkey-fuzzer random --iterations 10
+  valkey-fuzzer cluster --random --iterations 10
   
-  # Run with configuration file and store results to output file
-  valkey-fuzzer random --config config.yaml --output results.json
+  # Run with configuration file and output results to another file
+  valkey-fuzzer cluster --seed 42 --config config.yaml --output results.json
   
   # Run DSL-based test
-  valkey-fuzzer dsl examples/simple_failover.yaml
+  valkey-fuzzer cluster --dsl examples/simple_failover.yaml
   
   # Validate DSL file
   valkey-fuzzer validate examples/simple_failover.yaml
   
   # Verbose output
-  valkey-fuzzer random --seed 42 --verbose
+  valkey-fuzzer cluster --seed 42 --verbose
         """
     )
     
@@ -474,65 +484,50 @@ Examples:
     
     subparsers = parser.add_subparsers(dest='command', help='Command to execute')
     
-    # Random test command
-    random_parser = subparsers.add_parser(
-        'random',
-        help='Run a randomized test scenario'
+    # Cluster test command
+    cluster_parser = subparsers.add_parser(
+        'cluster',
+        help='Run cluster-related fuzzer tests'
     )
-    random_parser.add_argument(
+    cluster_parser.add_argument(
+        '--random',
+        action='store_true',
+        help='Run with random scenario'
+    )
+    cluster_parser.add_argument(
         '--seed',
         type=int,
         help='Seed for reproducibility'
     )
-    random_parser.add_argument(
+    cluster_parser.add_argument(
+        '--dsl',
+        type=str,
+        metavar='FILE',
+        help='Path to DSL YAML file'
+    )
+    cluster_parser.add_argument(
         '--iterations',
         type=int,
         default=1,
         help='Number of test iterations to run (default: 1)'
     )
-    random_parser.add_argument(
+    cluster_parser.add_argument(
         '--config',
         type=str,
         help='Path to configuration file (YAML or JSON)'
     )
-    random_parser.add_argument(
+    cluster_parser.add_argument(
         '--output',
         type=str,
         help='Path to save test results'
     )
-    random_parser.add_argument(
+    cluster_parser.add_argument(
         '--format',
         choices=['json', 'yaml'],
         default='json',
         help='Output format for results (default: json)'
     )
-    random_parser.add_argument(
-        '--verbose',
-        action='store_true',
-        help='Enable verbose output'
-    )
-    
-    # DSL test command
-    dsl_parser = subparsers.add_parser(
-        'dsl',
-        help='Run a DSL-based test scenario'
-    )
-    dsl_parser.add_argument(
-        'file',
-        help='Path to DSL YAML file'
-    )
-    dsl_parser.add_argument(
-        '--output',
-        type=str,
-        help='Path to save test results'
-    )
-    dsl_parser.add_argument(
-        '--format',
-        choices=['json', 'yaml'],
-        default='json',
-        help='Output format for results (default: json)'
-    )
-    dsl_parser.add_argument(
+    cluster_parser.add_argument(
         '--verbose',
         action='store_true',
         help='Enable verbose output'
@@ -562,16 +557,44 @@ def main():
     args = parser.parse_args()
     
     if not args.command:
+        print("Error: No command specified\n")
         parser.print_help()
+        print("\nCommon commands:")
+        print("  valkey-fuzzer cluster --random          # Run random test")
+        print("  valkey-fuzzer cluster --seed 42         # Run with specific seed")
+        print("  valkey-fuzzer validate <file.yaml>      # Validate DSL file")
         return 1
     
     cli = FuzzerCLI()
     
     try:
-        if args.command == 'random':
-            return cli.run_random_test(args)
-        elif args.command == 'dsl':
-            return cli.run_dsl_test(args)
+        if args.command == 'cluster':
+            # Validate cluster command arguments
+            if not args.dsl and args.seed is None and not args.random:
+                print("Error: cluster command requires either --dsl, --seed, or --random\n")
+                print("Examples:")
+                print("  valkey-fuzzer cluster --random")
+                print("  valkey-fuzzer cluster --seed 42")
+                print("  valkey-fuzzer cluster --dsl test.yaml")
+                return 1
+            
+            # Determine which cluster test mode to run
+            if args.dsl:
+                if args.seed is not None or args.iterations != 1 or args.config:
+                    print("Error: --dsl mode cannot be combined with --seed, --iterations, or --config\n")
+                    return 1
+                
+                # Run DSL-based test
+                dsl_args = type('obj', (object,), {
+                    'file': args.dsl,
+                    'output': args.output,
+                    'format': args.format,
+                    'verbose': args.verbose
+                })
+                return cli.run_dsl_test(dsl_args)
+            else:
+                # Run random test (default)
+                return cli.run_random_test(args)
         elif args.command == 'validate':
             return cli.validate_dsl(args)
     except KeyboardInterrupt:

@@ -52,8 +52,6 @@ graph TB
 ### Prerequisites
 
 - Python 3.9+
-- Valkey server binaries
-- valkey-benchmark utility
 
 ### Setup
 
@@ -72,19 +70,44 @@ valkey-benchmark --version
 
 ## Usage
 
+### CLI Help
+
+View all available commands and options:
+
+```bash
+# Show all commands and options
+valkey-fuzzer --help
+
+# Show cluster command options
+valkey-fuzzer cluster --help
+
+# Show validate command options
+valkey-fuzzer validate --help
+```
+
 ### Random Test Execution
 
 Generate and execute randomized test scenarios:
 
 ```bash
 # Run with random seed
-python -m valkey_fuzzer --mode random
+valkey-fuzzer cluster --random
 
 # Run with specific seed for reproducibility
-python -m valkey_fuzzer --mode random --seed 12345
+valkey-fuzzer cluster --seed 12345
 
-# Configure cluster parameters
-python -m valkey_fuzzer --mode random --shards 6 --replicas 1
+# Run multiple iterations
+valkey-fuzzer cluster --random --iterations 10
+
+# Run with configuration file
+valkey-fuzzer cluster --seed 42 --config config.yaml --output results.json
+
+# Verbose output
+valkey-fuzzer cluster --seed 42 --verbose
+
+# Run with iterations 
+valkey-fuzzer cluster --seed 42 --iterations 2 --verbose
+
 ```
 
 ### DSL-Based Test Execution
@@ -93,10 +116,10 @@ Execute predefined test scenarios using DSL configuration:
 
 ```bash
 # Run DSL-based test
-python -m valkey_fuzzer --mode dsl --config test_scenario.yaml
+valkey-fuzzer cluster --dsl test_scenario.yaml
 
 # Validate DSL configuration
-python -m valkey_fuzzer --validate-dsl test_scenario.yaml
+valkey-fuzzer validate test_scenario.yaml
 ```
 
 ### DSL Configuration Examples
@@ -244,7 +267,7 @@ Error Log:
 [14:42:38] ERROR: Cluster state validation failed
 
 Reproduction Command:
-python -m valkey_fuzzer --mode random --seed 67890
+valkey-fuzzer cluster --seed 67890
 ```
 
 ## Initial Prototype Scope
