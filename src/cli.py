@@ -580,6 +580,10 @@ def main():
             
             # Determine which cluster test mode to run
             if args.dsl:
+                if args.seed is not None or args.iterations != 1 or args.config:
+                    print("Error: --dsl mode cannot be combined with --seed, --iterations, or --config\n")
+                    return 1
+                
                 # Run DSL-based test
                 dsl_args = type('obj', (object,), {
                     'file': args.dsl,
