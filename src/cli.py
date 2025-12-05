@@ -107,7 +107,11 @@ class FuzzerCLI:
         
         # Export scenario to DSL if requested
         if args.export_dsl and self.fuzzer.last_scenario:
-            self._export_scenario_to_dsl(self.fuzzer.last_scenario, args.export_dsl)
+            try:
+                self._export_scenario_to_dsl(self.fuzzer.last_scenario, args.export_dsl)
+            except Exception as e:
+                print(f"\nError: Failed to export scenario to DSL: {e}")
+                return 1
         
         # Return success if all tests passed
         return 0 if all(r.success for r in results) else 1
@@ -329,15 +333,11 @@ class FuzzerCLI:
     
     def _export_scenario_to_dsl(self, scenario, export_path: str):
         """Export scenario to DSL YAML file"""
-        try:
-            export_path = Path(export_path)
-            export_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            DSLLoader.save_scenario_as_dsl(scenario, export_path)
-            print(f"\nScenario exported to DSL: {export_path}")
+        export_path = Path(export_path)
+        export_path.parent.mkdir(parents=True, exist_ok=True)
         
-        except Exception as e:
-            print(f"\nFailed to export scenario to DSL: {e}")
+        DSLLoader.save_scenario_as_dsl(scenario, export_path)
+        print(f"\nScenario exported to DSL: {export_path}")
     
     def _save_results(self, results: list, output_path: str, format: str):
         """Save test results to file"""
