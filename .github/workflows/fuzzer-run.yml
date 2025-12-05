@@ -33,7 +33,7 @@ jobs:
         echo "Random Fuzzer Test"
         echo "Timestamp: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
         echo "========================================"
-        valkey-fuzzer random --verbose
+        valkey-fuzzer cluster --random --verbose
     
     - name: Print Valkey node logs
       if: always()
