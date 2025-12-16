@@ -12,8 +12,7 @@ from typing import Optional, Callable, Any, Dict, List
 from enum import Enum
 from dataclasses import dataclass
 
-logging.basicConfig(format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', level=logging.INFO, force=True)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger()
 
 
 class ErrorSeverity(Enum):
@@ -126,7 +125,7 @@ class ErrorHandler:
         
         for attempt in range(config.max_attempts):
             try:
-                logger.info(f"Executing {operation_name} (attempt {attempt + 1}/{config.max_attempts})")
+                logger.debug(f"Executing {operation_name} (attempt {attempt + 1}/{config.max_attempts})")
                 
                 result = operation(**kwargs)
                 

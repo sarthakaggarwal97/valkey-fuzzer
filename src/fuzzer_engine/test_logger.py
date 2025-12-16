@@ -4,19 +4,19 @@ Test Logger - Comprehensive logging and reporting for test execution
 import json
 import time
 import logging
+import threading
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from ..models import Scenario, Operation, ChaosResult, ExecutionResult, ClusterStatus
 
 
-logging.basicConfig(format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', level=logging.INFO, force=True)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger()
 
 
 class FuzzerLogger:
     """
-    Immutable test execution logging system with comprehensive reporting.
+    Thread-safe test execution logging system with comprehensive reporting.
     Logs all test execution details including operations, chaos events, and validation results.
     """
     
@@ -27,9 +27,8 @@ class FuzzerLogger:
         self.current_test_id: Optional[str] = None
         self.test_logs: Dict[str, Dict[str, Any]] = {}
         self.test_start_times: Dict[str, float] = {}
-        
-        logger.info(f"Test logger initialized with log directory: {self.log_dir}")
-    
+        self._lock = threading.Lock()
+            
     def log_test_start(self, scenario: Scenario) -> None:
         """Log the start of a test scenario with immutable configuration."""
         self.current_test_id = scenario.scenario_id
@@ -57,31 +56,33 @@ class FuzzerLogger:
         
         self._write_log_to_disk(scenario.scenario_id)
     
-    def log_operation(self, operation: Operation, success: bool, details: str) -> None:
+    def log_operation(self, operation: Operation, success: bool, details: str, silent: bool = False) -> None:
         """Log a cluster operation execution with success status and details."""
-        if not self.current_test_id:
-            logger.warning("No active test to log operation to")
-            return
-        
-        operation_log = {
-            'timestamp': time.time(),
-            'datetime': datetime.now().isoformat(),
-            'operation_type': operation.type.value,
-            'target_node': operation.target_node,
-            'parameters': operation.parameters,
-            'timing': {
-                'delay_before': operation.timing.delay_before,
-                'timeout': operation.timing.timeout,
-                'delay_after': operation.timing.delay_after
-            },
-            'success': success,
-            'details': details
-        }
-        
-        self.test_logs[self.current_test_id]['operation_logs'].append(operation_log)
-        
-        logger.info(f"Logged operation: {operation.type.value} on {operation.target_node} - {'SUCCESS' if success else 'FAILED'}")
-        self._write_log_to_disk(self.current_test_id)
+        with self._lock:
+            if not self.current_test_id:
+                logger.warning("No active test to log operation to")
+                return
+            
+            operation_log = {
+                'timestamp': time.time(),
+                'datetime': datetime.now().isoformat(),
+                'operation_type': operation.type.value,
+                'target_node': operation.target_node,
+                'parameters': operation.parameters,
+                'timing': {
+                    'delay_before': operation.timing.delay_before,
+                    'timeout': operation.timing.timeout,
+                    'delay_after': operation.timing.delay_after
+                },
+                'success': success,
+                'details': details
+            }
+            
+            self.test_logs[self.current_test_id]['operation_logs'].append(operation_log)
+            
+            if not silent:
+                logger.info(f"Logged operation: {operation.type.value} on {operation.target_node} - {'SUCCESS' if success else 'FAILED'}")
+            self._write_log_to_disk(self.current_test_id)
     
     def log_chaos_event(self, chaos_result: ChaosResult) -> None:
         """Log a chaos injection event with result details."""

@@ -10,12 +10,7 @@ from typing import List, Dict, Optional, Tuple
 from ..models import ClusterConfig, NodePlan, NodeInfo, ClusterConnection
 from ..utils.valkey_utils import valkey_client
 
-logging.basicConfig(format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', level=logging.INFO, force=True)
-logger = logging.getLogger(__name__)
-
-cli_logger = logging.getLogger('cli')
-cli_logger.addHandler(logging.StreamHandler())
-cli_logger.propagate = False
+logger = logging.getLogger()
 
 class PortManager:
     """Manages port allocation for Valkey cluster nodes"""
@@ -148,9 +143,7 @@ class ConfigurationManager:
     
     def build_node_command(self, port: int, data_dir: str, log_file: str) -> List[str]:
         """
-        Build the Valkey server command with standard cluster configuration.
-        
-        This is the single source of truth for node configuration parameters.
+        Build the Valkey server command with standard cluster configuration.        
         """
         return [
             self.clusterConfig.valkey_binary,
@@ -173,7 +166,7 @@ class ConfigurationManager:
     
     def spawn_all_nodes(self, node_plans: List[NodePlan]) -> List[NodeInfo]:
         """Spawn all Valkey processes and wait for them to be ready"""
-        cli_logger.info("")
+        logger.info("")
         logger.info(f"Spawning {len(node_plans)} nodes")
         node_info_list = []
         
@@ -325,7 +318,7 @@ class ConfigurationManager:
                 shutil.rmtree(cluster_dir)
                 logger.info(f"Deleted data directory")
         
-        logger.info(f"Cluster {self.cluster_id} cleaned up")
+        logger.debug(f"Cluster {self.cluster_id} cleaned up")
 
 
 class ClusterManager:
@@ -379,7 +372,7 @@ class ClusterManager:
         first_node = nodes_in_cluster[0]
         first_node_client = self.get_client(first_node)
 
-        cli_logger.info("")
+        logger.info("")
         logger.info(f"Connecting {len(nodes_in_cluster)} nodes with CLUSTER MEET using {first_node.node_id} as starting node")
                 
         for node in nodes_in_cluster[1:]:
@@ -434,7 +427,7 @@ class ClusterManager:
             logger.info("No primary nodes to assign slots to")
             return {}
         
-        cli_logger.info("")
+        logger.info("")
         logger.info(f"Assigning slots to {len(primary_nodes)} primaries")
         
         node_ids = {}
@@ -490,7 +483,7 @@ class ClusterManager:
             logger.info("No replicas to configure")
             return
         
-        cli_logger.info("")
+        logger.info("")
         logger.info(f"Configuring {len(replicas)} replicas")
         
         for replica in replicas:
@@ -570,7 +563,7 @@ class ClusterManager:
         if not nodes_in_cluster:
             return False
         
-        cli_logger.info("")
+        logger.info("")
         logger.info("CLUSTER VALIDATION")
         deadline = time.time() + timeout
         last_states: List[Dict[str, object]] = []
@@ -582,7 +575,6 @@ class ClusterManager:
 
             for node in nodes_in_cluster:
                 try:
-                    client = self.get_client(node)
                     info_dict = self.get_cluster_info(node)
 
                     cluster_state = info_dict.get('cluster_state')
@@ -601,7 +593,7 @@ class ClusterManager:
 
                 except Exception as e:
                     unreachable_nodes.append(node.node_id)
-                    logger.warning(f"Expected node {node.node_id} is unreachable: {e}")
+                    logger.debug(f"Expected node {node.node_id} is unreachable: {e}")
 
             if unreachable_nodes:
                 last_unreachable = unreachable_nodes
@@ -678,9 +670,6 @@ class ClusterManager:
     
     def form_cluster(self, nodes_in_cluster: List[NodeInfo], cluster_id: str) -> ClusterConnection:
         """Form a complete cluster from spawned nodes"""
-        cli_logger.info("")
-        logger.info("FORMING CLUSTER")
-        
         try:
             self.reset_cluster_state(nodes_in_cluster)
             self.cluster_meet(nodes_in_cluster)

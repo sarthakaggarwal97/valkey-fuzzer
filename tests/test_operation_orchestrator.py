@@ -375,7 +375,7 @@ def test_execute_failover_exact_node_id_match():
     )
     
     # Mock the Valkey client
-    with patch('src.fuzzer_engine.operation_orchestrator.valkey.Valkey') as mock_valkey:
+    with patch('src.utils.valkey_utils.valkey.Valkey') as mock_valkey:
         mock_client = Mock()
         mock_valkey.return_value = mock_client
         
@@ -498,7 +498,7 @@ def test_execute_failover_shard_based_matching():
     )
     
     # Mock the Valkey client
-    with patch('src.fuzzer_engine.operation_orchestrator.valkey.Valkey') as mock_valkey:
+    with patch('src.utils.valkey_utils.valkey.Valkey') as mock_valkey:
         mock_client = Mock()
         mock_valkey.return_value = mock_client
         # Mock CLUSTER FAILOVER response
@@ -560,7 +560,7 @@ def test_execute_failover_port_matching():
     )
     
     # Mock the Valkey client
-    with patch('src.fuzzer_engine.operation_orchestrator.valkey.Valkey') as mock_valkey:
+    with patch('src.utils.valkey_utils.valkey.Valkey') as mock_valkey:
         mock_client = Mock()
         mock_valkey.return_value = mock_client
         # Mock CLUSTER FAILOVER response

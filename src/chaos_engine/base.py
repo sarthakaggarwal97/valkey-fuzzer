@@ -11,8 +11,7 @@ from ..interfaces import IChaosEngine
 from ..models import NodeInfo, ChaosResult, ChaosType, ProcessChaosType, Operation, ChaosConfig, TargetSelection
 
 
-logging.basicConfig(format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', level=logging.INFO, force=True)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger()
 
 
 class BaseChaosEngine(IChaosEngine, ABC):
@@ -24,8 +23,9 @@ class BaseChaosEngine(IChaosEngine, ABC):
         self.coordination_enabled = True
         self.node_processes: Dict[str, int] = {}  # node_id -> process_id mapping
     
-    def inject_process_chaos(self, target_node: NodeInfo, chaos_type: ProcessChaosType) -> ChaosResult:
+    def inject_process_chaos(self, target_node: NodeInfo, chaos_type: ProcessChaosType, log_buffer=None) -> ChaosResult:
         """Inject process-level chaos on target node"""
+        log = log_buffer if log_buffer else logger
         chaos_id = str(uuid.uuid4())
         start_time = time.time()
         
@@ -39,7 +39,7 @@ class BaseChaosEngine(IChaosEngine, ABC):
         
         try:
             # Validate target node
-            if not self._validate_chaos_target(target_node):
+            if not self._validate_chaos_target(target_node, log_buffer):
                 chaos_result.error_message = f"Invalid chaos target: {target_node.node_id}"
                 self.chaos_history.append(chaos_result)
                 return chaos_result
@@ -47,27 +47,27 @@ class BaseChaosEngine(IChaosEngine, ABC):
             # Get process ID for the target node
             process_id = self._get_node_process_id(target_node)
             if not process_id:
-                chaos_result.error_message = f"Could not find process for node {target_node.node_id}"
+                chaos_result.error_message = f"Could not find process for {target_node.node_id}"
                 self.chaos_history.append(chaos_result)
                 return chaos_result
             
             # Execute process chaos
-            success = self._execute_process_kill(process_id, chaos_type)
+            success = self._execute_process_kill(process_id, chaos_type, log_buffer)
             
             chaos_result.success = success
             chaos_result.end_time = time.time()
             
             if success:
-                logger.info(f"Successfully injected {chaos_type.value} chaos on node {target_node.node_id} (PID: {process_id})")
+                log.info(f"Successfully injected {chaos_type.value} chaos on {target_node.node_id} (PID: {process_id})")
                 self.active_chaos[chaos_id] = chaos_result
             else:
                 chaos_result.error_message = f"Failed to kill process {process_id} with {chaos_type.value}"
-                logger.error(chaos_result.error_message)
+                log.error(chaos_result.error_message)
             
         except Exception as e:
             chaos_result.error_message = f"Exception during chaos injection: {str(e)}"
             chaos_result.end_time = time.time()
-            logger.error(f"Chaos injection failed: {e}")
+            log.error(f"Chaos injection failed: {e}")
         
         self.chaos_history.append(chaos_result)
         return chaos_result
@@ -105,14 +105,16 @@ class BaseChaosEngine(IChaosEngine, ABC):
             logger.error(f"Failed to cleanup chaos for cluster {cluster_id}: {e}")
             return False
     
-    def _validate_chaos_target(self, target_node: NodeInfo) -> bool:
+    def _validate_chaos_target(self, target_node: NodeInfo, log_buffer=None) -> bool:
         """Validate that chaos can be injected on target node"""
+        log = log_buffer if log_buffer else logger
+        
         if not target_node:
             return False
         
         # Check if node has a valid process ID
         if target_node.node_id not in self.node_processes:
-            logger.warning(f"No process ID found for node {target_node.node_id}")
+            log.warning(f"No process ID found for node {target_node.node_id}")
             return False
         
         return True
@@ -123,26 +125,28 @@ class BaseChaosEngine(IChaosEngine, ABC):
         # For now, we'll simulate by checking our process tracking
         return self.node_processes.get(target_node.node_id)
     
-    def _execute_process_kill(self, process_id: int, chaos_type: ProcessChaosType) -> bool:
+    def _execute_process_kill(self, process_id: int, chaos_type: ProcessChaosType, log_buffer=None) -> bool:
         """Execute process termination"""
+        log = log_buffer if log_buffer else logger
+        
         try:
             if chaos_type == ProcessChaosType.SIGKILL:
                 os.kill(process_id, signal.SIGKILL)
             elif chaos_type == ProcessChaosType.SIGTERM:
                 os.kill(process_id, signal.SIGTERM)
             else:
-                logger.error(f"Unsupported process chaos type: {chaos_type}")
+                log.error(f"Unsupported process chaos type: {chaos_type}")
                 return False
             
             return True
         except ProcessLookupError:
-            logger.info(f"Process {process_id} already dead (chaos goal achieved)")
+            log.debug(f"Process {process_id} already dead (chaos goal achieved)")
             return True
         except PermissionError:
-            logger.error(f"Permission denied when trying to kill process {process_id}")
+            log.error(f"Permission denied when trying to kill process {process_id}")
             return False
         except Exception as e:
-            logger.error(f"Failed to kill process {process_id}: {e}")
+            log.error(f"Failed to kill process {process_id}: {e}")
             return False
     
     def _select_chaos_target(self, operation: Operation, target_selection: TargetSelection) -> Optional[NodeInfo]:
@@ -196,18 +200,22 @@ class ChaosTargetSelector:
         self.cluster_nodes[cluster_id] = nodes
         logger.debug(f"Updated topology for cluster {cluster_id} with {len(nodes)} nodes")
     
-    def select_target(self, cluster_id: str, target_selection: TargetSelection) -> Optional[NodeInfo]:
+    def select_target(self, cluster_id: str, target_selection: TargetSelection, log_buffer=None) -> Optional[NodeInfo]:
         """Select target node based on selection strategy"""
+        log = log_buffer if log_buffer else logger
 
         # Get nodes for this cluster
         if cluster_id not in self.cluster_nodes:
-            logger.warning(f"No topology information for cluster {cluster_id}")
+            log.warning(f"No topology information for cluster {cluster_id}")
             return None
         
         nodes = self.cluster_nodes[cluster_id]
         if not nodes:
-            logger.warning(f"No nodes available in cluster {cluster_id}")
+            log.warning(f"No nodes available in cluster {cluster_id}")
             return None
+        
+        # Sort nodes by node_id for deterministic ordering
+        nodes = sorted(nodes, key=lambda n: n.node_id)
         
         strategy = target_selection.strategy
         
@@ -221,44 +229,44 @@ class ChaosTargetSelector:
                         break  # Found this node, move to next node_id
             
             if not matching_nodes:
-                logger.warning(f"None of the specified nodes found: {target_selection.specific_nodes}")
+                log.warning(f"None of the specified nodes found: {target_selection.specific_nodes}")
                 return None
             
             # Randomly select from matching nodes (consistent with other strategies)
             selected = self.rng.choice(matching_nodes)
-            logger.info(f"Selected specific node: {selected.node_id} (from {len(matching_nodes)} specified)")
+            log.info(f"Selected specific node: {selected.node_id} (from {len(matching_nodes)} specified)")
             return selected
         
         elif target_selection.strategy == "random":
             selected = self.rng.choice(nodes)
-            logger.info(f"Selected random node: node id: {selected.node_id}, shard: {selected.shard_id}, role: {selected.role}, port: {selected.port}")
+            log.info(f"Selected random node: node id: {selected.node_id}, shard: {selected.shard_id}, role: {selected.role}, port: {selected.port}")
             return selected
         
         elif target_selection.strategy == "primary_only":
             primaries = [n for n in nodes if n.role == 'primary']
             
             if not primaries:
-                logger.warning("No primary nodes available")
+                log.warning("No primary nodes available")
                 return None
             
             # Randomly select from primaries
             selected = self.rng.choice(primaries)
-            logger.info(f"Selected random primary: {selected.node_id} (shard {selected.shard_id})")
+            log.info(f"Selected random primary: {selected.node_id} (shard {selected.shard_id})")
             return selected
         
         elif target_selection.strategy == "replica_only":
             replicas = [n for n in nodes if n.role == 'replica']
             
             if not replicas:
-                logger.warning("No replica nodes available")
+                log.warning("No replica nodes available")
                 return None
             
             # Randomly select from replicas
             selected = self.rng.choice(replicas)
-            logger.info(f"Selected random replica: {selected.node_id} (shard {selected.shard_id})")
+            log.info(f"Selected random replica: {selected.node_id} (shard {selected.shard_id})")
             return selected
         
         else:
-            logger.error(f"Unknown target selection strategy: {strategy}")
+            log.error(f"Unknown target selection strategy: {strategy}")
             return None
     

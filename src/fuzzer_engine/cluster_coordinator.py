@@ -7,8 +7,7 @@ from typing import List, Optional
 from ..models import ClusterConfig, ClusterInstance, ClusterStatus, NodeInfo
 from ..cluster_orchestrator.orchestrator import ConfigurationManager, ClusterManager, PortManager
 
-logging.basicConfig(format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', level=logging.INFO, force=True)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger()
 
 
 class ClusterCoordinator:
@@ -32,7 +31,6 @@ class ClusterCoordinator:
         
         try:
             # Create a fresh PortManager for this cluster using config's base_port
-            # Since we only maintain one cluster at a time, no need for pooling
             port_manager = PortManager(base_port=config.base_port)
             
             # Initialize configuration manager
@@ -232,16 +230,9 @@ class ClusterCoordinator:
             cluster_data = self.active_clusters[cluster_id]
             cluster_instance = cluster_data['instance']
             config_manager = cluster_data['config_manager']
-            
-            logger.info(f"Destroying cluster {cluster_id}")
-            
-            # Close cluster manager connections
+                        
             self.cluster_manager.close_connections()
-            
-            # Cleanup cluster resources
             config_manager.cleanup_cluster(cluster_instance.nodes)
-            
-            # Remove from active clusters
             del self.active_clusters[cluster_id]
             
             return True

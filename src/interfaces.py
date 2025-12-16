@@ -6,8 +6,8 @@ from typing import List, Optional
 from dataclasses import dataclass
 from .models import (
     Scenario, ExecutionResult, DSLConfig, StateValidationResult,
-    ClusterConfig, ClusterInstance, ClusterStatus, ClusterConnection,
-    NodeInfo, NodePlan, ChaosConfig, ChaosResult, ProcessChaosType,
+    ClusterStatus, ClusterConnection,
+    NodeInfo, NodePlan, ChaosResult, ProcessChaosType,
     WorkloadConfig, WorkloadSession, WorkloadMetrics, Operation
 )
 

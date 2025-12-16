@@ -473,12 +473,7 @@ class ReplicationValidator:
 class ClusterStatusValidator:
     """Validates overall cluster health status"""
 
-    def validate(
-        self,
-        cluster_connection: ClusterConnection,
-        config: ClusterStatusValidationConfig,
-        killed_nodes: Optional[set[str]] = None
-    ) -> ClusterStatusValidation:
+    def validate(self, cluster_connection: ClusterConnection, config: ClusterStatusValidationConfig, killed_nodes: Optional[set[str]] = None) -> ClusterStatusValidation:
         """Check cluster health status from all reachable nodes."""
         try:
             # Get all nodes from cluster (including failed ones for comprehensive check)
@@ -527,7 +522,6 @@ class ClusterStatusValidator:
                 if node['status'] == 'failed':
                     node_address = format_node_address(node)
                     nodes_in_fail_state.append(node_address)
-                    logger.warning(f"Node {node_address} is in fail state")
 
             # Determine overall cluster state
             # Use the most common state reported by reachable nodes
@@ -1199,8 +1193,8 @@ class TopologyValidator:
             if success:
                 logger.info(
                     f"Topology validation passed: {actual_primaries} primaries, "
-                    f"{actual_replicas} replicas (expected {expected_topology.num_primaries} "
-                    f"primaries, {expected_topology.num_replicas} replicas)"
+                    f"{actual_replicas} replicas (expected {adjusted_expected_primaries} "
+                    f"primaries, {adjusted_expected_replicas} replicas)"
                 )
             else:
                 logger.error(
@@ -1513,17 +1507,12 @@ class ViewConsistencyValidator:
                                     f"Ignoring expected membership discrepancy: killed node {subject_node_id} missing from view"
                                 )
                         elif discrepancy.discrepancy_type == "state":
-                            # Being marked as "failed" is expected
-                            if "fail" in discrepancy.actual_value.lower():
+                            # Both "fail" and "disconnected" are expected for killed nodes
+                            # "disconnected" is the initial state, "fail" comes after timeout (~30s)
+                            if "fail" in discrepancy.actual_value.lower() or "disconnected" in discrepancy.actual_value.lower():
                                 is_expected = True
                                 logger.debug(
-                                    f"Ignoring expected state discrepancy: killed node {subject_node_id} marked as failed"
-                                )
-                            else:
-                                # BUG: Killed node should be marked as failed, not connected!
-                                logger.error(
-                                    f"BUG: Killed node {subject_node_id} has wrong state: {discrepancy.actual_value} "
-                                    f"(should be 'fail')"
+                                    f"Ignoring expected state discrepancy: killed node {subject_node_id} in state {discrepancy.actual_value}"
                                 )
                         # All other discrepancy types about killed nodes are UNEXPECTED (bugs)
                         # - role changes: killed nodes shouldn't change roles

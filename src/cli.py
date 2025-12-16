@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 Command-line interface for the Cluster Bus Fuzzer
-
 Provides commands for running random tests, DSL-based tests, and validating configurations.
 """
 import sys
@@ -9,10 +8,11 @@ import argparse
 import json
 import yaml
 import traceback
+import time
+import logging
 from pathlib import Path
 from typing import Dict, Any
 from datetime import datetime
-
 from .main import ClusterBusFuzzer
 from .fuzzer_engine import DSLLoader
 from .fuzzer_engine.test_case_generator import ScenarioGenerator
@@ -56,7 +56,6 @@ class FuzzerCLI:
                 print(f"Example: valkey-fuzzer cluster --seed 42 --config config.yaml")
                 return 1
         
-        # Display test parameters
         seed = args.seed
         if seed:
             print(f"Seed: {seed} (reproducible)")
@@ -149,8 +148,7 @@ class FuzzerCLI:
             
         except Exception as e:
             print(f"Error: DSL test failed: {e}")
-            print(f"\nTry validating your DSL file first:")
-            print(f"  valkey-fuzzer validate {args.file}")
+            print(f"\nTry validating your DSL file first: valkey-fuzzer validate {args.file}")
             if args.verbose:
                 traceback.print_exc()
             return 1
@@ -180,7 +178,6 @@ class FuzzerCLI:
             generator.validate_scenario(scenario)
             print("Scenario validated successfully")
             
-            # Print scenario summary
             print("\n" + "=" * 60)
             print("Scenario Summary")
             print("=" * 60)
@@ -216,6 +213,8 @@ class FuzzerCLI:
     
     def _print_summary_result(self, result: ExecutionResult):
         """Print summary of test result"""
+        time.sleep(0.1)
+        
         status = "PASSED" if result.success else "FAILED"
         duration = result.end_time - result.start_time
         
@@ -483,6 +482,9 @@ Examples:
   
   # Run with configuration file and output results to another file
   valkey-fuzzer cluster --seed 42 --config config.yaml --output results.json
+
+  # Verbose output
+  valkey-fuzzer cluster --seed 42 --verbose
   
   # Run DSL-based test
   valkey-fuzzer cluster --dsl examples/simple_failover.yaml
@@ -492,9 +494,6 @@ Examples:
   
   # Validate DSL file
   valkey-fuzzer validate examples/simple_failover.yaml
-  
-  # Verbose output
-  valkey-fuzzer cluster --seed 42 --verbose
         """
     )
     
@@ -581,6 +580,13 @@ Examples:
 
 def main():
     """Main entry point for CLI"""
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s',
+        handlers=[logging.StreamHandler()]
+    )
+    
     parser = create_parser()
     args = parser.parse_args()
     
@@ -606,18 +612,7 @@ def main():
                 print("  valkey-fuzzer cluster --dsl test.yaml")
                 return 1
             
-            # Determine which cluster test mode to run
             if args.dsl:
-                if args.seed is not None or args.iterations != 1 or args.config:
-                    print("Error: --dsl mode cannot be combined with --seed, --iterations, or --config\n")
-                    return 1
-                
-                if args.export_dsl:
-                    print("Error: --dsl mode cannot be combined with --export-dsl\n")
-                    print("The --export-dsl option is only for randomly generated scenarios.")
-                    return 1
-                
-                # Run DSL-based test
                 dsl_args = type('obj', (object,), {
                     'file': args.dsl,
                     'output': args.output,
@@ -626,7 +621,6 @@ def main():
                 })
                 return cli.run_dsl_test(dsl_args)
             else:
-                # Run random test (default)
                 return cli.run_random_test(args)
         elif args.command == 'validate':
             return cli.validate_dsl(args)

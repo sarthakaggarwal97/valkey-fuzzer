@@ -6,9 +6,7 @@ from typing import Dict, List, Any, Optional
 from enum import Enum
 import subprocess
 import random
-import valkey
-from .utils.cluster_parser import parse_cluster_nodes_raw
-from .utils.valkey_utils import valkey_client, is_node_alive as check_node_alive, query_cluster_nodes
+from .utils.valkey_utils import is_node_alive as check_node_alive, query_cluster_nodes
 
 
 @dataclass

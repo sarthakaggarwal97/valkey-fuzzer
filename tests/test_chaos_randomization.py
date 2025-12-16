@@ -202,7 +202,7 @@ def test_coordinate_chaos_with_randomization_enabled(mock_sleep, chaos_coordinat
     # Track what chaos types were used
     chaos_types_used = []
     
-    def capture_chaos_type(node, chaos_type):
+    def capture_chaos_type(node, chaos_type, **kwargs):
         chaos_types_used.append(chaos_type)
         return Mock(
             success=True,
@@ -241,7 +241,7 @@ def test_coordinate_chaos_without_randomization(mock_sleep, chaos_coordinator, m
     """Test that chaos is deterministic when randomize_per_operation=False."""
     chaos_types_used = []
     
-    def capture_chaos_type(node, chaos_type):
+    def capture_chaos_type(node, chaos_type, **kwargs):
         chaos_types_used.append(chaos_type)
         return Mock(
             success=True,
@@ -365,7 +365,7 @@ def test_chaos_randomization_across_operations(mock_sleep, chaos_coordinator, mo
     # Track chaos injections
     chaos_injections = []
     
-    def mock_inject_chaos(node, chaos_type):
+    def mock_inject_chaos(node, chaos_type, **kwargs):
         """Mock chaos injection to track what was injected."""
         chaos_injections.append({
             'node_id': node.node_id,
@@ -455,7 +455,7 @@ def test_chaos_without_randomization_is_consistent(mock_sleep, chaos_coordinator
     # Track chaos injections
     chaos_injections = []
     
-    def mock_inject_chaos(node, chaos_type):
+    def mock_inject_chaos(node, chaos_type, **kwargs):
         """Mock chaos injection to track what was injected."""
         chaos_injections.append({
             'node_id': node.node_id,

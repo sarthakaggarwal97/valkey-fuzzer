@@ -5,7 +5,7 @@ import time
 import logging
 from copy import deepcopy
 from typing import Optional
-from ..models import Scenario, ExecutionResult, DSLConfig, ClusterConnection, ClusterStatus
+from ..models import Scenario, ExecutionResult, DSLConfig, ClusterConnection
 from ..interfaces import IFuzzerEngine
 from ..valkey_client.load_data import load_all_slots
 from .test_case_generator import ScenarioGenerator
@@ -15,14 +15,10 @@ from .operation_orchestrator import OperationOrchestrator
 from .test_logger import FuzzerLogger
 from .error_handler import ErrorHandler, ErrorContext, ErrorCategory, ErrorSeverity, RetryConfig
 from .state_validator import StateValidator
-from ..models import StateValidationConfig, ExpectedTopology, OperationContext, ChaosType
+from .parallel_executor import ParallelExecutor
+from ..models import StateValidationConfig, ExpectedTopology, ChaosType
 
-logging.basicConfig(format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', level=logging.INFO, force=True)
-logger = logging.getLogger(__name__)
-
-cli_logger = logging.getLogger('cli')
-cli_logger.addHandler(logging.StreamHandler())
-cli_logger.propagate = False
+logger = logging.getLogger()
 
 class FuzzerEngine(IFuzzerEngine):
     """
@@ -38,9 +34,7 @@ class FuzzerEngine(IFuzzerEngine):
         self.operation_orchestrator = OperationOrchestrator()
         self.logger = FuzzerLogger()
         self.error_handler = ErrorHandler()
-        
-        logger.info("Fuzzer Engine Initialized")
-    
+            
     def generate_random_scenario(self, seed: Optional[int] = None) -> Scenario:
         """Generate a randomized test scenario with optional seed for reproducibility."""
         logger.info(f"Generating random scenario with seed: {seed}")
@@ -125,13 +119,13 @@ class FuzzerEngine(IFuzzerEngine):
             )
             
             # Step 2: Validate cluster readiness
-            cli_logger.info("")
+            logger.info("")
             logger.info("Step 2: Validating cluster readiness")
             if not self._validate_cluster_readiness_with_retry(cluster_instance.cluster_id):
                 raise Exception("Cluster failed readiness validation")
             
-            # Step 3: Populate cluster with test data
-            cli_logger.info("")
+            # Step 3: Populate cluster with test data and register nodes for chaos
+            logger.info("")
             logger.info("Step 3: Populating cluster with test data")
             load_all_slots(cluster_connection, keys_per_slot=5)
             
@@ -143,7 +137,7 @@ class FuzzerEngine(IFuzzerEngine):
             # Create StateValidator with config from scenario or use defaults
             if hasattr(scenario, 'state_validation_config') and scenario.state_validation_config:
                 validation_config = deepcopy(scenario.state_validation_config)
-                logger.info("Using scenario-specific StateValidationConfig (copied)")
+                logger.info("Using scenario-specific StateValidationConfig")
             else:
                 validation_config = StateValidationConfig()
                 # Allow 'unknown' state after failovers - it's transient and expected
@@ -175,139 +169,31 @@ class FuzzerEngine(IFuzzerEngine):
             killed_nodes_tracker = set()
             
             # Step 4: Execute operations with chaos coordination
-            cli_logger.info("")
-            logger.info(f"Step 4: Executing {len(scenario.operations)} operations")
-
-            for i, operation in enumerate(scenario.operations):
-                cli_logger.info("")
-                logger.info(f"Executing operation {i+1}/{len(scenario.operations)}: {operation.type.value}")
-                
-                try:
-                    # Log cluster state before operation
-                    cluster_status = self.cluster_coordinator.get_cluster_status(cluster_instance.cluster_id)
-                    if cluster_status:
-                        self.logger.log_cluster_state_snapshot(cluster_status, f"before_operation_{i+1}")
-                    
-                    # Coordinate chaos with operation
-                    operation_chaos_events = self.chaos_coordinator.coordinate_chaos_with_operation(
-                        operation,
-                        scenario.chaos_config,
-                        cluster_connection,
-                        cluster_instance.cluster_id
-                    )
-                    chaos_events.extend(operation_chaos_events)
-                    
-                    # Register killed nodes with state validator for chaos-aware validation
-                    for chaos_event in operation_chaos_events:
-                        if chaos_event.success and chaos_event.chaos_type == ChaosType.PROCESS_KILL:
-                            # Find the node address from target_node (node_id)
-                            target_node_id = chaos_event.target_node
-                            for node in cluster_instance.nodes:
-                                if node.node_id == target_node_id:
-                                    node_address = f"{node.host}:{node.port}"
-                                    state_validator.register_killed_node(node_address)
-                                    killed_nodes_tracker.add(node_address)
-                                    logger.info(f"Registered killed node for validation: {node_address}")
-                                    break
-                    
-                    # Execute operation
-                    operation_success = self.operation_orchestrator.execute_operation(
-                        operation,
-                        cluster_instance.cluster_id
-                    )
-                    
-                    # Log operation result
-                    self.logger.log_operation(
-                        operation,
-                        operation_success,
-                        f"Operation {'succeeded' if operation_success else 'failed'}"
-                    )
-                    
-                    if operation_success:
-                        operations_executed += 1
-                    else:
-                        logger.warning(f"Operation {i+1} failed, continuing with graceful degradation")
-                    
-                    # Log cluster state after operation
-                    cluster_status = self.cluster_coordinator.get_cluster_status(cluster_instance.cluster_id)
-                    if cluster_status:
-                        self.logger.log_cluster_state_snapshot(cluster_status, f"after_operation_{i+1}")
-                    
-                    # State validation
-                    logger.info(f"Running state validation after operation {i+1}")
-                    
-                    # Build expected topology from cluster config
-                    expected_topology = ExpectedTopology(
-                        num_primaries=scenario.cluster_config.num_shards,
-                        num_replicas=scenario.cluster_config.num_shards * scenario.cluster_config.replicas_per_shard,
-                        shard_structure={}
-                    )
-                    
-                    # Create operation context
-                    operation_context = OperationContext(
-                        operation_type=operation.type,
-                        target_node=operation.target_node,
-                        operation_success=operation_success,
-                        operation_timestamp=time.time()
-                    )
-                    
-                    # Execute state validation with retry
-                    validation_result = state_validator.validate_with_retry(
-                        cluster_connection,
-                        expected_topology,
-                        operation_context
-                    )
-                    
-                    # Collect validation result for API consumers
-                    validation_results.append(validation_result)
-                    
-                    # Log state validation result
-                    self.logger.log_state_validation_result(validation_result, i+1)
-                    
-                    # NOTE: We do NOT clear killed_nodes here!
-                    # Killed nodes should remain tracked throughout the scenario because:
-                    # 1. Nodes killed in operation N may still be down in operation N+1 (expected)
-                    # 2. Final validation needs to know which nodes were killed
-                    # 3. Clearing would cause false positives for nodes that haven't recovered yet
-                    
-                    # Check for validation failures
-                    if not validation_result.overall_success:
-                        # Determine severity
-                        is_critical = validation_result.is_critical_failure()
-                        severity = "CRITICAL" if is_critical else "NON-CRITICAL"
-                        
-                        logger.error(
-                            f"{severity} VALIDATION FAILURE after operation {i+1}: "
-                            f"{', '.join(validation_result.failed_checks)}"
-                        )
-                        
-                        # Check if we should halt execution on ANY failure (not just critical)
-                        if state_validator.config.blocking_on_failure:
-                            logger.error(
-                                f"Halting execution due to validation failure "
-                                f"(blocking_on_failure=True)"
-                            )
-                            raise Exception(
-                                f"Validation failure after operation {i+1}: "
-                                f"{', '.join(validation_result.failed_checks)}"
-                            )
-                    
-                except Exception as e:
-                    logger.error(f"Operation {i+1} execution failed: {e}")
-                    self.logger.log_error(
-                        f"Operation {i+1} failed",
-                        {"operation": operation.type.value, "error": str(e)}
-                    )
-                    
-                    # Check if this is a validation failure that should halt execution
-                    if "Validation failure" in str(e) and state_validator.config.blocking_on_failure:
-                        logger.error("Re-raising validation failure to halt scenario execution")
-                        raise  # Re-raise to stop the scenario
-                    
-                    # For other errors, continue with next operation (graceful degradation)
+            logger.info("")
+            logger.info(f"Step 4: Executing {len(scenario.operations)} operations in parallel")
+            
+            parallel_executor = ParallelExecutor(self.operation_orchestrator, self.chaos_coordinator, self.logger)
+            
+            operations_executed, chaos_events, validation_results = parallel_executor.execute_operations_parallel(
+                scenario.operations,
+                scenario.chaos_config,
+                cluster_connection,
+                cluster_instance.cluster_id
+            )
+            
+            # Register killed nodes with state validator
+            for chaos_event in chaos_events:
+                if chaos_event.success and chaos_event.chaos_type == ChaosType.PROCESS_KILL:
+                    target_node_id = chaos_event.target_node
+                    for node in cluster_instance.nodes:
+                        if node.node_id == target_node_id:
+                            node_address = f"{node.host}:{node.port}"
+                            state_validator.register_killed_node(node_address)
+                            logger.info(f"Registered killed node for validation: {node_address}")
+                            break
             
             # Step 5: Final cluster validation
-            cli_logger.info("")
+            logger.info("")
             logger.info("Step 5: Final cluster validation")
             
             # Build expected topology for final validation
@@ -385,8 +271,8 @@ class FuzzerEngine(IFuzzerEngine):
             
         finally:
             # Step 6: Cleanup
-            cli_logger.info("")
-            logger.info("Step 5: Cleaning up resources")
+            logger.info("")
+            logger.info("Step 6: Cleaning up resources")
             self._cleanup_resources(cluster_instance, cluster_connection)
     
     def validate_cluster_state(self, cluster_id: str):

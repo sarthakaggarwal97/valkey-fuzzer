@@ -22,8 +22,7 @@ from ..models import (
     NodeInfo, ChaosTiming, ChaosCoordination
 )
 
-logging.basicConfig(format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', level=logging.INFO, force=True)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger()
 
 
 class ChaosScenarioState(Enum):

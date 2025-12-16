@@ -115,7 +115,7 @@ class ScenarioGenerator(ITestCaseGenerator):
             timing=timing,
             coordination=coordination,
             process_chaos_type=process_chaos_type,
-            randomize_per_operation=True
+            randomize_per_operation=False
         )
     
     def parse_dsl_config(self, dsl_text: str) -> Scenario:

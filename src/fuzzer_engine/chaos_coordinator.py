@@ -10,8 +10,7 @@ from copy import deepcopy
 from ..models import Operation, ChaosConfig, ChaosResult, NodeInfo, ChaosCoordination, ProcessChaosType, ChaosType, TargetSelection
 from ..chaos_engine.base import ProcessChaosEngine
 
-logging.basicConfig(format='%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s', level=logging.INFO, force=True)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger()
 
 
 class ChaosCoordinator:
@@ -22,12 +21,10 @@ class ChaosCoordinator:
         self.chaos_history: List[ChaosResult] = []
         
         if seed is not None:
-            logger.info(f"ChaosCoordinator initialized with seed {seed} for deterministic target selection")
+            logger.debug(f"ChaosCoordinator initialized with seed {seed} for deterministic target selection")
 
     def register_cluster_nodes(self, cluster_id: str, nodes: List[NodeInfo]) -> None:
-        """
-        Register cluster nodes with the chaos engine for chaos injection.
-        """
+        """Register cluster nodes with the chaos engine for chaos injection."""
         logger.info(f"Registering {len(nodes)} nodes for chaos injection in cluster {cluster_id}")
         
         for node in nodes:
@@ -54,23 +51,22 @@ class ChaosCoordinator:
         chaos_config: ChaosConfig,
         cluster_connection,
         cluster_id: str,
-        randomize_per_operation: Optional[bool] = None
+        randomize_per_operation: Optional[bool] = None,
+        log_buffer=None
     ) -> List[ChaosResult]:
-        """
-        Coordinate chaos injection with a cluster operation based on timing configuration.
-        """
+        """Coordinate chaos injection with a cluster operation based on timing configuration."""
         chaos_results = []
+        log = log_buffer if log_buffer else logger
         
-        logger.info(f"Coordinating chaos with operation {operation.type.value} on {operation.target_node}")
+        log.info(f"Coordinating chaos with operation {operation.type.value} on {operation.target_node}")
         
         try:
             # Determine if randomization should be enabled
-            # Priority: explicit parameter > config flag > default (False)
             should_randomize = randomize_per_operation if randomize_per_operation is not None else chaos_config.randomize_per_operation
 
             # Randomize chaos configuration for this operation if enabled
             if should_randomize:
-                chaos_config = self._randomize_chaos_config(chaos_config)
+                chaos_config = self._randomize_chaos_config(chaos_config, log)
 
             # Refresh topology from live cluster connection
             live_nodes_dict = cluster_connection.get_live_nodes()
@@ -78,15 +74,15 @@ class ChaosCoordinator:
                 # Convert dict nodes to NodeInfo objects for the target selector
                 live_nodes = self._convert_dict_nodes_to_nodeinfo(live_nodes_dict, cluster_connection.initial_nodes)
                 self.chaos_engine.target_selector.update_cluster_topology(cluster_id, live_nodes)
-                logger.debug(f"Updated topology with {len(live_nodes)} live nodes from cluster")
+                log.debug(f"Updated topology with {len(live_nodes)} live nodes from cluster")
             else:
-                logger.warning("No live nodes available from cluster connection")
+                log.warning("No live nodes available from cluster connection")
 
             # Select target node for chaos using ChaosTargetSelector
-            target_node = self.chaos_engine.target_selector.select_target(cluster_id, chaos_config.target_selection)
+            target_node = self.chaos_engine.target_selector.select_target(cluster_id, chaos_config.target_selection, log_buffer=log)
             
             if not target_node:
-                logger.warning("No suitable chaos target found")
+                log.warning("No suitable chaos target found")
                 return chaos_results
             
             # Execute chaos based on coordination configuration
@@ -103,60 +99,45 @@ class ChaosCoordinator:
 
             # Chaos before operation
             if coordination.chaos_before_operation:
-                logger.info(f"Injecting chaos before operation (delay: {delay_before:.2f}s)")
+                log.info(f"Injecting chaos before operation (delay: {delay_before:.2f}s)")
                 time.sleep(delay_before)
                 
-                result = self._inject_chaos(target_node, chaos_config, should_randomize)
+                result = self._inject_chaos(target_node, chaos_config, should_randomize, log)
                 chaos_results.append(result)
                 
                 if result.success:
-                    logger.debug(f"Pre-operation chaos injected on {target_node.node_id}")
+                    log.debug(f"Pre-operation chaos injected on {target_node.node_id}")
             
             # Chaos during operation (most common for failover testing)
             if coordination.chaos_during_operation:
-                logger.info("Injecting chaos during operation execution")
+                log.info("Injecting chaos during operation execution")
                 
-                result = self._inject_chaos(target_node, chaos_config, should_randomize)
+                result = self._inject_chaos(target_node, chaos_config, should_randomize, log)
                 chaos_results.append(result)
                 
                 if result.success:
-                    logger.debug(f"During-operation chaos injected on {target_node.node_id}")
+                    log.debug(f"During-operation chaos injected on {target_node.node_id}")
             
-            # Chaos after operation
+            # Chaos after operation - return info for later injection
             if coordination.chaos_after_operation:
-                logger.info(f"Injecting chaos after operation (delay: {delay_after:.2f}s)")
-                time.sleep(delay_after)
-                
-                result = self._inject_chaos(target_node, chaos_config, should_randomize)
-                chaos_results.append(result)
-                
-                if result.success:
-                    logger.debug(f"Post-operation chaos injected on {target_node.node_id}")
+                log.info(f"Chaos scheduled after operation (delay: {delay_after:.2f}s)")
+                # Don't inject now - return a placeholder that indicates chaos should happen after operation
+                chaos_results.append({
+                    'deferred': True,
+                    'target_node': target_node,
+                    'delay': delay_after,
+                    'chaos_config': chaos_config,
+                    'should_randomize': should_randomize
+                })
             
-            # Store chaos results for this scenario
-            self.chaos_history.extend(chaos_results)
+            # Store only actual chaos results (not deferred placeholders) for this scenario
+            actual_results = [r for r in chaos_results if isinstance(r, ChaosResult)]
+            self.chaos_history.extend(actual_results)
             
         except Exception as e:
             logger.error(f"Failed to coordinate chaos with operation: {e}")
         
         return chaos_results
-    
-    def execute_chaos_during_operation(
-        self,
-        target_node: NodeInfo,
-        chaos_config: ChaosConfig,
-        randomize: bool = False
-    ) -> ChaosResult:
-        """
-        Execute chaos injection during operation execution.
-        This is typically called by the operation orchestrator at the appropriate time.
-        """
-        logger.info(f"Executing chaos during operation on {target_node.node_id}")
-        
-        result = self._inject_chaos(target_node, chaos_config, randomize)
-        self.chaos_history.append(result)
-        
-        return result
     
     def _convert_dict_nodes_to_nodeinfo(self, live_nodes_dict: List[dict], initial_nodes: List[NodeInfo]) -> List[NodeInfo]:
         """Convert dictionary node representations to NodeInfo objects."""
@@ -193,8 +174,12 @@ class ChaosCoordinator:
                 ))
         return node_info_list
 
-    def _randomize_chaos_config(self, chaos_config: ChaosConfig) -> ChaosConfig:
+    def _randomize_chaos_config(self, chaos_config: ChaosConfig, log=None) -> ChaosConfig:
         """Create a randomized copy of the chaos config for this operation."""
+
+        if log is None:
+            log = logger
+            
         # Create a copy to avoid modifying the original
         randomized_config = deepcopy(chaos_config)
 
@@ -205,7 +190,7 @@ class ChaosCoordinator:
                 ProcessChaosType.SIGKILL,
                 ProcessChaosType.SIGTERM
             ])
-            logger.info(f"Randomized chaos type: {randomized_config.process_chaos_type.value}")
+            log.info(f"Randomized chaos type: {randomized_config.process_chaos_type.value}")
 
         # Randomize chaos timing coordination - select exactly ONE timing option
         timing_options = ['before', 'during', 'after']
@@ -217,7 +202,7 @@ class ChaosCoordinator:
             chaos_after_operation=(selected_timing == 'after')
         )
 
-        logger.info(f"Randomized chaos timing: {selected_timing}")
+        log.info(f"Randomized chaos timing: {selected_timing}")
 
         # Randomize target selection strategy (if not specific nodes)
         if randomized_config.target_selection.strategy != "specific":
@@ -229,19 +214,16 @@ class ChaosCoordinator:
                 strategy=new_strategy,
                 specific_nodes=None
             )
-            logger.info(f"Randomized target strategy: {new_strategy}")
+            log.info(f"Randomized target strategy: {new_strategy}")
 
         return randomized_config
 
-    def _inject_chaos(
-        self,
-        target_node: NodeInfo,
-        chaos_config: ChaosConfig,
-        randomize: bool = False
-    ) -> ChaosResult:
-        """
-        Inject chaos on the target node based on configuration.
-        """
+    def _inject_chaos(self, target_node: NodeInfo, chaos_config: ChaosConfig, randomize: bool = False, log=None) -> ChaosResult:
+        """Inject chaos on the target node based on configuration."""
+
+        if log is None:
+            log = logger
+        
         if chaos_config.chaos_type == ChaosType.PROCESS_KILL:
             # Use process chaos type from config (may have been randomized)
             if chaos_config.process_chaos_type:
@@ -251,15 +233,15 @@ class ChaosCoordinator:
                 if randomize:
                     # Randomize when explicitly requested
                     process_chaos_type = self.rng.choice([ProcessChaosType.SIGKILL, ProcessChaosType.SIGTERM])
-                    logger.info(f"Randomized fallback chaos type: {process_chaos_type.value}")
+                    log.info(f"Randomized fallback chaos type: {process_chaos_type.value}")
                 else:
                     # Deterministic default for backward compatibility
                     process_chaos_type = ProcessChaosType.SIGKILL
-                    logger.debug(f"Using default chaos type: {process_chaos_type.value}")
+                    log.debug(f"Using default chaos type: {process_chaos_type.value}")
             
-            logger.info(f"Injecting {process_chaos_type.value} on {target_node.node_id}")
+            log.info(f"Injecting {process_chaos_type.value} on {target_node.node_id}")
             
-            result = self.chaos_engine.inject_process_chaos(target_node, process_chaos_type)
+            result = self.chaos_engine.inject_process_chaos(target_node, process_chaos_type, log_buffer=log)
 
             return result
         else:
@@ -275,14 +257,9 @@ class ChaosCoordinator:
                 error_message=f"Unsupported chaos type: {chaos_config.chaos_type}"
             )
 
-    def _select_chaos_target(
-        self,
-        cluster_nodes: List[NodeInfo],
-        target_selection: TargetSelection
-    ) -> Optional[NodeInfo]:
-        """
-        Select a target node for chaos injection based on selection strategy.
-        """
+    def _select_chaos_target(self, cluster_nodes: List[NodeInfo], target_selection: TargetSelection) -> Optional[NodeInfo]:
+        """Select a target node for chaos injection based on selection strategy."""
+        
         if not cluster_nodes:
             return None
 
@@ -319,15 +296,11 @@ class ChaosCoordinator:
             return None
     
     def get_chaos_history(self) -> List[ChaosResult]:
-        """
-        Get the history of all chaos injections.
-        """
+        """Get the history of all chaos injections."""
         return self.chaos_history.copy()
     
     def cleanup_chaos(self, cluster_id: str) -> bool:
-        """
-        Clean up chaos effects for a cluster.
-        """
+        """Clean up chaos effects for a cluster."""
         logger.debug(f"Cleaning up chaos for cluster {cluster_id}")
         
         try:

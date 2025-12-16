@@ -9,29 +9,21 @@ class ClusterBusFuzzer:
     """Main orchestrator for the Cluster Bus Fuzzer system"""
     
     def __init__(self):
-        """
-        Initialize the fuzzer with the main fuzzer engine
-        """
+        """Initialize the fuzzer with the main fuzzer engine"""
         self.fuzzer_engine = FuzzerEngine()
         self.last_scenario = None
     
     def run_random_test(self, seed: int = None):
-        """
-        Run a randomized test scenario.
-        """
+        """Run a randomized test scenario."""
         scenario = self.fuzzer_engine.generate_random_scenario(seed)
         result = self.fuzzer_engine.execute_test(scenario)
         self.last_scenario = scenario
         return result
     
     def run_dsl_test(self, dsl_config: DSLConfig):
-        """
-        Run a DSL-based test scenario.
-        """
+        """Run a DSL-based test scenario."""
         return self.fuzzer_engine.execute_dsl_scenario(dsl_config)
     
     def validate_cluster(self, cluster_id: str):
-        """
-        Validate cluster state.
-        """
+        """Validate cluster state."""
         return self.fuzzer_engine.validate_cluster_state(cluster_id)

@@ -75,13 +75,13 @@ def test_seeded_chaos_coordinator_is_deterministic(mock_sleep, cluster_nodes, mo
     chaos_injections_1 = []
     chaos_injections_2 = []
     
-    def capture_chaos_1(node, chaos_type):
+    def capture_chaos_1(node, chaos_type, **kwargs):
         chaos_injections_1.append({'node_id': node.node_id, 'chaos_type': chaos_type})
         return Mock(success=True, chaos_id=f"test_{len(chaos_injections_1)}", 
                    chaos_type=ChaosType.PROCESS_KILL, target_node=node.node_id,
                    start_time=0, end_time=1)
     
-    def capture_chaos_2(node, chaos_type):
+    def capture_chaos_2(node, chaos_type, **kwargs):
         chaos_injections_2.append({'node_id': node.node_id, 'chaos_type': chaos_type})
         return Mock(success=True, chaos_id=f"test_{len(chaos_injections_2)}", 
                    chaos_type=ChaosType.PROCESS_KILL, target_node=node.node_id,
@@ -152,13 +152,13 @@ def test_different_seeds_produce_different_chaos(mock_sleep, cluster_nodes, mock
     chaos_injections_1 = []
     chaos_injections_2 = []
     
-    def capture_chaos_1(node, chaos_type):
+    def capture_chaos_1(node, chaos_type, **kwargs):
         chaos_injections_1.append({'node_id': node.node_id, 'chaos_type': chaos_type})
         return Mock(success=True, chaos_id=f"test_{len(chaos_injections_1)}", 
                    chaos_type=ChaosType.PROCESS_KILL, target_node=node.node_id,
                    start_time=0, end_time=1)
     
-    def capture_chaos_2(node, chaos_type):
+    def capture_chaos_2(node, chaos_type, **kwargs):
         chaos_injections_2.append({'node_id': node.node_id, 'chaos_type': chaos_type})
         return Mock(success=True, chaos_id=f"test_{len(chaos_injections_2)}", 
                    chaos_type=ChaosType.PROCESS_KILL, target_node=node.node_id,
@@ -229,7 +229,7 @@ def test_target_selector_uses_seeded_rng(mock_sleep, cluster_nodes, mock_cluster
     # Track selected nodes
     selected_nodes = []
     
-    def capture_chaos(node, chaos_type):
+    def capture_chaos(node, chaos_type, **kwargs):
         selected_nodes.append(node.node_id)
         return Mock(success=True, chaos_id=f"test_{len(selected_nodes)}", 
                    chaos_type=ChaosType.PROCESS_KILL, target_node=node.node_id,
@@ -267,7 +267,7 @@ def test_target_selector_uses_seeded_rng(mock_sleep, cluster_nodes, mock_cluster
     coordinator2 = ChaosCoordinator(seed=12345)
     selected_nodes_2 = []
     
-    def capture_chaos_2(node, chaos_type):
+    def capture_chaos_2(node, chaos_type, **kwargs):
         selected_nodes_2.append(node.node_id)
         return Mock(success=True, chaos_id=f"test_{len(selected_nodes_2)}", 
                    chaos_type=ChaosType.PROCESS_KILL, target_node=node.node_id,

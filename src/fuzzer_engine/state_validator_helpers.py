@@ -10,8 +10,7 @@ from ..utils.cluster_parser import (
     fetch_cluster_slot_assignments
 )
 
-logger = logging.getLogger(__name__)
-
+logger = logging.getLogger()
 
 # Re-export cluster utilities for backward compatibility
 __all__ = [
