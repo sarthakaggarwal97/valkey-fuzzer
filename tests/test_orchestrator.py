@@ -90,7 +90,7 @@ def test_full_cluster_creation():
         expected_configs = {
             'protected-mode': 'no',
             'cluster-enabled': 'yes',
-            'cluster-node-timeout': '5000',
+            'cluster-node-timeout': '1000',
             'appendonly': 'yes', 
             'save': '',
             'cluster-require-full-coverage': 'no',
