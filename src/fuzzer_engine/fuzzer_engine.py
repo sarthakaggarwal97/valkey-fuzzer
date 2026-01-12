@@ -185,11 +185,12 @@ class FuzzerEngine(IFuzzerEngine):
             for chaos_event in chaos_events:
                 if chaos_event.success and chaos_event.chaos_type == ChaosType.PROCESS_KILL:
                     target_node_id = chaos_event.target_node
+                    target_role = chaos_event.target_role
                     for node in cluster_instance.nodes:
                         if node.node_id == target_node_id:
                             node_address = f"{node.host}:{node.port}"
-                            state_validator.register_killed_node(node_address)
-                            logger.info(f"Registered killed node for validation: {node_address}")
+                            state_validator.register_killed_node(node_address, target_role)
+                            logger.info(f"Registered killed node for validation: {node_address} (role: {target_role})")
                             break
             
             # Step 5: Final cluster validation
