@@ -16,7 +16,7 @@ from .test_logger import FuzzerLogger
 from .error_handler import ErrorHandler, ErrorContext, ErrorCategory, ErrorSeverity, RetryConfig
 from .state_validator import StateValidator
 from .parallel_executor import ParallelExecutor
-from ..models import StateValidationConfig, ExpectedTopology, ChaosType
+from ..models import StateValidationConfig, ExpectedTopology, ChaosType, ChaosResult
 
 logger = logging.getLogger()
 
@@ -406,14 +406,34 @@ class FuzzerEngine(IFuzzerEngine):
         validation_results: List,
         final_validation_result
     ) -> List[str]:
-        """Summarize all execution failures that should make the run fail."""
+        """Summarize all execution failures that should make the run fail.
+
+        Operation failures during chaos are tolerated when all final
+        validations pass — transient timeouts or connection errors while
+        nodes are being killed do not indicate a Valkey bug if the cluster
+        recovers correctly.
+        """
         failure_reasons = []
+
+        has_chaos = any(
+            isinstance(event, ChaosResult) and event.success
+            for event in chaos_events
+        )
+        all_validations_passed = final_validation_result.overall_success
 
         if operations_executed != total_operations:
             failed_operations = total_operations - operations_executed
-            failure_reasons.append(f"{failed_operations} operation(s) failed")
+            if has_chaos and all_validations_passed:
+                # Chaos was active and the cluster recovered — operation
+                # failures are expected (timeouts, killed targets, etc.)
+                logger.info(
+                    f"{failed_operations} operation(s) failed during chaos, "
+                    "but all validations passed — tolerating as expected chaos interaction"
+                )
+            else:
+                failure_reasons.append(f"{failed_operations} operation(s) failed")
 
-        failed_chaos_events = [event for event in chaos_events if not event.success]
+        failed_chaos_events = [event for event in chaos_events if isinstance(event, ChaosResult) and not event.success]
         if failed_chaos_events:
             failure_reasons.append(f"{len(failed_chaos_events)} chaos injection(s) failed")
 
