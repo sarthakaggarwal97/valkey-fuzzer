@@ -16,11 +16,11 @@ an activation action, workload lifecycle, path-evidence observer, and independen
 oracles; setting a server option alone does not prove that a feature ran.
 
 The target onboarding contract is “manifest, plus an optional small plugin”:
-once the generic runner is wired in, a new feature must not require a new CLI
-command, parser branch, engine switch, topology special case, or reporter field.
-The repository now contains the topology foundation and an isolated extension
-API/registry contract; the generic feature-pack compiler and runner are the
-remaining one-time integration work.
+new features must not require a new engine switch or topology special case.
+The repository now contains the topology foundation, extension API, v3
+feature-pack compiler, generic lifecycle runner, and local Valkey topology
+provider. The v3 path remains programmatic: CLI/reporting integration,
+reusable built-in components, and real feature packs are still pending.
 
 ### Key Features
 
@@ -427,9 +427,16 @@ configuration/topology smokes. They are not yet complete feature packs.
 The isolated contracts in `src/extensibility.py` define the six stable
 component roles, immutable feature packs and run plans, lifecycle events,
 uniform outcomes, typed registries, and `valkey_fuzzer.plugins` entry-point
-discovery. They are intentionally not connected to the current v1/v2 runner
-yet, so the repository does not claim drop-in feature execution until the
-manifest compiler, generic runner, and legacy adapter are complete.
+discovery. `src/feature_packs.py`, `src/feature_runner.py`, and
+`src/local_topology_provider.py` provide the manifest compiler, generic
+executor, and real local topology adapter. They are intentionally not connected
+to the current CLI yet, and no built-in feature pack currently provides a
+complete activation, path-evidence, and correctness contract.
+
+Durability and data-tiering features also require a generic resource layer for
+filesystems, object stores, proxies, capacity controls, and storage faults.
+Those dependencies should be lifecycle-managed providers rather than
+feature-specific setup hidden inside actions.
 
 ### Additional Operations
 - `add_replica`: Add new replica nodes to existing shards

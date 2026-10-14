@@ -329,8 +329,10 @@ registries, lifecycle event journal, uniform outcomes, and trusted Python
 entry-point discovery in `src/extensibility.py`. They deliberately do not yet
 alter the v1/v2 execution path.
 
-The next one-time layer is a generic pack compiler and runner. A proposed v3
-scenario envelope remains stable as features are added:
+The generic pack compiler, runner, and local topology provider now exist as an
+isolated programmatic path. The remaining integration is CLI/reporting wiring,
+built-in reusable components, and complete feature packs. The v3 scenario
+envelope remains stable as features are added:
 
 ```yaml
 api_version: v3
@@ -384,6 +386,37 @@ Every component receives a narrow run context: structured node selection,
 client access, deterministic per-component randomness, named events, an
 evidence/artifact store, workload ledger, deadlines/cancellation, cleanup
 registration, and logging. Plugins do not import the current engine internals.
+
+## Resources beyond Valkey nodes
+
+Node communication is only one feature domain. Durability, data tiering,
+search, modules, and externally backed features may depend on filesystems,
+object stores, proxies, sidecars, resource limits, or other services.
+
+The execution plan should therefore support lifecycle-managed resource
+providers in addition to topology providers:
+
+```text
+resolve artifacts
+      |
+provision resources (filesystem, object store, proxy, resource envelope)
+      |
+provision Valkey topology using resource outputs
+      |
+workload, actions, faults, observers, and oracles
+      |
+cleanup topology, then resources in reverse order
+```
+
+Resource outputs are referenced as typed values in topology configuration and
+components. Resource providers own readiness, rollback, cleanup, and immutable
+reproduction metadata. This keeps storage setup out of feature-specific actions.
+
+For durability, the generic contracts additionally need an acknowledged-write
+ledger, explicit durability/loss policy, crash and storage faults, recovery
+checkpoints, and post-restart oracles. For data tiering, they need tier-capacity
+controls, backend latency/failure injection, residency/migration evidence, and
+data/availability oracles across hot and cold tiers.
 
 ## Feature examples
 
@@ -506,20 +539,25 @@ preserving both path evidence and the violated invariant.
 
 1. Finish topology-neutral lifecycle and configuration. **Implemented.**
 2. Define the isolated feature-pack plan, terminal outcomes, component
-   protocols, registries, named events, and result bundle. **Implemented as an
-   extension contract; not yet wired into execution.**
-3. Add the manifest catalog/compiler and generic v3 envelope, then convert
-   v1/v2 scenarios through a compatibility adapter.
-4. Add the generic lifecycle runner and wrap current failover, process kill,
-   and state validations as built-in components.
-5. Build a vertical forkless-save pack for standalone: managed mutation
+   protocols, registries, named events, and result bundle. **Implemented.**
+3. Add the manifest catalog/compiler and generic v3 envelope. **Implemented as
+   a programmatic API.**
+4. Add the generic lifecycle runner and local standalone/replication/cluster
+   provider. **Implemented and unit tested.**
+5. Wire v3 compilation/execution/result reporting into the CLI and add a legacy
+   compatibility adapter.
+6. Wrap current failover, process kill, and state validations as built-in
+   components.
+7. Build a vertical forkless-save pack for standalone: managed mutation
    workload, `BGSAVE` action, required evidence, data/RDB oracles, and one
    event-triggered process fault.
-6. Generalize the working primitives and extend the forkless pack to
+8. Generalize the working primitives and extend the forkless pack to
    replication and cluster.
-7. Add per-node immutable artifacts, then implement
+9. Add resource providers and durability policies for durability and
+   data-tiering packs.
+10. Add per-node immutable artifacts, then implement
    replication-compression and mixed-version cluster-protocol packs.
-8. Add differential execution, semantic coverage accounting,
+11. Add differential execution, semantic coverage accounting,
    and scenario minimization.
 
 The extensibility milestone is complete only when two tests pass:
