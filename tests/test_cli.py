@@ -9,7 +9,7 @@ import pytest
 import yaml
 
 from src.cli import FuzzerCLI, create_parser, main
-from src.models import ChaosResult, ExecutionResult
+from src.models import ChaosResult, ClusterConfig, ExecutionResult, TopologyType
 
 
 @pytest.fixture
@@ -321,6 +321,78 @@ class TestFuzzerCLI:
         captured = capsys.readouterr()
         assert "valid" in captured.out.lower()
 
+    @patch("src.cli.ScenarioGenerator")
+    @patch("src.cli.DSLLoader")
+    def test_validate_dsl_prints_replication_topology(self, mock_loader, mock_generator_class, tmp_path, capsys):
+        """Test validation summary reports the topology type and node count."""
+        dsl_file = tmp_path / "replication.yaml"
+        dsl_file.write_text("api_version: v2\ntopology:\n  type: replication\n")
+
+        mock_loader.load_from_file.return_value = Mock(config_text="test config")
+        mock_scenario = Mock(
+            scenario_id="replication-test",
+            api_version="v2",
+            seed=None,
+            cluster_config=ClusterConfig(
+                num_shards=1,
+                replicas_per_shard=2,
+                topology_type=TopologyType.REPLICATION,
+            ),
+            operations=[],
+            chaos_config=Mock(chaos_type=Mock(value="process_kill")),
+        )
+        mock_generator = Mock()
+        mock_generator.parse_dsl_config.return_value = mock_scenario
+        mock_generator_class.return_value = mock_generator
+
+        result = FuzzerCLI().validate_dsl(Mock(file=str(dsl_file), verbose=False))
+
+        assert result == 0
+        output = capsys.readouterr().out
+        assert "API Version: v2" in output
+        assert "Topology: replication (1 primary, 2 replicas, 3 nodes total)" in output
+
+    @patch("src.cli.ScenarioGenerator")
+    @patch("src.cli.DSLLoader")
+    def test_validate_dsl_reports_chaos_disabled_without_operations(
+        self, mock_loader, mock_generator_class, tmp_path, capsys
+    ):
+        """Test zero-operation scenarios do not imply that chaos will run."""
+        dsl_file = tmp_path / "standalone.yaml"
+        dsl_file.write_text("api_version: v2\ntopology:\n  type: standalone\n")
+        mock_loader.load_from_file.return_value = Mock(config_text="test config")
+        mock_generator = Mock()
+        mock_generator.parse_dsl_config.return_value = Mock(
+            scenario_id="standalone-test",
+            api_version="v2",
+            seed=None,
+            cluster_config=ClusterConfig(
+                num_shards=1,
+                replicas_per_shard=0,
+                topology_type=TopologyType.STANDALONE,
+            ),
+            operations=[],
+            chaos_config=Mock(chaos_type=Mock(value="process_kill")),
+        )
+        mock_generator_class.return_value = mock_generator
+
+        result = FuzzerCLI().validate_dsl(Mock(file=str(dsl_file), verbose=False))
+
+        assert result == 0
+        assert "Chaos: disabled (no operations)" in capsys.readouterr().out
+
+    def test_format_topology_summary_singular_replica(self):
+        """Test topology summaries use singular grammar for one replica."""
+        config = ClusterConfig(
+            num_shards=1,
+            replicas_per_shard=1,
+            topology_type=TopologyType.REPLICATION,
+        )
+
+        assert FuzzerCLI._format_topology_summary(config) == (
+            "Topology: replication (1 primary, 1 replica, 2 nodes total)"
+        )
+
     def test_result_to_dict(self, mock_result):
         """Test converting ExecutionResult to dictionary"""
         cli = FuzzerCLI()
@@ -374,6 +446,38 @@ class TestCLIParser:
         assert args.command == "cluster"
         assert args.dsl == "test.yaml"
 
+    def test_parse_generic_run_command(self):
+        """Test parsing the topology-neutral DSL command."""
+        parser = create_parser()
+        args = parser.parse_args(
+            [
+                "run",
+                "topology.yaml",
+                "--valkey-binary",
+                "/tmp/valkey-server",
+                "--output",
+                "results.yaml",
+                "--format",
+                "yaml",
+                "--verbose",
+            ]
+        )
+
+        assert args.command == "run"
+        assert args.file == "topology.yaml"
+        assert args.valkey_binary == "/tmp/valkey-server"
+        assert args.output == "results.yaml"
+        assert args.format == "yaml"
+        assert args.verbose is True
+
+    def test_help_is_topology_neutral(self):
+        """Test top-level help describes every supported topology."""
+        help_text = create_parser().format_help()
+
+        assert "Valkey Fuzzer" in help_text
+        assert "standalone, replication, and cluster" in help_text
+        assert "Cluster Bus Fuzzer" not in help_text
+
     def test_parse_valkey_binary_option(self):
         """Test parsing explicit Valkey binary option"""
         parser = create_parser()
@@ -402,6 +506,34 @@ class TestCLIParser:
 
 class TestCLIMain:
     """Test main CLI entry point"""
+
+    @patch("src.cli.FuzzerCLI")
+    def test_main_generic_run_command(self, mock_cli_class):
+        """Test main dispatches the generic run command to DSL execution."""
+        mock_cli = Mock()
+        mock_cli.run_dsl_test.return_value = 0
+        mock_cli_class.return_value = mock_cli
+
+        with patch(
+            "sys.argv",
+            [
+                "cli",
+                "run",
+                "replication.yaml",
+                "--valkey-binary",
+                "/tmp/valkey-server",
+                "--output",
+                "results.json",
+            ],
+        ):
+            result = main()
+
+        assert result == 0
+        mock_cli.run_dsl_test.assert_called_once()
+        run_args = mock_cli.run_dsl_test.call_args.args[0]
+        assert run_args.file == "replication.yaml"
+        assert run_args.valkey_binary == "/tmp/valkey-server"
+        assert run_args.output == "results.json"
 
     @patch("src.cli.FuzzerCLI")
     def test_main_random_command(self, mock_cli_class):

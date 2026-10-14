@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from ..models import ChaosResult, ClusterStatus, ExecutionResult, Operation, Scenario
+from ..models import ChaosResult, ClusterStatus, ExecutionResult, Operation, Scenario, TopologyType
 
 logger = logging.getLogger()
 
@@ -39,6 +39,7 @@ class FuzzerLogger:
             # Initialize test log structure
             self.test_logs[scenario.scenario_id] = {
                 "scenario_id": scenario.scenario_id,
+                "api_version": scenario.api_version,
                 "seed": scenario.seed,
                 "start_time": self.test_start_times[scenario.scenario_id],
                 "start_timestamp": datetime.now().isoformat(),
@@ -140,111 +141,146 @@ class FuzzerLogger:
                 "checks": {},
             }
 
-        # Log replication validation details
-        if validation_result.replication:
-            repl = validation_result.replication
-            validation_log["checks"]["replication"] = {
-                "success": repl.success,
-                "all_replicas_synced": repl.all_replicas_synced,
-                "max_lag": repl.max_lag,
-                "lagging_replicas": [
-                    {
-                        "replica_node_id": lag.replica_node_id,
-                        "replica_address": lag.replica_address,
-                        "primary_node_id": lag.primary_node_id,
-                        "primary_address": lag.primary_address,
-                        "lag_seconds": lag.lag_seconds,
-                        "replication_offset_diff": lag.replication_offset_diff,
-                        "link_status": lag.link_status,
-                    }
-                    for lag in repl.lagging_replicas
-                ],
-                "disconnected_replicas": repl.disconnected_replicas,
-                "error_message": repl.error_message,
-            }
+            # Log replication validation details
+            if validation_result.replication:
+                repl = validation_result.replication
+                validation_log["checks"]["replication"] = {
+                    "success": repl.success,
+                    "all_replicas_synced": repl.all_replicas_synced,
+                    "max_lag": repl.max_lag,
+                    "lagging_replicas": [
+                        {
+                            "replica_node_id": lag.replica_node_id,
+                            "replica_address": lag.replica_address,
+                            "primary_node_id": lag.primary_node_id,
+                            "primary_address": lag.primary_address,
+                            "lag_seconds": lag.lag_seconds,
+                            "replication_offset_diff": lag.replication_offset_diff,
+                            "link_status": lag.link_status,
+                        }
+                        for lag in repl.lagging_replicas
+                    ],
+                    "disconnected_replicas": repl.disconnected_replicas,
+                    "error_message": repl.error_message,
+                }
 
-        # Log cluster status validation details
-        if validation_result.cluster_status:
-            status = validation_result.cluster_status
-            validation_log["checks"]["cluster_status"] = {
-                "success": status.success,
-                "cluster_state": status.cluster_state,
-                "nodes_in_fail_state": status.nodes_in_fail_state,
-                "has_quorum": status.has_quorum,
-                "degraded_reason": status.degraded_reason,
-                "error_message": status.error_message,
-            }
+            # Log cluster status validation details
+            if validation_result.cluster_status:
+                status = validation_result.cluster_status
+                validation_log["checks"]["cluster_status"] = {
+                    "success": status.success,
+                    "cluster_state": status.cluster_state,
+                    "nodes_in_fail_state": status.nodes_in_fail_state,
+                    "has_quorum": status.has_quorum,
+                    "degraded_reason": status.degraded_reason,
+                    "error_message": status.error_message,
+                }
 
-        # Log slot coverage validation details
-        if validation_result.slot_coverage:
-            slots = validation_result.slot_coverage
-            validation_log["checks"]["slot_coverage"] = {
-                "success": slots.success,
-                "total_slots_assigned": slots.total_slots_assigned,
-                "unassigned_slots_count": len(slots.unassigned_slots),
-                "unassigned_slots": slots.unassigned_slots[:100]
-                if len(slots.unassigned_slots) > 100
-                else slots.unassigned_slots,  # Limit for readability
-                "conflicting_slots": [
-                    {"slot": conflict.slot, "conflicting_nodes": conflict.conflicting_nodes}
-                    for conflict in slots.conflicting_slots
-                ],
-                "slot_distribution": {
-                    node_id: len(slot_list) for node_id, slot_list in slots.slot_distribution.items()
-                },
-                "error_message": slots.error_message,
-            }
+            # Log slot coverage validation details
+            if validation_result.slot_coverage:
+                slots = validation_result.slot_coverage
+                validation_log["checks"]["slot_coverage"] = {
+                    "success": slots.success,
+                    "total_slots_assigned": slots.total_slots_assigned,
+                    "unassigned_slots_count": len(slots.unassigned_slots),
+                    "unassigned_slots": slots.unassigned_slots[:100]
+                    if len(slots.unassigned_slots) > 100
+                    else slots.unassigned_slots,
+                    "conflicting_slots": [
+                        {"slot": conflict.slot, "conflicting_nodes": conflict.conflicting_nodes}
+                        for conflict in slots.conflicting_slots
+                    ],
+                    "slot_distribution": {
+                        node_id: len(slot_list) for node_id, slot_list in slots.slot_distribution.items()
+                    },
+                    "error_message": slots.error_message,
+                }
 
-        # Log topology validation details
-        if validation_result.topology:
-            topo = validation_result.topology
-            validation_log["checks"]["topology"] = {
-                "success": topo.success,
-                "expected_primaries": topo.expected_primaries,
-                "actual_primaries": topo.actual_primaries,
-                "expected_replicas": topo.expected_replicas,
-                "actual_replicas": topo.actual_replicas,
-                "topology_mismatches": [
-                    {
-                        "mismatch_type": mismatch.mismatch_type,
-                        "node_id": mismatch.node_id,
-                        "expected": mismatch.expected,
-                        "actual": mismatch.actual,
-                    }
-                    for mismatch in topo.topology_mismatches
-                ],
-                "error_message": topo.error_message,
-            }
+            # Log topology validation details
+            if validation_result.topology:
+                topo = validation_result.topology
+                validation_log["checks"]["topology"] = {
+                    "success": topo.success,
+                    "expected_primaries": topo.expected_primaries,
+                    "actual_primaries": topo.actual_primaries,
+                    "expected_replicas": topo.expected_replicas,
+                    "actual_replicas": topo.actual_replicas,
+                    "topology_mismatches": [
+                        {
+                            "mismatch_type": mismatch.mismatch_type,
+                            "node_id": mismatch.node_id,
+                            "expected": mismatch.expected,
+                            "actual": mismatch.actual,
+                        }
+                        for mismatch in topo.topology_mismatches
+                    ],
+                    "error_message": topo.error_message,
+                }
 
-        # Log view consistency validation details
-        if validation_result.view_consistency:
-            view = validation_result.view_consistency
-            validation_log["checks"]["view_consistency"] = {
-                "success": view.success,
-                "nodes_checked": view.nodes_checked,
-                "consistent_views": view.consistent_views,
-                "split_brain_detected": view.split_brain_detected,
-                "consensus_percentage": view.consensus_percentage,
-                "view_discrepancies": [
-                    {
-                        "discrepancy_type": disc.discrepancy_type,
-                        "node_reporting": disc.node_reporting,
-                        "subject_node": disc.subject_node,
-                        "expected_value": disc.expected_value,
-                        "actual_value": disc.actual_value,
-                    }
-                    for disc in view.view_discrepancies[:50]  # Limit for readability
-                ],
-                "error_message": view.error_message,
-            }
+            # Log view consistency validation details
+            if validation_result.view_consistency:
+                view = validation_result.view_consistency
+                validation_log["checks"]["view_consistency"] = {
+                    "success": view.success,
+                    "nodes_checked": view.nodes_checked,
+                    "consistent_views": view.consistent_views,
+                    "split_brain_detected": view.split_brain_detected,
+                    "consensus_percentage": view.consensus_percentage,
+                    "view_discrepancies": [
+                        {
+                            "discrepancy_type": disc.discrepancy_type,
+                            "node_reporting": disc.node_reporting,
+                            "subject_node": disc.subject_node,
+                            "expected_value": disc.expected_value,
+                            "actual_value": disc.actual_value,
+                        }
+                        for disc in view.view_discrepancies[:50]
+                    ],
+                    "error_message": view.error_message,
+                }
 
-            # Add to test logs
+            if validation_result.data_consistency:
+                data = validation_result.data_consistency
+                validation_log["checks"]["data_consistency"] = {
+                    "success": data.success,
+                    "test_keys_checked": data.test_keys_checked,
+                    "missing_keys": data.missing_keys,
+                    "inconsistent_keys": [
+                        {
+                            "key": item.key,
+                            "inconsistency_type": item.inconsistency_type,
+                            "expected_value": item.expected_value,
+                            "actual_values": item.actual_values,
+                        }
+                        for item in data.inconsistent_keys
+                    ],
+                    "unreachable_keys": data.unreachable_keys,
+                    "error_message": data.error_message,
+                }
+
+            if validation_result.log_validation:
+                log_result = validation_result.log_validation
+                validation_log["checks"]["log_validation"] = {
+                    "success": log_result.success,
+                    "shards_checked": log_result.shards_checked,
+                    "findings": [
+                        {
+                            "node_id": finding.node_id,
+                            "shard_id": finding.shard_id,
+                            "severity": finding.severity,
+                            "message": finding.message,
+                            "log_line": finding.log_line,
+                        }
+                        for finding in log_result.findings
+                    ],
+                }
+
+            # Every validation result is persisted, including topology-specific
+            # runs where view-consistency validation is disabled.
             self.test_logs[self.current_test_id]["state_validation_results"].append(validation_log)
 
-            # Log human-readable summary
             status_str = "PASSED" if validation_result.overall_success else "FAILED"
             critical_str = " (CRITICAL)" if validation_result.is_critical_failure() else ""
-
             logger.info(
                 f"Logged state validation result for operation {operation_number}: "
                 f"{status_str}{critical_str} - Duration: {validation_result.validation_duration:.2f}s"
@@ -253,7 +289,6 @@ class FuzzerLogger:
             if not validation_result.overall_success:
                 logger.info(f"  Failed checks: {', '.join(validation_result.failed_checks)}")
 
-                # Log detailed failure information for each check
                 if validation_result.replication and not validation_result.replication.success:
                     logger.info(
                         f"  - Replication: {len(validation_result.replication.lagging_replicas)} lagging, "
@@ -275,8 +310,10 @@ class FuzzerLogger:
 
                 if validation_result.topology and not validation_result.topology.success:
                     logger.info(
-                        f"  - Topology: {validation_result.topology.actual_primaries}/{validation_result.topology.expected_primaries} primaries, "
-                        f"{validation_result.topology.actual_replicas}/{validation_result.topology.expected_replicas} replicas, "
+                        f"  - Topology: {validation_result.topology.actual_primaries}/"
+                        f"{validation_result.topology.expected_primaries} primaries, "
+                        f"{validation_result.topology.actual_replicas}/"
+                        f"{validation_result.topology.expected_replicas} replicas, "
                         f"{len(validation_result.topology.topology_mismatches)} mismatches"
                     )
 
@@ -285,6 +322,13 @@ class FuzzerLogger:
                         f"  - View Consistency: {validation_result.view_consistency.nodes_checked} nodes checked, "
                         f"consensus={validation_result.view_consistency.consensus_percentage:.1f}%, "
                         f"split_brain={validation_result.view_consistency.split_brain_detected}"
+                    )
+
+                if validation_result.data_consistency and not validation_result.data_consistency.success:
+                    logger.info(
+                        f"  - Data Consistency: {len(validation_result.data_consistency.missing_keys)} missing, "
+                        f"{len(validation_result.data_consistency.inconsistent_keys)} inconsistent, "
+                        f"{len(validation_result.data_consistency.unreachable_keys)} unreachable"
                     )
 
             self._write_log_to_disk(self.current_test_id)
@@ -387,7 +431,7 @@ class FuzzerLogger:
 
         report_lines = [
             "=" * 80,
-            "CLUSTER BUS FUZZER - TEST EXECUTION REPORT",
+            "VALKEY FUZZER - TEST EXECUTION REPORT",
             "=" * 80,
             "",
             f"Total Tests:        {total_tests}",
@@ -437,14 +481,20 @@ class FuzzerLogger:
         return report
 
     def _serialize_cluster_config(self, config) -> dict[str, Any]:
-        """Serialize cluster configuration to dictionary"""
+        """Serialize topology configuration under the compatibility key."""
+        topology_type = getattr(config, "topology_type", TopologyType.CLUSTER)
         return {
+            "topology_type": getattr(topology_type, "value", str(topology_type)),
             "num_shards": config.num_shards,
             "replicas_per_shard": config.replicas_per_shard,
             "base_port": config.base_port,
             "base_data_dir": config.base_data_dir,
             "valkey_binary": config.valkey_binary,
             "enable_cleanup": config.enable_cleanup,
+            "server_config": dict(getattr(config, "server_config", {})),
+            "node_configs": {
+                node_id: dict(node_config) for node_id, node_config in getattr(config, "node_configs", {}).items()
+            },
         }
 
     def _serialize_operations(self, operations: list[Operation]) -> list[dict[str, Any]]:
@@ -496,6 +546,7 @@ class FuzzerLogger:
             "check_topology": config.check_topology,
             "check_view_consistency": config.check_view_consistency,
             "check_data_consistency": config.check_data_consistency,
+            "check_logs": config.check_logs,
             "stabilization_wait": config.stabilization_wait,
             "validation_timeout": config.validation_timeout,
             "blocking_on_failure": config.blocking_on_failure,
@@ -562,18 +613,23 @@ class FuzzerLogger:
 
     def _log_scenario_summary(self, scenario: Scenario) -> None:
         """Log a human-readable summary of the scenario before execution"""
+        topology_type = getattr(scenario.cluster_config, "topology_type", TopologyType.CLUSTER)
+        topology_name = getattr(topology_type, "value", str(topology_type))
+        total_nodes = scenario.cluster_config.num_shards * (1 + scenario.cluster_config.replicas_per_shard)
         summary_lines = [
             "",
             "=" * 80,
             f"SCENARIO SUMMARY: {scenario.scenario_id}",
             "=" * 80,
+            f"API Version: {scenario.api_version}",
             f"Seed: {scenario.seed}",
             "",
-            "CLUSTER CONFIGURATION:",
+            "TOPOLOGY CONFIGURATION:",
+            f"  - Type: {topology_name}",
             f"  - Shards: {scenario.cluster_config.num_shards}",
             f"  - Replicas per shard: {scenario.cluster_config.replicas_per_shard}",
             f"  - Base port: {scenario.cluster_config.base_port}",
-            f"  - Total nodes: {scenario.cluster_config.num_shards * (1 + scenario.cluster_config.replicas_per_shard)}",
+            f"  - Total nodes: {total_nodes}",
             "",
             f"OPERATIONS ({len(scenario.operations)} total):",
         ]

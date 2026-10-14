@@ -3,6 +3,7 @@ Valkey client utilities for safe connection management and common query patterns
 """
 
 import logging
+from collections.abc import Mapping
 from contextlib import contextmanager
 from typing import Callable, Optional, TypeVar
 
@@ -11,6 +12,39 @@ import valkey
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+
+def _response_text(value: object) -> str:
+    """Normalize RESP2/RESP3 response components to text."""
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value).decode("utf-8", errors="replace")
+    return str(value)
+
+
+def parse_cluster_info_response(response: object) -> dict[str, str]:
+    """Parse CLUSTER INFO output from raw or mapping-based client responses."""
+    if isinstance(response, Mapping):
+        return {
+            _response_text(key).strip(): _response_text(value).strip()
+            for key, value in response.items()
+            if _response_text(key).strip()
+        }
+
+    info: dict[str, str] = {}
+    for raw_line in _response_text(response).splitlines():
+        line = raw_line.strip()
+        if not line or ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip()
+        if key:
+            info[key] = value.strip()
+    return info
+
+
+def query_cluster_info(client: valkey.Valkey) -> dict[str, str]:
+    """Query the canonical CLUSTER INFO command and normalize its response."""
+    return parse_cluster_info_response(client.execute_command("CLUSTER", "INFO"))
 
 
 @contextmanager

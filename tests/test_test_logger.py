@@ -16,6 +16,7 @@ from src.models import (
     ChaosType,
     ClusterConfig,
     ClusterStatus,
+    DataConsistencyValidation,
     ExecutionResult,
     NodeInfo,
     Operation,
@@ -23,7 +24,9 @@ from src.models import (
     OperationType,
     ProcessChaosType,
     Scenario,
+    StateValidationResult,
     TargetSelection,
+    TopologyType,
 )
 
 
@@ -71,11 +74,15 @@ def test_log_test_start(test_logger, sample_scenario):
 
     log = test_logger.test_logs["test-scenario-1"]
     assert log["scenario_id"] == "test-scenario-1"
+    assert log["api_version"] == "v1"
     assert log["seed"] == 12345
     assert log["status"] == "running"
     assert "cluster_config" in log
     assert "operations" in log
     assert "chaos_config" in log
+    assert log["cluster_config"]["topology_type"] == "cluster"
+    assert log["cluster_config"]["server_config"] == {}
+    assert log["cluster_config"]["node_configs"] == {}
 
     # Check that log file was created
     log_file = test_logger.log_dir / "test-scenario-1.json"
@@ -241,6 +248,8 @@ def test_generate_report(test_logger):
 
     report = test_logger.generate_report(results)
 
+    assert "VALKEY FUZZER - TEST EXECUTION REPORT" in report
+    assert "CLUSTER BUS FUZZER" not in report
     assert "Total Tests:        3" in report
     assert "Successful:         2" in report
     assert "Failed:             1" in report
@@ -308,6 +317,71 @@ def test_log_file_persistence(test_logger, sample_scenario):
 
     assert log_data["scenario_id"] == "test-scenario-1"
     assert log_data["seed"] == 12345
+
+
+def test_log_topology_configuration(test_logger, sample_scenario):
+    """Test topology metadata and server overrides are retained in the compatibility object."""
+    sample_scenario.api_version = "v2"
+    sample_scenario.cluster_config.topology_type = TopologyType.REPLICATION
+    sample_scenario.cluster_config.num_shards = 1
+    sample_scenario.cluster_config.replicas_per_shard = 2
+    sample_scenario.cluster_config.server_config = {"repl-diskless-sync": "yes"}
+    sample_scenario.cluster_config.node_configs = {
+        "replica": {"repl-diskless-load": "swapdb"},
+        "node-2": {"loglevel": "debug"},
+    }
+
+    test_logger.log_test_start(sample_scenario)
+
+    log = test_logger.get_test_log(sample_scenario.scenario_id)
+    assert log["api_version"] == "v2"
+    assert log["cluster_config"] == {
+        "topology_type": "replication",
+        "num_shards": 1,
+        "replicas_per_shard": 2,
+        "base_port": 7000,
+        "base_data_dir": "/tmp/valkey-fuzzer",
+        "valkey_binary": "",
+        "enable_cleanup": True,
+        "server_config": {"repl-diskless-sync": "yes"},
+        "node_configs": {
+            "replica": {"repl-diskless-load": "swapdb"},
+            "node-2": {"loglevel": "debug"},
+        },
+    }
+
+
+def test_log_validation_without_view_consistency(test_logger, sample_scenario):
+    """Test validation is persisted when cluster-only view validation is disabled."""
+    test_logger.log_test_start(sample_scenario)
+    validation = StateValidationResult(
+        overall_success=True,
+        validation_timestamp=time.time(),
+        validation_duration=0.25,
+        replication=None,
+        cluster_status=None,
+        slot_coverage=None,
+        topology=None,
+        view_consistency=None,
+        data_consistency=DataConsistencyValidation(
+            success=True,
+            test_keys_checked=10,
+            missing_keys=[],
+            inconsistent_keys=[],
+            unreachable_keys=[],
+        ),
+    )
+
+    test_logger.log_state_validation_result(validation, operation_number=0)
+
+    log = test_logger.get_test_log(sample_scenario.scenario_id)
+    assert len(log["state_validation_results"]) == 1
+    validation_log = log["state_validation_results"][0]
+    assert validation_log["operation_number"] == 0
+    assert validation_log["checks"]["data_consistency"]["test_keys_checked"] == 10
+
+    persisted = json.loads((test_logger.log_dir / "test-scenario-1.json").read_text())
+    assert len(persisted["state_validation_results"]) == 1
 
 
 if __name__ == "__main__":

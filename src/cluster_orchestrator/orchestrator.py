@@ -1,4 +1,3 @@
-import contextlib
 import logging
 import os
 import re
@@ -7,18 +6,32 @@ import subprocess
 import time
 import traceback
 import uuid
-from typing import Optional
+from collections.abc import Iterable, Mapping
+from typing import Any, Optional
 
 import valkey
 
-from ..models import ClusterConfig, ClusterConnection, NodeInfo, NodePlan
-from ..utils.valkey_utils import valkey_client
+from ..models import ClusterConfig, ClusterConnection, NodeInfo, NodePlan, TopologyType
+from ..utils.server_config import (
+    build_server_config_arguments,
+    canonicalize_server_config,
+    normalize_server_option,
+    server_config_values,
+)
+from ..utils.valkey_utils import query_cluster_info, valkey_client
 
 logger = logging.getLogger()
 
 # Matches the `sha=<hex>:<dirty>` field from `valkey-server --version`.
 # Example output: "Valkey server v=8.1.0 sha=abc1234:0 malloc=jemalloc-5.3.0 ..."
 _VERSION_SHA_RE = re.compile(r"sha=([0-9a-f]{7,40}):", re.IGNORECASE)
+
+
+def _coerce_topology_type(topology_type: Any) -> TopologyType:
+    """Normalize enum/string topology values at orchestration boundaries."""
+    if isinstance(topology_type, TopologyType):
+        return topology_type
+    return TopologyType(topology_type)
 
 
 def detect_valkey_sha(binary: str) -> Optional[str]:
@@ -87,6 +100,12 @@ class ConfigurationManager:
         self.port_manager = port_manager
         self.cluster_id = str(uuid.uuid4())[:8]
         self.seed = seed
+        self._spawned_nodes: dict[str, NodeInfo] = {}
+
+    @property
+    def spawned_nodes(self) -> list[NodeInfo]:
+        """Return nodes currently owned by this manager."""
+        return list(self._spawned_nodes.values())
 
     def setup_valkey_from_source(self, base_dir: str = "/tmp/valkey-build") -> str:
         """Clone and build Valkey binary, return path to valkey-server binary"""
@@ -140,6 +159,7 @@ class ConfigurationManager:
         """Create a node plan with allocated ports and configuration"""
         node_id = f"node-{node_counter}"
         client_port, bus_port = self.port_manager.allocate_ports(node_id)
+        server_config = self.resolve_node_server_config(node_id, role)
 
         return NodePlan(
             node_id=node_id,
@@ -150,10 +170,56 @@ class ConfigurationManager:
             slot_start=slot_start,
             slot_end=slot_end,
             master_node_id=master_node_id,
+            server_config=server_config,
         )
 
+    def resolve_node_server_config(self, node_id: str, role: str) -> dict[str, Any]:
+        """Resolve global, role, and exact-node server configuration layers."""
+        resolved: dict[str, Any] = {}
+        node_configs = self.clusterConfig.node_configs or {}
+        layers = (
+            ("server_config", self.clusterConfig.server_config or {}),
+            (f"node_configs[{role!r}]", node_configs.get(role, {})),
+            (f"node_configs[{node_id!r}]", node_configs.get(node_id, {})),
+        )
+
+        for layer_name, layer in layers:
+            if not isinstance(layer, Mapping):
+                raise TypeError(f"{layer_name} must be a mapping, got {type(layer).__name__}")
+            try:
+                resolved.update(canonicalize_server_config(layer))
+            except (TypeError, ValueError) as exc:
+                error_type = TypeError if isinstance(exc, TypeError) else ValueError
+                raise error_type(f"{layer_name}: {exc}") from exc
+
+        return resolved
+
     def plan_topology(self) -> list[NodePlan]:
-        """Plan cluster topology with given number of primary and replica nodes"""
+        """Plan nodes for cluster, standalone, or primary/replica topology."""
+        topology_type = _coerce_topology_type(self.clusterConfig.topology_type)
+
+        if topology_type == TopologyType.STANDALONE:
+            logger.info("Planning standalone topology")
+            return [self.create_node_plan(0, "primary", 0)]
+
+        if topology_type == TopologyType.REPLICATION:
+            logger.info(
+                "Planning primary/replica topology with %s replica(s)",
+                self.clusterConfig.replicas_per_shard,
+            )
+            primary = self.create_node_plan(0, "primary", 0)
+            nodes = [primary]
+            for node_counter in range(1, self.clusterConfig.replicas_per_shard + 1):
+                nodes.append(
+                    self.create_node_plan(
+                        node_counter,
+                        "replica",
+                        0,
+                        master_node_id=primary.node_id,
+                    )
+                )
+            return nodes
+
         nodes = []
         node_counter = 0
 
@@ -204,9 +270,28 @@ class ConfigurationManager:
         log_file = os.path.join(log_dir, f"{self.seed}-{node_id}.log")
         return node_data_dir, log_file
 
-    def build_node_command(self, port: int, data_dir: str, log_file: str) -> list[str]:
-        """Build the Valkey server command with standard cluster configuration."""
-        return [
+    @staticmethod
+    def _normalize_server_option(raw_option: object) -> str:
+        return normalize_server_option(raw_option)
+
+    @staticmethod
+    def _server_config_values(option: str, raw_value: object) -> Iterable[str]:
+        return server_config_values(option, raw_value)
+
+    def _build_server_config_arguments(self, server_config: Optional[Mapping[str, Any]]) -> list[str]:
+        return build_server_config_arguments(server_config)
+
+    def build_node_command(
+        self,
+        port: int,
+        data_dir: str,
+        log_file: str,
+        server_config: Optional[Mapping[str, Any]] = None,
+    ) -> list[str]:
+        """Build a shell-safe Valkey command for the configured topology."""
+        topology_type = _coerce_topology_type(self.clusterConfig.topology_type)
+        cluster_enabled = topology_type == TopologyType.CLUSTER
+        command = [
             self.clusterConfig.valkey_binary,
             "--port",
             str(port),
@@ -215,30 +300,43 @@ class ConfigurationManager:
             "--protected-mode",
             "no",
             "--cluster-enabled",
-            "yes",
-            "--cluster-config-file",
-            os.path.join(data_dir, "nodes.conf"),
-            "--cluster-node-timeout",
-            "1000",
-            "--cluster-require-full-coverage",
-            "no",
-            "--dir",
-            data_dir,
-            "--logfile",
-            log_file,
-            "--loglevel",
-            "notice",
-            "--appendonly",
-            "yes",
-            "--appendfilename",
-            "appendonly.aof",
-            "--save",
-            "",
-            "--maxmemory",
-            "500mb",
-            "--maxmemory-policy",
-            "allkeys-lru",
+            "yes" if cluster_enabled else "no",
         ]
+
+        if cluster_enabled:
+            command.extend(
+                [
+                    "--cluster-config-file",
+                    os.path.join(data_dir, "nodes.conf"),
+                    "--cluster-node-timeout",
+                    "1000",
+                    "--cluster-require-full-coverage",
+                    "no",
+                ]
+            )
+
+        command.extend(
+            [
+                "--dir",
+                data_dir,
+                "--logfile",
+                log_file,
+                "--loglevel",
+                "notice",
+                "--appendonly",
+                "yes",
+                "--appendfilename",
+                "appendonly.aof",
+                "--save",
+                "",
+                "--maxmemory",
+                "500mb",
+                "--maxmemory-policy",
+                "allkeys-lru",
+            ]
+        )
+        command.extend(self._build_server_config_arguments(server_config))
+        return command
 
     def spawn_all_nodes(self, node_plans: list[NodePlan]) -> list[NodeInfo]:
         """Spawn all Valkey processes and wait for them to be ready"""
@@ -246,69 +344,108 @@ class ConfigurationManager:
         logger.info(f"Spawning {len(node_plans)} nodes")
         node_info_list = []
 
-        for plan in node_plans:
-            node_data_dir, log_file = self.create_node_directories(plan.node_id)
-
-            # Build command using centralized configuration
-            cmd = self.build_node_command(plan.port, node_data_dir, log_file)
-
-            logger.debug(f"Spawning {plan.node_id} on port {plan.port}")
-            try:
-                process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-                # Note: host defaults to 127.0.0.1 in NodeInfo
-                node_info = NodeInfo(
-                    node_id=plan.node_id,
-                    role=plan.role,
-                    shard_id=plan.shard_id,
-                    port=plan.port,
-                    bus_port=plan.bus_port,
-                    pid=process.pid,
-                    process=process,
-                    data_dir=node_data_dir,
-                    log_file=log_file,
-                    slot_start=plan.slot_start,
-                    slot_end=plan.slot_end,
-                    master_node_id=plan.master_node_id,
+        try:
+            for plan in node_plans:
+                logger.debug(f"Spawning {plan.node_id} on port {plan.port}")
+                node_data_dir, log_file = self.create_node_directories(plan.node_id)
+                # Build command using the configuration resolved while planning.
+                cmd = self.build_node_command(
+                    plan.port,
+                    node_data_dir,
+                    log_file,
+                    server_config=plan.server_config,
                 )
+                process = None
+                try:
+                    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-                node_info_list.append(node_info)
+                    # Note: host defaults to 127.0.0.1 in NodeInfo
+                    node_info = NodeInfo(
+                        node_id=plan.node_id,
+                        role=plan.role,
+                        shard_id=plan.shard_id,
+                        port=plan.port,
+                        bus_port=plan.bus_port,
+                        pid=process.pid,
+                        process=process,
+                        data_dir=node_data_dir,
+                        log_file=log_file,
+                        slot_start=plan.slot_start,
+                        slot_end=plan.slot_end,
+                        master_node_id=plan.master_node_id,
+                        server_config=dict(plan.server_config),
+                    )
+
+                    self._spawned_nodes[node_info.node_id] = node_info
+                    node_info_list.append(node_info)
+                except BaseException:
+                    if process is not None and plan.node_id not in self._spawned_nodes:
+                        self._terminate_untracked_process(process, plan.node_id)
+                    raise
                 logger.debug(f"Spawned {plan.node_id} with PID {process.pid}")
 
-            except Exception as e:
-                logger.error(f"Failed to spawn {plan.node_id}: {e}")
-                for node in node_info_list:
-                    self.terminate_node(node)
-                raise
+            logger.info("Waiting for all nodes to be ready")
+            for node in node_info_list:
+                deadline = time.monotonic() + 30
+                ready = False
 
-        logger.info("Waiting for all nodes to be ready")
-        for node in node_info_list:
-            deadline = time.time() + 30
-            ready = False
+                while time.monotonic() < deadline:
+                    if node.process.poll() is not None:
+                        logger.info(f"Node {node.node_id} process died")
+                        break
 
-            while time.time() < deadline:
-                if node.process.poll() is not None:
-                    logger.info(f"Node {node.node_id} process died")
-                    break
+                    try:
+                        with valkey_client(node.host, node.port, timeout=3.0, decode_responses=True) as client:
+                            if client.ping():
+                                logger.debug(f"Node {node.node_id} is active")
+                                ready = True
+                                break
+                    except (valkey.ConnectionError, valkey.TimeoutError):
+                        pass
 
-                try:
-                    with valkey_client("127.0.0.1", node.port, timeout=3.0, decode_responses=True) as client:
-                        if client.ping():
-                            logger.debug(f"Node {node.node_id} is active")
-                            ready = True
-                            break
-                except (valkey.ConnectionError, valkey.TimeoutError):
-                    pass
+                    time.sleep(0.5)
 
-                time.sleep(0.5)
+                if not ready:
+                    raise Exception(f"Node {node.node_id} failed to start")
 
-            if not ready:
-                for failed_node in node_info_list:
-                    self.terminate_node(failed_node)
-                raise Exception(f"Node {node.node_id} failed to start")
+        except BaseException as exc:
+            logger.error("Failed while spawning or waiting for nodes: %s", exc)
+            self._cleanup_failed_spawn(node_info_list, node_plans)
+            raise
 
         logger.info(f"All {len(node_info_list)} nodes are active")
         return node_info_list
+
+    @staticmethod
+    def _terminate_untracked_process(process: subprocess.Popen, node_id: str) -> None:
+        """Best-effort termination before a process has a NodeInfo owner."""
+        try:
+            if process.poll() is not None:
+                return
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        except BaseException as exc:
+            logger.error("Failed to terminate untracked process for %s: %s", node_id, exc)
+
+    def _cleanup_failed_spawn(self, spawned_nodes: list[NodeInfo], node_plans: list[NodePlan]) -> None:
+        """Best-effort cleanup when spawning fails before ownership is returned.
+
+        This method deliberately reports cleanup failures instead of raising:
+        its caller is already handling a spawn/readiness exception or
+        interruption, which must remain the exception observed by the caller.
+        """
+        nodes_by_id = dict(self._spawned_nodes)
+        nodes_by_id.update({node.node_id: node for node in spawned_nodes})
+        self._cleanup_resources(
+            nodes_by_id.values(),
+            [plan.node_id for plan in node_plans],
+            context="failed spawn",
+            raise_on_failure=False,
+        )
 
     def terminate_node(self, node: NodeInfo) -> None:
         """Terminate a Valkey node process"""
@@ -331,8 +468,30 @@ class ConfigurationManager:
         logger.info(f"Restarting {node.node_id} on port {node.port}")
 
         # Build command using centralized configuration
-        cmd = self.build_node_command(node.port, node.data_dir, node.log_file)
+        cmd = self.build_node_command(
+            node.port,
+            node.data_dir,
+            node.log_file,
+            server_config=node.server_config,
+        )
+        topology_type = _coerce_topology_type(self.clusterConfig.topology_type)
+        if topology_type == TopologyType.REPLICATION and node.role == "replica":
+            if not node.master_node_id:
+                raise ValueError(f"Replica {node.node_id} has no configured primary")
 
+            primary = self._spawned_nodes.get(node.master_node_id)
+            if primary is None or primary.role != "primary":
+                raise ValueError(
+                    f"Cannot restart replica {node.node_id}: configured primary {node.master_node_id!r} is unavailable"
+                )
+
+            # Replication configured at runtime is not persisted by the process
+            # command assembled above. Inject the orchestrator-owned startup
+            # directive so even a non-blocking restart cannot briefly become a
+            # writable primary.
+            cmd.extend(["--replicaof", primary.host, str(primary.port)])
+
+        process = None
         try:
             # Start new process
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -340,54 +499,216 @@ class ConfigurationManager:
             # Update node info with new process
             node.process = process
             node.pid = process.pid
+            self._spawned_nodes[node.node_id] = node
 
             logger.info(f"Restarted {node.node_id} with new PID {process.pid}")
 
             # Wait for node to be ready if requested
             if wait_ready:
-                deadline = time.time() + ready_timeout
+                deadline = time.monotonic() + max(ready_timeout, 0.0)
                 ready = False
 
-                while time.time() < deadline:
+                while time.monotonic() < deadline:
                     if node.process.poll() is not None:
                         raise Exception(f"Node {node.node_id} process died during restart")
 
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+
                     try:
-                        with valkey_client("127.0.0.1", node.port, timeout=3.0, decode_responses=True) as client:
-                            if client.ping():
+                        expected_round_trips = 4 if topology_type == TopologyType.CLUSTER else 2
+                        attempt_timeout = min(0.5, max(0.001, remaining / expected_round_trips))
+                        with valkey_client(
+                            node.host,
+                            node.port,
+                            timeout=attempt_timeout,
+                            decode_responses=True,
+                        ) as client:
+                            if self._restart_topology_is_ready(node, client, topology_type):
                                 logger.info(f"Node {node.node_id} is ready after restart")
                                 ready = True
                                 break
-                    except (valkey.ConnectionError, valkey.TimeoutError):
-                        pass
+                    except Exception as exc:
+                        logger.debug("Node %s is not topology-ready after restart: %s", node.node_id, exc)
 
-                    time.sleep(0.5)
+                    remaining = deadline - time.monotonic()
+                    if remaining > 0:
+                        time.sleep(min(0.5, remaining))
 
                 if not ready:
                     self.terminate_node(node)
+                    process = None
                     raise Exception(f"Node {node.node_id} failed to become ready within {ready_timeout:.2f}s")
 
             return node
 
-        except Exception as e:
+        except BaseException as e:
             logger.error(f"Failed to restart {node.node_id}: {e}")
+            if process is not None and process.poll() is None:
+                try:
+                    self.terminate_node(node)
+                except BaseException as cleanup_error:
+                    logger.error("Failed to terminate %s after restart failure: %s", node.node_id, cleanup_error)
             raise
 
-    def cleanup_cluster(self, nodes_in_cluster: list[NodeInfo]) -> None:
-        """Clean up cluster by terminating nodes and releasing resources"""
-        logger.info(f"Cleaning up cluster {self.cluster_id}")
+    @staticmethod
+    def _normalize_info_value(value: object) -> str:
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        return str(value).lower()
 
-        for node in nodes_in_cluster:
-            self.terminate_node(node)
-            self.port_manager.release_ports(node.node_id)
+    def _restart_topology_is_ready(
+        self,
+        node: NodeInfo,
+        client: valkey.Valkey,
+        topology_type: TopologyType,
+    ) -> bool:
+        """Return whether a restarted node has rejoined its expected topology."""
+        if not client.ping():
+            return False
+
+        if topology_type == TopologyType.CLUSTER:
+            server_info = client.info("cluster")
+            cluster_enabled = self._normalize_info_value(server_info.get("cluster_enabled", 0))
+            cluster_info = query_cluster_info(client)
+            cluster_state = self._normalize_info_value(cluster_info.get("cluster_state", ""))
+            try:
+                known_nodes = int(cluster_info.get("cluster_known_nodes", 0))
+            except (TypeError, ValueError):
+                return False
+
+            expected_nodes = max(len(self._spawned_nodes), 1)
+            if cluster_enabled not in {"1", "yes", "true"} or cluster_state != "ok" or known_nodes < expected_nodes:
+                return False
+
+            cluster_node_id = client.execute_command("CLUSTER", "MYID")
+            cluster_nodes = client.execute_command("CLUSTER", "NODES")
+            if isinstance(cluster_node_id, bytes):
+                cluster_node_id = cluster_node_id.decode("utf-8", errors="replace")
+            if isinstance(cluster_nodes, bytes):
+                cluster_nodes = cluster_nodes.decode("utf-8", errors="replace")
+
+            self_is_healthy = False
+            connected_members = 0
+            for line in str(cluster_nodes).splitlines():
+                fields = line.split()
+                if len(fields) < 8:
+                    continue
+                flags = set(fields[2].split(","))
+                unhealthy_flags = {"fail", "fail?", "handshake", "noaddr"}
+                member_is_healthy = flags.isdisjoint(unhealthy_flags) and fields[7] == "connected"
+                if member_is_healthy:
+                    connected_members += 1
+                if fields[0] != str(cluster_node_id):
+                    continue
+                self_is_healthy = "myself" in flags and member_is_healthy
+
+            minimum_connected_members = 1 if expected_nodes == 1 else 2
+            return self_is_healthy and connected_members >= minimum_connected_members
+
+        replication_info = client.info("replication")
+        role = self._normalize_info_value(replication_info.get("role", ""))
+
+        if topology_type == TopologyType.REPLICATION and node.role == "replica":
+            master_link_status = self._normalize_info_value(replication_info.get("master_link_status", ""))
+            if role not in {"slave", "replica"} or master_link_status != "up":
+                return False
+
+            if not node.master_node_id:
+                return False
+            primary = self._spawned_nodes.get(node.master_node_id)
+            if primary is None:
+                return False
+
+            master_host = self._normalize_info_value(replication_info.get("master_host", ""))
+            try:
+                master_port = int(replication_info.get("master_port"))
+            except (TypeError, ValueError):
+                return False
+            return master_host == primary.host.lower() and master_port == primary.port
+
+        if topology_type == TopologyType.REPLICATION and node.role == "primary":
+            if role not in {"master", "primary"}:
+                return False
+            expected_replicas = sum(
+                other.role == "replica" and other.master_node_id in {None, node.node_id}
+                for other in self._spawned_nodes.values()
+            )
+            connected_replicas = replication_info.get(
+                "connected_slaves",
+                replication_info.get("connected_replicas", 0),
+            )
+            try:
+                return int(connected_replicas) >= expected_replicas
+            except (TypeError, ValueError):
+                return False
+
+        return node.role == "primary" and role in {"master", "primary"}
+
+    def cleanup_cluster(self, nodes_in_cluster: list[NodeInfo]) -> None:
+        """Clean up every node and resource, then report any failures."""
+        logger.info(f"Cleaning up cluster {self.cluster_id}")
+        self._cleanup_resources(
+            nodes_in_cluster,
+            [node.node_id for node in nodes_in_cluster],
+            context=f"cluster {self.cluster_id}",
+            raise_on_failure=True,
+        )
+        logger.debug(f"Cluster {self.cluster_id} cleaned up")
+
+    def _cleanup_resources(
+        self,
+        nodes: Iterable[NodeInfo],
+        node_ids: Iterable[str],
+        *,
+        context: str,
+        raise_on_failure: bool,
+    ) -> list[tuple[str, BaseException]]:
+        """Attempt all lifecycle cleanup actions regardless of individual failures."""
+        failures: list[tuple[str, BaseException]] = []
+
+        for node in nodes:
+            try:
+                self.terminate_node(node)
+            except BaseException as exc:
+                failures.append((f"terminate {node.node_id}", exc))
+
+        for node_id in dict.fromkeys(node_ids):
+            try:
+                self.port_manager.release_ports(node_id)
+            except BaseException as exc:
+                failures.append((f"release ports for {node_id}", exc))
+            finally:
+                self._spawned_nodes.pop(node_id, None)
 
         if self.clusterConfig.enable_cleanup:
             cluster_dir = os.path.join(self.clusterConfig.base_data_dir, f"cluster-{self.cluster_id}")
-            if os.path.exists(cluster_dir):
-                shutil.rmtree(cluster_dir)
-                logger.info("Deleted data directory")
+            try:
+                cluster_dir_exists = os.path.exists(cluster_dir)
+            except BaseException as exc:
+                failures.append((f"inspect {cluster_dir}", exc))
+                cluster_dir_exists = False
 
-        logger.debug(f"Cluster {self.cluster_id} cleaned up")
+            if cluster_dir_exists:
+                try:
+                    shutil.rmtree(cluster_dir)
+                    logger.info("Deleted data directory")
+                except BaseException as exc:
+                    failures.append((f"delete {cluster_dir}", exc))
+
+        for action, exc in failures:
+            logger.error("Cleanup action failed during %s (%s): %s", context, action, exc)
+
+        if failures and raise_on_failure:
+            interrupt = next((exc for _, exc in failures if not isinstance(exc, Exception)), None)
+            if interrupt is not None:
+                raise interrupt
+
+            actions = ", ".join(action for action, _ in failures)
+            raise RuntimeError(f"Cleanup for {context} completed with failures: {actions}") from failures[0][1]
+
+        return failures
 
 
 class ClusterManager:
@@ -400,21 +721,14 @@ class ClusterManager:
         """Get or create Valkey client connection for a node"""
         if node.node_id not in self.connections:
             self.connections[node.node_id] = valkey.Valkey(
-                host="127.0.0.1", port=node.port, socket_timeout=5, decode_responses=True
+                host=node.host, port=node.port, socket_timeout=5, decode_responses=True
             )
         return self.connections[node.node_id]
 
     def get_cluster_info(self, node: NodeInfo) -> dict[str, str]:
         """Get cluster info from a node and parse into dictionary"""
         client = self.get_client(node)
-        info = client.execute_command("CLUSTER", "INFO")
-
-        info_dict = {}
-        for line in info.split("\r\n"):
-            if ":" in line:
-                key, value = line.split(":", 1)
-                info_dict[key] = value
-        return info_dict
+        return query_cluster_info(client)
 
     def cluster_meet(self, nodes_in_cluster: list[NodeInfo], timeout: int = 30) -> None:
         """Connect cluster nodes and wait for convergence"""
@@ -431,7 +745,7 @@ class ClusterManager:
 
         for node in nodes_in_cluster[1:]:
             logger.debug(f"Meeting {node.node_id} (port {node.port})")
-            first_node_client.execute_command("CLUSTER", "MEET", "127.0.0.1", node.port)
+            first_node_client.execute_command("CLUSTER", "MEET", node.host, node.port)
             time.sleep(0.1)
 
         logger.info("CLUSTER MEET complete")
@@ -586,6 +900,143 @@ class ClusterManager:
 
         raise Exception(f"Replicas failed to sync within {timeout:.2f}s")
 
+    @staticmethod
+    def _primary_replica_layout(nodes_in_cluster: list[NodeInfo]) -> tuple[NodeInfo, list[NodeInfo]]:
+        primaries = [node for node in nodes_in_cluster if node.role == "primary"]
+        replicas = [node for node in nodes_in_cluster if node.role == "replica"]
+
+        if len(primaries) != 1:
+            raise ValueError(f"Primary/replica topology requires exactly one primary, found {len(primaries)}")
+        if len(primaries) + len(replicas) != len(nodes_in_cluster):
+            raise ValueError("Primary/replica topology contains a node with an unsupported role")
+
+        primary = primaries[0]
+        for replica in replicas:
+            if replica.master_node_id and replica.master_node_id != primary.node_id:
+                raise ValueError(f"Replica {replica.node_id} targets unknown primary {replica.master_node_id!r}")
+        return primary, replicas
+
+    def setup_primary_replica_replication(self, nodes_in_cluster: list[NodeInfo]) -> None:
+        """Configure non-cluster replication using REPLICAOF."""
+        primary, replicas = self._primary_replica_layout(nodes_in_cluster)
+        self.get_client(primary).execute_command("REPLICAOF", "NO", "ONE")
+
+        for replica in replicas:
+            logger.debug(
+                "Configuring %s to replicate %s at %s:%s",
+                replica.node_id,
+                primary.node_id,
+                primary.host,
+                primary.port,
+            )
+            self.get_client(replica).execute_command(
+                "REPLICAOF",
+                primary.host,
+                primary.port,
+            )
+
+    @staticmethod
+    def _replication_role(info: Mapping[str, Any]) -> str:
+        role = info.get("role", "")
+        if isinstance(role, bytes):
+            role = role.decode("utf-8", errors="replace")
+        return str(role).lower()
+
+    def _standalone_is_healthy(self, node: NodeInfo) -> bool:
+        info = self.get_client(node).info("replication")
+        return self._replication_role(info) in {"master", "primary"}
+
+    def validate_standalone(
+        self,
+        nodes_in_topology: list[NodeInfo],
+        timeout: float = 30.0,
+        interval: float = 1.0,
+    ) -> bool:
+        """Validate a single reachable, writable standalone primary."""
+        if len(nodes_in_topology) != 1 or nodes_in_topology[0].role != "primary":
+            return False
+
+        node = nodes_in_topology[0]
+        deadline = time.time() + max(timeout, 0.0)
+        while True:
+            try:
+                if self._standalone_is_healthy(node):
+                    logger.info("Standalone topology is healthy")
+                    return True
+            except Exception as exc:
+                logger.debug("Standalone node %s is not ready: %s", node.node_id, exc)
+
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return False
+            time.sleep(min(max(interval, 0.0), remaining))
+
+    def _primary_replica_is_healthy(self, primary: NodeInfo, replicas: list[NodeInfo]) -> bool:
+        primary_info = self.get_client(primary).info("replication")
+        if self._replication_role(primary_info) not in {"master", "primary"}:
+            return False
+
+        connected_replicas = primary_info.get(
+            "connected_slaves",
+            primary_info.get("connected_replicas", len(replicas)),
+        )
+        try:
+            if int(connected_replicas) < len(replicas):
+                return False
+        except (TypeError, ValueError):
+            return False
+
+        for replica in replicas:
+            replica_info = self.get_client(replica).info("replication")
+            if self._replication_role(replica_info) not in {"slave", "replica"}:
+                return False
+            if replica_info.get("master_link_status") != "up":
+                return False
+
+            master_host = replica_info.get("master_host")
+            if isinstance(master_host, bytes):
+                master_host = master_host.decode("utf-8", errors="replace")
+            if str(master_host) != primary.host:
+                return False
+
+            try:
+                master_port = int(replica_info.get("master_port"))
+            except (TypeError, ValueError):
+                return False
+            if master_port != primary.port:
+                return False
+
+        return True
+
+    def validate_primary_replica(
+        self,
+        nodes_in_topology: list[NodeInfo],
+        timeout: float = 30.0,
+        interval: float = 1.0,
+    ) -> bool:
+        """Validate primary/replica roles, links, and configured upstreams."""
+        if not nodes_in_topology:
+            return False
+        try:
+            primary, replicas = self._primary_replica_layout(nodes_in_topology)
+        except ValueError as exc:
+            logger.warning("Invalid primary/replica topology: %s", exc)
+            return False
+
+        deadline = time.time() + max(timeout, 0.0)
+        while True:
+            try:
+                if self._primary_replica_is_healthy(primary, replicas):
+                    logger.info("Primary/replica topology is healthy")
+                    return True
+            except Exception as exc:
+                logger.debug("Primary/replica topology is not ready: %s", exc)
+
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return False
+            time.sleep(min(max(interval, 0.0), remaining))
+
     def check_replication_links(self, nodes_in_cluster: list[NodeInfo]) -> bool:
         """Check if all replica master_link_status is 'up'"""
         for node in nodes_in_cluster:
@@ -600,7 +1051,19 @@ class ClusterManager:
 
         return True
 
-    def validate_cluster(self, nodes_in_cluster: list[NodeInfo], timeout: float = 30.0, interval: float = 1.0) -> bool:
+    def validate_cluster(
+        self,
+        nodes_in_cluster: list[NodeInfo],
+        timeout: float = 30.0,
+        interval: float = 1.0,
+        topology_type: TopologyType = TopologyType.CLUSTER,
+    ) -> bool:
+        topology_type = _coerce_topology_type(topology_type)
+        if topology_type == TopologyType.STANDALONE:
+            return self.validate_standalone(nodes_in_cluster, timeout=timeout, interval=interval)
+        if topology_type == TopologyType.REPLICATION:
+            return self.validate_primary_replica(nodes_in_cluster, timeout=timeout, interval=interval)
+
         if not nodes_in_cluster:
             return False
 
@@ -710,9 +1173,33 @@ class ClusterManager:
 
         return False
 
-    def form_cluster(self, nodes_in_cluster: list[NodeInfo], cluster_id: str) -> ClusterConnection:
-        """Form a complete cluster from spawned nodes"""
+    def form_standalone(self, nodes_in_topology: list[NodeInfo], cluster_id: str) -> ClusterConnection:
+        """Form and validate a standalone deployment."""
+        if not self.validate_standalone(nodes_in_topology):
+            raise Exception("Standalone validation failed")
+        return ClusterConnection(nodes_in_topology, cluster_id, topology_type=TopologyType.STANDALONE)
+
+    def form_primary_replica(self, nodes_in_topology: list[NodeInfo], cluster_id: str) -> ClusterConnection:
+        """Form and validate a non-cluster primary/replica deployment."""
+        self.setup_primary_replica_replication(nodes_in_topology)
+        if not self.validate_primary_replica(nodes_in_topology):
+            raise Exception("Primary/replica validation failed")
+        return ClusterConnection(nodes_in_topology, cluster_id, topology_type=TopologyType.REPLICATION)
+
+    def form_cluster(
+        self,
+        nodes_in_cluster: list[NodeInfo],
+        cluster_id: str,
+        topology_type: TopologyType = TopologyType.CLUSTER,
+    ) -> ClusterConnection:
+        """Form and validate the requested deployment topology."""
+        topology_type = _coerce_topology_type(topology_type)
         try:
+            if topology_type == TopologyType.STANDALONE:
+                return self.form_standalone(nodes_in_cluster, cluster_id)
+            if topology_type == TopologyType.REPLICATION:
+                return self.form_primary_replica(nodes_in_cluster, cluster_id)
+
             self.reset_cluster_state(nodes_in_cluster)
             self.cluster_meet(nodes_in_cluster)
 
@@ -723,16 +1210,54 @@ class ClusterManager:
             if not self.validate_cluster(nodes_in_cluster):
                 raise Exception("Cluster validation failed")
 
-            return ClusterConnection(nodes_in_cluster, cluster_id)
+            return ClusterConnection(nodes_in_cluster, cluster_id, topology_type=TopologyType.CLUSTER)
 
-        except Exception as e:
-            logger.info(f"Cluster formation failed: {e}")
-            traceback.print_exc()
+        except BaseException as e:
+            logger.info(f"{topology_type.value} topology formation failed: {e}")
+            if isinstance(e, Exception):
+                traceback.print_exc()
+            self.close_connections()
+            if not isinstance(e, Exception):
+                raise
             return None
 
+    def form_topology(
+        self,
+        nodes_in_topology: list[NodeInfo],
+        topology_id: str,
+        topology_type: TopologyType,
+    ) -> ClusterConnection:
+        """Explicit topology-oriented alias for form_cluster."""
+        return self.form_cluster(nodes_in_topology, topology_id, topology_type=topology_type)
+
+    def validate_topology(
+        self,
+        nodes_in_topology: list[NodeInfo],
+        topology_type: TopologyType,
+        timeout: float = 30.0,
+        interval: float = 1.0,
+    ) -> bool:
+        """Explicit topology-oriented alias for validate_cluster."""
+        return self.validate_cluster(
+            nodes_in_topology,
+            timeout=timeout,
+            interval=interval,
+            topology_type=topology_type,
+        )
+
     def close_connections(self) -> None:
-        """Close all Valkey client connections"""
-        for client in self.connections.values():
-            with contextlib.suppress(BaseException):
-                client.close()
+        """Close and discard every cached client, preserving interruptions."""
+        failures: list[BaseException] = []
+        clients = list(self.connections.values())
         self.connections.clear()
+
+        for client in clients:
+            try:
+                client.close()
+            except BaseException as exc:
+                failures.append(exc)
+                logger.error("Failed to close Valkey client: %s", exc)
+
+        interrupt = next((exc for exc in failures if not isinstance(exc, Exception)), None)
+        if interrupt is not None:
+            raise interrupt

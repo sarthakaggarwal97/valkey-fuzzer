@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""
-Command-line interface for the Cluster Bus Fuzzer
-Provides commands for running random tests, DSL-based tests, and validating configurations.
-"""
+"""Command-line interface for the Valkey Fuzzer."""
 
 import argparse
 import json
@@ -19,12 +16,12 @@ import yaml
 from .fuzzer_engine import DSLLoader
 from .fuzzer_engine.test_case_generator import ScenarioGenerator
 from .main import ClusterBusFuzzer
-from .models import ExecutionResult, StateValidationResult
+from .models import ExecutionResult, StateValidationResult, TopologyType
 from .utils.cluster_utils import cleanup_logs
 
 
 class FuzzerCLI:
-    """Command-line interface for the Cluster Bus Fuzzer"""
+    """Command-line interface for topology-aware Valkey fuzzing."""
 
     def __init__(self):
         self.fuzzer = ClusterBusFuzzer()
@@ -125,13 +122,13 @@ class FuzzerCLI:
 
     def run_dsl_test(self, args) -> int:
         """Execute a DSL-based test scenario"""
-        self._print_header(f"DSL Test: {args.file}")
+        self._print_header(f"Scenario: {args.file}")
 
         dsl_path = Path(args.file)
         if not dsl_path.exists():
             print(f"Error: DSL file not found: {args.file}")
             print("\nMake sure the file path is correct.")
-            print("Example: valkey-fuzzer cluster --dsl examples/simple_failover.yaml")
+            print("Example: valkey-fuzzer run examples/simple_failover.yaml")
             return 1
 
         try:
@@ -194,13 +191,14 @@ class FuzzerCLI:
             print("Scenario Summary")
             print("=" * 60)
             print(f"ID: {scenario.scenario_id}")
+            print(f"API Version: {scenario.api_version}")
             print(f"Seed: {scenario.seed}")
-            print(
-                f"Cluster: {scenario.cluster_config.num_shards} shards, "
-                f"{scenario.cluster_config.replicas_per_shard} replicas per shard"
-            )
+            print(self._format_topology_summary(scenario.cluster_config))
             print(f"Operations: {len(scenario.operations)}")
-            print(f"Chaos Type: {scenario.chaos_config.chaos_type.value}")
+            if scenario.operations:
+                print(f"Chaos Type: {scenario.chaos_config.chaos_type.value}")
+            else:
+                print("Chaos: disabled (no operations)")
 
             if args.verbose:
                 print("\nOperations:")
@@ -216,6 +214,25 @@ class FuzzerCLI:
             if args.verbose:
                 traceback.print_exc()
             return 1
+
+    @staticmethod
+    def _format_topology_summary(config) -> str:
+        """Return a concise topology summary with an accurate node count."""
+        topology_type = getattr(config, "topology_type", TopologyType.CLUSTER)
+        topology_name = getattr(topology_type, "value", str(topology_type))
+        num_shards = config.num_shards
+        replicas_per_shard = config.replicas_per_shard
+        total_nodes = num_shards * (1 + replicas_per_shard)
+
+        if topology_name == TopologyType.STANDALONE.value:
+            return f"Topology: standalone ({total_nodes} node)"
+        if topology_name == TopologyType.REPLICATION.value:
+            replica_label = "replica" if replicas_per_shard == 1 else "replicas"
+            return f"Topology: replication (1 primary, {replicas_per_shard} {replica_label}, {total_nodes} nodes total)"
+        return (
+            f"Topology: cluster ({num_shards} shards, {replicas_per_shard} replicas per shard, "
+            f"{total_nodes} nodes total)"
+        )
 
     def _print_header(self, title: str):
         """Print formatted header"""
@@ -500,10 +517,13 @@ def create_parser() -> argparse.ArgumentParser:
     """Create argument parser for CLI"""
     parser = argparse.ArgumentParser(
         prog="valkey-fuzzer",
-        description="Valkey Cluster Bus Fuzzer - Test Valkey cluster robustness through chaos engineering",
+        description="Valkey Fuzzer - Test standalone, replication, and cluster topologies",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Run a topology scenario from DSL
+  valkey-fuzzer run examples/standalone_scenario.yaml
+
   # Run a random cluster test
   valkey-fuzzer cluster --random
 
@@ -534,8 +554,18 @@ Examples:
 
     subparsers = parser.add_subparsers(dest="command", help="Command to execute")
 
+    # Generic topology scenario command
+    run_parser = subparsers.add_parser("run", help="Run a standalone, replication, or cluster DSL scenario")
+    run_parser.add_argument("file", help="Path to DSL YAML file")
+    run_parser.add_argument("--valkey-binary", type=str, help="Path to the valkey-server binary to run")
+    run_parser.add_argument("--output", type=str, help="Path to save test results")
+    run_parser.add_argument(
+        "--format", choices=["json", "yaml"], default="json", help="Output format for results (default: json)"
+    )
+    run_parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
+
     # Cluster test command
-    cluster_parser = subparsers.add_parser("cluster", help="Run cluster-related fuzzer tests")
+    cluster_parser = subparsers.add_parser("cluster", help="Run legacy cluster random or DSL tests")
     cluster_parser.add_argument("--random", action="store_true", help="Run with random scenario")
     cluster_parser.add_argument("--seed", type=int, help="Seed for reproducibility")
     cluster_parser.add_argument("--dsl", type=str, metavar="FILE", help="Path to DSL YAML file")
@@ -579,6 +609,7 @@ def main():
         print("Error: No command specified\n")
         parser.print_help()
         print("\nCommon commands:")
+        print("  valkey-fuzzer run <file.yaml>            # Run a topology scenario")
         print("  valkey-fuzzer cluster --random          # Run random test")
         print("  valkey-fuzzer cluster --seed 42         # Run with specific seed")
         print("  valkey-fuzzer validate <file.yaml>      # Validate DSL file")
@@ -587,7 +618,9 @@ def main():
     cli = FuzzerCLI()
 
     try:
-        if args.command == "cluster":
+        if args.command == "run":
+            return cli.run_dsl_test(args)
+        elif args.command == "cluster":
             # Validate cluster command arguments
             if not args.dsl and args.seed is None and not args.random:
                 print("Error: cluster command requires either --dsl, --seed, or --random\n")

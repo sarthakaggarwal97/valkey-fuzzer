@@ -1,6 +1,4 @@
-"""
-Main entry point for the Cluster Bus Fuzzer
-"""
+"""Public Python API for the Valkey Fuzzer."""
 
 from typing import Optional
 
@@ -8,8 +6,8 @@ from .fuzzer_engine import FuzzerEngine
 from .models import DSLConfig, ExecutionResult
 
 
-class ClusterBusFuzzer:
-    """Main orchestrator for the Cluster Bus Fuzzer"""
+class ValkeyFuzzer:
+    """Main orchestrator for topology-aware Valkey fuzzing."""
 
     def __init__(self):
         """Initialize the fuzzer with the main fuzzer engine"""
@@ -32,3 +30,7 @@ class ClusterBusFuzzer:
     def validate_cluster(self, cluster_id: str):
         """Validate cluster state."""
         return self.fuzzer_engine.validate_cluster_state(cluster_id)
+
+
+# Backward-compatible public name used by existing callers and examples.
+ClusterBusFuzzer = ValkeyFuzzer

@@ -7,8 +7,13 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from src.fuzzer_engine.state_validator import StateValidator
-from src.models import StateValidationConfig
+from src.fuzzer_engine.state_validator import ClusterStatusValidator, DataConsistencyValidator, StateValidator
+from src.models import (
+    ClusterStatusValidationConfig,
+    DataConsistencyValidationConfig,
+    StateValidationConfig,
+    TopologyType,
+)
 
 
 def test_killed_nodes_tracking():
@@ -24,6 +29,304 @@ def test_killed_nodes_tracking():
     assert len(validator.killed_nodes) == 2
     validator.clear_killed_nodes()
     assert len(validator.killed_nodes) == 0
+
+
+def _client_context(client):
+    context = Mock()
+    context.__enter__ = Mock(return_value=client)
+    context.__exit__ = Mock(return_value=False)
+    return context
+
+
+def test_cluster_status_uses_cluster_info_command_for_health_fields():
+    validator = ClusterStatusValidator()
+    connection = Mock()
+    connection.get_current_nodes.return_value = [
+        {
+            "node_id": "primary-1",
+            "host": "127.0.0.1",
+            "port": 7000,
+            "role": "primary",
+            "shard_id": 0,
+            "status": "connected",
+        }
+    ]
+    client = Mock()
+    client.info.return_value = {"cluster_enabled": 1}
+    client.execute_command.return_value = (
+        "cluster_state:ok\r\n"
+        "cluster_slots_assigned:16384\r\n"
+        "cluster_known_nodes:1\r\n"
+        "cluster_stats_messages_ping_sent:12:34\r\n"
+    )
+
+    with patch(
+        "src.fuzzer_engine.state_validator.valkey_client",
+        return_value=_client_context(client),
+    ):
+        result = validator.validate(connection, ClusterStatusValidationConfig())
+
+    assert result.success is True
+    assert result.cluster_state == "ok"
+    client.execute_command.assert_called_once_with("CLUSTER", "INFO")
+    client.info.assert_not_called()
+
+
+def test_cluster_status_rejects_missing_state_even_when_failed_node_matches_chaos():
+    validator = ClusterStatusValidator()
+    connection = Mock()
+    connection.get_current_nodes.return_value = [
+        {
+            "node_id": "primary-1",
+            "host": "127.0.0.1",
+            "port": 7000,
+            "role": "primary",
+            "shard_id": 0,
+            "status": "connected",
+        },
+        {
+            "node_id": "replica-1",
+            "host": "127.0.0.1",
+            "port": 7001,
+            "role": "replica",
+            "shard_id": 0,
+            "status": "failed",
+        },
+    ]
+    malformed_client = Mock()
+    malformed_client.execute_command.return_value = "cluster_known_nodes:2\r\n"
+
+    with patch(
+        "src.fuzzer_engine.state_validator.valkey_client",
+        side_effect=[
+            _client_context(malformed_client),
+            ConnectionError("killed replica"),
+        ],
+    ):
+        result = validator.validate(
+            connection,
+            ClusterStatusValidationConfig(acceptable_states=["ok", "unknown"]),
+            killed_nodes={"127.0.0.1:7001"},
+        )
+
+    assert result.success is False
+    assert result.cluster_state == "unknown"
+    assert "missing or blank cluster_state" in result.error_message
+
+
+def test_cluster_status_does_not_implicitly_allow_reported_unknown_after_chaos():
+    validator = ClusterStatusValidator()
+    connection = Mock()
+    connection.get_current_nodes.return_value = [
+        {
+            "node_id": "primary-1",
+            "host": "127.0.0.1",
+            "port": 7000,
+            "role": "primary",
+            "shard_id": 0,
+            "status": "connected",
+        },
+        {
+            "node_id": "replica-1",
+            "host": "127.0.0.1",
+            "port": 7001,
+            "role": "replica",
+            "shard_id": 0,
+            "status": "failed",
+        },
+    ]
+    client = Mock()
+    client.execute_command.return_value = "cluster_state:unknown\r\n"
+
+    with patch(
+        "src.fuzzer_engine.state_validator.valkey_client",
+        side_effect=[
+            _client_context(client),
+            ConnectionError("killed replica"),
+        ],
+    ):
+        result = validator.validate(
+            connection,
+            ClusterStatusValidationConfig(),
+            killed_nodes={"127.0.0.1:7001"},
+        )
+
+    assert result.success is False
+    assert result.cluster_state == "unknown"
+    assert "unacceptable states" in result.error_message
+
+
+def test_cluster_status_rejects_mixed_node_reports_instead_of_majority_voting():
+    validator = ClusterStatusValidator()
+    connection = Mock()
+    connection.get_current_nodes.return_value = [
+        {
+            "node_id": f"primary-{index}",
+            "host": "127.0.0.1",
+            "port": 7000 + index,
+            "role": "primary",
+            "shard_id": index,
+            "status": "connected",
+        }
+        for index in range(3)
+    ]
+    clients = [Mock(), Mock(), Mock()]
+    for client, state in zip(clients, ("ok", "fail", "ok")):
+        client.execute_command.return_value = f"cluster_state:{state}\r\n"
+
+    with patch(
+        "src.fuzzer_engine.state_validator.valkey_client",
+        side_effect=[_client_context(client) for client in clients],
+    ):
+        result = validator.validate(connection, ClusterStatusValidationConfig())
+
+    assert result.success is False
+    assert result.cluster_state == "mixed"
+    assert "Cluster state disagreement" in result.error_message
+    assert "127.0.0.1:7001=fail" in result.error_message
+
+
+def test_cluster_status_allows_mixed_reports_only_when_each_state_is_explicitly_accepted():
+    validator = ClusterStatusValidator()
+    connection = Mock()
+    connection.get_current_nodes.return_value = [
+        {
+            "node_id": f"primary-{index}",
+            "host": "127.0.0.1",
+            "port": 7000 + index,
+            "role": "primary",
+            "shard_id": index,
+            "status": "connected",
+        }
+        for index in range(2)
+    ]
+    ok_client = Mock()
+    ok_client.execute_command.return_value = "cluster_state:ok\r\n"
+    fail_client = Mock()
+    fail_client.execute_command.return_value = "cluster_state:fail\r\n"
+
+    with patch(
+        "src.fuzzer_engine.state_validator.valkey_client",
+        side_effect=[_client_context(ok_client), _client_context(fail_client)],
+    ):
+        result = validator.validate(
+            connection,
+            ClusterStatusValidationConfig(acceptable_states=["ok", "fail"]),
+        )
+
+    assert result.success is True
+    assert result.cluster_state == "mixed"
+    assert result.degraded_reason == "Cluster state disagreement explicitly allowed by acceptable_states"
+
+
+def test_standalone_data_consistency_uses_direct_primary_client():
+    validator = DataConsistencyValidator()
+    connection = Mock(topology_type=TopologyType.STANDALONE)
+    connection.get_live_nodes.return_value = [
+        {
+            "node_id": "primary-1",
+            "host": "127.0.0.1",
+            "port": 6379,
+            "role": "primary",
+            "shard_id": 0,
+            "status": "connected",
+        }
+    ]
+    direct_client = Mock()
+    direct_client.get.side_effect = lambda key: validator.test_keys[key]
+    config = DataConsistencyValidationConfig(
+        num_test_keys=3,
+        check_cross_replica_consistency=False,
+    )
+
+    with (
+        patch("src.fuzzer_engine.state_validator.valkey_client", return_value=_client_context(direct_client)) as direct,
+        patch("src.fuzzer_engine.state_validator.valkey.ValkeyCluster") as cluster_client,
+    ):
+        assert validator.write_test_keys(connection, config) is True
+        result = validator.validate(connection, config)
+
+    assert result.success is True
+    assert result.test_keys_checked == 3
+    assert direct.call_count == 2
+    assert all(call.args == ("127.0.0.1", 6379, config.timeout) for call in direct.call_args_list)
+    cluster_client.assert_not_called()
+
+
+def test_replication_data_consistency_reads_primary_and_checks_replicas():
+    validator = DataConsistencyValidator()
+    validator.test_keys = {"fuzzer:test:0": "expected"}
+    connection = Mock(topology_type=TopologyType.REPLICATION)
+    connection.get_live_nodes.return_value = [
+        {
+            "node_id": "primary-1",
+            "host": "127.0.0.1",
+            "port": 6379,
+            "role": "primary",
+            "shard_id": 0,
+            "status": "connected",
+        },
+        {
+            "node_id": "replica-1",
+            "host": "127.0.0.1",
+            "port": 6380,
+            "role": "replica",
+            "shard_id": 0,
+            "status": "connected",
+        },
+    ]
+    primary_client = Mock()
+    primary_client.get.return_value = "expected"
+    replica_client = Mock()
+    replica_client.get.return_value = "diverged"
+
+    with (
+        patch(
+            "src.fuzzer_engine.state_validator.valkey_client",
+            side_effect=[_client_context(primary_client), _client_context(replica_client)],
+        ) as direct,
+        patch("src.fuzzer_engine.state_validator.valkey.ValkeyCluster") as cluster_client,
+    ):
+        result = validator.validate(connection, DataConsistencyValidationConfig())
+
+    assert result.success is False
+    assert result.inconsistent_keys[0].inconsistency_type == "replica_divergence"
+    assert [call.args[:2] for call in direct.call_args_list] == [
+        ("127.0.0.1", 6379),
+        ("127.0.0.1", 6380),
+    ]
+    cluster_client.assert_not_called()
+
+
+def test_cluster_data_consistency_keeps_cluster_aware_routing():
+    validator = DataConsistencyValidator()
+    validator.test_keys = {"fuzzer:test:0": "expected"}
+    connection = Mock(topology_type=TopologyType.CLUSTER)
+    connection.get_live_nodes.return_value = [
+        {
+            "node_id": "primary-1",
+            "host": "127.0.0.1",
+            "port": 7000,
+            "role": "primary",
+            "shard_id": 0,
+            "status": "connected",
+        }
+    ]
+    cluster_client = Mock()
+    cluster_client.get.return_value = "expected"
+
+    with (
+        patch("src.fuzzer_engine.state_validator.valkey.ValkeyCluster", return_value=cluster_client) as cluster_factory,
+        patch("src.fuzzer_engine.state_validator.valkey_client") as direct,
+    ):
+        result = validator.validate(
+            connection,
+            DataConsistencyValidationConfig(check_cross_replica_consistency=False),
+        )
+
+    assert result.success is True
+    cluster_factory.assert_called_once()
+    direct.assert_not_called()
 
 
 if __name__ == "__main__":

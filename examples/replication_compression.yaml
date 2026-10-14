@@ -1,0 +1,35 @@
+api_version: v2
+scenario_id: replication-compression-smoke
+seed: 202
+
+topology:
+  type: replication
+  replicas_per_shard: 1
+  base_port: 7500
+  enable_cleanup: true
+  server_config:
+    repl-compression: lz4
+  node_configs:
+    replica:
+      repl-diskless-load: swapdb
+
+# This topology/configuration smoke writes validation data after the replication
+# link is established and checks convergence. It requests compression settings
+# but does not prove that compression was negotiated or used; a complete feature
+# pack must assert path evidence.
+operations: []
+
+state_validation:
+  check_replication: true
+  check_data_consistency: true
+  stabilization_wait: 1.0
+  validation_timeout: 30.0
+  replication_config:
+    require_all_replicas_synced: true
+    min_replicas_per_shard: 1
+    max_acceptable_lag: 5.0
+  data_consistency_config:
+    check_test_keys: true
+    check_cross_replica_consistency: true
+    num_test_keys: 100
+    key_prefix: "repl_compression_smoke_"

@@ -1,18 +1,27 @@
 import logging
 import random
+from typing import Optional
 
 import valkey
 from valkey.cluster import ClusterNode
 
-from ..models import ClusterConnection
+from ..models import ClusterConnection, TopologyType
 from .crc16_slot_table import CRC16_SLOT_TABLE
 
 logger = logging.getLogger()
 
 
-def load_all_slots(cluster_connection: ClusterConnection, keys_per_slot: int = 10) -> bool:
+def load_all_slots(
+    cluster_connection: ClusterConnection,
+    keys_per_slot: int = 10,
+    rng: Optional[random.Random] = None,
+) -> bool:
     """Load keys into all 16384 slots using CRC16 slot table"""
+    if cluster_connection.topology_type != TopologyType.CLUSTER:
+        logger.info(f"Skipping slot preload for {cluster_connection.topology_type.value} topology")
+        return True
 
+    random_source = rng if rng is not None else random.Random()
     startup_nodes = [ClusterNode(host=node["host"], port=node["port"]) for node in cluster_connection.startup_nodes]
 
     cluster_client = valkey.ValkeyCluster(
@@ -26,7 +35,7 @@ def load_all_slots(cluster_connection: ClusterConnection, keys_per_slot: int = 1
     keys = []
     for i in range(total_keys):
         table_key = CRC16_SLOT_TABLE[i % slot_table_len]
-        key = f"key:{{{table_key}}}:{random.randint(0, 1000)}"
+        key = f"key:{{{table_key}}}:{random_source.randint(0, 1000)}"
         keys.append(key)
 
     try:

@@ -5,14 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "valkey-fuzzer"
 version = "0.1.0"
-description = "Chaos engineering and fuzzing framework for Valkey cluster bus testing"
+description = "Topology-aware chaos engineering and fuzzing framework for Valkey"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
 authors = [
     {name = "valkey-io"}
 ]
-keywords = ["valkey", "cluster", "chaos-engineering", "fuzzing", "testing"]
+keywords = ["valkey", "standalone", "replication", "cluster", "chaos-engineering", "fuzzing", "testing"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -44,7 +44,14 @@ Issues = "https://github.com/valkey-io/valkey-fuzzer/issues"
 valkey-fuzzer = "src.cli:main"
 
 [tool.setuptools]
-packages = ["src", "src.fuzzer_engine", "src.cluster_orchestrator", "src.chaos_engine"]
+packages = [
+    "src",
+    "src.chaos_engine",
+    "src.cluster_orchestrator",
+    "src.fuzzer_engine",
+    "src.utils",
+    "src.valkey_client",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

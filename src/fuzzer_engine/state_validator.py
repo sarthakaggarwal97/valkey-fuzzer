@@ -5,7 +5,7 @@ import signal
 import string
 import time
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from typing import Any, Callable, Optional, TypeVar
 
 import valkey
@@ -30,6 +30,7 @@ from ..models import (
     StateValidationConfig,
     StateValidationResult,
     TopologyMismatch,
+    TopologyType,
     TopologyValidation,
     TopologyValidationConfig,
     ViewConsistencyValidation,
@@ -37,7 +38,7 @@ from ..models import (
     ViewDiscrepancy,
 )
 from ..utils.cluster_parser import parse_cluster_nodes_raw as parse_cluster_nodes_output
-from ..utils.valkey_utils import query_cluster_nodes, safe_query_node, valkey_client
+from ..utils.valkey_utils import query_cluster_info, query_cluster_nodes, safe_query_node, valkey_client
 from .log_validator import ShardLogValidator
 from .state_validator_helpers import (
     check_per_shard_redundancy,
@@ -179,6 +180,33 @@ class ReplicationValidator:
 
             # Build primary node lookup
             primary_nodes = {node["node_id"]: node for node in all_nodes if node["role"] == "primary"}
+            replication_topology = self._is_replication_topology(cluster_connection)
+            expected_replication_primary = None
+            replication_errors: list[str] = []
+            replica_to_primary_map: dict[str, str] = {}
+
+            if replication_topology:
+                try:
+                    expected_replication_primary = self._get_expected_replication_primary(
+                        cluster_connection,
+                        all_nodes,
+                    )
+                except ValueError as exc:
+                    return ReplicationValidation(
+                        success=False,
+                        all_replicas_synced=False,
+                        max_lag=-1.0,
+                        lagging_replicas=[],
+                        disconnected_replicas=[],
+                        error_message=str(exc),
+                    )
+                expected_primary_id = expected_replication_primary["node_id"]
+                if expected_replication_primary.get("status") != "connected":
+                    replication_errors.append(
+                        f"Planned primary {format_node_address(expected_replication_primary)} is not connected"
+                    )
+                if expected_primary_id not in primary_nodes:
+                    replication_errors.append(f"Planned primary {expected_primary_id} is not reported as a primary")
 
             lagging_replicas: list[ReplicaLagInfo] = []
             disconnected_replicas: list[str] = []
@@ -207,13 +235,32 @@ class ReplicationValidator:
                     master_link_status = repl_info.get("master_link_status", "down")
                     master_last_io_seconds_ago = repl_info.get("master_last_io_seconds_ago", -1)
 
-                    # Get master node ID from cluster nodes output
-                    master_node_id = self._get_master_node_id(replica, cluster_connection)
+                    if replication_topology:
+                        master_node_id = expected_replication_primary["node_id"]
+                        upstream_error = self._validate_replication_upstream(
+                            replica,
+                            repl_info,
+                            expected_replication_primary,
+                        )
+                        if upstream_error:
+                            replication_errors.append(upstream_error)
+                            all_replicas_synced = False
+                            logger.error(upstream_error)
+                            continue
+                        replica_to_primary_map[replica_address] = master_node_id
+                    else:
+                        # Cluster mode discovers replica ownership from the
+                        # cluster topology, preserving failover semantics.
+                        master_node_id = self._get_master_node_id(replica, cluster_connection)
 
                     if master_node_id and master_node_id in primary_nodes:
                         primary_node = primary_nodes[master_node_id]
                         primary_address = format_node_address(primary_node)
+                    elif replication_topology:
+                        primary_node = expected_replication_primary
+                        primary_address = format_node_address(primary_node)
                     else:
+                        primary_node = None
                         primary_address = "unknown"
 
                     # Check if replica's replication link is down
@@ -237,14 +284,25 @@ class ReplicationValidator:
                     # Get replication offset difference if configured
                     replication_offset_diff = 0
                     if config.check_replication_offset and master_node_id:
-                        replication_offset_diff = self._get_offset_difference(
-                            replica, primary_nodes.get(master_node_id), config.timeout
-                        )
+                        measured_offset_diff = self._get_offset_difference(replica, primary_node, config.timeout)
+                        if measured_offset_diff is None:
+                            offset_error = (
+                                f"Unable to compare replication offsets for replica {replica_address} "
+                                f"and primary {primary_address}"
+                            )
+                            replication_errors.append(offset_error)
+                            all_replicas_synced = False
+                            logger.error(offset_error)
+                            continue
+                        replication_offset_diff = measured_offset_diff
 
-                    # Check if replica is lagging
-                    is_lagging = lag_seconds > config.max_acceptable_lag and (
-                        not config.check_replication_offset or replication_offset_diff > 0
-                    )
+                    # Offset divergence is independently meaningful: a replica
+                    # behind by bytes is not caught up merely because it heard
+                    # from the primary recently.
+                    if config.check_replication_offset:
+                        is_lagging = replication_offset_diff > 0
+                    else:
+                        is_lagging = lag_seconds > config.max_acceptable_lag
                     if is_lagging:
                         lag_info = ReplicaLagInfo(
                             replica_node_id=replica["node_id"],
@@ -277,12 +335,26 @@ class ReplicationValidator:
                     all_replicas_synced = False
                     logger.error(f"Error checking replica {replica_address}: {e}")
 
-            # Cross-validate: Query primaries for their view of replicas
-            self._cross_validate_with_primaries(primary_nodes, replica_nodes, disconnected_replicas, config)
+            # Cross-validate: Query primaries for their view of replicas.
+            # Count mismatches are advisory in cluster mode because ownership
+            # can be transient during failover, but are correctness failures in
+            # the static primary/replica topology.
+            replication_errors.extend(
+                self._cross_validate_with_primaries(
+                    primary_nodes,
+                    replica_nodes,
+                    disconnected_replicas,
+                    config,
+                    replica_to_primary_map=replica_to_primary_map if replication_topology else None,
+                    fail_on_count_mismatch=replication_topology,
+                )
+            )
 
             # Determine overall success
-            success = True
-            error_message = None
+            success = not replication_errors
+            error_message = "; ".join(replication_errors) if replication_errors else None
+            if replication_errors:
+                all_replicas_synced = False
 
             # Initialize killed_nodes if not provided
             if killed_nodes is None:
@@ -395,10 +467,17 @@ class ReplicationValidator:
                 # This ensures that excessive lag is still detected and reported as a failure
                 if lagging_replicas:
                     success = False
-                    error_message = (
-                        f"{len(lagging_replicas)} replica(s) lagging beyond acceptable threshold "
-                        f"(max_lag={max_lag:.2f}s > {config.max_acceptable_lag:.2f}s)"
-                    )
+                    if config.check_replication_offset:
+                        max_offset_diff = max(replica.replication_offset_diff for replica in lagging_replicas)
+                        error_message = (
+                            f"{len(lagging_replicas)} replica(s) behind their primary "
+                            f"(max_offset_diff={max_offset_diff}, required=0)"
+                        )
+                    else:
+                        error_message = (
+                            f"{len(lagging_replicas)} replica(s) lagging beyond acceptable threshold "
+                            f"(max_lag={max_lag:.2f}s > {config.max_acceptable_lag:.2f}s)"
+                        )
                 elif len(disconnected_replicas) == len(replica_nodes) and replica_nodes:
                     # Only fail if there are unexpected disconnections (not killed by chaos)
                     disconnected_set = set(disconnected_replicas)
@@ -441,14 +520,18 @@ class ReplicationValidator:
         replica_nodes: list[dict],
         disconnected_replicas: list[str],
         config: ReplicationValidationConfig,
-    ) -> None:
+        *,
+        replica_to_primary_map: Optional[dict[str, str]] = None,
+        fail_on_count_mismatch: bool = False,
+    ) -> list[str]:
         """Cross-validate replication by querying primaries for their view of replicas."""
         logger.debug("Cross-validating replication from primary nodes' perspective")
+        errors: list[str] = []
 
         # Build a map of which replicas belong to which primary
         # by querying CLUSTER NODES from a reference node
-        replica_to_primary_map = {}
-        if replica_nodes:
+        if replica_to_primary_map is None:
+            replica_to_primary_map = {}
             # Use first available replica to get cluster topology
             for replica in replica_nodes:
                 if format_node_address(replica) in disconnected_replicas:
@@ -484,16 +567,92 @@ class ReplicationValidator:
                 )
 
                 if connected_slaves != expected_replicas:
-                    logger.debug(
+                    message = (
                         f"Primary {primary['host']}:{primary['port']} reports "
-                        f"{connected_slaves} connected replicas, expected {expected_replicas} "
-                        f"(may be transient during failover)"
+                        f"{connected_slaves} connected replicas, expected {expected_replicas}"
                     )
+                    if fail_on_count_mismatch:
+                        errors.append(message)
+                        logger.error(message)
+                    else:
+                        logger.debug(f"{message} (may be transient during failover)")
                 else:
                     logger.debug(
                         f"Primary {primary['host']}:{primary['port']} has "
                         f"{connected_slaves} replicas connected (as expected)"
                     )
+            elif fail_on_count_mismatch:
+                message = f"Unable to query replication INFO from primary {primary['host']}:{primary['port']}"
+                errors.append(message)
+                logger.error(message)
+
+        return errors
+
+    @staticmethod
+    def _is_replication_topology(cluster_connection: ClusterConnection) -> bool:
+        topology_type = getattr(cluster_connection, "topology_type", TopologyType.CLUSTER)
+        try:
+            return TopologyType(topology_type) == TopologyType.REPLICATION
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _get_expected_replication_primary(
+        cluster_connection: ClusterConnection,
+        all_nodes: list[dict],
+    ) -> dict:
+        """Resolve the single planned primary for a non-cluster topology."""
+        initial_nodes = getattr(cluster_connection, "initial_nodes", None)
+        initial_primaries = []
+        if isinstance(initial_nodes, (list, tuple)):
+            initial_primaries = [node for node in initial_nodes if getattr(node, "role", None) == "primary"]
+
+        if len(initial_primaries) == 1:
+            primary = initial_primaries[0]
+            current_primary = next(
+                (node for node in all_nodes if node.get("node_id") == primary.node_id),
+                None,
+            )
+            return {
+                "node_id": primary.node_id,
+                "host": primary.host,
+                "port": primary.port,
+                "role": "primary",
+                "shard_id": primary.shard_id,
+                "status": current_primary.get("status", "failed") if current_primary else "failed",
+            }
+        if len(initial_primaries) > 1:
+            raise ValueError(
+                f"Primary/replica topology requires exactly one planned primary, found {len(initial_primaries)}"
+            )
+
+        current_primaries = [node for node in all_nodes if node["role"] == "primary"]
+        if len(current_primaries) != 1:
+            raise ValueError(f"Primary/replica topology requires exactly one primary, found {len(current_primaries)}")
+        return current_primaries[0]
+
+    @staticmethod
+    def _validate_replication_upstream(
+        replica: dict,
+        repl_info: dict,
+        expected_primary: dict,
+    ) -> Optional[str]:
+        """Ensure a non-cluster replica is attached to the planned primary."""
+        reported_host = repl_info.get("master_host")
+        reported_port = repl_info.get("master_port")
+        try:
+            reported_port = int(reported_port)
+        except (TypeError, ValueError):
+            reported_port = None
+
+        expected_host = str(expected_primary["host"])
+        expected_port = int(expected_primary["port"])
+        if str(reported_host) == expected_host and reported_port == expected_port:
+            return None
+
+        replica_address = format_node_address(replica)
+        reported_address = f"{reported_host}:{reported_port}" if reported_host is not None else "unknown"
+        return f"Replica {replica_address} is attached to {reported_address}, expected {expected_host}:{expected_port}"
 
     def _get_master_node_id(self, replica: dict, cluster_connection: ClusterConnection) -> Optional[str]:
         """Get the master node ID for a replica by parsing CLUSTER NODES output."""
@@ -506,36 +665,44 @@ class ReplicationValidator:
 
         return None
 
-    def _get_offset_difference(self, replica: dict, primary: Optional[dict], timeout: float) -> int:
+    def _get_offset_difference(self, replica: dict, primary: Optional[dict], timeout: float) -> Optional[int]:
         """Calculate replication offset difference between primary and replica."""
         if not primary:
-            return 0
+            return None
 
         try:
             # Get replica offset
             with valkey_client(replica["host"], replica["port"], timeout) as replica_client:
                 replica_info = replica_client.info("replication")
 
-                # Cast offsets to int since decode_responses=True returns strings
-                replica_offset = int(replica_info.get("master_repl_offset", 0))
-                if replica_offset == 0:
-                    # Replica might report slave_repl_offset instead
-                    replica_offset = int(replica_info.get("slave_repl_offset", 0))
+                # Prefer the replica-specific field where available and only
+                # fall back to master_repl_offset for compatible server
+                # versions. A missing field is unknown, not zero lag.
+                replica_offset_raw = replica_info.get("slave_repl_offset")
+                if replica_offset_raw is None:
+                    replica_offset_raw = replica_info.get("master_repl_offset")
+                if replica_offset_raw is None:
+                    raise ValueError("replica replication offset is missing")
+                replica_offset = int(replica_offset_raw)
 
             # Get primary offset
             with valkey_client(primary["host"], primary["port"], timeout) as primary_client:
                 primary_info = primary_client.info("replication")
 
-                # Cast to int since decode_responses=True returns strings
-                primary_offset = int(primary_info.get("master_repl_offset", 0))
+                primary_offset_raw = primary_info.get("master_repl_offset")
+                if primary_offset_raw is None:
+                    raise ValueError("primary replication offset is missing")
+                primary_offset = int(primary_offset_raw)
 
             # Calculate difference
             offset_diff = primary_offset - replica_offset
-            return max(0, offset_diff)  # Return 0 if negative (shouldn't happen)
+            if offset_diff < 0:
+                raise ValueError(f"replica offset {replica_offset} is ahead of primary offset {primary_offset}")
+            return offset_diff
 
         except Exception as e:
-            logger.debug(f"Error calculating offset difference: {e}")
-            return 0
+            logger.warning(f"Error calculating offset difference: {e}")
+            return None
 
 
 class ClusterStatusValidator:
@@ -563,27 +730,38 @@ class ClusterStatusValidator:
                 )
 
             # Track cluster state from different nodes
-            cluster_states = {}
+            cluster_states: dict[str, str] = {}
+            missing_cluster_state_nodes: list[str] = []
+            cluster_info_query_failures: list[str] = []
             nodes_in_fail_state = []
             reachable_nodes = []
 
             # Query cluster info from all reachable nodes
             for node in all_nodes:
+                node_address = format_node_address(node)
                 try:
                     with valkey_client(node["host"], node["port"], config.timeout) as client:
-                        # Get cluster info
-                        cluster_info = client.info("cluster")
-
-                        # Extract cluster state
-                        cluster_state = cluster_info.get("cluster_state", "unknown")
-                        cluster_states[format_node_address(node)] = cluster_state
+                        # INFO cluster only exposes whether cluster mode is enabled.
+                        # Health and membership fields come from CLUSTER INFO.
+                        cluster_info = query_cluster_info(client)
                         reachable_nodes.append(node)
+
+                        raw_cluster_state = cluster_info.get("cluster_state")
+                        if raw_cluster_state is None or not raw_cluster_state.strip():
+                            cluster_state = "unknown"
+                            missing_cluster_state_nodes.append(node_address)
+                        else:
+                            cluster_state = raw_cluster_state.strip().lower()
+                        cluster_states[node_address] = cluster_state
 
                         logger.debug(f"Node {node['host']}:{node['port']} reports cluster_state={cluster_state}")
 
                 except Exception as e:
                     logger.debug(f"Unable to query cluster info from {node['host']}:{node['port']}: {e}")
-                    # Node is unreachable, but we already know about failed nodes from get_current_nodes
+                    # A node still reported as connected must not disappear from
+                    # status validation merely because its query failed.
+                    if node.get("status") != "failed":
+                        cluster_info_query_failures.append(node_address)
                     continue
 
             # Identify nodes in fail state from cluster topology
@@ -592,21 +770,19 @@ class ClusterStatusValidator:
                     node_address = format_node_address(node)
                     nodes_in_fail_state.append(node_address)
 
-            # Determine overall cluster state
-            # Use the most common state reported by reachable nodes
+            # Determine overall cluster state. Do not majority-vote away a
+            # disagreement: expose it explicitly and validate every report.
             if cluster_states:
-                # Count occurrences of each state
-                state_counts = {}
-                for state in cluster_states.values():
-                    state_counts[state] = state_counts.get(state, 0) + 1
-
-                # Get the most common state
-                overall_cluster_state = max(state_counts, key=state_counts.get)
-
-                # Log if there's disagreement
-                if len(set(cluster_states.values())) > 1:
+                reported_states = set(cluster_states.values())
+                state_disagreement = len(reported_states) > 1
+                if state_disagreement:
+                    overall_cluster_state = "mixed"
                     logger.warning(f"Cluster state disagreement detected: {cluster_states}")
+                else:
+                    overall_cluster_state = next(iter(reported_states))
             else:
+                reported_states = set()
+                state_disagreement = False
                 overall_cluster_state = "unknown"
 
             # Check quorum
@@ -626,46 +802,62 @@ class ClusterStatusValidator:
                         f"primaries reachable (need {quorum_threshold})"
                     )
 
-            # Determine success based on configuration
-            success = True
+            # Determine success based on every reachable node's report.
+            validation_errors: list[str] = []
             degraded_reason = None
-            error_message = None
 
             # Initialize killed_nodes if not provided
             if killed_nodes is None:
                 killed_nodes = set()
 
-            # Check if cluster state is acceptable
-            if overall_cluster_state not in config.acceptable_states:
-                # Special handling for "unknown" state when nodes were killed
-                if overall_cluster_state == "unknown" and killed_nodes:
-                    # "unknown" state is expected when nodes are killed
-                    # Use helper to validate killed vs failed nodes
-                    validation_success, validation_error = validate_killed_vs_failed_nodes(
-                        killed_nodes=killed_nodes, failed_nodes=nodes_in_fail_state, context="cluster_status"
-                    )
+            explicit_acceptable_states = {
+                str(state).strip().lower() for state in config.acceptable_states if str(state).strip()
+            }
+            effective_acceptable_states = set(explicit_acceptable_states)
+            if config.allow_degraded:
+                effective_acceptable_states.update({"fail", "degraded"})
 
-                    if not validation_success:
-                        success = False
-                        error_message = validation_error
-                    else:
-                        # All killed nodes are in fail state as expected
-                        degraded_reason = (
-                            f"Cluster in 'unknown' state due to {len(killed_nodes)} killed node(s) - expected behavior"
-                        )
-                        logger.info(
-                            f"Cluster state 'unknown' is expected: killed nodes {killed_nodes} are in fail state"
-                        )
-                elif config.allow_degraded and overall_cluster_state in ["fail", "degraded"]:
-                    # Degraded state is acceptable
-                    degraded_reason = f"Cluster in {overall_cluster_state} state"
-                    logger.info(f"Cluster in degraded state: {overall_cluster_state}")
-                else:
-                    success = False
-                    error_message = (
-                        f"Cluster state '{overall_cluster_state}' not in acceptable states: {config.acceptable_states}"
-                    )
-                    logger.error(error_message)
+            if missing_cluster_state_nodes:
+                validation_errors.append(
+                    "Reachable nodes returned a missing or blank cluster_state from CLUSTER INFO: "
+                    + ", ".join(sorted(missing_cluster_state_nodes))
+                )
+
+            if cluster_info_query_failures:
+                validation_errors.append(
+                    "Connected nodes could not be queried with CLUSTER INFO: "
+                    + ", ".join(sorted(cluster_info_query_failures))
+                )
+
+            missing_state_nodes = set(missing_cluster_state_nodes)
+            unacceptable_reports = {
+                address: state
+                for address, state in cluster_states.items()
+                if address not in missing_state_nodes and state not in effective_acceptable_states
+            }
+            if not cluster_states and "unknown" not in effective_acceptable_states:
+                validation_errors.append(
+                    f"Cluster state 'unknown' not in acceptable states: {config.acceptable_states}"
+                )
+            elif unacceptable_reports:
+                reports = ", ".join(f"{address}={state}" for address, state in sorted(unacceptable_reports.items()))
+                validation_errors.append(
+                    f"Cluster nodes reported unacceptable states ({reports}); "
+                    f"acceptable states: {config.acceptable_states}"
+                )
+
+            # A mixed report is only allowed when every reported state was
+            # explicitly listed. allow_degraded permits a unanimous degraded
+            # state, but does not implicitly permit inconsistent node views.
+            if state_disagreement:
+                if not reported_states.issubset(explicit_acceptable_states):
+                    reports = ", ".join(f"{address}={state}" for address, state in sorted(cluster_states.items()))
+                    validation_errors.append(f"Cluster state disagreement across reachable nodes: {reports}")
+                elif not validation_errors:
+                    degraded_reason = "Cluster state disagreement explicitly allowed by acceptable_states"
+            elif overall_cluster_state in {"fail", "degraded"} and config.allow_degraded:
+                degraded_reason = f"Cluster in {overall_cluster_state} state"
+                logger.info(f"Cluster in degraded state: {overall_cluster_state}")
 
             # Check for nodes in fail state
             if nodes_in_fail_state:
@@ -684,25 +876,22 @@ class ClusterStatusValidator:
                                 f"{len(nodes_in_fail_state)} node(s) in fail state "
                                 f"(killed by chaos) - expected behavior"
                             )
-                    elif success:  # Only update if not already failed
-                        success = False
-                        error_message = validation_error
+                    elif validation_error:
+                        validation_errors.append(validation_error)
                 else:
                     # No killed nodes tracked, but nodes are in fail state
                     # If cluster state is "ok" but nodes are failed, this is suspicious
-                    if success and overall_cluster_state in config.acceptable_states:
+                    if overall_cluster_state in explicit_acceptable_states:
                         # Cluster says it's OK but has failed nodes
                         # Only allow if explicitly configured to allow degraded state
                         if not config.allow_degraded:
-                            success = False
-                            error_message = (
+                            validation_errors.append(
                                 f"Spontaneous node failures detected: {len(nodes_in_fail_state)} node(s) in fail state "
                                 f"but were not killed by chaos. "
                                 f"Failed nodes: {nodes_in_fail_state}. "
                                 f"This indicates unexpected node failures or failed failover attempts. "
                                 f"Cluster state: {overall_cluster_state}"
                             )
-                            logger.error(error_message)
                         else:
                             # Degraded state is explicitly allowed
                             degraded_reason = (
@@ -716,10 +905,15 @@ class ClusterStatusValidator:
 
             # Check quorum
             if not has_quorum:
-                success = False
-                error_message = (
+                validation_errors.append(
                     f"Cluster does not have quorum: {len(reachable_primaries)}/{len(primary_nodes)} primaries reachable"
                 )
+
+            # Preserve all independent failure evidence rather than allowing a
+            # later check to overwrite the original cause.
+            success = not validation_errors
+            error_message = "; ".join(validation_errors) if validation_errors else None
+            if error_message:
                 logger.error(error_message)
 
             # Log overall result
@@ -1908,45 +2102,209 @@ class ViewConsistencyValidator:
 class DataConsistencyValidator:
     """Validates data consistency across cluster nodes"""
 
-    def __init__(self):
+    def __init__(self, rng: Optional[random.Random] = None):
         """Initialize the data consistency validator."""
         self.test_keys: dict[str, str] = {}  # key -> expected_value
+        self.rng = rng if rng is not None else random.Random()
+
+    @staticmethod
+    def _get_topology_type(cluster_connection: ClusterConnection) -> TopologyType:
+        topology_type = getattr(cluster_connection, "topology_type", TopologyType.CLUSTER)
+        if isinstance(topology_type, TopologyType):
+            return topology_type
+        try:
+            return TopologyType(topology_type)
+        except (TypeError, ValueError):
+            return TopologyType.CLUSTER
+
+    @staticmethod
+    def _find_primary(live_nodes: list[dict]) -> Optional[dict]:
+        return next((node for node in live_nodes if node.get("role") == "primary"), None)
+
+    @staticmethod
+    def _address_port(node_address: str) -> Optional[int]:
+        try:
+            return int(node_address.rsplit(":", 1)[1])
+        except (IndexError, TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _resolve_authoritative_primary_owners(
+        cls,
+        live_nodes: list[dict],
+        slot_map: dict[int, str],
+    ) -> list[str]:
+        """Resolve each live primary to its authoritative CLUSTER SLOTS address."""
+        live_primaries = [node for node in live_nodes if node.get("role") == "primary"]
+        slot_owners = sorted(set(slot_map.values()))
+        resolved_owners: list[str] = []
+
+        for primary in sorted(live_primaries, key=format_node_address):
+            primary_address = format_node_address(primary)
+            if primary_address in slot_owners:
+                resolved_owners.append(primary_address)
+                continue
+
+            # CLUSTER SLOTS may report an announced hostname while discovery
+            # used the configured bind address. Ports are unique in the local
+            # topology, so they safely reconcile the two views.
+            port_matches = [owner for owner in slot_owners if cls._address_port(owner) == int(primary["port"])]
+            if len(port_matches) != 1:
+                raise RuntimeError(f"Live cluster primary {primary_address} has no unambiguous slot ownership")
+            resolved_owners.append(port_matches[0])
+
+        if len(set(resolved_owners)) != len(live_primaries):
+            raise RuntimeError("Cluster slot ownership does not map one-to-one to the live primaries")
+
+        unexpected_owners = set(slot_owners) - set(resolved_owners)
+        if unexpected_owners:
+            raise RuntimeError(f"Cluster slots are assigned to non-live primaries: {sorted(unexpected_owners)}")
+
+        return sorted(resolved_owners)
+
+    def _build_cluster_test_keys(
+        self,
+        live_nodes: list[dict],
+        config: DataConsistencyValidationConfig,
+    ) -> list[str]:
+        """Choose deterministic test keys that cover every authoritative primary."""
+        live_primary_count = len([node for node in live_nodes if node.get("role") == "primary"])
+        if config.num_test_keys < live_primary_count:
+            raise ValueError(
+                f"num_test_keys={config.num_test_keys} is insufficient for "
+                f"{live_primary_count} live cluster primaries; at least one key per primary is required"
+            )
+
+        slot_map = fetch_cluster_slot_assignments(live_nodes, config.timeout)
+        if not slot_map:
+            raise RuntimeError("Unable to resolve cluster slots while seeding validation data")
+
+        authoritative_owners = self._resolve_authoritative_primary_owners(live_nodes, slot_map)
+        keys_by_owner: dict[str, str] = {}
+        candidate_index = 0
+        max_candidates = max(16384, config.num_test_keys * 1024)
+
+        while len(keys_by_owner) < len(authoritative_owners) and candidate_index < max_candidates:
+            candidate = f"{config.key_prefix}{candidate_index}"
+            owner = slot_map.get(compute_cluster_slot(candidate))
+            if owner in authoritative_owners and owner not in keys_by_owner:
+                keys_by_owner[owner] = candidate
+            candidate_index += 1
+
+        missing_owners = set(authoritative_owners) - set(keys_by_owner)
+        if missing_owners:
+            raise RuntimeError(f"Unable to generate validation keys for cluster primaries: {sorted(missing_owners)}")
+
+        selected_keys = [keys_by_owner[owner] for owner in authoritative_owners]
+        selected_key_set = set(selected_keys)
+        candidate_index = 0
+        while len(selected_keys) < config.num_test_keys:
+            candidate = f"{config.key_prefix}{candidate_index}"
+            if candidate not in selected_key_set:
+                selected_keys.append(candidate)
+                selected_key_set.add(candidate)
+            candidate_index += 1
+
+        return selected_keys
+
+    def _validate_keys_with_client(
+        self,
+        data_client,
+        missing_keys: list[str],
+        inconsistent_keys: list[DataInconsistency],
+        unreachable_keys: list[str],
+        source: str,
+        include_slot_in_source: bool = False,
+    ) -> None:
+        for key, expected_value in self.test_keys.items():
+            try:
+                actual_value = data_client.get(key)
+
+                if actual_value is None:
+                    missing_keys.append(key)
+                    logger.warning(f"Test key {key} is missing from {source}")
+                elif actual_value != expected_value:
+                    actual_source = source
+                    if include_slot_in_source:
+                        actual_source = f"slot_{compute_cluster_slot(key)}"
+                    inconsistent_keys.append(
+                        DataInconsistency(
+                            key=key,
+                            inconsistency_type="value_mismatch",
+                            expected_value=expected_value,
+                            actual_values={actual_source: actual_value},
+                        )
+                    )
+                    logger.warning(
+                        f"Test key {key} has wrong value: "
+                        f"expected {expected_value[:16]}, got {actual_value[:16] if actual_value else 'None'}"
+                    )
+                else:
+                    logger.debug(f"Test key {key} validated successfully")
+            except Exception as e:
+                logger.warning(f"Error validating key {key}: {e}")
+                unreachable_keys.append(key)
 
     def write_test_keys(self, cluster_connection: ClusterConnection, config: DataConsistencyValidationConfig) -> bool:
         try:
-            # Get live nodes for cluster client
+            # A previous attempt must not allow a partial retry to satisfy this
+            # run's seeding precondition.
+            self.test_keys.clear()
             live_nodes = cluster_connection.get_live_nodes()
 
             if not live_nodes:
                 logger.error("No live nodes found to write test keys")
                 return False
 
-            # Use cluster-aware client that handles MOVED redirects
-            startup_nodes = [ClusterNode(host=node["host"], port=node["port"]) for node in live_nodes[:3]]
+            topology_type = self._get_topology_type(cluster_connection)
+            with ExitStack() as client_stack:
+                if topology_type == TopologyType.CLUSTER:
+                    if config.check_cross_replica_consistency:
+                        test_keys = self._build_cluster_test_keys(live_nodes, config)
+                    else:
+                        test_keys = [f"{config.key_prefix}{i}" for i in range(config.num_test_keys)]
 
-            cluster_client = valkey.ValkeyCluster(
-                startup_nodes=startup_nodes,
-                decode_responses=True,
-                skip_full_coverage_check=True,
-                socket_timeout=config.timeout,
-            )
+                    startup_nodes = [ClusterNode(host=node["host"], port=node["port"]) for node in live_nodes[:3]]
+                    data_client = valkey.ValkeyCluster(
+                        startup_nodes=startup_nodes,
+                        decode_responses=True,
+                        skip_full_coverage_check=True,
+                        socket_timeout=config.timeout,
+                    )
+                    client_stack.callback(data_client.close)
+                else:
+                    primary = self._find_primary(live_nodes)
+                    if primary is None:
+                        logger.error(f"No live primary found in {topology_type.value} topology")
+                        return False
+                    data_client = client_stack.enter_context(
+                        valkey_client(primary["host"], primary["port"], config.timeout)
+                    )
+                    test_keys = [f"{config.key_prefix}{i}" for i in range(config.num_test_keys)]
 
-            # Write test keys
-            for i in range(config.num_test_keys):
-                key = f"{config.key_prefix}{i}"
-                value = "".join(random.choices(string.ascii_letters + string.digits, k=32))
+                for key in test_keys:
+                    value = "".join(self.rng.choices(string.ascii_letters + string.digits, k=32))
 
-                try:
-                    cluster_client.set(key, value)
-                    self.test_keys[key] = value
-                except Exception as e:
-                    logger.warning(f"Failed to write test key {key}: {e}")
-                    continue
+                    try:
+                        if not data_client.set(key, value):
+                            raise RuntimeError("SET was not acknowledged")
+                        self.test_keys[key] = value
+                    except Exception as e:
+                        logger.warning(f"Failed to write test key {key}: {e}")
+                        continue
 
-            cluster_client.close()
+            keys_written = len(self.test_keys)
+            if config.num_test_keys <= 0 or keys_written != config.num_test_keys:
+                logger.error(
+                    "Test-data seeding incomplete: wrote %s of %s requested keys to the %s topology",
+                    keys_written,
+                    config.num_test_keys,
+                    topology_type.value,
+                )
+                return False
 
-            logger.info(f"Successfully wrote {len(self.test_keys)} test keys to cluster")
-            return len(self.test_keys) > 0
+            logger.info(f"Successfully wrote {keys_written} test keys to the {topology_type.value} topology")
+            return True
 
         except Exception as e:
             logger.error(f"Error writing test keys: {e}")
@@ -1984,135 +2342,127 @@ class DataConsistencyValidator:
             missing_keys = []
             inconsistent_keys = []
             unreachable_keys = []
+            topology_type = self._get_topology_type(cluster_connection)
 
-            # Use cluster-aware client to properly route requests to the correct nodes
-            startup_nodes = [
-                ClusterNode(host=node["host"], port=node["port"])
-                for node in live_nodes[:3]  # Use first 3 live nodes as startup nodes
-            ]
+            if topology_type == TopologyType.CLUSTER:
+                startup_nodes = [ClusterNode(host=node["host"], port=node["port"]) for node in live_nodes[:3]]
 
-            if not startup_nodes:
-                logger.error("No live nodes available for cluster client")
-                return DataConsistencyValidation(
-                    success=False,
-                    test_keys_checked=0,
-                    missing_keys=[],
-                    inconsistent_keys=[],
-                    unreachable_keys=list(self.test_keys.keys()),
-                    error_message="No live nodes available",
-                )
-
-            try:
-                # Create cluster-aware client that handles MOVED redirects automatically
-                cluster_client = valkey.ValkeyCluster(
-                    startup_nodes=startup_nodes,
-                    decode_responses=True,
-                    skip_full_coverage_check=True,
-                    read_from_replicas=False,  # Read from primaries for authoritative values
-                    socket_timeout=config.timeout,
-                )
-
-                # Check each test key using cluster-aware routing
-                for key, expected_value in self.test_keys.items():
+                try:
+                    cluster_client = valkey.ValkeyCluster(
+                        startup_nodes=startup_nodes,
+                        decode_responses=True,
+                        skip_full_coverage_check=True,
+                        read_from_replicas=False,
+                        socket_timeout=config.timeout,
+                    )
                     try:
-                        actual_value = cluster_client.get(key)
+                        self._validate_keys_with_client(
+                            cluster_client,
+                            missing_keys,
+                            inconsistent_keys,
+                            unreachable_keys,
+                            source="cluster",
+                            include_slot_in_source=True,
+                        )
+                    finally:
+                        cluster_client.close()
 
-                        if actual_value is None:
-                            missing_keys.append(key)
-                            logger.warning(f"Test key {key} is missing from cluster")
-                        elif actual_value != expected_value:
-                            # Determine which slot this key belongs to for logging
+                except Exception as e:
+                    logger.error(f"Failed to create cluster client: {e}")
+                    logger.info("Falling back to manual slot routing")
+
+                    slot_map = fetch_cluster_slot_assignments(live_nodes, config.timeout)
+
+                    if not slot_map:
+                        logger.error("Failed to fetch slot assignments - cannot validate keys")
+                        return DataConsistencyValidation(
+                            success=False,
+                            test_keys_checked=0,
+                            missing_keys=[],
+                            inconsistent_keys=[],
+                            unreachable_keys=list(self.test_keys.keys()),
+                            error_message="Failed to fetch slot assignments for fallback routing",
+                        )
+
+                    for key, expected_value in self.test_keys.items():
+                        try:
                             slot = compute_cluster_slot(key)
-                            inconsistency = DataInconsistency(
-                                key=key,
-                                inconsistency_type="value_mismatch",
-                                expected_value=expected_value,
-                                actual_values={f"slot_{slot}": actual_value},
+                            owning_node_addr = slot_map.get(slot)
+
+                            if not owning_node_addr:
+                                logger.debug(f"No owner found for slot {slot} (key {key})")
+                                unreachable_keys.append(key)
+                                continue
+
+                            owning_node = next(
+                                (node for node in live_nodes if format_node_address(node) == owning_node_addr),
+                                None,
                             )
-                            inconsistent_keys.append(inconsistency)
-                            logger.warning(
-                                f"Test key {key} (slot {slot}) has wrong value: "
-                                f"expected {expected_value[:16]}, got {actual_value[:16] if actual_value else 'None'}"
-                            )
-                        else:
-                            logger.debug(f"Test key {key} validated successfully")
+                            if not owning_node:
+                                logger.debug(f"Owning node {owning_node_addr} not in live nodes")
+                                unreachable_keys.append(key)
+                                continue
 
-                    except Exception as e:
-                        logger.warning(f"Error validating key {key}: {e}")
-                        unreachable_keys.append(key)
+                            with valkey_client(owning_node["host"], owning_node["port"], config.timeout) as client:
+                                actual_value = client.get(key)
 
-                cluster_client.close()
+                            if actual_value is None:
+                                missing_keys.append(key)
+                                logger.warning(f"Test key {key} is missing from cluster")
+                            elif actual_value != expected_value:
+                                inconsistent_keys.append(
+                                    DataInconsistency(
+                                        key=key,
+                                        inconsistency_type="value_mismatch",
+                                        expected_value=expected_value,
+                                        actual_values={format_node_address(owning_node): actual_value},
+                                    )
+                                )
+                                logger.warning(
+                                    f"Test key {key} has wrong value: "
+                                    f"expected {expected_value[:16]}, "
+                                    f"got {actual_value[:16] if actual_value else 'None'}"
+                                )
+                            else:
+                                logger.debug(f"Test key {key} validated successfully")
 
-            except Exception as e:
-                logger.error(f"Failed to create cluster client: {e}")
-                logger.info("Falling back to manual slot routing")
-
-                # Fetch slot assignments from cluster
-                slot_map = fetch_cluster_slot_assignments(live_nodes, config.timeout)
-
-                if not slot_map:
-                    logger.error("Failed to fetch slot assignments - cannot validate keys")
+                        except Exception as e:
+                            logger.warning(f"Error validating key {key}: {e}")
+                            unreachable_keys.append(key)
+            else:
+                primary = self._find_primary(live_nodes)
+                if primary is None:
                     return DataConsistencyValidation(
                         success=False,
                         test_keys_checked=0,
                         missing_keys=[],
                         inconsistent_keys=[],
                         unreachable_keys=list(self.test_keys.keys()),
-                        error_message="Failed to fetch slot assignments for fallback routing",
+                        error_message=f"No live primary available in {topology_type.value} topology",
                     )
 
-                # Fall back to checking what we can with individual node connections
-                for key, expected_value in self.test_keys.items():
-                    try:
-                        # Compute slot and find the owning node
-                        slot = compute_cluster_slot(key)
-                        owning_node_addr = slot_map.get(slot)
-
-                        if not owning_node_addr:
-                            logger.debug(f"No owner found for slot {slot} (key {key})")
-                            unreachable_keys.append(key)
-                            continue
-
-                        # Find the node info from live_nodes
-                        owning_node = None
-                        for node in live_nodes:
-                            if format_node_address(node) == owning_node_addr:
-                                owning_node = node
-                                break
-
-                        if not owning_node:
-                            logger.debug(f"Owning node {owning_node_addr} not in live nodes")
-                            unreachable_keys.append(key)
-                            continue
-
-                        with valkey_client(owning_node["host"], owning_node["port"], config.timeout) as client:
-                            actual_value = client.get(key)
-
-                            if actual_value is None:
-                                missing_keys.append(key)
-                                logger.warning(f"Test key {key} is missing from cluster")
-                            elif actual_value != expected_value:
-                                inconsistency = DataInconsistency(
-                                    key=key,
-                                    inconsistency_type="value_mismatch",
-                                    expected_value=expected_value,
-                                    actual_values={format_node_address(owning_node): actual_value},
-                                )
-                                inconsistent_keys.append(inconsistency)
-                                logger.warning(
-                                    f"Test key {key} has wrong value: "
-                                    f"expected {expected_value[:16]}, got {actual_value[:16] if actual_value else 'None'}"
-                                )
-                            else:
-                                logger.debug(f"Test key {key} validated successfully")
-
-                    except Exception as e:
-                        logger.warning(f"Error validating key {key}: {e}")
-                        unreachable_keys.append(key)
+                primary_address = format_node_address(primary)
+                try:
+                    with valkey_client(primary["host"], primary["port"], config.timeout) as direct_client:
+                        self._validate_keys_with_client(
+                            direct_client,
+                            missing_keys,
+                            inconsistent_keys,
+                            unreachable_keys,
+                            source=primary_address,
+                        )
+                except Exception as e:
+                    logger.error(f"Failed to connect to primary {primary_address}: {e}")
+                    unreachable_keys.extend(key for key in self.test_keys if key not in unreachable_keys)
 
             # Optionally check cross-replica consistency
             if config.check_cross_replica_consistency:
-                self._check_cross_replica_consistency(cluster_connection, config, inconsistent_keys)
+                self._check_cross_replica_consistency(
+                    cluster_connection,
+                    config,
+                    inconsistent_keys,
+                    unreachable_keys,
+                )
 
             # Determine success
             success = True
@@ -2173,68 +2523,130 @@ class DataConsistencyValidator:
         cluster_connection: ClusterConnection,
         config: DataConsistencyValidationConfig,
         inconsistent_keys: list[DataInconsistency],
+        unreachable_keys: list[str],
     ) -> None:
-        try:
-            # Get all live nodes (primaries and replicas)
-            all_nodes = cluster_connection.get_live_nodes()
-            replica_nodes = [n for n in all_nodes if n["role"] == "replica"]
+        # Get all live nodes (primaries and replicas). Failure to inspect this
+        # topology is itself a validation failure and must propagate.
+        all_nodes = cluster_connection.get_live_nodes()
+        replica_nodes = [n for n in all_nodes if n["role"] == "replica"]
 
-            if not replica_nodes:
-                logger.debug("No replicas to check for cross-replica consistency")
-                return
+        if not replica_nodes:
+            logger.debug("No replicas to check for cross-replica consistency")
+            return
 
-            # Sample a subset of test keys to check (checking all can be slow)
-            sample_size = min(20, len(self.test_keys))
-            sampled_keys = random.sample(list(self.test_keys.keys()), sample_size)
+        topology_type = self._get_topology_type(cluster_connection)
+        sorted_keys = sorted(self.test_keys)
+        slot_map = None
+        if topology_type == TopologyType.CLUSTER:
+            slot_map = fetch_cluster_slot_assignments(all_nodes, config.timeout)
+            if not slot_map:
+                raise RuntimeError("Unable to resolve cluster slots for cross-replica validation")
 
-            logger.debug(
-                f"Checking cross-replica consistency for {sample_size} test keys across {len(replica_nodes)} replicas"
-            )
+        logger.debug(f"Checking cross-replica consistency across {len(replica_nodes)} replicas")
 
-            # For each sampled key, check if replicas have the same value as expected
-            for key in sampled_keys:
-                expected_value = self.test_keys[key]
+        for replica in replica_nodes:
+            replica_address = format_node_address(replica)
+            if topology_type == TopologyType.CLUSTER:
+                primary = next(
+                    (
+                        node
+                        for node in all_nodes
+                        if node["role"] == "primary" and node.get("shard_id") == replica.get("shard_id")
+                    ),
+                    None,
+                )
+                if primary is None:
+                    raise RuntimeError(f"No live primary found for cluster replica {replica_address}")
 
-                # Check each replica
-                for replica in replica_nodes:
-                    try:
-                        with valkey_client(replica["host"], replica["port"], config.timeout) as client:
+                primary_address = format_node_address(primary)
+                authoritative_primary_address = primary_address
+                slot_owners = set(slot_map.values())
+                if primary_address not in slot_owners:
+                    port_matches = [owner for owner in slot_owners if self._address_port(owner) == int(primary["port"])]
+                    if len(port_matches) != 1:
+                        raise RuntimeError(
+                            f"Unable to resolve slot ownership for cluster replica {replica_address}'s "
+                            f"primary {primary_address}"
+                        )
+                    authoritative_primary_address = port_matches[0]
+                eligible_keys = [
+                    key
+                    for key in sorted_keys
+                    if slot_map.get(compute_cluster_slot(key)) == authoritative_primary_address
+                ]
+                sampled_keys = eligible_keys[: min(20, len(eligible_keys))]
+            else:
+                # Non-cluster replication has one shared keyspace, so every
+                # sampled key must be checked on every replica.
+                sampled_keys = sorted_keys[: min(20, len(sorted_keys))]
+
+            if not sampled_keys:
+                raise RuntimeError(
+                    f"No seeded validation key is owned by cluster replica {replica_address}'s "
+                    f"primary; cross-replica coverage is incomplete"
+                )
+
+            try:
+                with valkey_client(replica["host"], replica["port"], config.timeout) as client:
+                    if topology_type == TopologyType.CLUSTER:
+                        # Cluster replicas reject direct reads unless READONLY
+                        # is enabled, even when the key belongs to their shard.
+                        client.execute_command("READONLY")
+
+                    for key in sampled_keys:
+                        expected_value = self.test_keys[key]
+                        try:
                             actual_value = client.get(key)
 
                             if actual_value is None:
-                                # Key missing on replica
                                 inconsistency = DataInconsistency(
                                     key=key,
                                     inconsistency_type="missing_on_replica",
                                     expected_value=expected_value,
-                                    actual_values={format_node_address(replica): "None"},
+                                    actual_values={replica_address: "None"},
                                 )
                                 inconsistent_keys.append(inconsistency)
-                                logger.warning(f"Key {key} missing on replica {format_node_address(replica)}")
+                                logger.warning(f"Key {key} missing on replica {replica_address}")
                             elif actual_value != expected_value:
-                                # Value mismatch on replica
                                 inconsistency = DataInconsistency(
                                     key=key,
                                     inconsistency_type="replica_divergence",
                                     expected_value=expected_value,
-                                    actual_values={format_node_address(replica): actual_value},
+                                    actual_values={replica_address: actual_value},
                                 )
                                 inconsistent_keys.append(inconsistency)
                                 logger.warning(
-                                    f"Key {key} has diverged on replica {format_node_address(replica)}: "
+                                    f"Key {key} has diverged on replica {replica_address}: "
                                     f"expected {expected_value[:16]}, got {actual_value[:16]}"
                                 )
-                    except Exception as e:
-                        logger.debug(f"Error checking replica {format_node_address(replica)} for key {key}: {e}")
-                        # Don't fail on individual replica query errors
-                        continue
+                        except Exception as e:
+                            if key not in unreachable_keys:
+                                unreachable_keys.append(key)
+                            inconsistent_keys.append(
+                                DataInconsistency(
+                                    key=key,
+                                    inconsistency_type="replica_unreachable",
+                                    expected_value=expected_value,
+                                    actual_values={replica_address: f"unreachable: {e}"},
+                                )
+                            )
+                            logger.warning(f"Error checking replica {replica_address} for key {key}: {e}")
+            except Exception as e:
+                for key in sampled_keys:
+                    if key not in unreachable_keys:
+                        unreachable_keys.append(key)
+                    inconsistent_keys.append(
+                        DataInconsistency(
+                            key=key,
+                            inconsistency_type="replica_unreachable",
+                            expected_value=self.test_keys[key],
+                            actual_values={replica_address: f"unreachable: {e}"},
+                        )
+                    )
+                logger.warning(f"Error connecting to replica {replica_address}: {e}")
 
-            if inconsistent_keys:
-                logger.warning(f"Cross-replica consistency check found {len(inconsistent_keys)} inconsistencies")
-
-        except Exception as e:
-            logger.error(f"Error during cross-replica consistency check: {e}")
-            # Don't fail the entire validation on cross-replica check errors
+        if inconsistent_keys:
+            logger.warning(f"Cross-replica consistency check found {len(inconsistent_keys)} inconsistencies")
 
     # _compute_slot and _fetch_slot_assignments moved to state_validator_helpers.py
 
@@ -2245,7 +2657,7 @@ class StateValidator:
     Executes all validation checks and aggregates results.
     """
 
-    def __init__(self, config: "StateValidationConfig"):
+    def __init__(self, config: "StateValidationConfig", rng: Optional[random.Random] = None):
         """Initialize the state validator with configuration."""
         self.config = config
 
@@ -2255,7 +2667,7 @@ class StateValidator:
         self.slot_validator = SlotCoverageValidator()
         self.topology_validator = TopologyValidator()
         self.view_consistency_validator = ViewConsistencyValidator()
-        self.data_consistency_validator = DataConsistencyValidator()
+        self.data_consistency_validator = DataConsistencyValidator(rng=rng)
 
         # Track killed nodes from chaos injections
         self.killed_nodes: set[str] = set()

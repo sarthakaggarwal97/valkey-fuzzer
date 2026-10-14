@@ -110,8 +110,8 @@ def compute_cluster_slot(key: str) -> int:
         if end != -1 and end > start + 1:
             key = key[start + 1 : end]
 
-    # CRC16 XMODEM
-    crc = 0xFFFF
+    # Valkey Cluster uses CRC16/XMODEM with an initial value of zero.
+    crc = 0
     for byte in key.encode("utf-8"):
         crc ^= byte << 8
         for _ in range(8):

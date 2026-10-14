@@ -4,17 +4,25 @@ Core data models for the Cluster Bus Fuzzer
 
 import random
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
 
 from .utils.valkey_utils import is_node_alive as check_node_alive
-from .utils.valkey_utils import query_cluster_nodes
+from .utils.valkey_utils import query_cluster_nodes, valkey_client
+
+
+class TopologyType(str, Enum):
+    """Supported Valkey deployment topologies."""
+
+    CLUSTER = "cluster"
+    REPLICATION = "replication"
+    STANDALONE = "standalone"
 
 
 @dataclass
 class ClusterConfig:
-    """Configuration for a Valkey cluster"""
+    """Configuration for a Valkey deployment topology."""
 
     num_shards: int
     replicas_per_shard: int
@@ -22,6 +30,13 @@ class ClusterConfig:
     base_data_dir: str = "/tmp/valkey-fuzzer"
     valkey_binary: str = ""
     enable_cleanup: bool = True
+    topology_type: TopologyType = TopologyType.CLUSTER
+    server_config: dict[str, Any] = field(default_factory=dict)
+    node_configs: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def __post_init__(self):
+        if isinstance(self.topology_type, str):
+            self.topology_type = TopologyType(self.topology_type)
 
 
 @dataclass
@@ -36,6 +51,7 @@ class NodePlan:
     slot_start: Optional[int] = None
     slot_end: Optional[int] = None
     master_node_id: Optional[str] = None
+    server_config: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -56,6 +72,7 @@ class NodeInfo:
     slot_end: Optional[int] = None
     master_node_id: Optional[str] = None
     cluster_node_id: Optional[str] = None
+    server_config: dict[str, Any] = field(default_factory=dict)
 
 
 class OperationType(Enum):
@@ -146,6 +163,7 @@ class Scenario:
     chaos_config: ChaosConfig
     seed: Optional[int] = None  # For reproducibility
     state_validation_config: Optional["StateValidationConfig"] = None
+    api_version: str = "v1"
 
 
 @dataclass
@@ -253,16 +271,26 @@ class DSLConfig:
 
 @dataclass
 class ClusterConnection:
-    """Stores cluster connection information after orchestrator creates cluster"""
+    """Stores connection information after the orchestrator creates a topology."""
 
     initial_nodes: list[NodeInfo]
     cluster_id: str
+    topology_type: TopologyType = TopologyType.CLUSTER
 
     def __post_init__(self):
-        self.startup_nodes = [{"host": "127.0.0.1", "port": node.port} for node in self.initial_nodes]
+        if isinstance(self.topology_type, str):
+            self.topology_type = TopologyType(self.topology_type)
+        self.startup_nodes = [{"host": node.host, "port": node.port} for node in self.initial_nodes]
 
     def get_current_nodes(self, include_failed: bool = True) -> list[dict]:
-        """Get current cluster topology via CLUSTER NODES. List of node dictionaries with keys: node_id, host, port, role, shard_id, status"""
+        """Get the current topology using the topology's authoritative source."""
+        if self.topology_type != TopologyType.CLUSTER:
+            return self._get_current_non_cluster_nodes(include_failed)
+
+        return self._get_current_cluster_nodes(include_failed)
+
+    def _get_current_cluster_nodes(self, include_failed: bool) -> list[dict]:
+        """Get the current cluster topology via CLUSTER NODES."""
         # Build a mapping from port to shard_id using initial_nodes
         port_to_shard = {node.port: node.shard_id for node in self.initial_nodes}
 
@@ -315,8 +343,68 @@ class ClusterConnection:
                 continue
         return []
 
+    @staticmethod
+    def _process_is_running(node: NodeInfo) -> Optional[bool]:
+        """Return process liveness, or None when no local process handle exists."""
+        if node.process is None:
+            return None
+        try:
+            return node.process.poll() is None
+        except (AttributeError, OSError):
+            return None
+
+    @staticmethod
+    def _normalize_replication_role(role: Any, fallback: str) -> str:
+        if isinstance(role, bytes):
+            role = role.decode(errors="replace")
+        normalized = str(role or fallback).lower()
+        if normalized in {"master", "primary"}:
+            return "primary"
+        if normalized in {"slave", "replica"}:
+            return "replica"
+        return fallback
+
+    @staticmethod
+    def _query_replication_info(node: NodeInfo) -> Optional[dict]:
+        try:
+            with valkey_client(node.host, node.port, timeout=2.0) as client:
+                info = client.info("replication")
+                return info if isinstance(info, dict) else {}
+        except Exception:
+            return None
+
+    def _get_current_non_cluster_nodes(self, include_failed: bool) -> list[dict]:
+        """Inspect standalone and primary/replica nodes through direct clients."""
+        current_nodes = []
+        for node in self.initial_nodes:
+            process_running = self._process_is_running(node)
+            replication_info = None
+            if process_running is not False:
+                replication_info = self._query_replication_info(node)
+
+            is_connected = process_running is not False and replication_info is not None
+            if not include_failed and not is_connected:
+                continue
+
+            role = node.role
+            if replication_info is not None:
+                role = self._normalize_replication_role(replication_info.get("role"), node.role)
+
+            current_nodes.append(
+                {
+                    "node_id": node.node_id,
+                    "host": node.host,
+                    "port": node.port,
+                    "role": role,
+                    "shard_id": node.shard_id,
+                    "status": "connected" if is_connected else "failed",
+                }
+            )
+
+        return current_nodes
+
     def get_live_nodes(self) -> list[dict]:
-        """Get only live (connected) nodes from the cluster"""
+        """Get only live (connected) nodes from the topology."""
         return self.get_current_nodes(include_failed=False)
 
     def get_primary_nodes(self) -> list[dict]:

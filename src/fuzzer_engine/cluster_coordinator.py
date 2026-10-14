@@ -3,6 +3,7 @@ Cluster Coordinator - Manages cluster lifecycle and interfaces with Cluster Orch
 """
 
 import logging
+from collections.abc import Callable
 from typing import Optional
 
 from ..cluster_orchestrator.orchestrator import (
@@ -11,9 +12,10 @@ from ..cluster_orchestrator.orchestrator import (
     PortManager,
     detect_valkey_sha,
 )
-from ..models import ClusterConfig, ClusterInstance, ClusterStatus, NodeInfo
+from ..models import ClusterConfig, ClusterInstance, ClusterStatus, NodeInfo, NodePlan, TopologyType
 
 logger = logging.getLogger()
+NodePlanConfigurator = Callable[[list[NodePlan]], None]
 
 
 class ClusterCoordinator:
@@ -26,9 +28,21 @@ class ClusterCoordinator:
         self.active_clusters: dict[str, ClusterInstance] = {}
         self.cluster_manager = ClusterManager()
 
-    def create_cluster(self, config: ClusterConfig, seed: Optional[int] = None) -> ClusterInstance:
-        """Create a new Valkey cluster with the specified configuration."""
-        logger.info(f"Creating cluster with {config.num_shards} shards, {config.replicas_per_shard} replicas per shard")
+    def create_cluster(
+        self,
+        config: ClusterConfig,
+        seed: Optional[int] = None,
+        *,
+        configure_node_plans: Optional[NodePlanConfigurator] = None,
+    ) -> ClusterInstance:
+        """Create a new Valkey deployment with the specified topology."""
+        topology_type = TopologyType(config.topology_type)
+        logger.info(
+            "Creating %s topology with %s shard(s), %s replica(s) per shard",
+            topology_type.value,
+            config.num_shards,
+            config.replicas_per_shard,
+        )
 
         config_manager = None
         nodes = []
@@ -53,15 +67,24 @@ class ClusterCoordinator:
 
             # Plan topology
             node_plans = config_manager.plan_topology()
+            if configure_node_plans is not None:
+                configure_result = configure_node_plans(node_plans)
+                if configure_result is not None:
+                    raise TypeError("configure_node_plans must mutate plans in place and return None")
 
             # Spawn all nodes
             nodes = config_manager.spawn_all_nodes(node_plans)
 
-            # Form cluster
-            cluster_connection = self.cluster_manager.form_cluster(nodes, config_manager.cluster_id)
+            # Form the selected topology. form_cluster remains the compatibility
+            # entry point and dispatches internally for non-cluster deployments.
+            cluster_connection = self.cluster_manager.form_cluster(
+                nodes,
+                config_manager.cluster_id,
+                topology_type=topology_type,
+            )
 
             if not cluster_connection:
-                raise Exception("Failed to form cluster")
+                raise Exception(f"Failed to form {topology_type.value} topology")
 
             # Create cluster instance
             cluster_instance = ClusterInstance(
@@ -80,18 +103,45 @@ class ClusterCoordinator:
 
             return cluster_instance
 
-        except Exception as e:
+        except BaseException as e:
             logger.error(f"Failed to create cluster: {e}")
 
-            # Clean up spawned nodes and release ports on failure
-            if nodes and config_manager:
+            # A failed attempt must not leave clients cached for node IDs that
+            # a later attempt will reuse.
+            try:
+                self.cluster_manager.close_connections()
+            except BaseException as cleanup_error:
+                logger.error(f"Error while closing clients after creation failure: {cleanup_error}")
+
+            # Include nodes tracked before spawn_all_nodes returned. This is
+            # important when an interruption lands partway through spawning.
+            if config_manager:
+                cleanup_nodes = {node.node_id: node for node in nodes}
+                tracked_nodes = config_manager.spawned_nodes
+                if isinstance(tracked_nodes, (list, tuple)):
+                    cleanup_nodes.update({node.node_id: node for node in tracked_nodes})
+
                 logger.info("Cleaning up spawned nodes after cluster formation failure")
                 try:
-                    config_manager.cleanup_cluster(nodes)
-                except Exception as cleanup_error:
+                    config_manager.cleanup_cluster(list(cleanup_nodes.values()))
+                except BaseException as cleanup_error:
                     logger.error(f"Error during cleanup: {cleanup_error}")
 
             raise
+
+    def create_topology(
+        self,
+        config: ClusterConfig,
+        seed: Optional[int] = None,
+        *,
+        configure_node_plans: Optional[NodePlanConfigurator] = None,
+    ) -> ClusterInstance:
+        """Topology-oriented alias for the backwards-compatible create_cluster API."""
+        return self.create_cluster(
+            config,
+            seed=seed,
+            configure_node_plans=configure_node_plans,
+        )
 
     def get_cluster_status(self, cluster_id: str) -> Optional[ClusterStatus]:
         """Get current status of a cluster."""
@@ -101,6 +151,7 @@ class ClusterCoordinator:
 
         cluster_data = self.active_clusters[cluster_id]
         cluster_instance = cluster_data["instance"]
+        topology_type = TopologyType(cluster_instance.config.topology_type)
 
         try:
             # Filter out dead nodes before validation
@@ -115,14 +166,23 @@ class ClusterCoordinator:
             nodes_to_validate = live_nodes if live_nodes else cluster_instance.nodes
 
             # Validate cluster health with live nodes only
-            is_healthy = self.cluster_manager.validate_cluster(nodes_to_validate)
+            all_expected_nodes_live = len(live_nodes) == len(cluster_instance.nodes)
+            if topology_type != TopologyType.CLUSTER and not all_expected_nodes_live:
+                is_healthy = False
+            else:
+                is_healthy = self.cluster_manager.validate_cluster(
+                    nodes_to_validate,
+                    topology_type=topology_type,
+                )
 
             # Count assigned slots from live primary nodes only
-            total_slots = sum(
-                (node.slot_end - node.slot_start + 1)
-                for node in nodes_to_validate
-                if node.role == "primary" and node.slot_start is not None
-            )
+            total_slots = 0
+            if topology_type == TopologyType.CLUSTER:
+                total_slots = sum(
+                    (node.slot_end - node.slot_start + 1)
+                    for node in nodes_to_validate
+                    if node.role == "primary" and node.slot_start is not None
+                )
 
             status = ClusterStatus(
                 cluster_id=cluster_id,
@@ -145,13 +205,12 @@ class ClusterCoordinator:
         if not status:
             return False
 
+        cluster_instance = self.active_clusters[cluster_id]["instance"]
+        topology_type = TopologyType(cluster_instance.config.topology_type)
+
         # Check all required conditions for readiness
-        is_ready = (
-            status.formation_complete
-            and status.is_healthy
-            and status.total_slots_assigned == 16384
-            and len(status.nodes) > 0
-        )
+        slots_ready = topology_type != TopologyType.CLUSTER or status.total_slots_assigned == 16384
+        is_ready = status.formation_complete and status.is_healthy and slots_ready and len(status.nodes) > 0
 
         if is_ready:
             logger.info(f"Cluster {cluster_id} is ready for testing")
@@ -160,7 +219,8 @@ class ClusterCoordinator:
                 f"Cluster {cluster_id} is not ready: "
                 f"formation={status.formation_complete}, "
                 f"healthy={status.is_healthy}, "
-                f"slots={status.total_slots_assigned}"
+                f"slots={status.total_slots_assigned}, "
+                f"topology={topology_type.value}"
             )
 
         return is_ready
@@ -220,22 +280,34 @@ class ClusterCoordinator:
             return False
 
     def destroy_cluster(self, cluster_id: str) -> bool:
-        """Destroy a cluster and clean up all resources."""
+        """Destroy a cluster, attempting every cleanup action before reporting."""
         if cluster_id not in self.active_clusters:
             logger.warning(f"Cluster {cluster_id} not found")
             return False
 
+        cluster_data = self.active_clusters[cluster_id]
+        cluster_instance = cluster_data["instance"]
+        config_manager = cluster_data["config_manager"]
+        failures: list[tuple[str, BaseException]] = []
+
         try:
-            cluster_data = self.active_clusters[cluster_id]
-            cluster_instance = cluster_data["instance"]
-            config_manager = cluster_data["config_manager"]
-
             self.cluster_manager.close_connections()
-            config_manager.cleanup_cluster(cluster_instance.nodes)
-            del self.active_clusters[cluster_id]
+        except BaseException as exc:
+            failures.append(("close client connections", exc))
 
+        try:
+            config_manager.cleanup_cluster(cluster_instance.nodes)
+        except BaseException as exc:
+            failures.append(("clean up node resources", exc))
+
+        if not failures:
+            del self.active_clusters[cluster_id]
             return True
 
-        except Exception as e:
-            logger.error(f"Failed to destroy cluster {cluster_id}: {e}")
-            return False
+        for action, exc in failures:
+            logger.error("Failed to destroy cluster %s while attempting to %s: %s", cluster_id, action, exc)
+
+        interrupt = next((exc for _, exc in failures if not isinstance(exc, Exception)), None)
+        if interrupt is not None:
+            raise interrupt
+        return False

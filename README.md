@@ -1,30 +1,53 @@
 # valkey-fuzzer
 
-A comprehensive testing framework designed to validate and test the robustness of Valkey through automated chaos engineering and randomized testing scenarios.
+A topology-aware foundation for running seeded Valkey scenarios across
+standalone, primary–replica, and cluster deployments.
 
 ## Overview
 
-valkey-fuzzer helps identify bugs that are difficult to catch through traditional integration testing by simulating real-world failure scenarios and edge cases. The initial focus is on cluster bus communication and cluster operations, with an extensible architecture supporting future expansion to other Valkey components and testing scenarios.
+valkey-fuzzer helps identify bugs that are difficult to catch through traditional
+integration testing. Existing cluster failover and process-chaos scenarios
+remain supported, while the v2 DSL adds topology-neutral lifecycle, layered
+server configuration, data seeding, and correctness checks.
+
+This is the foundation for feature packs such as forkless save, replication
+compression, and future cluster protocols. A complete feature pack still needs
+an activation action, workload lifecycle, path-evidence observer, and independent
+oracles; setting a server option alone does not prove that a feature ran.
+
+The target onboarding contract is “manifest, plus an optional small plugin”:
+once the generic runner is wired in, a new feature must not require a new CLI
+command, parser branch, engine switch, topology special case, or reporter field.
+The repository now contains the topology foundation and an isolated extension
+API/registry contract; the generic feature-pack compiler and runner are the
+remaining one-time integration work.
 
 ### Key Features
 
-- **Reproducible Testing**: Generate deterministic test scenarios using configurable seeds
+- **Seeded Scenarios**: Generate and replay scenario descriptions using configurable seeds
 - **DSL-Based Configuration**: Create and reproduce specific test scenarios using a domain-specific language
-- **Chaos Engineering**: Inject process failures coordinated with cluster operations
-- **Comprehensive Validation**: Monitor cluster state, data consistency, and performance metrics
-- **Extensible Architecture**: Modular design supporting future expansion of operations and chaos types
+- **Multiple Topologies**: Run standalone, primary–replica, and cluster deployments
+- **Layered Server Configuration**: Configure all nodes, a role, or one exact node
+- **Current Chaos Support**: Inject process failures coordinated with cluster failover operations
+- **Topology-Aware Validation**: Apply only the checks meaningful for the selected deployment
+- **Extensible Foundation**: Add feature actions, workloads, observers, oracles, and additional faults
 
 ## Architecture
 
-The system follows a modular architecture with five core components:
+The current execution path has five main responsibilities. The generic feature
+design extends them with workload, action, observer, and oracle registries:
 
 ### Components
 
-- **Fuzzer Engine**: Central orchestrator that creates scenarios, coordinates test execution, and manages test scenarios
-- **Cluster Orchestrator**: Manages Valkey cluster lifecycle including node spawning, cluster formation, and configuration
-- **Chaos Engine**: Injects process failures and coordinates chaos timing with cluster operations
-- **State Validator**: Verifies cluster health, slot coverage, replication status, data consistency and log messages across nodes
-- **Valkey Client**: Generates realistic workload using valkey-benchmark during testing
+- **Fuzzer Engine**: Coordinates scenario execution and result collection
+- **Topology Orchestrator**: Manages standalone, replication, and cluster lifecycle
+- **Operation Orchestrator**: Runs the currently supported cluster failover action
+- **Chaos Engine**: Injects process failures around cluster operations
+- **State Validator and Data Seeder**: Writes validation keys and checks topology,
+  replication, logs, and data consistency
+
+There is not yet a continuous workload engine. The current data writes are
+validation traffic, not proof that a configured feature-specific path was used.
 
 ## Installation
 
@@ -44,7 +67,6 @@ pip install -r requirements.txt
 
 # Verify Valkey installation
 valkey-server --version
-valkey-benchmark --version
 ```
 
 ## Usage
@@ -60,9 +82,60 @@ valkey-fuzzer --help
 # Show cluster command options
 valkey-fuzzer cluster --help
 
+# Show topology-neutral DSL command options
+valkey-fuzzer run --help
+
 # Show validate command options
 valkey-fuzzer validate --help
 ```
+
+### Topology-aware DSL execution
+
+Version 1 `cluster:` scenarios continue to work unchanged. Version 2 uses a
+`topology:` block:
+
+```bash
+# Standalone topology/configuration and data-consistency smoke test
+valkey-fuzzer run examples/standalone_scenario.yaml \
+  --valkey-binary /tmp/valkey/src/valkey-server
+
+# Primary–replica topology/configuration smoke with compression settings
+valkey-fuzzer run examples/replication_compression.yaml \
+  --valkey-binary /tmp/valkey/src/valkey-server
+```
+
+```yaml
+api_version: v2
+scenario_id: replication-feature-smoke
+
+topology:
+  type: replication
+  replicas_per_shard: 2
+  server_config:
+    repl-compression: lz4
+  node_configs:
+    primary:
+      repl-diskless-sync: yes
+    node-2:
+      repl-compression: no
+
+operations: []
+
+state_validation:
+  check_replication: true
+  check_data_consistency: true
+```
+
+Configuration is merged from `server_config`, then a role entry such as
+`node_configs.primary`, then an exact entry such as `node_configs.node-2`.
+The example only verifies that the topology starts and that generic replication
+and data checks pass. It does **not** prove that compression was negotiated or
+used; that requires a feature-specific observer or protocol counter. The option
+names and supported values also depend on the Valkey build under test.
+
+See [the generic feature fuzzer design](docs/generic-feature-fuzzer-design.md)
+for the stable extension boundary, proposed v3 feature envelope, example test
+matrices, path-evidence rules, and implementation sequence.
 
 ### Random Test Execution
 
@@ -77,9 +150,6 @@ valkey-fuzzer cluster --seed 12345
 
 # Run multiple iterations
 valkey-fuzzer cluster --random --iterations 10
-
-# Run with configuration file
-valkey-fuzzer cluster --seed 42 --config config.yaml --output results.json
 
 # Verbose output
 valkey-fuzzer cluster --seed 42 --verbose
@@ -206,7 +276,7 @@ valkey-fuzzer cluster --random --export-dsl captured_scenario.yaml
 # Export with specific seed
 valkey-fuzzer cluster --seed 12345 --export-dsl seed_12345_scenario.yaml
 
-# Reproduce the exact scenario
+# Replay the captured scenario
 valkey-fuzzer cluster --dsl captured_scenario.yaml
 ```
 
@@ -218,82 +288,48 @@ valkey-fuzzer cluster --dsl captured_scenario.yaml
 # simple_failover.yaml
 scenario_id: "basic_failover_test"
 seed: 42
-  
+
 cluster:
   num_shards: 3
   replicas_per_shard: 1
-  
+
 operations:
   - type: "failover"
-    target: "primary"
-    shard: 1
-    timing: "immediate"
-    
+    target_node: "shard-0-primary"
+    parameters:
+      force: false
+    timing:
+      delay_before: 0.0
+      timeout: 30.0
+      delay_after: 0.0
+
 chaos:
-  - type: "process_kill"
-    signal: "SIGKILL"
-    target: "primary"
-    shard: 2
-    coordination: "before_failover"
-    delay: 5.0
+  type: "process_kill"
+  process_chaos_type: "sigkill"
+  target_selection:
+    strategy: "replica_only"
+  timing:
+    delay_before_operation: 0.0
+    delay_after_operation: 0.0
+    chaos_duration: 5.0
+  coordination:
+    chaos_before_operation: true
+    chaos_during_operation: false
+    chaos_after_operation: false
 
 state_validation:
   check_slot_coverage: true
+  check_cluster_status: true
   check_replication: true
   check_data_consistency: true
   validation_timeout: 30.0
 ```
 
-#### Complex Multi-Operation Test
-
-```yaml
-scenario_id: "complex_chaos_test"
-seed: 98765
-  
-cluster:
-  num_shards: 8
-  replicas_per_shard: 2
-  
-operations:
-  - type: "failover"
-    target: "primary"
-    shard: 3
-    timing: "delayed"
-    delay: 10.0
-    
-  - type: "failover"
-    target: "primary" 
-    shard: 7
-    timing: "immediate"
-    
-chaos:
-  - type: "process_kill"
-    signal: "SIGTERM"
-    target: "replica"
-    shard: 1
-    coordination: "during_operation"
-    
-  - type: "process_kill"
-    signal: "SIGKILL"
-    target: "primary"
-    shard: 5
-    coordination: "after_operation"
-    delay: 15.0
-
-workload:
-  enabled: true
-  pattern: "mixed"
-  intensity: "medium"
-  duration: 120.0
-
-state_validation:
-  check_slot_coverage: true
-  check_replication: true
-  check_data_consistency: true
-  validation_timeout: 45.0
-  replication_config:
-    max_acceptable_lag: 5.0
-```
+The current DSL supports failover operations and one process-chaos policy that
+is applied around those operations. Continuous `workload:` blocks and
+feature-specific actions are part of the feature-pack roadmap, not the current
+parser. See `examples/simple_failover.yaml` for the complete legacy cluster
+form and the v2 examples above for topology/configuration smokes.
 
 ### Expected Output Formats
 
@@ -357,7 +393,7 @@ Reproduction Command:
 valkey-fuzzer cluster --seed 4226257627
 ```
 
-## Initial Prototype Scope
+## Current Scope
 
 The current implementation focuses on:
 
@@ -366,8 +402,10 @@ The current implementation focuses on:
 - **Process Chaos**: Random process termination (SIGKILL, SIGTERM)
 
 ### Supported Configurations
-- **Cluster Sizes**: 3-16 shards
-- **Replication**: 0-5 replicas per shard
+- **Standalone**: One writable node
+- **Primary–Replica**: One primary with 1-5 replicas
+- **Cluster Sizes**: 3-16 shards with 0-5 replicas per shard
+- **Server Configuration**: Global, per-role, and exact-node startup settings
 - **Deployment**: Single metal instance with multiple processes
 
 ### Validation Capabilities
@@ -377,9 +415,21 @@ The current implementation focuses on:
 - Convergence time and replication lag tracking
 - Actual Valkey node log validation
 
-## Future Extensibility
+## Feature-pack roadmap
 
-The architecture is designed to support expansion in multiple dimensions:
+The topology foundation is the first layer. Feature packs should add an
+activation action, continuous workload, path-evidence observer, faults, and
+independent correctness oracles.
+
+The forkless and replication-compression YAML files in `examples/` are therefore
+configuration/topology smokes. They are not yet complete feature packs.
+
+The isolated contracts in `src/extensibility.py` define the six stable
+component roles, immutable feature packs and run plans, lifecycle events,
+uniform outcomes, typed registries, and `valkey_fuzzer.plugins` entry-point
+discovery. They are intentionally not connected to the current v1/v2 runner
+yet, so the repository does not claim drop-in feature execution until the
+manifest compiler, generic runner, and legacy adapter are complete.
 
 ### Additional Operations
 - `add_replica`: Add new replica nodes to existing shards
