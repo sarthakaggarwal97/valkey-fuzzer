@@ -6,12 +6,29 @@ registries; the runner never dispatches on individual Valkey features.
 
 import inspect
 import math
+import os
+import tempfile
 import time
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Optional, Protocol, Union, runtime_checkable
 
+from .bound_plan import BoundComponentSpec, BoundRunPlan, RunServices
+from .environment import (
+    ArtifactProviderRegistry,
+    EnvironmentReference,
+    ResourceProviderRegistry,
+)
+from .environment_lifecycle import (
+    EnvironmentLifecycleError,
+    EnvironmentManager,
+    EnvironmentReport,
+    EnvironmentReportStatus,
+    EnvironmentSession,
+    UnsupportedEnvironmentError,
+)
 from .extensibility import (
     Action,
     CapabilityProbe,
@@ -22,6 +39,7 @@ from .extensibility import (
     ComponentStatus,
     Evidence,
     EvidenceRequirement,
+    ExecutableRunPlan,
     Fault,
     LifecycleEvent,
     LifecycleEventBus,
@@ -68,7 +86,7 @@ class TopologyProvider(Protocol):
     object.
     """
 
-    def validate(self, plan: RunPlan) -> None: ...
+    def validate(self, plan: ExecutableRunPlan) -> None: ...
 
     def provision(self, context: RunContext) -> ProvisionedTopology: ...
 
@@ -89,9 +107,23 @@ class CooperativeDeadlineError(FeatureRunnerError):
     """A component crossed a cooperative, runner-visible deadline."""
 
 
+class _EarlyTerminalError(Exception):
+    def __init__(
+        self,
+        status: OutcomeStatus,
+        summary: str,
+        *,
+        trustworthy_feature_failure: bool = False,
+    ):
+        self.status = status
+        self.summary = summary
+        self.trustworthy_feature_failure = trustworthy_feature_failure
+        super().__init__(summary)
+
+
 @dataclass(frozen=True)
 class _ResolvedComponent:
-    spec: ComponentSpec
+    spec: Union[ComponentSpec, BoundComponentSpec]
     registry: Registry[Any]
     registration: ComponentRegistration[Any]
     instance: Any
@@ -99,14 +131,14 @@ class _ResolvedComponent:
 
 @dataclass(frozen=True)
 class _ValidatedComponent:
-    spec: ComponentSpec
+    spec: Union[ComponentSpec, BoundComponentSpec]
     registry: Registry[Any]
     registration: ComponentRegistration[Any]
 
 
 @dataclass(frozen=True)
 class _PreparedPlan:
-    ordered: tuple[ComponentSpec, ...]
+    ordered: tuple[Union[ComponentSpec, BoundComponentSpec], ...]
     effective_required: frozenset[str]
     provider: TopologyProvider
 
@@ -117,26 +149,38 @@ class _CleanupEntry:
     method_name: str
 
 
+@dataclass(frozen=True)
+class _ExecutionResult:
+    outcome: RunOutcome
+    trustworthy_feature_failure: bool = False
+
+
 class _RunnerContext:
     def __init__(
         self,
-        plan: RunPlan,
+        source_plan: RunPlan,
+        plan: Union[RunPlan, BoundRunPlan],
         event_bus: LifecycleEventBus,
         artifact_dir: str,
         deadline: Optional[float],
     ):
+        self._source_plan = source_plan
         self._plan = plan
         self._event_bus = event_bus
         self._artifact_dir = artifact_dir
         self._run_deadline = deadline
         self._component_deadline: Optional[float] = None
         self._cleanup_depth = 0
-        self._services: Mapping[str, Any] = MappingProxyType({})
+        self._services: RunServices = plan.services if isinstance(plan, BoundRunPlan) else RunServices()
         self._topology: Optional[ProvisionedTopology] = None
 
     @property
-    def plan(self) -> RunPlan:
+    def plan(self) -> Union[RunPlan, BoundRunPlan]:
         return self._plan
+
+    @property
+    def source_plan(self) -> RunPlan:
+        return self._source_plan
 
     @property
     def event_bus(self) -> LifecycleEventBus:
@@ -163,13 +207,21 @@ class _RunnerContext:
             return self._run_deadline
         return min(self._run_deadline, self._component_deadline)
 
-    def bind_topology(self, topology: ProvisionedTopology) -> None:
-        self._topology = topology
-        self._services = topology.services
+    def bind_plan(self, plan: BoundRunPlan) -> None:
+        if not isinstance(plan, BoundRunPlan):
+            raise TypeError("plan must be a BoundRunPlan")
+        if plan.source_plan is not self._source_plan:
+            raise ValueError("bound plan must retain the runner context source plan")
+        self._plan = plan
+        self._services = plan.services
 
-    def clear_topology(self) -> None:
+    def bind_topology(self, topology: ProvisionedTopology, plan: BoundRunPlan) -> None:
+        self._topology = topology
+        self.bind_plan(plan)
+
+    def clear_topology(self, plan: BoundRunPlan) -> None:
         self._topology = None
-        self._services = MappingProxyType({})
+        self.bind_plan(plan)
 
     def set_component_deadline(self, deadline: Optional[float]) -> Optional[float]:
         previous = self._component_deadline
@@ -227,7 +279,9 @@ def _require_signature(callable_value: Any, args: Sequence[Any], label: str) -> 
         raise FeatureRunnerError(f"{label} has an incompatible signature: {exc}") from exc
 
 
-def stable_topological_order(components: Sequence[ComponentSpec]) -> tuple[ComponentSpec, ...]:
+def stable_topological_order(
+    components: Sequence[Union[ComponentSpec, BoundComponentSpec]],
+) -> tuple[Union[ComponentSpec, BoundComponentSpec], ...]:
     """Return a dependency order, preserving manifest order whenever possible."""
 
     entries = tuple(components)
@@ -266,11 +320,19 @@ def stable_topological_order(components: Sequence[ComponentSpec]) -> tuple[Compo
     return tuple(ordered)
 
 
-def _exception_data(exc: BaseException) -> Mapping[str, str]:
-    return {
-        "type": type(exc).__name__,
-        "message": str(exc),
-    }
+def _exception_data(
+    exc: BaseException,
+    *,
+    phase: Optional[str] = None,
+) -> Mapping[str, str]:
+    error_type = type(exc)
+    qualified_name = error_type.__qualname__
+    if error_type.__module__ != "builtins":
+        qualified_name = f"{error_type.__module__}.{qualified_name}"
+    result = {"type": qualified_name}
+    if phase is not None:
+        result["phase"] = phase
+    return result
 
 
 def _event_data(event: LifecycleEvent) -> Mapping[str, Any]:
@@ -283,10 +345,16 @@ def _event_data(event: LifecycleEvent) -> Mapping[str, Any]:
     }
 
 
-def _component_error(spec: ComponentSpec, summary: str, exc: Optional[BaseException] = None) -> ComponentResult:
+def _component_error(
+    spec: Union[ComponentSpec, BoundComponentSpec],
+    summary: str,
+    exc: Optional[BaseException] = None,
+    *,
+    phase: str = "component",
+) -> ComponentResult:
     diagnostics: Mapping[str, Any] = {}
     if exc is not None:
-        diagnostics = {"exception": _exception_data(exc)}
+        diagnostics = {"exception": _exception_data(exc, phase=phase)}
     return ComponentResult(
         component_instance_id=spec.instance_id,
         status=ComponentStatus.ERROR,
@@ -295,7 +363,10 @@ def _component_error(spec: ComponentSpec, summary: str, exc: Optional[BaseExcept
     )
 
 
-def _blocked_result(spec: ComponentSpec, reasons: Sequence[str]) -> ComponentResult:
+def _blocked_result(
+    spec: Union[ComponentSpec, BoundComponentSpec],
+    reasons: Sequence[str],
+) -> ComponentResult:
     return ComponentResult(
         component_instance_id=spec.instance_id,
         status=ComponentStatus.SKIP,
@@ -304,7 +375,9 @@ def _blocked_result(spec: ComponentSpec, reasons: Sequence[str]) -> ComponentRes
     )
 
 
-def _validate_phase_dependencies(ordered: Sequence[ComponentSpec]) -> None:
+def _validate_phase_dependencies(
+    ordered: Sequence[Union[ComponentSpec, BoundComponentSpec]],
+) -> None:
     by_id = {component.instance_id: component for component in ordered}
     for component in ordered:
         for dependency_id in component.depends_on:
@@ -319,7 +392,7 @@ def _validate_phase_dependencies(ordered: Sequence[ComponentSpec]) -> None:
                 )
 
 
-def _effective_required_instances(plan: RunPlan) -> frozenset[str]:
+def _effective_required_instances(plan: Union[RunPlan, BoundRunPlan]) -> frozenset[str]:
     by_id = {component.instance_id: component for component in plan.components}
     required = {component.instance_id for component in plan.components if component.required}
     required.update(requirement.source for requirement in plan.required_evidence if requirement.source is not None)
@@ -333,7 +406,7 @@ def _effective_required_instances(plan: RunPlan) -> frozenset[str]:
     return frozenset(required)
 
 
-def _validate_feature_mode(plan: RunPlan) -> None:
+def _validate_feature_mode(plan: Union[RunPlan, BoundRunPlan]) -> None:
     if plan.mode is not RunMode.FEATURE:
         return
     if not any(component.kind is ComponentKind.ORACLE and component.required for component in plan.components):
@@ -365,6 +438,90 @@ def _missing_evidence_requirements(
     return tuple(missing)
 
 
+def _contains_environment_reference(value: Any) -> bool:
+    if isinstance(value, EnvironmentReference):
+        return True
+    if isinstance(value, Mapping):
+        return any(_contains_environment_reference(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_environment_reference(item) for item in value)
+    return False
+
+
+def _plan_contains_environment_reference(plan: Union[RunPlan, BoundRunPlan]) -> bool:
+    if isinstance(plan, BoundRunPlan):
+        return False
+    values = [
+        plan.inputs,
+        plan.topology_document,
+        *(component.config for component in plan.components),
+        *(spec.config for spec in plan.artifacts),
+        *(spec.config for spec in plan.resources),
+        *(spec.config for spec in plan.policies),
+        *(overlay.selector.labels for overlay in plan.startup_overlays),
+        *(overlay.server_config for overlay in plan.startup_overlays),
+    ]
+    return any(_contains_environment_reference(value) for value in values)
+
+
+def _topology_contains_environment_reference(plan: RunPlan) -> bool:
+    values = [
+        plan.topology_document,
+        *(overlay.selector.labels for overlay in plan.startup_overlays),
+        *(overlay.server_config for overlay in plan.startup_overlays),
+    ]
+    return any(_contains_environment_reference(value) for value in values)
+
+
+def normalize_artifact_root(artifact_dir: str) -> str:
+    if not isinstance(artifact_dir, str):
+        raise TypeError("artifact_dir must be a string")
+    if "\x00" in artifact_dir:
+        raise ValueError("artifact_dir must not contain NUL")
+    if artifact_dir:
+        root = os.path.abspath(artifact_dir)
+    else:
+        root = os.path.join(
+            os.path.abspath(tempfile.gettempdir()),
+            "valkey-fuzzer",
+            "artifacts",
+        )
+    root = os.path.normpath(root)
+    if root == os.path.abspath(os.sep):
+        raise ValueError("artifact_dir must not resolve to the filesystem root")
+    return root
+
+
+def _environment_report(error: BaseException) -> Optional[EnvironmentReport]:
+    report = getattr(error, "environment_report", None)
+    if report is None:
+        report = getattr(error, "report", None)
+    return report if isinstance(report, EnvironmentReport) else None
+
+
+def _environment_diagnostics(
+    report: Optional[EnvironmentReport],
+    *,
+    error: Optional[BaseException] = None,
+) -> Mapping[str, Any]:
+    diagnostics: dict[str, Any] = {}
+    if report is not None:
+        diagnostics["environment_report"] = report.to_data()
+    if error is not None:
+        diagnostics["environment_error"] = {
+            "type": (
+                type(error).__qualname__
+                if type(error).__module__ == "builtins"
+                else f"{type(error).__module__}.{type(error).__qualname__}"
+            )
+        }
+    return diagnostics
+
+
+def _default_run_id() -> str:
+    return uuid.uuid4().hex
+
+
 class FeatureRunner:
     """Execute immutable feature-pack plans through registered generic roles."""
 
@@ -374,6 +531,8 @@ class FeatureRunner:
         topology_providers: Mapping[str, TopologyProviderEntry],
         *,
         artifact_dir: str = "",
+        environment_manager: Optional[EnvironmentManager] = None,
+        run_id_factory: Callable[[], str] = _default_run_id,
         clock: Callable[[], float] = time.monotonic,
     ):
         if not isinstance(registries, Mapping):
@@ -401,14 +560,27 @@ class FeatureRunner:
                     f"topology provider entry for {topology!r} must implement TopologyProvider or be a factory"
                 )
             normalized_providers[topology] = provider_entry
-        if not isinstance(artifact_dir, str):
-            raise TypeError("artifact_dir must be a string")
+        normalized_artifact_dir = normalize_artifact_root(artifact_dir)
+        if environment_manager is not None and not isinstance(environment_manager, EnvironmentManager):
+            raise TypeError("environment_manager must be an EnvironmentManager or None")
+        if not callable(run_id_factory):
+            raise TypeError("run_id_factory must be callable")
         if not callable(clock):
             raise TypeError("clock must be callable")
 
         self._registries = MappingProxyType(normalized_registries)
         self._topology_providers = MappingProxyType(normalized_providers)
-        self._artifact_dir = artifact_dir
+        self._artifact_dir = normalized_artifact_dir
+        self._environment_manager = (
+            EnvironmentManager(
+                artifact_registry=ArtifactProviderRegistry(),
+                resource_registry=ResourceProviderRegistry(),
+                artifact_root=normalized_artifact_dir,
+            )
+            if environment_manager is None
+            else environment_manager
+        )
+        self._run_id_factory = run_id_factory
         self._clock = clock
 
     def _new_outcome(
@@ -427,7 +599,7 @@ class FeatureRunner:
             _event_data(event) for event in context.event_bus.committed_history()
         )
         return RunOutcome(
-            plan=context.plan,
+            plan=context.source_plan,
             status=status,
             summary=summary,
             component_results=tuple(component_results),
@@ -466,14 +638,15 @@ class FeatureRunner:
                 (spec, plan),
                 f"validator for component {spec.component_id!r}",
             )
-            try:
-                validation_return = registration.validator(spec, plan)
-            except Exception as exc:
-                raise FeatureRunnerError(
-                    f"component {spec.component_id!r} rejected instance {spec.instance_id!r}: {exc}"
-                ) from exc
-            if validation_return is not None:
-                raise FeatureRunnerError(f"validator for component {spec.component_id!r} must return None")
+            if not _plan_contains_environment_reference(plan):
+                try:
+                    validation_return = registration.validator(spec, plan)
+                except Exception as exc:
+                    raise FeatureRunnerError(
+                        f"component {spec.component_id!r} rejected instance {spec.instance_id!r}: {exc}"
+                    ) from exc
+                if validation_return is not None:
+                    raise FeatureRunnerError(f"validator for component {spec.component_id!r} must return None")
         return _ValidatedComponent(
             spec=spec,
             registry=registry,
@@ -562,6 +735,8 @@ class FeatureRunner:
         self,
         plan: RunPlan,
         context: _RunnerContext,
+        *,
+        validate_topology: bool = True,
     ) -> _PreparedPlan:
         _validate_feature_mode(plan)
         ordered = stable_topological_order(plan.components)
@@ -608,9 +783,10 @@ class FeatureRunner:
             (context, ProvisionedTopology()),
             f"topology provider {plan.topology!r}.cleanup",
         )
-        validation_return = provider.validate(plan)
-        if validation_return is not None:
-            raise FeatureRunnerError("topology provider validation must return None")
+        if validate_topology:
+            validation_return = provider.validate(plan)
+            if validation_return is not None:
+                raise FeatureRunnerError("topology provider validation must return None")
 
         return _PreparedPlan(
             ordered=ordered,
@@ -621,20 +797,27 @@ class FeatureRunner:
     def validate(self, plan: RunPlan) -> None:
         """Preflight a plan without provisioning a topology or running components.
 
-        Topology provider factories are resolved so their pure ``validate``
-        method can inspect the complete plan. Component factories are checked
-        for zero-argument compatibility but are deliberately not invoked.
+        Topology provider factories and signatures are resolved. Plan-specific
+        topology validation and component validators are deferred only where
+        typed environment references still require post-acquisition binding.
+        Component factories are checked for zero-argument compatibility but
+        are deliberately not invoked.
         """
 
         if not isinstance(plan, RunPlan):
             raise TypeError("plan must be a RunPlan")
         context = _RunnerContext(
             plan,
+            plan,
             LifecycleEventBus(clock=self._clock),
             self._artifact_dir,
             None,
         )
-        prepared = self._prepare_plan(plan, context)
+        prepared = self._prepare_plan(
+            plan,
+            context,
+            validate_topology=not _topology_contains_environment_reference(plan),
+        )
         self._validate_component_registrations(plan, prepared.ordered)
 
     def _deadline_for(self, context: _RunnerContext, spec: ComponentSpec, started_at: float) -> Optional[float]:
@@ -864,16 +1047,20 @@ class FeatureRunner:
         summary: str,
         component_results: Sequence[ComponentResult],
         started_at: float,
+        diagnostics: Optional[Mapping[str, Any]] = None,
     ) -> RunOutcome:
-        diagnostics: dict[str, Any] = {}
+        final_diagnostics: dict[str, Any] = dict(diagnostics or {})
         primary_base_exception: Optional[BaseException] = None
         try:
             context.event_bus.publish("run.completed", source="runner")
         except BaseException as exc:
             if isinstance(exc, Exception):
                 status = OutcomeStatus.ERROR
-                summary = f"runner error while finalizing event journal: {exc}"
-                diagnostics["error"] = _exception_data(exc)
+                summary = "event journal finalization failed"
+                final_diagnostics["error"] = _exception_data(
+                    exc,
+                    phase="run.completed",
+                )
             else:
                 primary_base_exception = exc
         try:
@@ -881,8 +1068,11 @@ class FeatureRunner:
         except BaseException as exc:
             if isinstance(exc, Exception):
                 status = OutcomeStatus.ERROR
-                summary = f"runner error while quiescing event journal: {exc}"
-                diagnostics["error"] = _exception_data(exc)
+                summary = "event journal quiesce failed"
+                final_diagnostics["error"] = _exception_data(
+                    exc,
+                    phase="event_bus.quiesce",
+                )
             elif primary_base_exception is None:
                 primary_base_exception = exc
         if primary_base_exception is not None:
@@ -893,41 +1083,34 @@ class FeatureRunner:
             summary=summary,
             component_results=component_results,
             started_at=started_at,
-            diagnostics=diagnostics,
+            diagnostics=final_diagnostics,
         )
 
-    def run(self, plan: RunPlan, *, deadline: Optional[float] = None) -> RunOutcome:
-        """Execute ``plan`` and return one uniform terminal outcome.
-
-        Deadlines are absolute values from the configured monotonic clock.
-        Enforcement is cooperative: the current deadline is exposed through
-        ``RunContext.deadline`` and checked before and after synchronous calls.
-        No worker threads are abandoned to implement timeouts.
-        """
-
-        if not isinstance(plan, RunPlan):
-            raise TypeError("plan must be a RunPlan")
-        if deadline is not None and (
-            isinstance(deadline, bool) or not isinstance(deadline, (int, float)) or not math.isfinite(deadline)
-        ):
-            raise TypeError("deadline must be a finite number or None")
-
-        started_at = self._clock()
-        event_bus = LifecycleEventBus(clock=self._clock)
-        context = _RunnerContext(plan, event_bus, self._artifact_dir, deadline)
+    def _execute_bound(
+        self,
+        plan: BoundRunPlan,
+        session: EnvironmentSession,
+        context: _RunnerContext,
+        *,
+        started_at: float,
+        deadline: Optional[float],
+    ) -> _ExecutionResult:
+        event_bus = context.event_bus
         execution_results: dict[str, ComponentResult] = {}
         evidence_ledger: list[Evidence] = []
         invoked_results: set[str] = set()
         cleanup_errors: list[Mapping[str, Any]] = []
         error: Optional[BaseException] = None
+        error_phase = "preflight"
         primary_base_exception: Optional[BaseException] = None
+        terminal: Optional[_EarlyTerminalError] = None
         topology: Optional[ProvisionedTopology] = None
         provider: Optional[TopologyProvider] = None
         cleanups: list[_CleanupEntry] = []
-        current_spec: Optional[ComponentSpec] = None
+        current_spec: Optional[Union[ComponentSpec, BoundComponentSpec]] = None
         effective_required: frozenset[str] = frozenset()
-
-        event_bus.publish("run.started", source="runner", payload={"scenario_id": plan.scenario_id})
+        ordered = tuple(plan.components)
+        resolved: tuple[_ResolvedComponent, ...] = ()
 
         try:
             prepared = self._prepare_plan(plan, context)
@@ -941,6 +1124,7 @@ class FeatureRunner:
                 if spec.kind is not ComponentKind.CAPABILITY:
                     continue
                 current_spec = spec
+                error_phase = "capability.probe"
                 item = by_instance[spec.instance_id]
                 reasons = self._dependency_reasons(spec, execution_results)
                 if reasons:
@@ -960,20 +1144,15 @@ class FeatureRunner:
                 if result.status is ComponentStatus.ERROR:
                     raise FeatureRunnerError(f"capability {spec.instance_id!r} returned ERROR: {result.summary}")
                 if spec.instance_id in effective_required and result.status is ComponentStatus.SKIP:
-                    return self._finish_without_topology(
-                        context=context,
-                        status=OutcomeStatus.SKIP_UNSUPPORTED,
-                        summary=f"required capability {spec.instance_id!r} is unsupported",
-                        component_results=self._result_sequence(ordered, execution_results),
-                        started_at=started_at,
+                    raise _EarlyTerminalError(
+                        OutcomeStatus.SKIP_UNSUPPORTED,
+                        f"required capability {spec.instance_id!r} is unsupported",
                     )
                 if spec.instance_id in effective_required and result.status is ComponentStatus.FAIL:
-                    return self._finish_without_topology(
-                        context=context,
-                        status=OutcomeStatus.FAIL,
-                        summary=f"required capability {spec.instance_id!r} failed",
-                        component_results=self._result_sequence(ordered, execution_results),
-                        started_at=started_at,
+                    raise _EarlyTerminalError(
+                        OutcomeStatus.FAIL,
+                        f"required capability {spec.instance_id!r} failed",
+                        trustworthy_feature_failure=True,
                     )
             current_spec = None
 
@@ -991,15 +1170,15 @@ class FeatureRunner:
                 outcome_status = (
                     OutcomeStatus.SKIP_UNSUPPORTED if ComponentStatus.SKIP in blocked_statuses else OutcomeStatus.FAIL
                 )
-                return self._finish_without_topology(
-                    context=context,
-                    status=outcome_status,
-                    summary=(f"required capabilities were blocked: {', '.join(blocked_required_capabilities)}"),
-                    component_results=self._result_sequence(ordered, execution_results),
-                    started_at=started_at,
+                raise _EarlyTerminalError(
+                    outcome_status,
+                    f"required capabilities were blocked: {', '.join(blocked_required_capabilities)}",
+                    trustworthy_feature_failure=outcome_status is OutcomeStatus.FAIL,
                 )
 
+            error_phase = "registry"
             self._check_registry_drift(resolved)
+            error_phase = "topology.provision"
             now = self._clock()
             if deadline is not None and now >= deadline:
                 raise CooperativeDeadlineError("deadline expired before topology provision")
@@ -1031,7 +1210,12 @@ class FeatureRunner:
                     raise rollback_base_exception
                 raise invalid_provision
             topology = provisioned
-            context.bind_topology(topology)
+            topology_bound_plan = BoundRunPlan.materialize(
+                context.source_plan,
+                session.binding,
+                topology_services=topology.services,
+            )
+            context.bind_topology(topology, topology_bound_plan)
             if deadline is not None and self._clock() >= deadline:
                 raise CooperativeDeadlineError("topology provision exceeded the run deadline")
             event_bus.publish("topology.ready", source="runner", payload={"topology": plan.topology})
@@ -1046,6 +1230,7 @@ class FeatureRunner:
                     execution_results[spec.instance_id] = _blocked_result(spec, reasons)
                     continue
                 method_name, before_event, success_event, failure_event = _START_METHODS[spec.kind]
+                error_phase = f"{spec.kind.value}.{method_name}"
                 if spec.kind in _CLEANUP_METHODS:
                     cleanups.append(_CleanupEntry(item, _CLEANUP_METHODS[spec.kind][0]))
                 event_bus.publish(before_event, source=spec.instance_id)
@@ -1064,13 +1249,16 @@ class FeatureRunner:
                     raise FeatureRunnerError(f"{spec.kind.value} {spec.instance_id!r} returned ERROR: {result.summary}")
             current_spec = None
 
+        except _EarlyTerminalError as early_terminal:
+            terminal = early_terminal
         except Exception as exc:
             error = exc
             if current_spec is not None and current_spec.instance_id not in execution_results:
                 execution_results[current_spec.instance_id] = _component_error(
                     current_spec,
-                    f"runner error: {exc}",
+                    "component execution failed",
                     exc,
+                    phase=error_phase,
                 )
         except BaseException as exc:
             primary_base_exception = exc
@@ -1141,13 +1329,14 @@ class FeatureRunner:
                 if not isinstance(exc, Exception) and primary_base_exception is None:
                     primary_base_exception = exc
 
-        if error is None and primary_base_exception is None and "ordered" in locals():
+        if terminal is None and error is None and primary_base_exception is None:
             try:
                 resolved_by_instance = {item.spec.instance_id: item for item in resolved}
                 for spec in ordered:
                     if spec.kind is not ComponentKind.ORACLE:
                         continue
                     current_spec = spec
+                    error_phase = "oracle.evaluate"
                     reasons = self._dependency_reasons(spec, execution_results)
                     if reasons:
                         execution_results[spec.instance_id] = _blocked_result(spec, reasons)
@@ -1170,6 +1359,7 @@ class FeatureRunner:
                     if result.status is ComponentStatus.ERROR:
                         raise FeatureRunnerError(f"oracle {spec.instance_id!r} returned ERROR: {result.summary}")
                 current_spec = None
+                error_phase = "validation"
                 event_bus.publish("validation.completed", source="runner")
                 self._check_registry_drift(resolved)
             except Exception as exc:
@@ -1177,8 +1367,9 @@ class FeatureRunner:
                 if current_spec is not None and current_spec.instance_id not in execution_results:
                     execution_results[current_spec.instance_id] = _component_error(
                         current_spec,
-                        f"runner error: {exc}",
+                        "component execution failed",
                         exc,
+                        phase=error_phase,
                     )
             except BaseException as exc:
                 primary_base_exception = exc
@@ -1226,7 +1417,7 @@ class FeatureRunner:
                     if not isinstance(exc, Exception) and primary_base_exception is None:
                         primary_base_exception = exc
             finally:
-                context.clear_topology()
+                context.clear_topology(plan)
 
         try:
             event_bus.publish("run.completed", source="runner")
@@ -1234,6 +1425,7 @@ class FeatureRunner:
             if isinstance(exc, Exception):
                 if error is None:
                     error = exc
+                    error_phase = "run.completed"
             elif primary_base_exception is None:
                 primary_base_exception = exc
 
@@ -1243,26 +1435,25 @@ class FeatureRunner:
             if isinstance(exc, Exception):
                 if error is None:
                     error = exc
+                    error_phase = "event_bus.quiesce"
             elif primary_base_exception is None:
                 primary_base_exception = exc
 
-        if primary_base_exception is None and "resolved" in locals():
+        if primary_base_exception is None and resolved:
             try:
                 self._check_registry_drift(resolved)
             except Exception as exc:
                 if error is None:
                     error = exc
+                    error_phase = "registry"
 
         if primary_base_exception is not None:
             raise primary_base_exception
 
-        component_results = self._result_sequence(
-            ordered if "ordered" in locals() else plan.components,
-            execution_results,
-        )
+        component_results = self._result_sequence(ordered, execution_results)
         required_failures = tuple(
             spec.instance_id
-            for spec in (ordered if "ordered" in locals() else ())
+            for spec in ordered
             if spec.instance_id in effective_required
             and spec.instance_id in execution_results
             and execution_results[spec.instance_id].status in (ComponentStatus.FAIL, ComponentStatus.SKIP)
@@ -1278,28 +1469,35 @@ class FeatureRunner:
             spec.instance_id in effective_required
             and spec.instance_id in invoked_results
             and execution_results[spec.instance_id].status is ComponentStatus.FAIL
-            for spec in (ordered if "ordered" in locals() else ())
+            for spec in ordered
             if spec.instance_id in execution_results
+        )
+        trustworthy_feature_failure = real_required_failure or (
+            terminal is not None and terminal.trustworthy_feature_failure
         )
 
         diagnostics: dict[str, Any] = {}
         if cleanup_errors:
             diagnostics["cleanup_errors"] = tuple(cleanup_errors)
-        if missing_events:
-            diagnostics["missing_required_events"] = missing_events
-        if missing_evidence:
-            diagnostics["missing_required_evidence"] = missing_evidence
-        if required_failures:
-            diagnostics["required_component_failures"] = required_failures
+        if terminal is None:
+            if missing_events:
+                diagnostics["missing_required_events"] = missing_events
+            if missing_evidence:
+                diagnostics["missing_required_evidence"] = missing_evidence
+            if required_failures:
+                diagnostics["required_component_failures"] = required_failures
         if error is not None:
-            diagnostics["error"] = _exception_data(error)
+            diagnostics["error"] = _exception_data(error, phase=error_phase)
 
         if error is not None:
             status = OutcomeStatus.ERROR
-            summary = f"runner error: {error}"
-        elif cleanup_errors and not real_required_failure:
+            summary = f"runner execution failed during {error_phase}"
+        elif cleanup_errors and not trustworthy_feature_failure:
             status = OutcomeStatus.ERROR
             summary = "cleanup failed before a trustworthy feature failure was established"
+        elif terminal is not None:
+            status = terminal.status
+            summary = terminal.summary
         elif required_failures or missing_events or missing_evidence:
             status = OutcomeStatus.FAIL
             reasons = []
@@ -1317,14 +1515,161 @@ class FeatureRunner:
             status = OutcomeStatus.PASS
             summary = "feature run passed"
 
-        return self._new_outcome(
-            context=context,
+        return _ExecutionResult(
+            outcome=self._new_outcome(
+                context=context,
+                status=status,
+                summary=summary,
+                component_results=component_results,
+                started_at=started_at,
+                diagnostics=diagnostics,
+            ),
+            trustworthy_feature_failure=trustworthy_feature_failure,
+        )
+
+    def _with_environment_report(
+        self,
+        execution: _ExecutionResult,
+        report: EnvironmentReport,
+        *,
+        teardown_error: Optional[BaseException] = None,
+    ) -> RunOutcome:
+        outcome = execution.outcome
+        diagnostics = dict(to_plain_data(outcome.diagnostics))
+        diagnostics.update(_environment_diagnostics(report, error=teardown_error))
+
+        status = outcome.status
+        summary = outcome.summary
+        teardown_failed = teardown_error is not None or report.status is not EnvironmentReportStatus.CLEANED
+        if teardown_failed and status in (OutcomeStatus.PASS, OutcomeStatus.SKIP_UNSUPPORTED):
+            status = OutcomeStatus.ERROR
+            summary = "environment cleanup failed after execution"
+        elif teardown_failed and status is OutcomeStatus.FAIL and not execution.trustworthy_feature_failure:
+            status = OutcomeStatus.ERROR
+            summary = "environment cleanup failed before a trustworthy feature failure was established"
+
+        return RunOutcome(
+            plan=outcome.plan,
             status=status,
             summary=summary,
-            component_results=component_results,
-            started_at=started_at,
+            component_results=outcome.component_results,
+            evidence=outcome.evidence,
             diagnostics=diagnostics,
+            started_at=outcome.started_at,
+            ended_at=self._clock(),
         )
+
+    def run(self, plan: RunPlan, *, deadline: Optional[float] = None) -> RunOutcome:
+        """Acquire, bind, execute, and fully tear down one declarative plan.
+
+        Deadlines are absolute values from the configured monotonic clock.
+        Enforcement is cooperative: the current deadline is exposed through
+        ``RunContext.deadline`` and checked before and after synchronous calls.
+        No worker threads are abandoned to implement timeouts.
+        """
+
+        if not isinstance(plan, RunPlan):
+            raise TypeError("plan must be a RunPlan")
+        if deadline is not None and (
+            isinstance(deadline, bool) or not isinstance(deadline, (int, float)) or not math.isfinite(deadline)
+        ):
+            raise TypeError("deadline must be a finite number or None")
+
+        started_at = self._clock()
+        event_bus = LifecycleEventBus(clock=self._clock)
+        context = _RunnerContext(
+            plan,
+            plan,
+            event_bus,
+            self._artifact_dir,
+            deadline,
+        )
+        event_bus.publish("run.started", source="runner", payload={"scenario_id": plan.scenario_id})
+
+        try:
+            run_id = self._run_id_factory()
+            session = self._environment_manager.acquire(
+                plan.artifacts,
+                plan.resources,
+                run_id=run_id,
+                seed=plan.seed,
+                deadline=deadline,
+                policies=plan.policies,
+            )
+        except UnsupportedEnvironmentError as exc:
+            return self._finish_without_topology(
+                context=context,
+                status=OutcomeStatus.SKIP_UNSUPPORTED,
+                summary="the requested environment is unsupported",
+                component_results=(),
+                started_at=started_at,
+                diagnostics=_environment_diagnostics(_environment_report(exc), error=exc),
+            )
+        except Exception as exc:
+            return self._finish_without_topology(
+                context=context,
+                status=OutcomeStatus.ERROR,
+                summary="environment acquisition failed",
+                component_results=(),
+                started_at=started_at,
+                diagnostics=_environment_diagnostics(_environment_report(exc), error=exc),
+            )
+
+        execution: Optional[_ExecutionResult] = None
+        try:
+            try:
+                bound_plan = BoundRunPlan.materialize(plan, session.binding)
+                context.bind_plan(bound_plan)
+                execution = self._execute_bound(
+                    bound_plan,
+                    session,
+                    context,
+                    started_at=started_at,
+                    deadline=deadline,
+                )
+            except Exception as exc:
+                execution = _ExecutionResult(
+                    self._finish_without_topology(
+                        context=context,
+                        status=OutcomeStatus.ERROR,
+                        summary="environment binding or runner setup failed",
+                        component_results=(),
+                        started_at=started_at,
+                        diagnostics={
+                            "error": {
+                                "type": (
+                                    type(exc).__qualname__
+                                    if type(exc).__module__ == "builtins"
+                                    else f"{type(exc).__module__}.{type(exc).__qualname__}"
+                                )
+                            }
+                        },
+                    )
+                )
+        except BaseException as primary_error:
+            try:
+                session.__exit__(
+                    type(primary_error),
+                    primary_error,
+                    primary_error.__traceback__,
+                )
+            except BaseException:
+                pass
+            raise
+
+        assert execution is not None
+        try:
+            report = session.close()
+        except EnvironmentLifecycleError as teardown_error:
+            report = _environment_report(teardown_error)
+            if report is None:
+                report = session.report
+            return self._with_environment_report(
+                execution,
+                report,
+                teardown_error=teardown_error,
+            )
+        return self._with_environment_report(execution, report)
 
 
 def run_feature_plan(
@@ -1333,6 +1678,8 @@ def run_feature_plan(
     topology_providers: Mapping[str, TopologyProviderEntry],
     *,
     artifact_dir: str = "",
+    environment_manager: Optional[EnvironmentManager] = None,
+    run_id_factory: Callable[[], str] = _default_run_id,
     deadline: Optional[float] = None,
 ) -> RunOutcome:
     """Functional convenience wrapper around :class:`FeatureRunner`."""
@@ -1341,6 +1688,8 @@ def run_feature_plan(
         registries,
         topology_providers,
         artifact_dir=artifact_dir,
+        environment_manager=environment_manager,
+        run_id_factory=run_id_factory,
     ).run(plan, deadline=deadline)
 
 
@@ -1352,6 +1701,7 @@ __all__ = [
     "TopologyProvider",
     "TopologyProviderEntry",
     "TopologyProviderFactory",
+    "normalize_artifact_root",
     "run_feature_plan",
     "stable_topological_order",
 ]

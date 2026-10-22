@@ -469,7 +469,7 @@ def test_runtime_rejects_recursive_execution_from_component(tmp_path):
     class ReentrantAction:
         def run(self, context, spec):
             try:
-                runtime.run_plan(context.plan)
+                runtime.run_plan(context.plan.source_plan)
             except FeatureRuntimeError as exc:
                 nested_errors.append(str(exc))
             return ComponentResult(

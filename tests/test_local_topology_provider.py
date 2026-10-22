@@ -1,5 +1,7 @@
 """Focused tests for the generic runner's local Valkey topology provider."""
 
+import threading
+import time
 from unittest.mock import Mock, call, patch
 
 import pytest
@@ -12,6 +14,7 @@ from src.fuzzer_engine.test_case_generator import ScenarioGenerator
 from src.local_topology_provider import (
     LOCAL_TOPOLOGY_SERVICE,
     LocalTopologyError,
+    LocalTopologyNode,
     LocalTopologyValidationError,
     LocalValkeyTopologyHandle,
     LocalValkeyTopologyProvider,
@@ -648,6 +651,7 @@ def test_provider_provisions_handle_services_clients_restarts_and_exact_cleanup(
     coordinator.create_topology.side_effect = create_topology
     coordinator.restart_node.return_value = True
     coordinator.destroy_cluster.return_value = True
+    borrowed_client.execute_command.return_value = b"PONG"
     provider = LocalValkeyTopologyProvider(lambda: coordinator)
     context = Mock(plan=plan)
 
@@ -659,11 +663,17 @@ def test_provider_provisions_handle_services_clients_restarts_and_exact_cleanup(
     assert topology.services == {LOCAL_TOPOLOGY_SERVICE: handle}
     assert captured["seed"] == 17
     assert captured["node_plan"].server_config == {"appendonly": "no"}
-    assert handle.nodes == tuple(instance.nodes)
+    assert all(isinstance(node, LocalTopologyNode) for node in handle.nodes)
+    assert tuple(node.node_id for node in handle.nodes) == ("node-0",)
+    assert not hasattr(handle.nodes[0], "process")
     assert handle.topology_type is TopologyType.STANDALONE
     assert handle.valkey_sha == "abc1234"
-    assert handle.client("node-0") is borrowed_client
-    assert handle.restart("node-0", wait_ready=False) is instance.nodes[0]
+    assert not hasattr(handle, "connection")
+    assert not hasattr(handle, "client")
+    execute_command = handle.execute_command
+    assert execute_command("node-0", "PING") == b"PONG"
+    borrowed_client.execute_command.assert_called_once_with("PING")
+    assert handle.restart("node-0", wait_ready=False) == handle.nodes[0]
     coordinator.restart_node.assert_called_once_with(
         "local-test",
         "node-0",
@@ -675,7 +685,118 @@ def test_provider_provisions_handle_services_clients_restarts_and_exact_cleanup(
     coordinator.destroy_cluster.assert_called_once_with("local-test")
     assert handle.is_closed
     with pytest.raises(LocalTopologyError, match="already been cleaned up"):
-        handle.client("node-0")
+        execute_command("node-0", "PING")
+
+
+def test_topology_handle_does_not_serialize_concurrent_commands():
+    coordinator = Mock()
+    coordinator.create_topology.return_value = make_instance()
+    coordinator.destroy_cluster.return_value = True
+    client = Mock()
+    coordinator.cluster_manager.get_client.return_value = client
+    entered_lock = threading.Lock()
+    entered_count = 0
+    both_entered = threading.Event()
+    release_commands = threading.Event()
+    results = []
+    errors = []
+
+    def execute_command(command):
+        nonlocal entered_count
+        with entered_lock:
+            entered_count += 1
+            if entered_count == 2:
+                both_entered.set()
+        assert release_commands.wait(timeout=2)
+        return command
+
+    client.execute_command.side_effect = execute_command
+    provider = LocalValkeyTopologyProvider(lambda: coordinator)
+    context = Mock(plan=make_plan())
+    topology = provider.provision(context)
+
+    def run_command(command):
+        try:
+            results.append(topology.handle.execute_command("node-0", command))
+        except BaseException as error:
+            errors.append(error)
+
+    workers = [
+        threading.Thread(target=run_command, args=("PING",)),
+        threading.Thread(target=run_command, args=("INFO",)),
+    ]
+    for worker in workers:
+        worker.start()
+    try:
+        assert both_entered.wait(timeout=1)
+    finally:
+        release_commands.set()
+    for worker in workers:
+        worker.join(timeout=2)
+
+    assert errors == []
+    assert sorted(results) == ["INFO", "PING"]
+    assert all(not worker.is_alive() for worker in workers)
+    provider.cleanup(context, topology)
+
+
+def test_topology_cleanup_waits_for_active_commands_and_rejects_new_ones():
+    coordinator = Mock()
+    coordinator.create_topology.return_value = make_instance()
+    coordinator.destroy_cluster.return_value = True
+    client = Mock()
+    coordinator.cluster_manager.get_client.return_value = client
+    command_entered = threading.Event()
+    release_command = threading.Event()
+    command_errors = []
+    cleanup_errors = []
+
+    def execute_command(command):
+        command_entered.set()
+        assert release_command.wait(timeout=2)
+        return command
+
+    client.execute_command.side_effect = execute_command
+    provider = LocalValkeyTopologyProvider(lambda: coordinator)
+    context = Mock(plan=make_plan())
+    topology = provider.provision(context)
+
+    def run_command():
+        try:
+            topology.handle.execute_command("node-0", "PING")
+        except BaseException as error:
+            command_errors.append(error)
+
+    def cleanup():
+        try:
+            provider.cleanup(context, topology)
+        except BaseException as error:
+            cleanup_errors.append(error)
+
+    command_worker = threading.Thread(target=run_command)
+    cleanup_worker = threading.Thread(target=cleanup)
+    command_worker.start()
+    assert command_entered.wait(timeout=1)
+    cleanup_worker.start()
+    deadline = time.monotonic() + 1
+    while not topology.handle.is_closing and time.monotonic() < deadline:
+        time.sleep(0.001)
+
+    assert topology.handle.is_closing
+    coordinator.destroy_cluster.assert_not_called()
+    with pytest.raises(LocalTopologyError, match="being cleaned up"):
+        topology.handle.execute_command("node-0", "INFO")
+
+    release_command.set()
+    command_worker.join(timeout=2)
+    cleanup_worker.join(timeout=2)
+
+    assert command_errors == []
+    assert cleanup_errors == []
+    assert not command_worker.is_alive()
+    assert not cleanup_worker.is_alive()
+    coordinator.destroy_cluster.assert_called_once_with("local-test")
+    assert topology.handle.is_closed
 
 
 @pytest.mark.parametrize(
@@ -774,6 +895,26 @@ def test_provider_reports_rollback_failure_after_post_create_error(rollback_effe
         provider.rollback(context)
 
     coordinator.destroy_cluster.assert_called_once_with(instance.cluster_id)
+
+
+def test_provider_rollback_does_not_log_or_raise_coordinator_exception_text(caplog):
+    sentinel = "RESOLVED_RUNTIME_SECRET"
+    duplicate = make_node()
+    instance = make_instance(nodes=[duplicate, duplicate])
+    coordinator = Mock()
+    coordinator.create_topology.return_value = instance
+    coordinator.destroy_cluster.side_effect = RuntimeError(f"coordinator echoed {sentinel}")
+    provider = LocalValkeyTopologyProvider(lambda: coordinator)
+    context = Mock(plan=make_plan())
+
+    with pytest.raises(LocalTopologyError) as captured:
+        with pytest.raises(LocalTopologyError, match="node IDs must be unique"):
+            provider.provision(context)
+        provider.rollback(context)
+
+    assert sentinel not in str(captured.value)
+    assert sentinel not in caplog.text
+    assert "RuntimeError" in caplog.text
 
 
 def test_provider_preserves_keyboard_interrupt_while_attempting_rollback():
@@ -1124,6 +1265,28 @@ def test_provider_cleanup_exception_leaves_handle_open_and_can_be_retried():
 
     assert not topology.handle.is_closed
     provider.cleanup(context, topology)
+    assert topology.handle.is_closed
+
+
+def test_provider_blocks_handle_operations_before_destroying_topology():
+    coordinator = Mock()
+    coordinator.create_topology.return_value = make_instance()
+    provider = LocalValkeyTopologyProvider(lambda: coordinator)
+    context = Mock(plan=make_plan())
+    topology = provider.provision(context)
+    observations = []
+
+    def destroy_cluster(cluster_id):
+        observations.append(cluster_id)
+        with pytest.raises(LocalTopologyError, match="being cleaned up"):
+            topology.handle.execute_command("node-0", "PING")
+        return True
+
+    coordinator.destroy_cluster.side_effect = destroy_cluster
+
+    provider.cleanup(context, topology)
+
+    assert observations == ["local-test"]
     assert topology.handle.is_closed
 
 

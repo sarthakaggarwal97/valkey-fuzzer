@@ -2,9 +2,14 @@
 
 import copy
 import logging
+import threading
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, Optional
+from contextlib import contextmanager
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Optional, Union
 
+from .bound_plan import BoundRunPlan, BoundStartupOverlay
 from .cluster_orchestrator.orchestrator import ConfigurationManager, PortManager
 from .extensibility import RunContext, RunPlan, StartupOverlay, to_plain_data
 from .feature_runner import ProvisionedTopology, TopologyProviderFactory
@@ -30,11 +35,55 @@ class LocalTopologyValidationError(ValueError):
     """A local topology document or startup overlay is invalid."""
 
 
+@dataclass(frozen=True)
+class LocalTopologyNode:
+    """Immutable, process-free description of one locally provisioned node."""
+
+    node_id: str
+    role: str
+    shard_id: int
+    host: str
+    port: int
+    bus_port: int
+    slot_start: Optional[int] = None
+    slot_end: Optional[int] = None
+    master_node_id: Optional[str] = None
+    cluster_node_id: Optional[str] = None
+
+    @classmethod
+    def from_node_info(cls, node: NodeInfo) -> "LocalTopologyNode":
+        return cls(
+            node_id=node.node_id,
+            role=node.role,
+            shard_id=node.shard_id,
+            host=node.host,
+            port=node.port,
+            bus_port=node.bus_port,
+            slot_start=node.slot_start,
+            slot_end=node.slot_end,
+            master_node_id=node.master_node_id,
+            cluster_node_id=node.cluster_node_id,
+        )
+
+
+class _LocalTopologyHandleState(str, Enum):
+    OPEN = "open"
+    CLOSING = "closing"
+    CLOSED = "closed"
+
+
 def _active_cluster_ids(coordinator: ClusterCoordinator) -> Optional[set[str]]:
     active_clusters = getattr(coordinator, "active_clusters", None)
     if not isinstance(active_clusters, Mapping):
         return None
     return {cluster_id for cluster_id in active_clusters if isinstance(cluster_id, str)}
+
+
+def _exception_type(error: BaseException) -> str:
+    error_type = type(error)
+    if error_type.__module__ == "builtins":
+        return error_type.__qualname__
+    return f"{error_type.__module__}.{error_type.__qualname__}"
 
 
 def _validate_provisioned_instance(
@@ -122,7 +171,10 @@ def _value_tokens(option: str, value: Any) -> tuple[str, ...]:
     return tuple(server_config_values(option, value))
 
 
-def _selected_plans(node_plans: Sequence[NodePlan], overlay: StartupOverlay) -> tuple[NodePlan, ...]:
+def _selected_plans(
+    node_plans: Sequence[NodePlan],
+    overlay: Union[StartupOverlay, BoundStartupOverlay],
+) -> tuple[NodePlan, ...]:
     selector = overlay.selector
     known_roles = {plan.role for plan in node_plans}
     known_node_ids = {plan.node_id for plan in node_plans}
@@ -152,7 +204,7 @@ def _selected_plans(node_plans: Sequence[NodePlan], overlay: StartupOverlay) -> 
 
 def apply_startup_overlays(
     node_plans: Sequence[NodePlan],
-    overlays: Sequence[StartupOverlay],
+    overlays: Sequence[Union[StartupOverlay, BoundStartupOverlay]],
 ) -> None:
     """Atomically apply ordered startup overlays to planned node configs.
 
@@ -171,8 +223,8 @@ def apply_startup_overlays(
         raise LocalTopologyValidationError("planned node IDs must be unique")
 
     overlay_entries = tuple(overlays)
-    if any(not isinstance(overlay, StartupOverlay) for overlay in overlay_entries):
-        raise TypeError("overlays must contain StartupOverlay values")
+    if any(not isinstance(overlay, (StartupOverlay, BoundStartupOverlay)) for overlay in overlay_entries):
+        raise TypeError("overlays must contain StartupOverlay or BoundStartupOverlay values")
 
     # Work entirely on detached mappings. No NodePlan is changed unless every
     # selector, policy, conflict, and value has passed validation.
@@ -230,14 +282,20 @@ class LocalValkeyTopologyHandle:
 
         self._coordinator = coordinator
         self._instance = instance
-        self._nodes = tuple(instance.nodes)
+        self._node_infos = tuple(instance.nodes)
+        self._node_infos_by_id = {node.node_id: node for node in self._node_infos}
+        self._nodes = tuple(LocalTopologyNode.from_node_info(node) for node in self._node_infos)
         self._nodes_by_id = {node.node_id: node for node in self._nodes}
         self._connection = ClusterConnection(
             list(instance.nodes),
             instance.cluster_id,
             topology_type=instance.config.topology_type,
         )
-        self._closed = False
+        self._state = _LocalTopologyHandleState.OPEN
+        self._lock = threading.RLock()
+        self._condition = threading.Condition(self._lock)
+        self._active_operations = 0
+        self._operation_owners: dict[int, int] = {}
 
     @property
     def cluster_id(self) -> str:
@@ -248,12 +306,10 @@ class LocalValkeyTopologyHandle:
         return TopologyType(self._instance.config.topology_type)
 
     @property
-    def nodes(self) -> tuple[NodeInfo, ...]:
-        return self._nodes
-
-    @property
-    def connection(self) -> ClusterConnection:
-        return self._connection
+    def nodes(self) -> tuple[LocalTopologyNode, ...]:
+        with self._lock:
+            self._ensure_open()
+            return self._nodes
 
     @property
     def valkey_sha(self) -> Optional[str]:
@@ -261,43 +317,100 @@ class LocalValkeyTopologyHandle:
 
     @property
     def is_closed(self) -> bool:
-        return self._closed
+        with self._lock:
+            return self._state is _LocalTopologyHandleState.CLOSED
+
+    @property
+    def is_closing(self) -> bool:
+        with self._lock:
+            return self._state is _LocalTopologyHandleState.CLOSING
 
     def _ensure_open(self) -> None:
-        if self._closed:
+        if self._state is _LocalTopologyHandleState.CLOSING:
+            raise LocalTopologyError(f"topology {self.cluster_id!r} is being cleaned up")
+        if self._state is _LocalTopologyHandleState.CLOSED:
             raise LocalTopologyError(f"topology {self.cluster_id!r} has already been cleaned up")
 
-    def _mark_closed(self) -> None:
-        self._closed = True
-
-    def node(self, node_id: str) -> NodeInfo:
-        """Return one initially planned node by its stable harness ID."""
-        self._ensure_open()
+    @contextmanager
+    def _operation(self):
+        owner = threading.get_ident()
+        with self._condition:
+            self._ensure_open()
+            self._active_operations += 1
+            self._operation_owners[owner] = self._operation_owners.get(owner, 0) + 1
         try:
-            return self._nodes_by_id[node_id]
-        except KeyError as exc:
-            raise KeyError(f"unknown node ID {node_id!r}") from exc
+            yield
+        finally:
+            with self._condition:
+                self._active_operations -= 1
+                remaining = self._operation_owners[owner] - 1
+                if remaining:
+                    self._operation_owners[owner] = remaining
+                else:
+                    del self._operation_owners[owner]
+                if self._active_operations == 0:
+                    self._condition.notify_all()
+
+    def _begin_close(self) -> None:
+        owner = threading.get_ident()
+        with self._condition:
+            self._ensure_open()
+            if self._operation_owners.get(owner, 0):
+                raise LocalTopologyError("cannot clean up a local topology reentrantly from an active operation")
+            self._state = _LocalTopologyHandleState.CLOSING
+            while self._active_operations:
+                self._condition.wait()
+
+    def _abort_close(self) -> None:
+        with self._condition:
+            if self._state is _LocalTopologyHandleState.CLOSING:
+                self._state = _LocalTopologyHandleState.OPEN
+                self._condition.notify_all()
+
+    def _mark_closed(self) -> None:
+        with self._condition:
+            if self._state is not _LocalTopologyHandleState.CLOSING:
+                raise LocalTopologyError("local topology handle was not closing")
+            self._state = _LocalTopologyHandleState.CLOSED
+            self._condition.notify_all()
+
+    def node(self, node_id: str) -> LocalTopologyNode:
+        """Return one initially planned node by its stable harness ID."""
+        with self._lock:
+            self._ensure_open()
+            try:
+                return self._nodes_by_id[node_id]
+            except KeyError as exc:
+                raise KeyError(f"unknown node ID {node_id!r}") from exc
 
     def current_nodes(self, include_failed: bool = True) -> list[dict]:
         """Return the topology's current authoritative node view."""
-        self._ensure_open()
-        return self._connection.get_current_nodes(include_failed=include_failed)
+        with self._operation():
+            return self._connection.get_current_nodes(include_failed=include_failed)
 
-    def client(self, node_id: str) -> Any:
-        """Return a coordinator-owned client; callers must not close it."""
-        self._ensure_open()
-        return self._coordinator.cluster_manager.get_client(self.node(node_id))
+    def execute_command(self, node_id: str, *args: Any, **kwargs: Any) -> Any:
+        """Execute one command without exporting a reconnectable raw client."""
 
-    def restart(self, node_id: str, wait_ready: bool = True) -> NodeInfo:
+        with self._operation():
+            try:
+                node = self._node_infos_by_id[node_id]
+            except KeyError as exc:
+                raise KeyError(f"unknown node ID {node_id!r}") from exc
+            client = self._coordinator.cluster_manager.get_client(node)
+            return client.execute_command(*args, **kwargs)
+
+    def restart(self, node_id: str, wait_ready: bool = True) -> LocalTopologyNode:
         """Restart one node while preserving its resolved startup config."""
-        self._ensure_open()
-        if not self._coordinator.restart_node(
-            self.cluster_id,
-            node_id,
-            wait_ready=wait_ready,
-        ):
-            raise LocalTopologyError(f"failed to restart node {node_id!r} in topology {self.cluster_id!r}")
-        return self.node(node_id)
+        with self._operation():
+            if node_id not in self._node_infos_by_id:
+                raise KeyError(f"unknown node ID {node_id!r}")
+            if not self._coordinator.restart_node(
+                self.cluster_id,
+                node_id,
+                wait_ready=wait_ready,
+            ):
+                raise LocalTopologyError(f"failed to restart node {node_id!r} in topology {self.cluster_id!r}")
+            return self._nodes_by_id[node_id]
 
 
 class LocalValkeyTopologyProvider:
@@ -317,9 +430,11 @@ class LocalValkeyTopologyProvider:
         self._pending_baseline_cluster_ids: set[str] = set()
 
     @staticmethod
-    def _prepare(plan: RunPlan) -> tuple[ClusterConfig, tuple[NodePlan, ...]]:
-        if not isinstance(plan, RunPlan):
-            raise TypeError("plan must be a RunPlan")
+    def _prepare(
+        plan: Union[RunPlan, BoundRunPlan],
+    ) -> tuple[ClusterConfig, tuple[NodePlan, ...]]:
+        if not isinstance(plan, (RunPlan, BoundRunPlan)):
+            raise TypeError("plan must be a RunPlan or BoundRunPlan")
 
         topology_document = to_plain_data(plan.topology_document)
         if not isinstance(topology_document, Mapping):  # defensive: RunPlan already enforces this
@@ -351,7 +466,7 @@ class LocalValkeyTopologyProvider:
             raise LocalTopologyValidationError(str(exc)) from exc
         return config, tuple(copy.deepcopy(dry_plans))
 
-    def validate(self, plan: RunPlan) -> None:
+    def validate(self, plan: Union[RunPlan, BoundRunPlan]) -> None:
         """Perform a complete, externally side-effect-free preflight."""
         self._prepare(plan)
 
@@ -443,7 +558,7 @@ class LocalValkeyTopologyProvider:
             self._pending_baseline_cluster_ids.clear()
 
         if failures:
-            descriptions = "; ".join(f"{cluster_id}: {failure}" for cluster_id, failure in failures)
+            descriptions = "; ".join(f"{cluster_id}: {_exception_type(failure)}" for cluster_id, failure in failures)
             logger.error("Local topology rollback failed: %s", descriptions)
             interrupt = next(
                 (failure for _, failure in failures if not isinstance(failure, Exception)),
@@ -452,7 +567,9 @@ class LocalValkeyTopologyProvider:
             if interrupt is not None:
                 raise interrupt
             first_failure = failures[0][1]
-            raise LocalTopologyError(f"local topology rollback failed: {descriptions}") from first_failure
+            raise LocalTopologyError(
+                f"local topology rollback failed for {len(failures)} topology operation(s)"
+            ) from first_failure
 
     def cleanup(self, context: RunContext, topology: ProvisionedTopology) -> None:
         """Clean up the exact topology returned by this provider."""
@@ -461,10 +578,15 @@ class LocalValkeyTopologyProvider:
         if not isinstance(topology.handle, LocalValkeyTopologyHandle):
             raise LocalTopologyError("owned topology has an invalid local handle")
 
-        destroyed = self._active_coordinator.destroy_cluster(topology.handle.cluster_id)
-        active_cluster_ids = _active_cluster_ids(self._active_coordinator)
-        if not destroyed or (active_cluster_ids is not None and topology.handle.cluster_id in active_cluster_ids):
-            raise LocalTopologyError(f"failed to clean up topology {topology.handle.cluster_id!r}")
+        topology.handle._begin_close()
+        try:
+            destroyed = self._active_coordinator.destroy_cluster(topology.handle.cluster_id)
+            active_cluster_ids = _active_cluster_ids(self._active_coordinator)
+            if not destroyed or (active_cluster_ids is not None and topology.handle.cluster_id in active_cluster_ids):
+                raise LocalTopologyError(f"failed to clean up topology {topology.handle.cluster_id!r}")
+        except BaseException:
+            topology.handle._abort_close()
+            raise
 
         topology.handle._mark_closed()
         self._active_topology = None
@@ -485,6 +607,7 @@ def local_topology_provider_factories(
 __all__ = [
     "LOCAL_TOPOLOGY_SERVICE",
     "LocalTopologyError",
+    "LocalTopologyNode",
     "LocalTopologyValidationError",
     "LocalValkeyTopologyHandle",
     "LocalValkeyTopologyProvider",

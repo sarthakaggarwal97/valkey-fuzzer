@@ -77,7 +77,8 @@ class _Provider:
 
     def provision(self, context) -> ProvisionedTopology:
         self.calls.append(f"{self.topology}.provision")
-        assert context.services == {}
+        assert tuple(context.services) == ("artifacts", "resources", "topology")
+        assert all(not namespace for namespace in context.services.values())
         self.provisioned = ProvisionedTopology(
             handle=object(),
             services={"topology": self.topology, "client": object()},
@@ -86,13 +87,13 @@ class _Provider:
 
     def rollback(self, context) -> None:
         self.calls.append(f"{self.topology}.rollback")
-        assert context.services == {}
+        assert all(not namespace for namespace in context.services.values())
         assert context.deadline is None
 
     def cleanup(self, context, topology: ProvisionedTopology) -> None:
         self.calls.append(f"{self.topology}.cleanup")
         assert topology is self.provisioned
-        assert context.services is topology.services
+        assert context.services["topology"] == topology.services
         assert context.deadline is None
         if self.cleanup_error is not None:
             raise self.cleanup_error
@@ -109,7 +110,7 @@ class _Probe:
 
     def probe(self, context, spec: ComponentSpec) -> ComponentResult:
         self.calls.append("capability.probe")
-        assert context.services == {}
+        assert all(not namespace for namespace in context.services.values())
         return _result(
             spec,
             status=self.status,
@@ -765,14 +766,14 @@ def test_keyboard_interrupt_runs_every_cleanup_then_reraises_original():
 
 
 @pytest.mark.parametrize(
-    ("factory", "expected"),
+    ("factory", "expected_phase"),
     [
-        (lambda calls: lambda: object(), "does not implement Action"),
-        (lambda calls: lambda: _Action, "does not implement Action"),
-        (lambda calls: lambda: _Action(calls, invalid_result=True), "expected ComponentResult"),
+        (lambda calls: lambda: object(), "preflight"),
+        (lambda calls: lambda: _Action, "preflight"),
+        (lambda calls: lambda: _Action(calls, invalid_result=True), "action.run"),
     ],
 )
-def test_bad_plugin_protocol_or_result_becomes_error(factory, expected):
+def test_bad_plugin_protocol_or_result_becomes_error(factory, expected_phase):
     calls: list[str] = []
     provider = _Provider(calls, "standalone")
     outcome = FeatureRunner(
@@ -781,8 +782,11 @@ def test_bad_plugin_protocol_or_result_becomes_error(factory, expected):
     ).run(_plan((_spec(ComponentKind.ACTION, "activate"),)))
 
     assert outcome.status is OutcomeStatus.ERROR
-    assert expected in outcome.summary
-    if "does not implement" in expected:
+    assert outcome.diagnostics["error"] == {
+        "type": "src.feature_runner.FeatureRunnerError",
+        "phase": expected_phase,
+    }
+    if expected_phase == "preflight":
         assert provider.provisioned is None
     else:
         assert calls[-1] == "standalone.cleanup"
@@ -835,7 +839,7 @@ def test_registry_drift_during_factory_is_error_before_provider_mutation():
     ).run(_plan((_spec(ComponentKind.ACTION, "activate"),)))
 
     assert outcome.status is OutcomeStatus.ERROR
-    assert "registry drift" in outcome.summary
+    assert outcome.diagnostics["error"]["phase"] == "preflight"
     assert calls == ["standalone.validate"]
     assert provider.provisioned is None
 
@@ -852,7 +856,10 @@ def test_expired_cooperative_deadline_is_error_without_provision():
     )
 
     assert outcome.status is OutcomeStatus.ERROR
-    assert "deadline expired before topology provision" in outcome.summary
+    assert outcome.diagnostics["error"] == {
+        "type": "src.feature_runner.CooperativeDeadlineError",
+        "phase": "topology.provision",
+    }
     assert provider.provisioned is None
 
 
@@ -890,7 +897,7 @@ def test_evidence_must_be_owned_by_the_component_that_returned_it():
     ).run(_plan((_spec(ComponentKind.ACTION, "activate"),)))
 
     assert outcome.status is OutcomeStatus.ERROR
-    assert "emitted evidence owned by 'another-component'" in outcome.summary
+    assert outcome.diagnostics["error"]["phase"] == "action.run"
     assert calls[-1] == "standalone.cleanup"
 
 
@@ -942,7 +949,7 @@ def test_evidence_cannot_reference_an_attempted_but_uncommitted_event():
     ).run(_plan((_spec(ComponentKind.ACTION, "activate"),)))
 
     assert outcome.status is OutcomeStatus.ERROR
-    assert "references uncommitted event sequence" in outcome.summary
+    assert outcome.diagnostics["error"]["phase"] == "action.run"
     attempted = [event for event in outcome.diagnostics["events"] if event["name"] == "feature.attempt"]
     committed = [event for event in outcome.diagnostics["committed_events"] if event["name"] == "feature.attempt"]
     assert len(attempted) == 1
@@ -1074,7 +1081,10 @@ def test_runner_component_validator_rejects_before_factory_or_provision():
     ).run(_plan((_spec(ComponentKind.ACTION, "activate"),)))
 
     assert outcome.status is OutcomeStatus.ERROR
-    assert "unsupported action configuration" in outcome.summary
+    assert outcome.diagnostics["error"] == {
+        "type": "src.feature_runner.FeatureRunnerError",
+        "phase": "preflight",
+    }
     assert calls == [
         "standalone.validate",
         "validator:activate:runner-test",
@@ -1102,7 +1112,7 @@ def test_component_method_signature_is_checked_before_provision():
     ).run(_plan((_spec(ComponentKind.ACTION, "activate"),)))
 
     assert outcome.status is OutcomeStatus.ERROR
-    assert "incompatible signature" in outcome.summary
+    assert outcome.diagnostics["error"]["phase"] == "preflight"
     assert calls == ["standalone.validate"]
 
 
@@ -1140,7 +1150,7 @@ def test_provider_method_signature_is_checked_before_validation_or_component_fac
     ).run(_plan((_spec(ComponentKind.ACTION, "activate"),)))
 
     assert outcome.status is OutcomeStatus.ERROR
-    assert "topology provider 'standalone'.provision has an incompatible signature" in (outcome.summary)
+    assert outcome.diagnostics["error"]["phase"] == "preflight"
     assert calls == []
 
 
@@ -1219,7 +1229,7 @@ def test_failed_or_invalid_provision_rolls_back_without_normal_cleanup(
     class BrokenProvisionProvider(_Provider):
         def provision(self, context):
             self.calls.append("standalone.provision")
-            assert context.services == {}
+            assert all(not namespace for namespace in context.services.values())
             if provision_behavior == "raise":
                 raise RuntimeError("provision failed after partial mutation")
             return object()
@@ -1250,7 +1260,7 @@ def test_rollback_failure_is_recorded_without_masking_the_provision_error():
 
         def rollback(self, context):
             self.calls.append("standalone.rollback")
-            assert context.services == {}
+            assert all(not namespace for namespace in context.services.values())
             assert context.deadline is None
             raise RuntimeError("rollback also failed")
 
@@ -1262,7 +1272,7 @@ def test_rollback_failure_is_recorded_without_masking_the_provision_error():
     assert outcome.status is OutcomeStatus.ERROR
     assert outcome.diagnostics["error"] == {
         "type": "RuntimeError",
-        "message": "primary provision error",
+        "phase": "topology.provision",
     }
     assert outcome.diagnostics["cleanup_errors"][0]["phase"] == "rollback"
 
@@ -1386,7 +1396,7 @@ def test_required_capability_registry_drift_is_error_not_unsupported():
     ).run(_plan((_spec(ComponentKind.CAPABILITY, "supported"),)))
 
     assert outcome.status is OutcomeStatus.ERROR
-    assert "registry drift replaced component" in outcome.summary
+    assert outcome.diagnostics["error"]["phase"] == "capability.probe"
     assert calls == ["standalone.validate", "capability.probe"]
 
 

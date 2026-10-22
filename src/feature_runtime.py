@@ -9,13 +9,18 @@ feature-specific dispatch.
 
 import copy
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from os import PathLike
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Optional, TextIO, Union
 
+from .environment import (
+    ArtifactProviderRegistry,
+    ResourceProviderRegistry,
+)
+from .environment_lifecycle import EnvironmentManager
 from .extensibility import (
     EXTENSION_API_VERSION,
     PLUGIN_ENTRY_POINT_GROUP,
@@ -34,17 +39,68 @@ from .feature_packs import (
     ReferenceInventory,
     load_feature_pack_directory,
     load_scenario_yaml,
+    validate_run_plan_environment,
 )
-from .feature_runner import FeatureRunner, TopologyProviderEntry
+from .feature_runner import (
+    FeatureRunner,
+    TopologyProviderEntry,
+    normalize_artifact_root,
+)
 from .fuzzer_engine.cluster_coordinator import ClusterCoordinator
 from .local_topology_provider import local_topology_provider_factories
 
 FeaturePackDirectory = Union[str, PathLike[str]]
 YamlSource = Union[str, bytes, TextIO]
+_ExtensionSnapshot = tuple[
+    Mapping[ComponentKind, Mapping[str, Any]],
+    Mapping[str, Any],
+    Mapping[str, Any],
+    Mapping[tuple[str, str], FeaturePackSpec],
+]
 
 
 class FeatureRuntimeError(RuntimeError):
     """The configured extension environment cannot safely execute a plan."""
+
+
+class _RuntimeFeaturePackCatalog(FeaturePackCatalog):
+    """Catalog that closes its public mutation surface after runtime pinning."""
+
+    def __init__(self, is_pinned: Callable[[], bool]):
+        super().__init__()
+        self._is_pinned = is_pinned
+
+    def _reject_pinned_mutation(self) -> None:
+        if self._is_pinned():
+            raise FeatureRuntimeError(
+                "feature-pack catalog cannot be mutated after the extension environment was pinned"
+            )
+
+    def register_many(self, packs: Iterable[FeaturePackSpec]) -> None:
+        entries = tuple(packs)
+        with self.registration_lock:
+            self._reject_pinned_mutation()
+            super().register_many(entries)
+
+    def restore_snapshot(
+        self,
+        snapshot: Mapping[tuple[str, str], FeaturePackSpec],
+    ) -> None:
+        with self.registration_lock:
+            if self._is_pinned():
+                current = self.snapshot()
+                if set(current) != set(snapshot) or any(current[key] is not pack for key, pack in snapshot.items()):
+                    self._reject_pinned_mutation()
+                return
+            super().restore_snapshot(snapshot)
+
+    def restore_runtime_snapshot(
+        self,
+        snapshot: Mapping[tuple[str, str], FeaturePackSpec],
+    ) -> None:
+        """Restore a runtime-owned transaction without crossing the public guard."""
+
+        super().restore_snapshot(snapshot)
 
 
 def _ordered_directories(
@@ -119,18 +175,28 @@ class FeatureRuntime:
         self._extension_api_version = extension_api_version
         self._lifecycle_lock = threading.RLock()
         self._lifecycle_owner: Optional[int] = None
-        self._registry_pin: Optional[Mapping[ComponentKind, Mapping[str, Any]]] = None
+        self._extension_pin: Optional[_ExtensionSnapshot] = None
 
         registries = {kind: Registry[Any](kind, api_version=extension_api_version) for kind in ComponentKind}
         self._registries: Mapping[ComponentKind, Registry[Any]] = MappingProxyType(registries)
-        self._catalog = FeaturePackCatalog()
+        self._catalog = _RuntimeFeaturePackCatalog(lambda: self._extension_pin is not None)
         self._manifest_feature_packs: tuple[FeaturePackSpec, ...] = ()
         self.load_feature_pack_directories(feature_pack_directories)
+        self._artifact_providers = ArtifactProviderRegistry(api_version=extension_api_version)
+        self._resource_providers = ResourceProviderRegistry(api_version=extension_api_version)
+        artifact_root = normalize_artifact_root(artifact_dir)
+        self._environment_manager = EnvironmentManager(
+            artifact_registry=self._artifact_providers,
+            resource_registry=self._resource_providers,
+            artifact_root=artifact_root,
+        )
 
         self._compiler = FeaturePackCompiler(
             self._catalog,
             self._registries,
             reference_inventory=reference_inventory,
+            artifact_registry=self._artifact_providers,
+            resource_registry=self._resource_providers,
             extension_api_version=extension_api_version,
         )
 
@@ -146,13 +212,16 @@ class FeatureRuntime:
         self._runner = FeatureRunner(
             self._registries,
             self._topology_providers,
-            artifact_dir=artifact_dir,
+            artifact_dir=artifact_root,
+            environment_manager=self._environment_manager,
         )
         self._plugins = (
             discover_plugins(
                 self._registries,
                 group=plugin_group,
                 feature_pack_catalog=self._catalog,
+                artifact_provider_registry=self._artifact_providers,
+                resource_provider_registry=self._resource_providers,
                 api_version=extension_api_version,
             )
             if discover_entry_points
@@ -168,6 +237,14 @@ class FeatureRuntime:
         return self._catalog
 
     @property
+    def artifact_providers(self) -> ArtifactProviderRegistry:
+        return self._artifact_providers
+
+    @property
+    def resource_providers(self) -> ResourceProviderRegistry:
+        return self._resource_providers
+
+    @property
     def plugins(self) -> tuple[PluginManifest, ...]:
         return self._plugins
 
@@ -179,43 +256,120 @@ class FeatureRuntime:
     def topology_providers(self) -> Mapping[str, TopologyProviderEntry]:
         return self._topology_providers
 
-    def _ordered_registries(self) -> tuple[Registry[Any], ...]:
-        return tuple(self._registries[kind] for kind in sorted(self._registries, key=lambda item: item.value))
+    def _ordered_extension_participants(self) -> tuple[Any, ...]:
+        component_registries = tuple(
+            self._registries[kind] for kind in sorted(self._registries, key=lambda item: item.value)
+        )
+        return (
+            *component_registries,
+            self._artifact_providers,
+            self._resource_providers,
+            self._catalog,
+        )
 
-    def _registry_snapshot(self) -> Mapping[ComponentKind, Mapping[str, Any]]:
-        return MappingProxyType({kind: registry.snapshot() for kind, registry in self._registries.items()})
+    def _extension_snapshot(self) -> _ExtensionSnapshot:
+        return (
+            MappingProxyType({kind: registry.snapshot() for kind, registry in self._registries.items()}),
+            self._artifact_providers.snapshot(),
+            self._resource_providers.snapshot(),
+            self._catalog.snapshot(),
+        )
 
-    def _assert_registry_snapshot(
-        self,
-        expected: Mapping[ComponentKind, Mapping[str, Any]],
-    ) -> None:
+    @staticmethod
+    def _snapshot_mapping_changed(expected: Mapping[Any, Any], current: Mapping[Any, Any]) -> bool:
+        return set(current) != set(expected) or any(
+            current[entry_id] is not pinned_entry for entry_id, pinned_entry in expected.items()
+        )
+
+    def _extension_drift(self, expected: _ExtensionSnapshot) -> tuple[str, ...]:
+        expected_components, expected_artifacts, expected_resources, expected_catalog = expected
+        changed = []
         for kind, registry in self._registries.items():
             if registry.kind is not kind or registry.api_version != self._extension_api_version:
                 raise FeatureRuntimeError(
                     f"component registry metadata for {kind.value!r} changed after runtime construction"
                 )
             current = registry.snapshot()
-            pinned = expected[kind]
-            if set(current) != set(pinned) or any(
-                current[component_id] is not pinned[component_id] for component_id in pinned
-            ):
-                raise FeatureRuntimeError(
-                    f"component registry for {kind.value!r} changed after the extension environment was pinned"
-                )
+            pinned = expected_components[kind]
+            if self._snapshot_mapping_changed(pinned, current):
+                changed.append(f"{kind.value} component registry")
+        for label, registry, pinned in (
+            ("artifact provider", self._artifact_providers, expected_artifacts),
+            ("resource provider", self._resource_providers, expected_resources),
+        ):
+            if registry.api_version != self._extension_api_version:
+                raise FeatureRuntimeError(f"{label} registry metadata changed after runtime construction")
+            current = registry.snapshot()
+            if self._snapshot_mapping_changed(pinned, current):
+                changed.append(f"{label} registry")
+        if self._snapshot_mapping_changed(expected_catalog, self._catalog.snapshot()):
+            changed.append("feature-pack catalog")
+        return tuple(changed)
 
-    def _expected_registry_snapshot(self) -> Mapping[ComponentKind, Mapping[str, Any]]:
-        if self._registry_pin is not None:
-            self._assert_registry_snapshot(self._registry_pin)
-            return self._registry_pin
-        return self._registry_snapshot()
+    def _restore_extension_snapshot(self, snapshot: _ExtensionSnapshot) -> tuple[BaseException, ...]:
+        components, artifacts, resources, catalog = snapshot
+        restore_operations = [
+            (self._catalog.restore_runtime_snapshot, catalog),
+            (self._resource_providers.restore_snapshot, resources),
+            (self._artifact_providers.restore_snapshot, artifacts),
+        ]
+        restore_operations.extend(
+            (self._registries[kind].restore_snapshot, components[kind])
+            for kind in sorted(self._registries, key=lambda item: item.value, reverse=True)
+        )
 
-    def _commit_registry_pin(
-        self,
-        expected: Mapping[ComponentKind, Mapping[str, Any]],
-    ) -> None:
-        self._assert_registry_snapshot(expected)
-        if self._registry_pin is None:
-            self._registry_pin = expected
+        failures = []
+        for restore, participant_snapshot in restore_operations:
+            try:
+                restore(participant_snapshot)
+            except BaseException as exc:  # Restoration must never mask the operation's exception.
+                failures.append(exc)
+        return tuple(failures)
+
+    @staticmethod
+    def _drift_error(changed: Sequence[str], *, when: str) -> FeatureRuntimeError:
+        participants = ", ".join(changed)
+        return FeatureRuntimeError(
+            f"{participants} changed {when}; the extension environment was restored to the expected snapshot"
+        )
+
+    @contextmanager
+    def _extension_operation(self):
+        with self._lifecycle_operation(), ExitStack() as locks:
+            for participant in self._ordered_extension_participants():
+                locks.enter_context(participant.registration_lock)
+
+            if self._extension_pin is None:
+                expected = self._extension_snapshot()
+            else:
+                expected = self._extension_pin
+                changed = self._extension_drift(expected)
+                if changed:
+                    error = self._drift_error(changed, when="after the extension environment was pinned")
+                    restore_failures = self._restore_extension_snapshot(expected)
+                    if restore_failures:
+                        raise FeatureRuntimeError(
+                            f"{error}; restoring the pinned extension environment also failed"
+                        ) from restore_failures[0]
+                    raise error
+
+            try:
+                yield
+            except BaseException:
+                self._restore_extension_snapshot(expected)
+                raise
+
+            changed = self._extension_drift(expected)
+            if changed:
+                error = self._drift_error(changed, when="during the runtime operation")
+                restore_failures = self._restore_extension_snapshot(expected)
+                if restore_failures:
+                    raise FeatureRuntimeError(
+                        f"{error}; restoring the extension environment also failed"
+                    ) from restore_failures[0]
+                raise error
+            if self._extension_pin is None:
+                self._extension_pin = expected
 
     @staticmethod
     def _require_plan(plan: RunPlan) -> None:
@@ -250,20 +404,30 @@ class FeatureRuntime:
         within each directory use the deterministic loader order.
         """
 
-        staging_catalog = FeaturePackCatalog()
-        packs = []
-        for directory in _ordered_directories(directories):
-            packs.extend(
-                load_feature_pack_directory(
-                    directory,
-                    catalog=staging_catalog,
+        with self._lifecycle_lock:
+            if self._lifecycle_owner is not None:
+                raise FeatureRuntimeError(
+                    "feature-pack directories cannot be loaded during runtime compilation, validation, or execution"
                 )
-            )
+            if self._extension_pin is not None:
+                raise FeatureRuntimeError(
+                    "feature-pack directories cannot be loaded after the extension environment was pinned"
+                )
 
-        entries = tuple(packs)
-        self._catalog.register_many(entries)
-        self._manifest_feature_packs += entries
-        return entries
+            staging_catalog = FeaturePackCatalog()
+            packs = []
+            for directory in _ordered_directories(directories):
+                packs.extend(
+                    load_feature_pack_directory(
+                        directory,
+                        catalog=staging_catalog,
+                    )
+                )
+
+            entries = tuple(packs)
+            self._catalog.register_many(entries)
+            self._manifest_feature_packs += entries
+            return entries
 
     def compile(
         self,
@@ -275,12 +439,8 @@ class FeatureRuntime:
 
         if not isinstance(scenario, Mapping):
             raise TypeError("scenario must be a mapping")
-        with ExitStack() as locks:
-            for registry in self._ordered_registries():
-                locks.enter_context(registry.registration_lock)
-            expected = self._expected_registry_snapshot()
+        with self._extension_operation():
             plan = self._compiler.compile(_with_topology_overrides(scenario, topology_overrides))
-            self._commit_registry_pin(expected)
             return plan
 
     def compile_yaml(
@@ -299,12 +459,13 @@ class FeatureRuntime:
         """Structurally validate a compiled plan without provisioning."""
 
         self._require_plan(plan)
-        with self._lifecycle_operation(), ExitStack() as locks:
-            for registry in self._ordered_registries():
-                locks.enter_context(registry.registration_lock)
-            expected = self._expected_registry_snapshot()
+        with self._extension_operation():
+            validate_run_plan_environment(
+                plan,
+                artifact_registry=self._artifact_providers,
+                resource_registry=self._resource_providers,
+            )
             self._runner.validate(plan)
-            self._commit_registry_pin(expected)
 
     def run_plan(
         self,
@@ -313,12 +474,13 @@ class FeatureRuntime:
         deadline: Optional[float] = None,
     ) -> RunOutcome:
         self._require_plan(plan)
-        with self._lifecycle_operation(), ExitStack() as locks:
-            for registry in self._ordered_registries():
-                locks.enter_context(registry.registration_lock)
-            expected = self._expected_registry_snapshot()
+        with self._extension_operation():
+            validate_run_plan_environment(
+                plan,
+                artifact_registry=self._artifact_providers,
+                resource_registry=self._resource_providers,
+            )
             outcome = self._runner.run(plan, deadline=deadline)
-            self._commit_registry_pin(expected)
             return outcome
 
     def run_yaml(
