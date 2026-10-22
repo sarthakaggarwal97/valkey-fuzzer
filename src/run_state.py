@@ -129,7 +129,11 @@ def canonical_snapshot(value: Any) -> Any:
     if isinstance(value, Enum):
         return canonical_snapshot(value.value)
     if is_dataclass(value) and not isinstance(value, type):
-        return {item.name: canonical_snapshot(getattr(value, item.name)) for item in fields(value)}
+        return {
+            item.name: canonical_snapshot(getattr(value, item.name))
+            for item in fields(value)
+            if item.metadata.get("serialize", True)
+        }
     if isinstance(value, Mapping):
         if any(not isinstance(key, str) for key in value):
             raise TypeError("state mapping keys must be strings")

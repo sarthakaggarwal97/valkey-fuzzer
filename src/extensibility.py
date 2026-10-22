@@ -21,7 +21,22 @@ from importlib import metadata as importlib_metadata
 from types import MappingProxyType
 from typing import Any, Generic, Optional, Protocol, TypeVar, runtime_checkable
 
-EXTENSION_API_VERSION = "v1"
+from .environment import (
+    ENVIRONMENT_REFERENCE_DATA_KEY,
+    ArtifactProviderRegistration,
+    ArtifactProviderRegistry,
+    ArtifactSpec,
+    DuplicateProviderRegistrationError,
+    EnvironmentReference,
+    InvalidEnvironmentReferenceError,
+    PolicySpec,
+    ResourceProviderRegistration,
+    ResourceProviderRegistry,
+    ResourceSpec,
+    environment_references_from_data,
+)
+from .extension_contract import EXTENSION_API_VERSION
+
 PLUGIN_ENTRY_POINT_GROUP = "valkey_fuzzer.plugins"
 
 _NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
@@ -47,18 +62,41 @@ def _require_name(value: str, field_name: str) -> str:
     return value
 
 
-def _freeze(value: Any) -> Any:
+def _freeze(
+    value: Any,
+    *,
+    allow_environment_references: bool = False,
+) -> Any:
     """Take a recursive immutable snapshot of common configuration values."""
 
+    if isinstance(value, EnvironmentReference):
+        if allow_environment_references:
+            return value
+        raise TypeError("extension data must not contain environment references")
     if isinstance(value, Mapping):
+        if ENVIRONMENT_REFERENCE_DATA_KEY in value:
+            raise InvalidEnvironmentReferenceError(
+                value.get(ENVIRONMENT_REFERENCE_DATA_KEY),
+                f"extension data contains the reserved {ENVIRONMENT_REFERENCE_DATA_KEY!r} "
+                "serialization marker; pass an EnvironmentReference in memory",
+            )
         frozen: dict[str, Any] = {}
         for key, item in value.items():
             if not isinstance(key, str):
                 raise TypeError("configuration and metadata mapping keys must be strings")
-            frozen[key] = _freeze(item)
+            frozen[key] = _freeze(
+                item,
+                allow_environment_references=allow_environment_references,
+            )
         return MappingProxyType(frozen)
     if isinstance(value, (list, tuple)):
-        return tuple(_freeze(item) for item in value)
+        return tuple(
+            _freeze(
+                item,
+                allow_environment_references=allow_environment_references,
+            )
+            for item in value
+        )
     if isinstance(value, float) and not math.isfinite(value):
         raise ValueError("extension data cannot contain NaN or infinite numbers")
     if value is None or isinstance(value, (str, bool, int, float)):
@@ -69,16 +107,50 @@ def _freeze(value: Any) -> Any:
     )
 
 
-def _freeze_mapping(value: Mapping[str, Any]) -> Mapping[str, Any]:
+def _freeze_mapping(
+    value: Mapping[str, Any],
+    *,
+    allow_environment_references: bool = False,
+) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise TypeError("expected a mapping")
-    return _freeze(value)
+    return _freeze(
+        value,
+        allow_environment_references=allow_environment_references,
+    )
 
 
 def _as_tuple(value: Sequence[Any]) -> tuple[Any, ...]:
     if isinstance(value, (str, bytes, bytearray, Mapping)) or not isinstance(value, Sequence):
         raise TypeError("expected an ordered sequence, not a string, bytes, mapping, or arbitrary iterable")
     return tuple(value)
+
+
+def _reject_environment_metadata_references(
+    value: Any,
+    location: str = "metadata",
+    *,
+    authored_markers: bool = False,
+) -> None:
+    if isinstance(value, EnvironmentReference):
+        raise ValueError(f"{location} must not contain environment references")
+    if isinstance(value, Mapping):
+        reference = value.get("$ref")
+        if authored_markers and isinstance(reference, str) and reference.split(".", 1)[0] in {"artifacts", "resources"}:
+            raise ValueError(f"{location} must not contain environment references")
+        for key, item in value.items():
+            _reject_environment_metadata_references(
+                item,
+                f"{location}.{key}",
+                authored_markers=authored_markers,
+            )
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _reject_environment_metadata_references(
+                item,
+                f"{location}[{index}]",
+                authored_markers=authored_markers,
+            )
 
 
 def to_plain_data(value: Any) -> Any:
@@ -89,11 +161,22 @@ def to_plain_data(value: Any) -> Any:
     one canonical serialization path.
     """
 
+    if isinstance(value, EnvironmentReference):
+        return {ENVIRONMENT_REFERENCE_DATA_KEY: value.path}
     if isinstance(value, Enum):
         return value.value
     if is_dataclass(value) and not isinstance(value, type):
-        return {item.name: to_plain_data(getattr(value, item.name)) for item in fields(value)}
+        return {
+            item.name: to_plain_data(getattr(value, item.name))
+            for item in fields(value)
+            if item.metadata.get("serialize", True) is not False
+        }
     if isinstance(value, Mapping):
+        if ENVIRONMENT_REFERENCE_DATA_KEY in value:
+            raise InvalidEnvironmentReferenceError(
+                value.get(ENVIRONMENT_REFERENCE_DATA_KEY),
+                f"raw mappings cannot contain the reserved {ENVIRONMENT_REFERENCE_DATA_KEY!r} serialization marker",
+            )
         return {key: to_plain_data(item) for key, item in value.items()}
     if isinstance(value, tuple):
         return [to_plain_data(item) for item in value]
@@ -195,7 +278,14 @@ class ComponentSpec:
             raise TypeError("kind must be a ComponentKind")
         _require_qualified_id(self.component_id, "component_id")
         _require_name(self.instance_id, "instance_id")
-        object.__setattr__(self, "config", _freeze_mapping(self.config))
+        object.__setattr__(
+            self,
+            "config",
+            _freeze_mapping(
+                self.config,
+                allow_environment_references=True,
+            ),
+        )
         object.__setattr__(self, "depends_on", _as_tuple(self.depends_on))
         for dependency in self.depends_on:
             _require_name(dependency, "depends_on entry")
@@ -244,7 +334,14 @@ class NodeSelector:
             raise ValueError("selector node_ids contains duplicates")
         object.__setattr__(self, "roles", roles)
         object.__setattr__(self, "node_ids", node_ids)
-        object.__setattr__(self, "labels", _freeze_mapping(self.labels))
+        object.__setattr__(
+            self,
+            "labels",
+            _freeze_mapping(
+                self.labels,
+                allow_environment_references=True,
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -261,7 +358,14 @@ class StartupOverlay:
         _require_name(self.overlay_id, "overlay_id")
         if not isinstance(self.selector, NodeSelector):
             raise TypeError("selector must be a NodeSelector")
-        object.__setattr__(self, "server_config", _freeze_mapping(self.server_config))
+        object.__setattr__(
+            self,
+            "server_config",
+            _freeze_mapping(
+                self.server_config,
+                allow_environment_references=True,
+            ),
+        )
         if self.artifact is not None:
             _require_name(self.artifact, "artifact")
         _require_name(self.conflict_policy, "conflict_policy")
@@ -414,6 +518,10 @@ class FeaturePackSpec:
         _validate_startup_overlays(startup_overlays)
         object.__setattr__(self, "startup_overlays", startup_overlays)
         object.__setattr__(self, "input_schema", _freeze_mapping(self.input_schema))
+        _reject_environment_metadata_references(
+            self.metadata,
+            authored_markers=True,
+        )
         object.__setattr__(self, "metadata", _freeze_mapping(self.metadata))
 
 
@@ -429,6 +537,9 @@ class RunPlan:
     components: tuple[ComponentSpec, ...]
     mode: RunMode = RunMode.FEATURE
     inputs: Mapping[str, Any] = field(default_factory=dict)
+    artifacts: tuple[ArtifactSpec, ...] = ()
+    resources: tuple[ResourceSpec, ...] = ()
+    policies: tuple[PolicySpec, ...] = ()
     startup_overlays: tuple[StartupOverlay, ...] = ()
     required_events: tuple[str, ...] = ()
     required_evidence: tuple[EvidenceRequirement, ...] = ()
@@ -461,13 +572,49 @@ class RunPlan:
         required_evidence = _validate_evidence_requirements(self.required_evidence, components)
         object.__setattr__(self, "required_evidence", required_evidence)
         _validate_run_mode(self.mode, components, required_evidence)
-        object.__setattr__(self, "inputs", _freeze_mapping(self.inputs))
+        object.__setattr__(
+            self,
+            "inputs",
+            _freeze_mapping(
+                self.inputs,
+                allow_environment_references=True,
+            ),
+        )
+        artifacts = _as_tuple(self.artifacts)
+        if any(not isinstance(spec, ArtifactSpec) for spec in artifacts):
+            raise TypeError("artifacts must contain only ArtifactSpec values")
+        artifact_ids = tuple(spec.artifact_id for spec in artifacts)
+        if len(set(artifact_ids)) != len(artifact_ids):
+            raise ValueError("artifacts contains duplicate artifact_id values")
+        object.__setattr__(self, "artifacts", artifacts)
+        resources = _as_tuple(self.resources)
+        if any(not isinstance(spec, ResourceSpec) for spec in resources):
+            raise TypeError("resources must contain only ResourceSpec values")
+        resource_ids = tuple(spec.resource_id for spec in resources)
+        if len(set(resource_ids)) != len(resource_ids):
+            raise ValueError("resources contains duplicate resource_id values")
+        object.__setattr__(self, "resources", resources)
+        policies = _as_tuple(self.policies)
+        if any(not isinstance(spec, PolicySpec) for spec in policies):
+            raise TypeError("policies must contain only PolicySpec values")
+        policy_ids = tuple(spec.policy_id for spec in policies)
+        if len(set(policy_ids)) != len(policy_ids):
+            raise ValueError("policies contains duplicate policy_id values")
+        object.__setattr__(self, "policies", policies)
         if not isinstance(self.topology_document, Mapping):
             raise TypeError("topology_document must be a mapping")
         topology_document = self.topology_document or {"type": self.topology}
         if topology_document.get("type") != self.topology:
             raise ValueError("topology_document.type must match topology")
-        object.__setattr__(self, "topology_document", _freeze_mapping(topology_document))
+        object.__setattr__(
+            self,
+            "topology_document",
+            _freeze_mapping(
+                topology_document,
+                allow_environment_references=True,
+            ),
+        )
+        _reject_environment_metadata_references(self.metadata)
         object.__setattr__(self, "metadata", _freeze_mapping(self.metadata))
 
     @classmethod
@@ -480,6 +627,9 @@ class RunPlan:
         topology: str,
         inputs: Optional[Mapping[str, Any]] = None,
         topology_document: Optional[Mapping[str, Any]] = None,
+        artifacts: Sequence[ArtifactSpec] = (),
+        resources: Sequence[ResourceSpec] = (),
+        policies: Sequence[PolicySpec] = (),
     ) -> "RunPlan":
         if not isinstance(spec, FeaturePackSpec):
             raise TypeError("spec must be a FeaturePackSpec")
@@ -495,6 +645,9 @@ class RunPlan:
             components=spec.components,
             mode=spec.mode,
             inputs={} if inputs is None else inputs,
+            artifacts=tuple(artifacts),
+            resources=tuple(resources),
+            policies=tuple(policies),
             startup_overlays=spec.startup_overlays,
             required_events=spec.required_events,
             required_evidence=spec.required_evidence,
@@ -780,6 +933,7 @@ def _evidence_requirement_from_data(value: Any) -> EvidenceRequirement:
 def run_plan_from_data(value: Mapping[str, Any]) -> RunPlan:
     """Rebuild a validated immutable plan from its canonical data form."""
 
+    value = environment_references_from_data(value, "run plan")
     mapping = _model_fields(
         value,
         "run plan",
@@ -792,6 +946,9 @@ def run_plan_from_data(value: Mapping[str, Any]) -> RunPlan:
             "components",
             "mode",
             "inputs",
+            "artifacts",
+            "resources",
+            "policies",
             "startup_overlays",
             "required_events",
             "required_evidence",
@@ -819,6 +976,17 @@ def run_plan_from_data(value: Mapping[str, Any]) -> RunPlan:
         _evidence_requirement_from_data(requirement)
         for requirement in _model_sequence(mapping.get("required_evidence", ()), "run plan required_evidence")
     )
+    artifacts = tuple(
+        ArtifactSpec.from_data(artifact)
+        for artifact in _model_sequence(mapping.get("artifacts", ()), "run plan artifacts")
+    )
+    resources = tuple(
+        ResourceSpec.from_data(resource)
+        for resource in _model_sequence(mapping.get("resources", ()), "run plan resources")
+    )
+    policies = tuple(
+        PolicySpec.from_data(policy) for policy in _model_sequence(mapping.get("policies", ()), "run plan policies")
+    )
     return RunPlan(
         scenario_id=mapping["scenario_id"],
         pack_id=mapping["pack_id"],
@@ -828,6 +996,9 @@ def run_plan_from_data(value: Mapping[str, Any]) -> RunPlan:
         components=components,
         mode=mapping.get("mode", RunMode.FEATURE),
         inputs=mapping.get("inputs", {}),
+        artifacts=artifacts,
+        resources=resources,
+        policies=policies,
         startup_overlays=overlays,
         required_events=mapping.get("required_events", ()),
         required_evidence=required_evidence,
@@ -1187,12 +1358,134 @@ class LifecycleEventBus:
                 handler(event)
 
 
+class ExecutableComponentSpec(Protocol):
+    """Common component view accepted by validators and lifecycle methods.
+
+    Static validation may receive a declarative :class:`ComponentSpec`;
+    post-acquisition validation and execution receive its runtime-only bound
+    counterpart. Both expose this feature-neutral surface.
+    """
+
+    @property
+    def kind(self) -> ComponentKind: ...
+
+    @property
+    def component_id(self) -> str: ...
+
+    @property
+    def instance_id(self) -> str: ...
+
+    @property
+    def config(self) -> Mapping[str, Any]: ...
+
+    @property
+    def required(self) -> bool: ...
+
+    @property
+    def depends_on(self) -> Sequence[str]: ...
+
+    @property
+    def when_event(self) -> Optional[str]: ...
+
+    @property
+    def timeout_s(self) -> Optional[float]: ...
+
+
+class ExecutablePolicySpec(Protocol):
+    """Opaque policy intent common to declarative and bound plans."""
+
+    @property
+    def policy_id(self) -> str: ...
+
+    @property
+    def policy_type(self) -> str: ...
+
+    @property
+    def config(self) -> Mapping[str, Any]: ...
+
+
+class ExecutableNodeSelector(Protocol):
+    @property
+    def roles(self) -> Sequence[str]: ...
+
+    @property
+    def node_ids(self) -> Sequence[str]: ...
+
+    @property
+    def labels(self) -> Mapping[str, Any]: ...
+
+
+class ExecutableStartupOverlay(Protocol):
+    @property
+    def overlay_id(self) -> str: ...
+
+    @property
+    def selector(self) -> ExecutableNodeSelector: ...
+
+    @property
+    def server_config(self) -> Mapping[str, Any]: ...
+
+    @property
+    def artifact(self) -> Optional[str]: ...
+
+    @property
+    def conflict_policy(self) -> str: ...
+
+
+class ExecutableRunPlan(Protocol):
+    """Common plan view used by topology providers, validators, and components."""
+
+    @property
+    def scenario_id(self) -> str: ...
+
+    @property
+    def pack_id(self) -> str: ...
+
+    @property
+    def pack_version(self) -> str: ...
+
+    @property
+    def seed(self) -> int: ...
+
+    @property
+    def topology(self) -> str: ...
+
+    @property
+    def mode(self) -> RunMode: ...
+
+    @property
+    def inputs(self) -> Mapping[str, Any]: ...
+
+    @property
+    def components(self) -> Sequence[ExecutableComponentSpec]: ...
+
+    @property
+    def policies(self) -> Sequence[ExecutablePolicySpec]: ...
+
+    @property
+    def startup_overlays(self) -> Sequence[ExecutableStartupOverlay]: ...
+
+    @property
+    def required_events(self) -> Sequence[str]: ...
+
+    @property
+    def required_evidence(self) -> Sequence[EvidenceRequirement]: ...
+
+    @property
+    def topology_document(self) -> Mapping[str, Any]: ...
+
+    @property
+    def metadata(self) -> Mapping[str, Any]: ...
+
+    def rng(self, component_instance_id: str, stream: str = "default") -> random.Random: ...
+
+
 @runtime_checkable
 class RunContext(Protocol):
     """Runner-owned services visible to components without engine coupling."""
 
     @property
-    def plan(self) -> RunPlan: ...
+    def plan(self) -> ExecutableRunPlan: ...
 
     @property
     def event_bus(self) -> LifecycleEventBus: ...
@@ -1226,33 +1519,33 @@ class FeaturePack(Protocol):
 
 @runtime_checkable
 class CapabilityProbe(Protocol):
-    def probe(self, context: RunContext, spec: ComponentSpec) -> ComponentResult: ...
+    def probe(self, context: RunContext, spec: ExecutableComponentSpec) -> ComponentResult: ...
 
 
 @runtime_checkable
 class Workload(Protocol):
-    def start(self, context: RunContext, spec: ComponentSpec) -> ComponentResult: ...
+    def start(self, context: RunContext, spec: ExecutableComponentSpec) -> ComponentResult: ...
 
-    def stop(self, context: RunContext, spec: ComponentSpec) -> ComponentResult: ...
+    def stop(self, context: RunContext, spec: ExecutableComponentSpec) -> ComponentResult: ...
 
 
 @runtime_checkable
 class Action(Protocol):
-    def run(self, context: RunContext, spec: ComponentSpec) -> ComponentResult: ...
+    def run(self, context: RunContext, spec: ExecutableComponentSpec) -> ComponentResult: ...
 
 
 @runtime_checkable
 class Fault(Protocol):
-    def arm(self, context: RunContext, spec: ComponentSpec) -> ComponentResult: ...
+    def arm(self, context: RunContext, spec: ExecutableComponentSpec) -> ComponentResult: ...
 
-    def cleanup(self, context: RunContext, spec: ComponentSpec) -> ComponentResult: ...
+    def cleanup(self, context: RunContext, spec: ExecutableComponentSpec) -> ComponentResult: ...
 
 
 @runtime_checkable
 class Observer(Protocol):
-    def start(self, context: RunContext, spec: ComponentSpec) -> ComponentResult: ...
+    def start(self, context: RunContext, spec: ExecutableComponentSpec) -> ComponentResult: ...
 
-    def stop(self, context: RunContext, spec: ComponentSpec) -> ComponentResult: ...
+    def stop(self, context: RunContext, spec: ExecutableComponentSpec) -> ComponentResult: ...
 
 
 @runtime_checkable
@@ -1260,7 +1553,7 @@ class Oracle(Protocol):
     def evaluate(
         self,
         context: RunContext,
-        spec: ComponentSpec,
+        spec: ExecutableComponentSpec,
         evidence: Sequence[Evidence],
     ) -> ComponentResult: ...
 
@@ -1283,7 +1576,7 @@ class ComponentRegistration(Generic[T]):
     kind: ComponentKind
     api_version: str
     factory: Callable[[], T]
-    validator: Optional[Callable[[ComponentSpec, RunPlan], None]] = None
+    validator: Optional[Callable[[ExecutableComponentSpec, ExecutableRunPlan], None]] = None
 
     def __post_init__(self) -> None:
         _require_qualified_id(self.component_id, "component_id")
@@ -1431,9 +1724,11 @@ class PluginManifest:
 
     plugin_id: str
     api_version: str
-    registrations: tuple[ComponentRegistration[Any], ...]
+    registrations: tuple[ComponentRegistration[Any], ...] = ()
     feature_packs: tuple[FeaturePackSpec, ...] = ()
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    artifact_providers: tuple[ArtifactProviderRegistration, ...] = ()
+    resource_providers: tuple[ResourceProviderRegistration, ...] = ()
 
     def __post_init__(self) -> None:
         _require_qualified_id(self.plugin_id, "plugin_id")
@@ -1463,6 +1758,36 @@ class PluginManifest:
                 raise ValueError(f"duplicate feature pack version: {feature_pack.pack_id}@{feature_pack.version}")
             pack_keys.add(key)
         object.__setattr__(self, "feature_packs", feature_packs)
+
+        artifact_providers = _as_tuple(self.artifact_providers)
+        artifact_provider_ids = set()
+        for registration in artifact_providers:
+            if not isinstance(registration, ArtifactProviderRegistration):
+                raise TypeError("artifact_providers must contain ArtifactProviderRegistration values")
+            if registration.api_version != self.api_version:
+                raise ValueError(
+                    f"artifact provider {registration.provider_id!r} uses API {registration.api_version!r}, "
+                    f"expected {self.api_version!r}"
+                )
+            if registration.provider_id in artifact_provider_ids:
+                raise DuplicateProviderRegistrationError(registration.provider_id)
+            artifact_provider_ids.add(registration.provider_id)
+        object.__setattr__(self, "artifact_providers", artifact_providers)
+
+        resource_providers = _as_tuple(self.resource_providers)
+        resource_provider_ids = set()
+        for registration in resource_providers:
+            if not isinstance(registration, ResourceProviderRegistration):
+                raise TypeError("resource_providers must contain ResourceProviderRegistration values")
+            if registration.api_version != self.api_version:
+                raise ValueError(
+                    f"resource provider {registration.provider_id!r} uses API {registration.api_version!r}, "
+                    f"expected {self.api_version!r}"
+                )
+            if registration.provider_id in resource_provider_ids:
+                raise DuplicateProviderRegistrationError(registration.provider_id)
+            resource_provider_ids.add(registration.provider_id)
+        object.__setattr__(self, "resource_providers", resource_providers)
         object.__setattr__(self, "metadata", _freeze_mapping(self.metadata))
 
 
@@ -1513,6 +1838,8 @@ def discover_plugins(
     *,
     group: str = PLUGIN_ENTRY_POINT_GROUP,
     feature_pack_catalog: Optional[Any] = None,
+    artifact_provider_registry: Optional[ArtifactProviderRegistry] = None,
+    resource_provider_registry: Optional[ResourceProviderRegistry] = None,
     api_version: str = EXTENSION_API_VERSION,
 ) -> tuple[PluginManifest, ...]:
     """Load and register external plugins in deterministic distribution/name order.
@@ -1564,6 +1891,21 @@ def discover_plugins(
                 "catalog must implement the atomic feature-pack catalog contract",
             )
 
+    for label, registry, registry_type in (
+        ("artifact-provider-registry", artifact_provider_registry, ArtifactProviderRegistry),
+        ("resource-provider-registry", resource_provider_registry, ResourceProviderRegistry),
+    ):
+        if registry is None:
+            continue
+        if not isinstance(registry, registry_type):
+            raise PluginDiscoveryError(label, "", f"registry must be a {registry_type.__name__}")
+        if registry.api_version != api_version:
+            raise PluginDiscoveryError(
+                label,
+                "",
+                f"registry API {registry.api_version!r} does not match extension API {api_version!r}",
+            )
+
     manifests = []
     manifest_sources = []
     for entry_point in _selected_entry_points(group):
@@ -1586,6 +1928,10 @@ def discover_plugins(
     registrations_by_kind: dict[ComponentKind, list[ComponentRegistration[Any]]] = {}
     new_component_ids = set()
     feature_packs = []
+    artifact_providers = []
+    resource_providers = []
+    new_artifact_provider_ids = set()
+    new_resource_provider_ids = set()
     for manifest, source in zip(manifests, manifest_sources):
         if manifest.plugin_id in seen_plugins:
             raise PluginDiscoveryError(source[0], source[1], f"duplicate plugin ID {manifest.plugin_id!r}")
@@ -1602,6 +1948,16 @@ def discover_plugins(
             new_component_ids.add(registration.component_id)
             registrations_by_kind.setdefault(registration.kind, []).append(registration)
         feature_packs.extend(manifest.feature_packs)
+        for registration in manifest.artifact_providers:
+            if registration.provider_id in new_artifact_provider_ids:
+                raise DuplicateProviderRegistrationError(registration.provider_id)
+            new_artifact_provider_ids.add(registration.provider_id)
+            artifact_providers.append(registration)
+        for registration in manifest.resource_providers:
+            if registration.provider_id in new_resource_provider_ids:
+                raise DuplicateProviderRegistrationError(registration.provider_id)
+            new_resource_provider_ids.add(registration.provider_id)
+            resource_providers.append(registration)
 
     if feature_packs and feature_pack_catalog is None:
         manifest_index = next(index for index, manifest in enumerate(manifests) if manifest.feature_packs)
@@ -1612,7 +1968,29 @@ def discover_plugins(
             "plugin provides feature packs but no feature_pack_catalog was provided",
         )
 
+    if artifact_providers and artifact_provider_registry is None:
+        manifest_index = next(index for index, manifest in enumerate(manifests) if manifest.artifact_providers)
+        source = manifest_sources[manifest_index]
+        raise PluginDiscoveryError(
+            source[0],
+            source[1],
+            "plugin provides artifact providers but no artifact_provider_registry was provided",
+        )
+
+    if resource_providers and resource_provider_registry is None:
+        manifest_index = next(index for index, manifest in enumerate(manifests) if manifest.resource_providers)
+        source = manifest_sources[manifest_index]
+        raise PluginDiscoveryError(
+            source[0],
+            source[1],
+            "plugin provides resource providers but no resource_provider_registry was provided",
+        )
+
     participants = [normalized_registries[kind] for kind in sorted(normalized_registries, key=lambda item: item.value)]
+    if artifact_provider_registry is not None:
+        participants.append(artifact_provider_registry)
+    if resource_provider_registry is not None:
+        participants.append(resource_provider_registry)
     if feature_pack_catalog is not None:
         participants.append(feature_pack_catalog)
 
@@ -1642,17 +2020,35 @@ def discover_plugins(
 
         if feature_pack_catalog is not None:
             feature_pack_catalog.validate_many(feature_packs)
+        if artifact_provider_registry is not None:
+            artifact_provider_registry.validate_many(artifact_providers)
+        if resource_provider_registry is not None:
+            resource_provider_registry.validate_many(resource_providers)
 
         registry_snapshots = {kind: registry.snapshot() for kind, registry in normalized_registries.items()}
         catalog_snapshot = feature_pack_catalog.snapshot() if feature_pack_catalog is not None else None
+        artifact_provider_snapshot = (
+            artifact_provider_registry.snapshot() if artifact_provider_registry is not None else None
+        )
+        resource_provider_snapshot = (
+            resource_provider_registry.snapshot() if resource_provider_registry is not None else None
+        )
         try:
             for kind, registrations in registrations_by_kind.items():
                 normalized_registries[kind].register_many(registrations)
+            if artifact_provider_registry is not None:
+                artifact_provider_registry.register_many(artifact_providers)
+            if resource_provider_registry is not None:
+                resource_provider_registry.register_many(resource_providers)
             if feature_pack_catalog is not None:
                 feature_pack_catalog.register_many(feature_packs)
         except BaseException:
             for kind, snapshot in registry_snapshots.items():
                 normalized_registries[kind].restore_snapshot(snapshot)
+            if artifact_provider_registry is not None:
+                artifact_provider_registry.restore_snapshot(artifact_provider_snapshot)
+            if resource_provider_registry is not None:
+                resource_provider_registry.restore_snapshot(resource_provider_snapshot)
             if feature_pack_catalog is not None:
                 feature_pack_catalog.restore_snapshot(catalog_snapshot)
             raise
@@ -1677,6 +2073,11 @@ __all__ = [
     "EventSubscription",
     "Evidence",
     "EvidenceRequirement",
+    "ExecutableComponentSpec",
+    "ExecutableNodeSelector",
+    "ExecutablePolicySpec",
+    "ExecutableRunPlan",
+    "ExecutableStartupOverlay",
     "Fault",
     "FeaturePack",
     "FeaturePackSpec",

@@ -18,6 +18,23 @@ from typing import Any, Optional, TextIO, Union
 
 import yaml
 
+from .environment import (
+    ENVIRONMENT_REFERENCE_DATA_KEY,
+    ArtifactProviderRegistry,
+    ArtifactSpec,
+    EnvironmentKind,
+    EnvironmentReference,
+    InvalidEnvironmentReferenceError,
+    PolicySpec,
+    ResourceProviderRegistry,
+    ResourceSpec,
+    UndeclaredEnvironmentOutputError,
+    UnknownEnvironmentTargetError,
+    _provider_registry_transaction,
+    collect_environment_references,
+    parse_environment_reference,
+    validate_environment_dependencies,
+)
 from .extensibility import (
     EXTENSION_API_VERSION,
     ComponentKind,
@@ -35,6 +52,8 @@ _NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
 _INPUT_SEGMENT = r"[A-Za-z0-9][A-Za-z0-9_-]*"
 _INPUT_SEGMENT_PATTERN = re.compile(rf"^{_INPUT_SEGMENT}$")
 _REF_PATTERN = re.compile(rf"^inputs\.({_INPUT_SEGMENT}(?:\.{_INPUT_SEGMENT})*)$")
+_ENVIRONMENT_REFERENCE_NAMESPACES = frozenset(kind.value for kind in EnvironmentKind)
+_LITERAL_MARKER_KEY = "$valkey_fuzzer_literal"
 
 
 class FeaturePackError(ValueError):
@@ -129,7 +148,7 @@ def _mapping(value: Any, field_name: str) -> Mapping[str, Any]:
 
 
 def _sequence(value: Any, field_name: str) -> tuple[Any, ...]:
-    if isinstance(value, (str, bytes, bytearray, Mapping)) or not isinstance(value, Iterable):
+    if isinstance(value, (str, bytes, bytearray, Mapping)) or not isinstance(value, Sequence):
         raise FeaturePackDocumentError(f"{field_name} must be a sequence")
     return tuple(value)
 
@@ -164,6 +183,86 @@ def _fields(
     if missing:
         raise FeaturePackDocumentError(f"{field_name} is missing required fields: {missing}")
     return mapping
+
+
+def _parse_artifacts(value: Any) -> tuple[ArtifactSpec, ...]:
+    declarations = _mapping(value, "artifacts")
+    result = []
+    for artifact_id, declaration_value in declarations.items():
+        _require_input_segment(artifact_id, "artifact id")
+        declaration = _fields(
+            declaration_value,
+            f"artifacts.{artifact_id}",
+            allowed=("use", "with", "depends_on"),
+            required=("use",),
+        )
+        try:
+            result.append(
+                ArtifactSpec(
+                    artifact_id=artifact_id,
+                    provider_id=_require_text(declaration["use"], f"artifacts.{artifact_id}.use"),
+                    config=_mapping(declaration.get("with", {}), f"artifacts.{artifact_id}.with"),
+                    depends_on=_sequence(
+                        declaration.get("depends_on", ()),
+                        f"artifacts.{artifact_id}.depends_on",
+                    ),
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise FeaturePackDocumentError(f"artifacts.{artifact_id} is invalid: {exc}") from exc
+    return tuple(result)
+
+
+def _parse_resources(value: Any) -> tuple[ResourceSpec, ...]:
+    declarations = _mapping(value, "resources")
+    result = []
+    for resource_id, declaration_value in declarations.items():
+        _require_input_segment(resource_id, "resource id")
+        declaration = _fields(
+            declaration_value,
+            f"resources.{resource_id}",
+            allowed=("use", "with", "depends_on"),
+            required=("use",),
+        )
+        try:
+            result.append(
+                ResourceSpec(
+                    resource_id=resource_id,
+                    provider_id=_require_text(declaration["use"], f"resources.{resource_id}.use"),
+                    config=_mapping(declaration.get("with", {}), f"resources.{resource_id}.with"),
+                    depends_on=_sequence(
+                        declaration.get("depends_on", ()),
+                        f"resources.{resource_id}.depends_on",
+                    ),
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise FeaturePackDocumentError(f"resources.{resource_id} is invalid: {exc}") from exc
+    return tuple(result)
+
+
+def _parse_policies(value: Any) -> tuple[PolicySpec, ...]:
+    declarations = _mapping(value, "policies")
+    result = []
+    for policy_id, declaration_value in declarations.items():
+        _require_input_segment(policy_id, "policy id")
+        declaration = _fields(
+            declaration_value,
+            f"policies.{policy_id}",
+            allowed=("use", "with"),
+            required=("use",),
+        )
+        try:
+            result.append(
+                PolicySpec(
+                    policy_id=policy_id,
+                    policy_type=_require_text(declaration["use"], f"policies.{policy_id}.use"),
+                    config=_mapping(declaration.get("with", {}), f"policies.{policy_id}.with"),
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise FeaturePackDocumentError(f"policies.{policy_id} is invalid: {exc}") from exc
+    return tuple(result)
 
 
 def _parse_component(value: Any, index: int) -> ComponentSpec:
@@ -563,10 +662,19 @@ _INPUT_PROPERTY_FIELDS = {
     "enum",
     "maximum",
     "minimum",
+    "reference_kinds",
     "title",
     "type",
 }
 _JSON_TYPES = {"array", "boolean", "integer", "null", "number", "object", "string"}
+_ENVIRONMENT_REFERENCE_INPUT_TYPE = "environment_reference"
+_INPUT_TYPES = _JSON_TYPES | {_ENVIRONMENT_REFERENCE_INPUT_TYPE}
+_ENVIRONMENT_REFERENCE_INCOMPATIBLE_FIELDS = {
+    "default",
+    "enum",
+    "maximum",
+    "minimum",
+}
 
 
 def _matches_json_type(value: Any, type_name: str) -> bool:
@@ -624,8 +732,37 @@ def _validate_input_rule(name: str, rule_value: Any) -> Mapping[str, Any]:
     )
     if "type" in rule:
         type_name = rule["type"]
-        if not isinstance(type_name, str) or type_name not in _JSON_TYPES:
+        if not isinstance(type_name, str) or type_name not in _INPUT_TYPES:
             raise ScenarioCompileError(f"input {name!r} has unsupported schema type {type_name!r}")
+    if "reference_kinds" in rule:
+        if rule.get("type") != _ENVIRONMENT_REFERENCE_INPUT_TYPE:
+            raise ScenarioCompileError(
+                f"input {name!r} can use reference_kinds only with type {_ENVIRONMENT_REFERENCE_INPUT_TYPE!r}"
+            )
+        reference_kinds = _sequence(
+            rule["reference_kinds"],
+            f"input_schema.properties.{name}.reference_kinds",
+        )
+        if not reference_kinds:
+            raise ScenarioCompileError(f"input {name!r} has an empty reference_kinds constraint")
+        normalized_kinds = []
+        for reference_kind in reference_kinds:
+            try:
+                normalized_kinds.append(EnvironmentKind(reference_kind))
+            except (TypeError, ValueError) as exc:
+                raise ScenarioCompileError(
+                    f"input {name!r} has unsupported environment reference kind "
+                    f"{reference_kind!r}; expected 'artifacts' or 'resources'"
+                ) from exc
+        if len(set(normalized_kinds)) != len(normalized_kinds):
+            raise ScenarioCompileError(f"input {name!r} has duplicate reference_kinds")
+    if rule.get("type") == _ENVIRONMENT_REFERENCE_INPUT_TYPE:
+        incompatible_fields = sorted(set(rule) & _ENVIRONMENT_REFERENCE_INCOMPATIBLE_FIELDS)
+        if incompatible_fields:
+            raise ScenarioCompileError(
+                f"input {name!r} with type {_ENVIRONMENT_REFERENCE_INPUT_TYPE!r} "
+                f"does not support fields: {incompatible_fields}"
+            )
     if "enum" in rule:
         allowed = _sequence(rule["enum"], f"input_schema.properties.{name}.enum")
         if not allowed:
@@ -655,8 +792,26 @@ def _validate_input_value(
     *,
     subject: str = "input",
 ) -> None:
+    type_name = rule.get("type")
+    references = collect_environment_references(value)
+    if type_name == _ENVIRONMENT_REFERENCE_INPUT_TYPE:
+        if not isinstance(value, EnvironmentReference):
+            raise ScenarioCompileError(f"{subject} for input {name!r} must be an exact environment reference")
+        if "reference_kinds" in rule:
+            allowed_kinds = tuple(EnvironmentKind(item) for item in rule["reference_kinds"])
+            if value.kind not in allowed_kinds:
+                allowed = ", ".join(repr(kind.value) for kind in allowed_kinds)
+                raise ScenarioCompileError(
+                    f"{subject} for input {name!r} references kind {value.kind.value!r}; allowed kinds are {allowed}"
+                )
+        return
+    if references:
+        location = f"feature.with.{name}" if subject == "input" else f"{subject} for input {name!r}"
+        raise ScenarioCompileError(
+            f"{location} cannot contain environment references; "
+            f"declare type {_ENVIRONMENT_REFERENCE_INPUT_TYPE!r} for an exact binding slot"
+        )
     if "type" in rule:
-        type_name = rule["type"]
         if not _matches_json_type(value, type_name):
             raise ScenarioCompileError(f"{subject} for input {name!r} must have type {type_name!r}")
     if "enum" in rule:
@@ -677,6 +832,7 @@ def _resolve_inputs(schema_value: Mapping[str, Any], supplied_value: Mapping[str
     schema = _mapping(schema_value, "input_schema")
     supplied = _mapping(supplied_value, "feature.with")
     if not schema:
+        _reject_typed_environment_input_references(supplied, "feature.with")
         return dict(supplied)
 
     unknown_schema_fields = sorted(set(schema) - _INPUT_SCHEMA_FIELDS)
@@ -713,7 +869,63 @@ def _resolve_inputs(schema_value: Mapping[str, Any], supplied_value: Mapping[str
             raise ScenarioCompileError(f"feature.with is missing required input {name!r}")
         if name in resolved:
             _validate_input_value(name, resolved[name], rule)
+    for name in unknown_inputs:
+        _reject_typed_environment_input_references(
+            resolved[name],
+            f"feature.with.{name}",
+        )
     return resolved
+
+
+def _prepare_feature_input_value(value: Any, location: str = "feature.with") -> Any:
+    """Parse authored bindings and unwrap explicit opaque literal values."""
+
+    if isinstance(value, EnvironmentReference):
+        return value
+    if isinstance(value, Mapping):
+        if _LITERAL_MARKER_KEY in value:
+            if set(value) != {_LITERAL_MARKER_KEY}:
+                raise ScenarioCompileError(
+                    f"{location} literal marker must contain only the {_LITERAL_MARKER_KEY!r} key"
+                )
+            return value[_LITERAL_MARKER_KEY]
+        if ENVIRONMENT_REFERENCE_DATA_KEY in value:
+            raise ScenarioCompileError(
+                f"{location} uses the reserved {ENVIRONMENT_REFERENCE_DATA_KEY!r} run-plan serialization marker"
+            )
+        reference = value.get("$ref")
+        if isinstance(reference, str) and reference.split(".", 1)[0] in _ENVIRONMENT_REFERENCE_NAMESPACES:
+            if set(value) != {"$ref"}:
+                raise ScenarioCompileError(
+                    f"{location} uses an environment $ref with sibling fields; references must be exact"
+                )
+            try:
+                return parse_environment_reference(reference)
+            except InvalidEnvironmentReferenceError as exc:
+                raise ScenarioCompileError(
+                    f"{location} contains an invalid environment reference: {exc.reason}"
+                ) from exc
+        return {key: _prepare_feature_input_value(item, f"{location}.{key}") for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_prepare_feature_input_value(item, f"{location}[{index}]") for index, item in enumerate(value)]
+    return value
+
+
+def _reject_typed_environment_input_references(
+    value: Any,
+    location: str = "resolved feature inputs",
+) -> None:
+    if isinstance(value, EnvironmentReference):
+        raise ScenarioCompileError(
+            f"{location} cannot contain environment references because input constraints "
+            "must be validated before acquisition"
+        )
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            _reject_typed_environment_input_references(item, f"{location}.{key}")
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _reject_typed_environment_input_references(item, f"{location}[{index}]")
 
 
 def _lookup_input_reference(reference: Any, inputs: Mapping[str, Any], location: str) -> Any:
@@ -739,11 +951,27 @@ def _lookup_input_reference(reference: Any, inputs: Mapping[str, Any], location:
 
 
 def _resolve_template(value: Any, inputs: Mapping[str, Any], location: str) -> Any:
+    if isinstance(value, EnvironmentReference):
+        return value
     if isinstance(value, Mapping):
+        if _LITERAL_MARKER_KEY in value:
+            if set(value) != {_LITERAL_MARKER_KEY}:
+                raise UnresolvedReferenceError(
+                    f"{location} literal marker must contain only the {_LITERAL_MARKER_KEY!r} key"
+                )
+            return value[_LITERAL_MARKER_KEY]
         if "$ref" in value:
             if len(value) != 1:
                 raise UnresolvedReferenceError(f"{location} uses $ref with sibling fields; references must be exact")
-            return _lookup_input_reference(value["$ref"], inputs, location)
+            reference = value["$ref"]
+            if isinstance(reference, str) and _REF_PATTERN.fullmatch(reference):
+                return _lookup_input_reference(reference, inputs, location)
+            try:
+                return parse_environment_reference(reference)
+            except InvalidEnvironmentReferenceError as exc:
+                raise UnresolvedReferenceError(
+                    f"{location}.$ref must be an exact path in inputs, artifacts, or resources: {exc.reason}"
+                ) from exc
         return {key: _resolve_template(item, inputs, f"{location}.{key}") for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_resolve_template(item, inputs, f"{location}[{index}]") for index, item in enumerate(value)]
@@ -832,6 +1060,20 @@ def _normalize_registries(
     return MappingProxyType(normalized)
 
 
+def _plan_contains_environment_references(plan: RunPlan) -> bool:
+    values = [
+        plan.inputs,
+        plan.topology_document,
+        *(component.config for component in plan.components),
+        *(spec.config for spec in plan.artifacts),
+        *(spec.config for spec in plan.resources),
+        *(spec.config for spec in plan.policies),
+        *(overlay.selector.labels for overlay in plan.startup_overlays),
+        *(overlay.server_config for overlay in plan.startup_overlays),
+    ]
+    return any(collect_environment_references(value) for value in values)
+
+
 def _validate_components(
     components: Sequence[ComponentSpec],
     registries: Mapping[ComponentKind, Registry[Any]],
@@ -882,16 +1124,17 @@ def _validate_components(
                 raise ComponentCompatibilityError(
                     f"validator for component {component.component_id!r} cannot accept (spec, plan): {exc}"
                 ) from exc
-            try:
-                validation_return = registration.validator(component, plan)
-            except Exception as exc:
-                raise ComponentCompatibilityError(
-                    f"component {component.component_id!r} rejected instance {component.instance_id!r}: {exc}"
-                ) from exc
-            if validation_return is not None:
-                raise ComponentCompatibilityError(
-                    f"validator for component {component.component_id!r} must return None"
-                )
+            if not _plan_contains_environment_references(plan):
+                try:
+                    validation_return = registration.validator(component, plan)
+                except Exception as exc:
+                    raise ComponentCompatibilityError(
+                        f"component {component.component_id!r} rejected instance {component.instance_id!r}: {exc}"
+                    ) from exc
+                if validation_return is not None:
+                    raise ComponentCompatibilityError(
+                        f"validator for component {component.component_id!r} must return None"
+                    )
 
 
 def _validate_resources(
@@ -910,12 +1153,85 @@ def _validate_resources(
                     f"startup overlay {overlay.overlay_id!r} references unresolved node label {label_name!r}"
                 )
             allowed_values = inventory.labels[label_name]
-            if allowed_values is not None and not any(
-                _json_equal(requested_value, allowed) for allowed in allowed_values
-            ):
+            if collect_environment_references(requested_value) or allowed_values is None:
+                continue
+            if not any(_json_equal(requested_value, allowed) for allowed in allowed_values):
                 raise UnsupportedResourceError(
                     f"startup overlay {overlay.overlay_id!r} requests unsupported value for node label {label_name!r}"
                 )
+
+
+def _validate_environment_consumers(
+    plan: RunPlan,
+    artifact_registry: ArtifactProviderRegistry,
+    resource_registry: ResourceProviderRegistry,
+) -> None:
+    artifacts = {spec.artifact_id: spec for spec in plan.artifacts}
+    resources = {spec.resource_id: spec for spec in plan.resources}
+
+    def validate(source: str, value: Any) -> None:
+        for reference in collect_environment_references(value):
+            if reference.kind is EnvironmentKind.ARTIFACT:
+                target = artifacts.get(reference.instance_id)
+                registry = artifact_registry
+            else:
+                target = resources.get(reference.instance_id)
+                registry = resource_registry
+            if target is None:
+                raise UnknownEnvironmentTargetError(source, reference.dependency)
+            registration = registry.resolve(target.provider_id)
+            if reference.output not in registration.declared_outputs:
+                raise UndeclaredEnvironmentOutputError(
+                    source,
+                    reference,
+                    registration.provider_id,
+                    registration.declared_outputs,
+                )
+
+    validate("feature.with", plan.inputs)
+    validate("topology", plan.topology_document)
+    for artifact in plan.artifacts:
+        validate(f"artifacts.{artifact.artifact_id}.config", artifact.config)
+    for resource in plan.resources:
+        validate(f"resources.{resource.resource_id}.config", resource.config)
+    for policy in plan.policies:
+        validate(f"policies.{policy.policy_id}.config", policy.config)
+    for component in plan.components:
+        validate(f"components.{component.instance_id}.config", component.config)
+    for overlay in plan.startup_overlays:
+        validate(f"startup_overlays.{overlay.overlay_id}.selector.labels", overlay.selector.labels)
+        validate(f"startup_overlays.{overlay.overlay_id}.server_config", overlay.server_config)
+
+
+def validate_run_plan_environment(
+    plan: RunPlan,
+    *,
+    artifact_registry: ArtifactProviderRegistry,
+    resource_registry: ResourceProviderRegistry,
+) -> None:
+    """Validate every environment declaration and typed consumer in a run plan.
+
+    This is the shared compile/replay boundary. It validates provider
+    registrations, explicit and reference-derived dependencies, output names,
+    the combined artifact/resource DAG, policy references, and references
+    consumed by topology, components, and startup overlays.
+    """
+
+    if not isinstance(plan, RunPlan):
+        raise TypeError("plan must be a RunPlan")
+    with _provider_registry_transaction(artifact_registry, resource_registry):
+        validate_environment_dependencies(
+            plan.artifacts,
+            plan.resources,
+            artifact_registry=artifact_registry,
+            resource_registry=resource_registry,
+            policies=plan.policies,
+        )
+        _validate_environment_consumers(
+            plan,
+            artifact_registry,
+            resource_registry,
+        )
 
 
 class FeaturePackCompiler:
@@ -927,6 +1243,8 @@ class FeaturePackCompiler:
         registries: Mapping[ComponentKind, Registry[Any]],
         *,
         reference_inventory: Optional[ReferenceInventory] = None,
+        artifact_registry: Optional[ArtifactProviderRegistry] = None,
+        resource_registry: Optional[ResourceProviderRegistry] = None,
         extension_api_version: str = EXTENSION_API_VERSION,
     ):
         if not isinstance(catalog, FeaturePackCatalog):
@@ -940,12 +1258,30 @@ class FeaturePackCompiler:
         self.reference_inventory = reference_inventory or ReferenceInventory()
         if not isinstance(self.reference_inventory, ReferenceInventory):
             raise TypeError("reference_inventory must be a ReferenceInventory")
+        self.artifact_registry = (
+            ArtifactProviderRegistry(api_version=self.extension_api_version)
+            if artifact_registry is None
+            else artifact_registry
+        )
+        if not isinstance(self.artifact_registry, ArtifactProviderRegistry):
+            raise TypeError("artifact_registry must be an ArtifactProviderRegistry")
+        if self.artifact_registry.api_version != self.extension_api_version:
+            raise TypeError("artifact_registry API version must match extension_api_version")
+        self.resource_registry = (
+            ResourceProviderRegistry(api_version=self.extension_api_version)
+            if resource_registry is None
+            else resource_registry
+        )
+        if not isinstance(self.resource_registry, ResourceProviderRegistry):
+            raise TypeError("resource_registry must be a ResourceProviderRegistry")
+        if self.resource_registry.api_version != self.extension_api_version:
+            raise TypeError("resource_registry API version must match extension_api_version")
 
     def compile(self, value: Mapping[str, Any]) -> RunPlan:
         envelope = _fields(
             value,
             "scenario",
-            allowed=("scenario_id", "seed", "feature", "topology"),
+            allowed=("scenario_id", "seed", "feature", "topology", "artifacts", "resources", "policies"),
             required=("scenario_id", "seed", "feature", "topology"),
         )
         scenario_id = _require_name(envelope["scenario_id"], "scenario_id")
@@ -963,19 +1299,28 @@ class FeaturePackCompiler:
         version = feature.get("version")
         if version is not None:
             version = _require_text(version, "feature.version")
-        supplied_inputs = _mapping(feature.get("with", {}), "feature.with")
+        supplied_inputs = _mapping(
+            _prepare_feature_input_value(_mapping(feature.get("with", {}), "feature.with")),
+            "feature.with",
+        )
 
         topology_document = _mapping(envelope["topology"], "topology")
         if "type" not in topology_document:
             raise FeaturePackDocumentError("topology is missing required field 'type'")
-        topology = _require_name(topology_document["type"], "topology.type")
 
         spec = self.catalog.resolve(pack_id, version)
-        if topology not in spec.supported_topologies:
-            raise ScenarioCompileError(f"topology {topology!r} is not supported by feature pack {pack_id!r}")
-
         resolved_inputs = _resolve_inputs(spec.input_schema, supplied_inputs)
         resolved_spec = _resolve_pack_templates(spec, resolved_inputs)
+        topology_document = _mapping(
+            _resolve_template(topology_document, resolved_inputs, "topology"),
+            "topology",
+        )
+        topology = _require_name(topology_document["type"], "topology.type")
+        if topology not in spec.supported_topologies:
+            raise ScenarioCompileError(f"topology {topology!r} is not supported by feature pack {pack_id!r}")
+        artifacts = _parse_artifacts(_resolve_template(envelope.get("artifacts", {}), resolved_inputs, "artifacts"))
+        resources = _parse_resources(_resolve_template(envelope.get("resources", {}), resolved_inputs, "resources"))
+        policies = _parse_policies(_resolve_template(envelope.get("policies", {}), resolved_inputs, "policies"))
         plan = RunPlan.from_feature_pack(
             resolved_spec,
             scenario_id=scenario_id,
@@ -983,12 +1328,20 @@ class FeaturePackCompiler:
             topology=topology,
             inputs=resolved_inputs,
             topology_document=topology_document,
+            artifacts=artifacts,
+            resources=resources,
+            policies=policies,
         )
         _validate_components(
             resolved_spec.components,
             self.registries,
             self.extension_api_version,
             plan,
+        )
+        validate_run_plan_environment(
+            plan,
+            artifact_registry=self.artifact_registry,
+            resource_registry=self.resource_registry,
         )
         _validate_resources(resolved_spec.startup_overlays, self.reference_inventory)
 
@@ -1011,6 +1364,8 @@ def compile_scenario(
     registries: Mapping[ComponentKind, Registry[Any]],
     *,
     reference_inventory: Optional[ReferenceInventory] = None,
+    artifact_registry: Optional[ArtifactProviderRegistry] = None,
+    resource_registry: Optional[ResourceProviderRegistry] = None,
 ) -> RunPlan:
     """Functional convenience wrapper around :class:`FeaturePackCompiler`."""
 
@@ -1018,6 +1373,8 @@ def compile_scenario(
         catalog,
         registries,
         reference_inventory=reference_inventory,
+        artifact_registry=artifact_registry,
+        resource_registry=resource_registry,
     ).compile(value)
 
 
@@ -1041,4 +1398,5 @@ __all__ = [
     "load_scenario_yaml",
     "parse_feature_pack",
     "parse_feature_pack_document",
+    "validate_run_plan_environment",
 ]

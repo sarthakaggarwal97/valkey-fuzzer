@@ -185,6 +185,14 @@ components: []
         )
 
 
+def test_feature_pack_sequences_reject_unordered_collections():
+    manifest = _manifest()
+    manifest["startup_overlays"] = set()
+
+    with pytest.raises(FeaturePackDocumentError, match="startup_overlays must be a sequence"):
+        parse_feature_pack_document(manifest)
+
+
 def test_feature_manifest_preserves_mode_and_required_evidence_through_compile():
     manifest = {
         "pack_id": "example.real-feature",
@@ -647,6 +655,29 @@ def test_input_values_are_not_recursively_interpreted_as_templates():
         ({"enum": [1], "default": True}, "default.*allowed values"),
         ({"minimum": 2, "default": 1}, "default.*below its minimum"),
         ({"maximum": 2, "default": 3}, "default.*above its maximum"),
+        (
+            {"type": "string", "reference_kinds": ["artifacts"]},
+            "reference_kinds only with type 'environment_reference'",
+        ),
+        (
+            {"type": "environment_reference", "reference_kinds": []},
+            "empty reference_kinds",
+        ),
+        (
+            {"type": "environment_reference", "reference_kinds": ["machines"]},
+            "unsupported environment reference kind",
+        ),
+        (
+            {
+                "type": "environment_reference",
+                "reference_kinds": ["artifacts", "artifacts"],
+            },
+            "duplicate reference_kinds",
+        ),
+        (
+            {"type": "environment_reference", "default": "artifacts.candidate.path"},
+            "does not support fields.*default",
+        ),
     ],
 )
 def test_optional_omitted_input_still_validates_its_complete_schema_rule(rule, match):
