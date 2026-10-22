@@ -19,8 +19,12 @@ The target onboarding contract is “manifest, plus an optional small plugin”:
 new features must not require a new engine switch or topology special case.
 The repository now contains the topology foundation, extension API, v3
 feature-pack compiler, generic lifecycle runner, and local Valkey topology
-provider. The v3 path remains programmatic: CLI/reporting integration,
-reusable built-in components, and real feature packs are still pending.
+provider. The `run` and `validate` commands now route v3 scenarios through that
+generic path, loading data-only manifests from configured directories and
+trusted installed plugins. This is the basic CLI slice, not the completed
+extensibility roadmap: reusable built-ins, mandatory baseline safety oracles,
+provenance, managed resources, per-node artifacts, and real feature packs are
+still pending.
 
 ### Key Features
 
@@ -31,6 +35,7 @@ reusable built-in components, and real feature packs are still pending.
 - **Current Chaos Support**: Inject process failures coordinated with cluster failover operations
 - **Topology-Aware Validation**: Apply only the checks meaningful for the selected deployment
 - **Extensible Foundation**: Add feature actions, workloads, observers, oracles, and additional faults
+- **Versioned Feature Packs**: Run v3 manifests and installed plugins without feature-specific CLI branches
 
 ## Architecture
 
@@ -134,8 +139,75 @@ used; that requires a feature-specific observer or protocol counter. The option
 names and supported values also depend on the Valkey build under test.
 
 See [the generic feature fuzzer design](docs/generic-feature-fuzzer-design.md)
-for the stable extension boundary, proposed v3 feature envelope, example test
+for the stable extension boundary, v3 feature envelope, example test
 matrices, path-evidence rules, and implementation sequence.
+
+### V3 feature-pack execution
+
+A v3 scenario selects an exact feature-pack ID and version. The pack may come
+from a repeatable `--feature-pack-dir` or from a trusted installed Python
+plugin in the `valkey_fuzzer.plugins` entry-point group:
+
+```yaml
+api_version: v3
+scenario_id: candidate-feature
+seed: 123
+
+feature:
+  use: example.candidate-feature
+  version: "1"
+  with:
+    key_count: 10000
+
+topology:
+  type: standalone
+  base_port: 7400
+```
+
+```bash
+# Strictly compile the scenario and run structural topology preflight only.
+valkey-fuzzer validate scenario.yaml \
+  --feature-pack-dir ./feature-packs \
+  --valkey-binary /tmp/valkey/src/valkey-server
+
+# Execute the same compiled plan and write a generic result bundle.
+valkey-fuzzer run scenario.yaml \
+  --feature-pack-dir ./feature-packs \
+  --valkey-binary /tmp/valkey/src/valkey-server \
+  --artifact-dir ./artifacts \
+  --output result.json
+```
+
+Installed plugins are enabled by default and are trusted executable code;
+`--no-plugins` disables their discovery. `--timeout` supplies a cooperative
+deadline, so a component that ignores the run context can still block.
+`--artifact-dir` exposes a path string to components; it is not yet a managed
+artifact store and the runtime does not create or clean it.
+
+Validation checks the scenario, pack, component registrations, validation
+hooks, and topology structure. It deliberately does not instantiate component
+factories, resolve or execute the Valkey binary, or prove environment
+readiness.
+
+V3 exit codes distinguish the terminal outcome:
+
+- `0`: passed
+- `1`: the declared feature contract failed
+- `2`: compiler, provider, runner, or reporting error
+- `3`: required capability unsupported
+- `130`: interrupted
+
+Use `--allow-unsupported` when an unsupported target should be successful in a
+heterogeneous test matrix. JSON and YAML outputs contain the complete generic
+`RunOutcome`, including the resolved plan, component results, evidence, and
+diagnostics. They are not yet a complete reproducer because plugin distribution
+versions, manifest digests, and tested-binary digests are not recorded.
+
+There are no reusable built-in component registrations or complete feature
+packs yet. Therefore the usable v3 path currently requires an installed plugin
+for non-empty feature behavior. A successful result means that the selected
+pack's declared contract passed; it does not add safety checks that the pack
+failed to declare.
 
 ### Random Test Execution
 
@@ -429,9 +501,11 @@ component roles, immutable feature packs and run plans, lifecycle events,
 uniform outcomes, typed registries, and `valkey_fuzzer.plugins` entry-point
 discovery. `src/feature_packs.py`, `src/feature_runner.py`, and
 `src/local_topology_provider.py` provide the manifest compiler, generic
-executor, and real local topology adapter. They are intentionally not connected
-to the current CLI yet, and no built-in feature pack currently provides a
-complete activation, path-evidence, and correctness contract.
+executor, and real local topology adapter. `src/feature_runtime.py` bootstraps
+all six registries, configured manifests, trusted plugins, and topology
+providers for v3 `run` and `validate` commands. No built-in feature pack
+currently provides a complete activation, path-evidence, and correctness
+contract.
 
 Durability and data-tiering features also require a generic resource layer for
 filesystems, object stores, proxies, capacity controls, and storage faults.

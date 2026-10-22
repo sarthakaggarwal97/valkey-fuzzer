@@ -391,9 +391,13 @@ class FeaturePackCatalog:
     """Thread-safe exact-version catalog with atomic batch registration."""
 
     def __init__(self, api_version: str = EXTENSION_API_VERSION):
-        self.api_version = _require_text(api_version, "api_version")
+        self._api_version = _require_text(api_version, "api_version")
         self._packs: dict[tuple[str, str], FeaturePackSpec] = {}
         self._lock = threading.RLock()
+
+    @property
+    def api_version(self) -> str:
+        return self._api_version
 
     def _validate_many(self, packs: Sequence[FeaturePackSpec]) -> None:
         seen = set()

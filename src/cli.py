@@ -4,28 +4,56 @@
 import argparse
 import json
 import logging
+import math
+import os
 import sys
+import tempfile
 import time
 import traceback
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from .extensibility import ComponentStatus, OutcomeStatus, RunOutcome, RunPlan, to_plain_data
+from .feature_packs import SCENARIO_API_VERSION, load_v3_scenario_yaml
+from .feature_runtime import FeatureRuntime
 from .fuzzer_engine import DSLLoader
 from .fuzzer_engine.test_case_generator import ScenarioGenerator
 from .main import ClusterBusFuzzer
 from .models import ExecutionResult, StateValidationResult, TopologyType
 from .utils.cluster_utils import cleanup_logs
 
+FEATURE_REPORT_API_VERSION = "v1"
+EXIT_SUCCESS = 0
+EXIT_FEATURE_FAILURE = 1
+EXIT_HARNESS_ERROR = 2
+EXIT_UNSUPPORTED = 3
+
+
+class ScenarioRoutingError(ValueError):
+    """A scenario cannot be routed safely to a DSL implementation."""
+
+    def __init__(self, message: str, *, feature_hint: bool = False):
+        self.feature_hint = feature_hint
+        super().__init__(message)
+
 
 class FuzzerCLI:
     """Command-line interface for topology-aware Valkey fuzzing."""
 
     def __init__(self):
-        self.fuzzer = ClusterBusFuzzer()
+        self._fuzzer = None
         self.config = {}
+
+    @property
+    def fuzzer(self) -> ClusterBusFuzzer:
+        """Construct the legacy engine only when a v1/v2 command needs it."""
+        if self._fuzzer is None:
+            self._fuzzer = ClusterBusFuzzer()
+        return self._fuzzer
 
     def load_config_file(self, config_path: str) -> dict[str, Any]:
         """Load configuration from YAML or JSON file"""
@@ -120,8 +148,96 @@ class FuzzerCLI:
         # Return success if all tests passed
         return 0 if all(r.success for r in results) else 1
 
+    @staticmethod
+    def _load_scenario_source(dsl_path: Path) -> tuple[str, str]:
+        """Read once and identify the API without imposing v3 rules on legacy YAML."""
+        try:
+            source = dsl_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ValueError(f"Unable to read DSL file {dsl_path}: {exc}") from exc
+
+        try:
+            root = yaml.compose(source, Loader=yaml.SafeLoader)
+            document = yaml.safe_load(source)
+        except yaml.YAMLError as exc:
+            raise ScenarioRoutingError(f"Invalid YAML syntax in {dsl_path}: {exc}") from exc
+        if not isinstance(root, yaml.nodes.MappingNode) or not isinstance(document, Mapping):
+            raise ScenarioRoutingError("DSL configuration must be a mapping")
+
+        direct_versions = [
+            value_node.value if isinstance(value_node, yaml.nodes.ScalarNode) else None
+            for key_node, value_node in root.value
+            if isinstance(key_node, yaml.nodes.ScalarNode) and key_node.value == "api_version"
+        ]
+        if len(direct_versions) > 1 and not set(direct_versions).issubset({"v1", "v2"}):
+            raise ScenarioRoutingError(
+                "top-level api_version is defined more than once",
+                feature_hint=any(version not in {"v1", "v2"} for version in direct_versions),
+            )
+
+        api_version = document.get("api_version", "v1")
+        if api_version is None:
+            api_version = "v1"
+        if not isinstance(api_version, str):
+            raise ScenarioRoutingError(
+                "api_version must be a string",
+                feature_hint=True,
+            )
+        if api_version not in {"v1", "v2", SCENARIO_API_VERSION}:
+            raise ScenarioRoutingError(
+                f"Unsupported api_version: {api_version}",
+                feature_hint=True,
+            )
+        return source, api_version
+
+    @staticmethod
+    def _feature_runtime(args) -> FeatureRuntime:
+        """Create one isolated extension runtime only for a v3 invocation."""
+        feature_pack_directories = getattr(args, "feature_pack_dirs", ())
+        if not isinstance(feature_pack_directories, (list, tuple)):
+            feature_pack_directories = ()
+        artifact_dir = getattr(args, "artifact_dir", "")
+        if not isinstance(artifact_dir, str):
+            artifact_dir = ""
+        return FeatureRuntime(
+            feature_pack_directories=tuple(feature_pack_directories),
+            discover_entry_points=getattr(args, "no_plugins", False) is not True,
+            artifact_dir=artifact_dir,
+        )
+
+    @staticmethod
+    def _topology_overrides(args) -> Mapping[str, Any]:
+        valkey_binary = getattr(args, "valkey_binary", None)
+        return {"valkey_binary": valkey_binary} if isinstance(valkey_binary, str) and valkey_binary else {}
+
+    @staticmethod
+    def _reject_v3_only_legacy_options(args, *, validation: bool = False) -> None:
+        enabled = []
+        feature_pack_directories = getattr(args, "feature_pack_dirs", ())
+        if isinstance(feature_pack_directories, (list, tuple)) and feature_pack_directories:
+            enabled.append("--feature-pack-dir")
+        if getattr(args, "no_plugins", False) is True:
+            enabled.append("--no-plugins")
+        artifact_dir = getattr(args, "artifact_dir", "")
+        if isinstance(artifact_dir, str) and artifact_dir:
+            enabled.append("--artifact-dir")
+        timeout = getattr(args, "timeout", None)
+        if isinstance(timeout, (int, float)) and not isinstance(timeout, bool):
+            enabled.append("--timeout")
+        if getattr(args, "allow_unsupported", False) is True:
+            enabled.append("--allow-unsupported")
+        valkey_binary = getattr(args, "valkey_binary", None)
+        if validation and isinstance(valkey_binary, str) and valkey_binary:
+            enabled.append("--valkey-binary")
+        if enabled:
+            joined = ", ".join(enabled)
+            raise ScenarioRoutingError(
+                f"{joined} require an api_version: v3 scenario",
+                feature_hint=True,
+            )
+
     def run_dsl_test(self, args) -> int:
-        """Execute a DSL-based test scenario"""
+        """Execute a version-routed DSL scenario."""
         self._print_header(f"Scenario: {args.file}")
 
         dsl_path = Path(args.file)
@@ -131,36 +247,80 @@ class FuzzerCLI:
             print("Example: valkey-fuzzer run examples/simple_failover.yaml")
             return 1
 
+        api_version = None
         try:
-            # Load DSL configuration
-            dsl_config = DSLLoader.load_from_file(str(dsl_path))
-            print(f"Loaded DSL from {args.file}")
-            print()
-
-            # Run test
-            run_kwargs = {}
-            if args.valkey_binary:
-                run_kwargs["valkey_binary"] = args.valkey_binary
-
-            result = self.fuzzer.run_dsl_test(dsl_config, **run_kwargs)
-
-            if args.verbose:
-                self._print_detailed_result(result)
-            else:
-                self._print_summary_result(result)
-
-            # Save results if output specified
-            if args.output:
-                self._save_results([result], args.output, args.format)
-
-            return 0 if result.success else 1
+            source, api_version = self._load_scenario_source(dsl_path)
+            if api_version == SCENARIO_API_VERSION and getattr(args, "legacy_only", False) is not True:
+                document = load_v3_scenario_yaml(source, source_name=str(dsl_path))
+                return self._run_feature_test(args, document)
+            return self._run_legacy_dsl_test(args, source)
 
         except Exception as e:
             print(f"Error: DSL test failed: {e}")
             print(f"\nTry validating your DSL file first: valkey-fuzzer validate {args.file}")
             if args.verbose:
                 traceback.print_exc()
-            return 1
+            feature_error = api_version == SCENARIO_API_VERSION or (
+                isinstance(e, ScenarioRoutingError) and e.feature_hint
+            )
+            return EXIT_HARNESS_ERROR if feature_error else EXIT_FEATURE_FAILURE
+
+    def _run_legacy_dsl_test(self, args, source: str) -> int:
+        """Run a v1/v2 scenario through the unchanged legacy engine."""
+        self._reject_v3_only_legacy_options(args)
+        dsl_config = DSLLoader.load_from_string(source)
+        print(f"Loaded DSL from {args.file}")
+        print()
+
+        run_kwargs = {}
+        if getattr(args, "valkey_binary", None):
+            run_kwargs["valkey_binary"] = args.valkey_binary
+
+        result = self.fuzzer.run_dsl_test(dsl_config, **run_kwargs)
+
+        if args.verbose:
+            self._print_detailed_result(result)
+        else:
+            self._print_summary_result(result)
+
+        if getattr(args, "output", None):
+            self._save_results([result], args.output, args.format)
+
+        return EXIT_SUCCESS if result.success else EXIT_FEATURE_FAILURE
+
+    def _run_feature_test(
+        self,
+        args,
+        document: Mapping[str, Any],
+    ) -> int:
+        """Compile and execute one v3 feature-pack scenario."""
+        runtime = self._feature_runtime(args)
+        plan = runtime.compile(
+            document,
+            topology_overrides=self._topology_overrides(args),
+        )
+        timeout = getattr(args, "timeout", None)
+        if not isinstance(timeout, (int, float)) or isinstance(timeout, bool):
+            timeout = None
+        deadline = time.monotonic() + timeout if timeout is not None else None
+        outcome = runtime.run_plan(plan, deadline=deadline)
+
+        print(f"Loaded v3 feature scenario from {args.file}")
+        if args.verbose:
+            self._print_feature_detailed_result(outcome)
+        else:
+            self._print_feature_summary_result(outcome)
+
+        if getattr(args, "output", None):
+            self._save_feature_outcomes((outcome,), args.output, args.format)
+
+        if outcome.status is OutcomeStatus.PASS:
+            return EXIT_SUCCESS
+        if outcome.status is OutcomeStatus.FAIL:
+            return EXIT_FEATURE_FAILURE
+        if outcome.status is OutcomeStatus.SKIP_UNSUPPORTED:
+            return EXIT_SUCCESS if getattr(args, "allow_unsupported", False) is True else EXIT_UNSUPPORTED
+        return EXIT_HARNESS_ERROR
 
     def validate_dsl(self, args) -> int:
         """Validate a DSL configuration file"""
@@ -173,47 +333,75 @@ class FuzzerCLI:
             print("Example: valkey-fuzzer validate examples/simple_failover.yaml")
             return 1
 
+        api_version = None
         try:
-            # Load DSL
-            dsl_config = DSLLoader.load_from_file(str(dsl_path))
-            print("DSL file loaded successfully")
-
-            # Parse and validate
-            generator = ScenarioGenerator()
-
-            scenario = generator.parse_dsl_config(dsl_config.config_text)
-            print("DSL parsed successfully")
-
-            generator.validate_scenario(scenario)
-            print("Scenario validated successfully")
-
-            print("\n" + "=" * 60)
-            print("Scenario Summary")
-            print("=" * 60)
-            print(f"ID: {scenario.scenario_id}")
-            print(f"API Version: {scenario.api_version}")
-            print(f"Seed: {scenario.seed}")
-            print(self._format_topology_summary(scenario.cluster_config))
-            print(f"Operations: {len(scenario.operations)}")
-            if scenario.operations:
-                print(f"Chaos Type: {scenario.chaos_config.chaos_type.value}")
-            else:
-                print("Chaos: disabled (no operations)")
-
-            if args.verbose:
-                print("\nOperations:")
-                for i, op in enumerate(scenario.operations, 1):
-                    print(f"  {i}. {op.type.value} on {op.target_node}")
-
-            print("\nDSL configuration is valid!")
-            return 0
+            source, api_version = self._load_scenario_source(dsl_path)
+            if api_version == SCENARIO_API_VERSION:
+                document = load_v3_scenario_yaml(source, source_name=str(dsl_path))
+                return self._validate_feature_scenario(args, document)
+            return self._validate_legacy_dsl(args, source)
 
         except Exception as e:
             print(f"\nError: Validation failed: {e}")
             print("\nCheck your DSL file syntax. See examples in the examples/ directory.")
             if args.verbose:
                 traceback.print_exc()
-            return 1
+            feature_error = api_version == SCENARIO_API_VERSION or (
+                isinstance(e, ScenarioRoutingError) and e.feature_hint
+            )
+            return EXIT_HARNESS_ERROR if feature_error else EXIT_FEATURE_FAILURE
+
+    def _validate_legacy_dsl(self, args, source: str) -> int:
+        self._reject_v3_only_legacy_options(args, validation=True)
+        dsl_config = DSLLoader.load_from_string(source)
+        print("DSL file loaded successfully")
+
+        generator = ScenarioGenerator()
+        scenario = generator.parse_dsl_config(dsl_config.config_text)
+        print("DSL parsed successfully")
+
+        generator.validate_scenario(scenario)
+        print("Scenario validated successfully")
+
+        print("\n" + "=" * 60)
+        print("Scenario Summary")
+        print("=" * 60)
+        print(f"ID: {scenario.scenario_id}")
+        print(f"API Version: {scenario.api_version}")
+        print(f"Seed: {scenario.seed}")
+        print(self._format_topology_summary(scenario.cluster_config))
+        print(f"Operations: {len(scenario.operations)}")
+        if scenario.operations:
+            print(f"Chaos Type: {scenario.chaos_config.chaos_type.value}")
+        else:
+            print("Chaos: disabled (no operations)")
+
+        if args.verbose:
+            print("\nOperations:")
+            for i, op in enumerate(scenario.operations, 1):
+                print(f"  {i}. {op.type.value} on {op.target_node}")
+
+        print("\nDSL configuration is valid!")
+        return EXIT_SUCCESS
+
+    def _validate_feature_scenario(
+        self,
+        args,
+        document: Mapping[str, Any],
+    ) -> int:
+        runtime = self._feature_runtime(args)
+        plan = runtime.compile(
+            document,
+            topology_overrides=self._topology_overrides(args),
+        )
+        runtime.validate_plan(plan)
+
+        print("V3 scenario compiled successfully")
+        print("Structural topology preflight completed without provisioning")
+        print("Component factories were not instantiated; Valkey binary availability was not checked")
+        self._print_feature_plan_summary(plan, verbose=args.verbose)
+        print("\nV3 feature scenario passed structural validation!")
+        return EXIT_SUCCESS
 
     @staticmethod
     def _format_topology_summary(config) -> str:
@@ -233,6 +421,101 @@ class FuzzerCLI:
             f"Topology: cluster ({num_shards} shards, {replicas_per_shard} replicas per shard, "
             f"{total_nodes} nodes total)"
         )
+
+    @staticmethod
+    def _feature_duration(outcome: RunOutcome) -> float:
+        if outcome.started_at is None or outcome.ended_at is None:
+            return 0.0
+        return max(0.0, outcome.ended_at - outcome.started_at)
+
+    @staticmethod
+    def _component_status_counts(outcome: RunOutcome) -> dict[ComponentStatus, int]:
+        counts = {status: 0 for status in ComponentStatus}
+        for result in outcome.component_results:
+            counts[result.status] += 1
+        return counts
+
+    def _print_feature_plan_summary(self, plan: RunPlan, *, verbose: bool = False) -> None:
+        print("\n" + "=" * 60)
+        print("Feature Plan Summary")
+        print("=" * 60)
+        print(f"ID: {plan.scenario_id}")
+        print(f"Feature Pack: {plan.pack_id}@{plan.pack_version}")
+        print(f"Scenario API: {plan.scenario_api_version or SCENARIO_API_VERSION}")
+        print(f"Extension API: {plan.api_version}")
+        print(f"Mode: {plan.mode.value}")
+        print(f"Topology: {plan.topology}")
+        print(f"Seed: {plan.seed}")
+        print(f"Components: {len(plan.components)}")
+        print(f"Startup Overlays: {len(plan.startup_overlays)}")
+        print(f"Required Evidence: {len(plan.required_evidence)}")
+
+        if verbose and plan.components:
+            print("\nComponents:")
+            for component in plan.components:
+                dependencies = ", ".join(component.depends_on) if component.depends_on else "none"
+                print(
+                    f"  - {component.instance_id}: {component.kind.value} "
+                    f"{component.component_id} (required={component.required}, depends_on={dependencies})"
+                )
+
+    def _print_feature_summary_result(self, outcome: RunOutcome) -> None:
+        counts = self._component_status_counts(outcome)
+        print(f"\nScenario: {outcome.plan.scenario_id}")
+        print(f"Feature Pack: {outcome.plan.pack_id}@{outcome.plan.pack_version}")
+        print(f"Status: {outcome.status.value}")
+        print(f"Mode: {outcome.plan.mode.value}")
+        print(f"Topology: {outcome.plan.topology}")
+        print(f"Duration: {self._feature_duration(outcome):.2f}s")
+        print(
+            "Components: "
+            f"{counts[ComponentStatus.PASS]} passed, "
+            f"{counts[ComponentStatus.FAIL]} failed, "
+            f"{counts[ComponentStatus.SKIP]} skipped, "
+            f"{counts[ComponentStatus.ERROR]} errors"
+        )
+        print(f"Evidence: {len(outcome.all_evidence)}")
+        print(f"Summary: {outcome.summary}")
+
+    def _print_feature_detailed_result(self, outcome: RunOutcome) -> None:
+        self._print_feature_summary_result(outcome)
+        results_by_id = {result.component_instance_id: result for result in outcome.component_results}
+
+        print("\nComponent Results:")
+        for component in outcome.plan.components:
+            result = results_by_id.get(component.instance_id)
+            if result is None:
+                print(f"  [NOT_RUN] {component.instance_id} ({component.kind.value}: {component.component_id})")
+                continue
+
+            duration = 0.0
+            if result.started_at is not None and result.ended_at is not None:
+                duration = max(0.0, result.ended_at - result.started_at)
+            print(
+                f"  [{result.status.value}] {component.instance_id} "
+                f"({component.kind.value}: {component.component_id}, {duration:.2f}s)"
+            )
+            print(f"    Summary: {result.summary}")
+            print(f"    Evidence: {len(result.evidence)}")
+            if result.diagnostics:
+                diagnostics = yaml.safe_dump(
+                    to_plain_data(result.diagnostics),
+                    default_flow_style=False,
+                    sort_keys=False,
+                ).rstrip()
+                print("    Diagnostics:")
+                for line in diagnostics.splitlines():
+                    print(f"      {line}")
+
+        if outcome.diagnostics:
+            diagnostics = yaml.safe_dump(
+                to_plain_data(outcome.diagnostics),
+                default_flow_style=False,
+                sort_keys=False,
+            ).rstrip()
+            print("\nRun Diagnostics:")
+            for line in diagnostics.splitlines():
+                print(f"  {line}")
 
     def _print_header(self, title: str):
         """Print formatted header"""
@@ -382,6 +665,69 @@ class FuzzerCLI:
         DSLLoader.save_scenario_as_dsl(scenario, export_path)
         print(f"\nScenario exported to DSL: {export_path}")
 
+    @staticmethod
+    def _feature_report(outcomes: tuple[RunOutcome, ...]) -> dict[str, Any]:
+        statuses = tuple(outcome.status for outcome in outcomes)
+        return {
+            "report_api_version": FEATURE_REPORT_API_VERSION,
+            "generated_at": datetime.now().astimezone().isoformat(),
+            "summary": {
+                "total": len(outcomes),
+                "passed": statuses.count(OutcomeStatus.PASS),
+                "failed": statuses.count(OutcomeStatus.FAIL),
+                "errors": statuses.count(OutcomeStatus.ERROR),
+                "skipped_unsupported": statuses.count(OutcomeStatus.SKIP_UNSUPPORTED),
+            },
+            "results": [outcome.to_data() for outcome in outcomes],
+        }
+
+    def _save_feature_outcomes(
+        self,
+        outcomes: tuple[RunOutcome, ...],
+        output_path: str,
+        format: str,
+    ) -> None:
+        """Atomically save generic outcomes; reporting failure fails the run."""
+        if format not in {"json", "yaml"}:
+            raise ValueError(f"Unsupported output format: {format}")
+
+        output = Path(output_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=output.parent,
+                prefix=f".{output.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+                report = self._feature_report(outcomes)
+                if format == "json":
+                    json.dump(report, temporary, indent=2, allow_nan=False)
+                    temporary.write("\n")
+                else:
+                    yaml.safe_dump(
+                        report,
+                        temporary,
+                        default_flow_style=False,
+                        sort_keys=False,
+                    )
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.replace(temporary_path, output)
+        except BaseException:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
+
+        print(f"\nResults saved to {output_path}")
+
     def _save_results(self, results: list, output_path: str, format: str):
         """Save test results to file"""
         try:
@@ -513,6 +859,16 @@ class FuzzerCLI:
         return validation_data
 
 
+def _positive_seconds(value: str) -> float:
+    try:
+        seconds = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a number greater than zero") from exc
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise argparse.ArgumentTypeError("must be a finite number greater than zero")
+    return seconds
+
+
 def create_parser() -> argparse.ArgumentParser:
     """Create argument parser for CLI"""
     parser = argparse.ArgumentParser(
@@ -523,6 +879,9 @@ def create_parser() -> argparse.ArgumentParser:
 Examples:
   # Run a topology scenario from DSL
   valkey-fuzzer run examples/standalone_scenario.yaml
+
+  # Run a v3 feature pack from an explicit manifest directory
+  valkey-fuzzer run scenario.yaml --feature-pack-dir ./feature-packs
 
   # Run a random cluster test
   valkey-fuzzer cluster --random
@@ -558,6 +917,36 @@ Examples:
     run_parser = subparsers.add_parser("run", help="Run a standalone, replication, or cluster DSL scenario")
     run_parser.add_argument("file", help="Path to DSL YAML file")
     run_parser.add_argument("--valkey-binary", type=str, help="Path to the valkey-server binary to run")
+    run_parser.add_argument(
+        "--feature-pack-dir",
+        dest="feature_pack_dirs",
+        action="append",
+        default=[],
+        metavar="DIR",
+        help="Directory containing v3 feature-pack manifests; may be repeated",
+    )
+    run_parser.add_argument(
+        "--no-plugins",
+        action="store_true",
+        help="Disable trusted installed plugins from the valkey_fuzzer.plugins entry-point group",
+    )
+    run_parser.add_argument(
+        "--artifact-dir",
+        default="",
+        metavar="DIR",
+        help="Directory exposed to v3 components for run artifacts",
+    )
+    run_parser.add_argument(
+        "--timeout",
+        type=_positive_seconds,
+        metavar="SECONDS",
+        help="Cooperative v3 run deadline in seconds",
+    )
+    run_parser.add_argument(
+        "--allow-unsupported",
+        action="store_true",
+        help="Return success when a required v3 capability reports unsupported",
+    )
     run_parser.add_argument("--output", type=str, help="Path to save test results")
     run_parser.add_argument(
         "--format", choices=["json", "yaml"], default="json", help="Output format for results (default: json)"
@@ -586,6 +975,20 @@ Examples:
     # Validate command
     validate_parser = subparsers.add_parser("validate", help="Validate a DSL configuration file")
     validate_parser.add_argument("file", help="Path to DSL YAML file")
+    validate_parser.add_argument("--valkey-binary", type=str, help="Override the v3 topology's Valkey binary")
+    validate_parser.add_argument(
+        "--feature-pack-dir",
+        dest="feature_pack_dirs",
+        action="append",
+        default=[],
+        metavar="DIR",
+        help="Directory containing v3 feature-pack manifests; may be repeated",
+    )
+    validate_parser.add_argument(
+        "--no-plugins",
+        action="store_true",
+        help="Disable trusted installed plugins from the valkey_fuzzer.plugins entry-point group",
+    )
     validate_parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
 
     # Cleanup logs command
@@ -640,6 +1043,7 @@ def main():
                         "output": args.output,
                         "format": args.format,
                         "verbose": args.verbose,
+                        "legacy_only": True,
                     },
                 )
                 return cli.run_dsl_test(dsl_args)

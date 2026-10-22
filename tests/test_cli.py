@@ -3,12 +3,27 @@ Tests for CLI functionality
 """
 
 import json
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest
 import yaml
 
 from src.cli import FuzzerCLI, create_parser, main
+from src.extensibility import (
+    ComponentKind,
+    ComponentRegistration,
+    ComponentResult,
+    ComponentStatus,
+    Evidence,
+    OutcomeStatus,
+    PluginManifest,
+    RunMode,
+    RunOutcome,
+    RunPlan,
+)
+from src.feature_runner import ProvisionedTopology
 from src.models import ChaosResult, ClusterConfig, ExecutionResult, TopologyType
 
 
@@ -32,6 +47,28 @@ def mock_result():
             )
         ],
         seed=42,
+    )
+
+
+def feature_outcome(status: OutcomeStatus = OutcomeStatus.PASS) -> RunOutcome:
+    plan = RunPlan(
+        scenario_id="feature-scenario",
+        pack_id="tests.feature",
+        pack_version="1",
+        api_version="v1",
+        seed=123,
+        topology="standalone",
+        components=(),
+        mode=RunMode.TOPOLOGY_SMOKE,
+        topology_document={"type": "standalone", "base_port": 7400},
+        scenario_api_version="v3",
+    )
+    return RunOutcome(
+        plan=plan,
+        status=status,
+        summary=f"{status.value.lower()} result",
+        started_at=10.0,
+        ended_at=12.5,
     )
 
 
@@ -214,7 +251,7 @@ class TestFuzzerCLI:
         dsl_file.write_text("scenario:\n  id: test\n")
 
         mock_dsl_config = Mock()
-        mock_loader.load_from_file.return_value = mock_dsl_config
+        mock_loader.load_from_string.return_value = mock_dsl_config
 
         mock_fuzzer = Mock()
         mock_fuzzer.run_dsl_test.return_value = mock_result
@@ -226,7 +263,7 @@ class TestFuzzerCLI:
         result = cli.run_dsl_test(args)
 
         assert result == 0
-        mock_loader.load_from_file.assert_called_once_with(str(dsl_file))
+        mock_loader.load_from_string.assert_called_once_with(dsl_file.read_text())
         mock_fuzzer.run_dsl_test.assert_called_once_with(mock_dsl_config)
 
     @patch("src.cli.ClusterBusFuzzer")
@@ -261,7 +298,7 @@ class TestFuzzerCLI:
         dsl_file.write_text("scenario:\n  id: test\n")
 
         mock_dsl_config = Mock()
-        mock_loader.load_from_file.return_value = mock_dsl_config
+        mock_loader.load_from_string.return_value = mock_dsl_config
 
         mock_fuzzer = Mock()
         mock_fuzzer.run_dsl_test.return_value = mock_result
@@ -274,6 +311,510 @@ class TestFuzzerCLI:
 
         assert result == 0
         mock_fuzzer.run_dsl_test.assert_called_once_with(mock_dsl_config, valkey_binary="/tmp/valkey/src/valkey-server")
+
+    @pytest.mark.parametrize(
+        ("status", "allow_unsupported", "expected_exit"),
+        [
+            (OutcomeStatus.PASS, False, 0),
+            (OutcomeStatus.FAIL, False, 1),
+            (OutcomeStatus.ERROR, False, 2),
+            (OutcomeStatus.SKIP_UNSUPPORTED, False, 3),
+            (OutcomeStatus.SKIP_UNSUPPORTED, True, 0),
+        ],
+    )
+    @patch("src.cli.FeatureRuntime")
+    @patch("src.cli.ClusterBusFuzzer")
+    def test_run_v3_routes_to_generic_runtime_and_maps_exit_status(
+        self,
+        mock_fuzzer_class,
+        mock_runtime_class,
+        status,
+        allow_unsupported,
+        expected_exit,
+        tmp_path,
+    ):
+        dsl_file = tmp_path / "feature.yaml"
+        dsl_file.write_text(
+            """
+api_version: v3
+scenario_id: feature-scenario
+seed: 123
+feature:
+  use: tests.feature
+  version: "1"
+  with: {}
+topology:
+  type: standalone
+"""
+        )
+        outcome = feature_outcome(status)
+        runtime = mock_runtime_class.return_value
+        runtime.compile.return_value = outcome.plan
+        runtime.run_plan.return_value = outcome
+        args = SimpleNamespace(
+            file=str(dsl_file),
+            valkey_binary="/tmp/valkey-server",
+            feature_pack_dirs=["packs-a", "packs-b"],
+            no_plugins=True,
+            artifact_dir="/tmp/artifacts",
+            timeout=None,
+            allow_unsupported=allow_unsupported,
+            output=None,
+            format="json",
+            verbose=False,
+        )
+
+        result = FuzzerCLI().run_dsl_test(args)
+
+        assert result == expected_exit
+        mock_runtime_class.assert_called_once_with(
+            feature_pack_directories=("packs-a", "packs-b"),
+            discover_entry_points=False,
+            artifact_dir="/tmp/artifacts",
+        )
+        compiled_document = runtime.compile.call_args.args[0]
+        assert compiled_document["api_version"] == "v3"
+        runtime.compile.assert_called_once_with(
+            compiled_document,
+            topology_overrides={"valkey_binary": "/tmp/valkey-server"},
+        )
+        runtime.run_plan.assert_called_once_with(outcome.plan, deadline=None)
+        mock_fuzzer_class.assert_not_called()
+
+    @patch("src.cli.time.monotonic", return_value=100.0)
+    @patch("src.cli.FeatureRuntime")
+    def test_run_v3_converts_relative_timeout_to_absolute_deadline(
+        self,
+        mock_runtime_class,
+        mock_monotonic,
+        tmp_path,
+    ):
+        dsl_file = tmp_path / "feature.yaml"
+        dsl_file.write_text(
+            "api_version: v3\nscenario_id: feature-scenario\nseed: 1\n"
+            "feature: {use: tests.feature, version: '1', with: {}}\n"
+            "topology: {type: standalone}\n"
+        )
+        outcome = feature_outcome()
+        runtime = mock_runtime_class.return_value
+        runtime.compile.return_value = outcome.plan
+        runtime.run_plan.return_value = outcome
+        args = SimpleNamespace(
+            file=str(dsl_file),
+            valkey_binary=None,
+            feature_pack_dirs=[],
+            no_plugins=False,
+            artifact_dir="",
+            timeout=5.5,
+            allow_unsupported=False,
+            output=None,
+            format="json",
+            verbose=False,
+        )
+
+        assert FuzzerCLI().run_dsl_test(args) == 0
+        runtime.run_plan.assert_called_once_with(outcome.plan, deadline=105.5)
+        mock_monotonic.assert_called_once_with()
+
+    @patch("src.cli.ClusterBusFuzzer")
+    def test_v3_cli_executes_discovered_plugin_and_directory_manifest_end_to_end(
+        self,
+        mock_fuzzer_class,
+        tmp_path,
+        monkeypatch,
+    ):
+        calls = []
+
+        class PassingAction:
+            def run(self, context, spec):
+                calls.append("action.run")
+                return ComponentResult(
+                    component_instance_id=spec.instance_id,
+                    status=ComponentStatus.PASS,
+                    summary="feature path activated",
+                    evidence=(
+                        Evidence(
+                            evidence_id="tests.path-used",
+                            source=spec.instance_id,
+                            phase="activation",
+                            observed_at=1.0,
+                            value={"used": True},
+                        ),
+                    ),
+                )
+
+        class EvidenceOracle:
+            def evaluate(self, context, spec, evidence):
+                calls.append("oracle.evaluate")
+                observed = any(item.evidence_id == "tests.path-used" for item in evidence)
+                return ComponentResult(
+                    component_instance_id=spec.instance_id,
+                    status=ComponentStatus.PASS if observed else ComponentStatus.FAIL,
+                    summary="required path evidence observed" if observed else "path evidence missing",
+                )
+
+        class Provider:
+            def validate(self, plan):
+                calls.append("provider.validate")
+
+            def provision(self, context):
+                calls.append("provider.provision")
+                return ProvisionedTopology()
+
+            def rollback(self, context):
+                calls.append("provider.rollback")
+
+            def cleanup(self, context, topology):
+                calls.append("provider.cleanup")
+
+        plugin = PluginManifest(
+            plugin_id="tests.cli-plugin",
+            api_version="v1",
+            registrations=(
+                ComponentRegistration[Any](
+                    component_id="tests.action",
+                    kind=ComponentKind.ACTION,
+                    api_version="v1",
+                    factory=PassingAction,
+                ),
+                ComponentRegistration[Any](
+                    component_id="tests.oracle",
+                    kind=ComponentKind.ORACLE,
+                    api_version="v1",
+                    factory=EvidenceOracle,
+                ),
+            ),
+        )
+
+        class EntryPoint:
+            name = "tests.cli-plugin"
+            value = "tests.cli:plugin"
+            dist = SimpleNamespace(name="test-plugin-distribution")
+
+            @staticmethod
+            def load():
+                return plugin
+
+        class EntryPoints:
+            @staticmethod
+            def select(*, group):
+                assert group == "valkey_fuzzer.plugins"
+                return (EntryPoint(),)
+
+        monkeypatch.setattr(
+            "src.extensibility.importlib_metadata.entry_points",
+            EntryPoints,
+        )
+        monkeypatch.setattr(
+            "src.feature_runtime.local_topology_provider_factories",
+            lambda coordinator_factory: {"standalone": Provider},
+        )
+
+        pack_dir = tmp_path / "packs"
+        pack_dir.mkdir()
+        (pack_dir / "feature.yaml").write_text(
+            """
+api_version: v1
+pack_id: tests.cli-feature
+version: "1"
+mode: feature
+supported_topologies: [standalone]
+components:
+  - kind: action
+    component_id: tests.action
+    instance_id: activate
+  - kind: oracle
+    component_id: tests.oracle
+    instance_id: verify
+    depends_on: [activate]
+required_events: [action.completed, oracle.completed]
+required_evidence:
+  - evidence_id: tests.path-used
+    source: activate
+""",
+            encoding="utf-8",
+        )
+        scenario = tmp_path / "scenario.yaml"
+        scenario.write_text(
+            """
+api_version: v3
+scenario_id: plugin-feature
+seed: 77
+feature:
+  use: tests.cli-feature
+  version: "1"
+  with: {}
+topology:
+  type: standalone
+""",
+            encoding="utf-8",
+        )
+        report_path = tmp_path / "result.json"
+        args = SimpleNamespace(
+            file=str(scenario),
+            valkey_binary=None,
+            feature_pack_dirs=[str(pack_dir)],
+            no_plugins=False,
+            artifact_dir="",
+            timeout=None,
+            allow_unsupported=False,
+            output=str(report_path),
+            format="json",
+            verbose=False,
+        )
+
+        assert FuzzerCLI().run_dsl_test(args) == 0
+        assert calls == [
+            "provider.validate",
+            "provider.provision",
+            "action.run",
+            "oracle.evaluate",
+            "provider.cleanup",
+        ]
+        mock_fuzzer_class.assert_not_called()
+
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        outcome = RunOutcome.from_data(report["results"][0])
+        assert outcome.status is OutcomeStatus.PASS
+        assert outcome.plan.pack_id == "tests.cli-feature"
+        assert [result.component_instance_id for result in outcome.component_results] == [
+            "activate",
+            "verify",
+        ]
+        assert outcome.all_evidence[0].evidence_id == "tests.path-used"
+        assert outcome.diagnostics["committed_events"]
+
+    @patch("src.cli.FeatureRuntime")
+    @patch("src.cli.ClusterBusFuzzer")
+    def test_duplicate_v3_yaml_fails_before_runtime_or_legacy_execution(
+        self,
+        mock_fuzzer_class,
+        mock_runtime_class,
+        tmp_path,
+    ):
+        dsl_file = tmp_path / "duplicate.yaml"
+        dsl_file.write_text(
+            "api_version: v3\napi_version: v3\nscenario_id: duplicate\n"
+            "seed: 1\nfeature: {use: tests.feature, version: '1', with: {}}\n"
+            "topology: {type: standalone}\n"
+        )
+        args = SimpleNamespace(file=str(dsl_file), verbose=False)
+
+        assert FuzzerCLI().run_dsl_test(args) == 2
+        mock_runtime_class.assert_not_called()
+        mock_fuzzer_class.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "versions",
+        [
+            ("v4", "v4"),
+            ("v2", "v4"),
+            ("v4", "v2"),
+        ],
+    )
+    @patch("src.cli.FeatureRuntime")
+    @patch("src.cli.ClusterBusFuzzer")
+    def test_duplicate_nonlegacy_api_versions_are_unsafe_routing_errors(
+        self,
+        mock_fuzzer_class,
+        mock_runtime_class,
+        versions,
+        tmp_path,
+    ):
+        dsl_file = tmp_path / "duplicate-unknown.yaml"
+        dsl_file.write_text(
+            f"api_version: {versions[0]}\napi_version: {versions[1]}\n"
+            "scenario_id: duplicate\nseed: 1\n"
+            "topology: {type: standalone}\noperations: []\n"
+        )
+
+        assert FuzzerCLI().run_dsl_test(SimpleNamespace(file=str(dsl_file), verbose=False)) == 2
+        mock_runtime_class.assert_not_called()
+        mock_fuzzer_class.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "api_declaration",
+        [
+            "api_version: [v3]\n",
+            "api_version: {major: 3}\n",
+            "api_version: v3\napi_version: [v2]\n",
+        ],
+    )
+    @patch("src.cli.FeatureRuntime")
+    @patch("src.cli.ClusterBusFuzzer")
+    def test_non_scalar_api_versions_are_unsafe_routing_errors(
+        self,
+        mock_fuzzer_class,
+        mock_runtime_class,
+        api_declaration,
+        tmp_path,
+    ):
+        dsl_file = tmp_path / "invalid-api.yaml"
+        dsl_file.write_text(
+            api_declaration + "scenario_id: invalid\nseed: 1\ntopology: {type: standalone}\noperations: []\n"
+        )
+
+        assert FuzzerCLI().run_dsl_test(SimpleNamespace(file=str(dsl_file), verbose=False)) == 2
+        mock_runtime_class.assert_not_called()
+        mock_fuzzer_class.assert_not_called()
+
+    @patch("src.cli.FeatureRuntime")
+    @patch("src.cli.ClusterBusFuzzer")
+    @patch("src.cli.DSLLoader")
+    def test_legacy_scenario_never_bootstraps_plugins(
+        self,
+        mock_loader,
+        mock_fuzzer_class,
+        mock_runtime_class,
+        mock_result,
+        tmp_path,
+    ):
+        dsl_file = tmp_path / "legacy.yaml"
+        dsl_file.write_text(
+            "api_version: v2\nscenario_id: legacy\nseed: 1\ntopology: {type: standalone}\noperations: []\n"
+        )
+        mock_loader.load_from_string.return_value = Mock()
+        mock_fuzzer_class.return_value.run_dsl_test.return_value = mock_result
+        args = SimpleNamespace(
+            file=str(dsl_file),
+            valkey_binary=None,
+            output=None,
+            verbose=False,
+        )
+
+        assert FuzzerCLI().run_dsl_test(args) == 0
+        mock_runtime_class.assert_not_called()
+
+    @patch("src.cli.FeatureRuntime")
+    @patch("src.cli.ClusterBusFuzzer")
+    @patch("src.cli.DSLLoader")
+    def test_legacy_yaml_merge_override_preserves_previous_loading_semantics(
+        self,
+        mock_loader,
+        mock_fuzzer_class,
+        mock_runtime_class,
+        mock_result,
+        tmp_path,
+    ):
+        dsl_file = tmp_path / "legacy-merge.yaml"
+        source = """
+api_version: v2
+scenario_id: legacy-merge
+seed: 1
+topology:
+  <<: &defaults
+    type: replication
+    replicas_per_shard: 1
+  type: standalone
+operations: []
+"""
+        dsl_file.write_text(source)
+        mock_loader.load_from_string.return_value = Mock()
+        mock_fuzzer_class.return_value.run_dsl_test.return_value = mock_result
+        args = SimpleNamespace(
+            file=str(dsl_file),
+            valkey_binary=None,
+            output=None,
+            verbose=False,
+        )
+
+        assert FuzzerCLI().run_dsl_test(args) == 0
+        mock_loader.load_from_string.assert_called_once_with(source)
+        mock_runtime_class.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "versions",
+        [
+            ("v2", "v2"),
+            ("v1", "v2"),
+        ],
+    )
+    @patch("src.cli.FeatureRuntime")
+    @patch("src.cli.ClusterBusFuzzer")
+    @patch("src.cli.DSLLoader")
+    def test_duplicate_legacy_api_versions_preserve_last_key_wins_loading(
+        self,
+        mock_loader,
+        mock_fuzzer_class,
+        mock_runtime_class,
+        versions,
+        mock_result,
+        tmp_path,
+    ):
+        source = (
+            f"api_version: {versions[0]}\n"
+            f"api_version: {versions[1]}\n"
+            "scenario_id: legacy\nseed: 1\n"
+            "topology: {type: standalone}\noperations: []\n"
+        )
+        dsl_file = tmp_path / "duplicate-legacy-version.yaml"
+        dsl_file.write_text(source)
+        mock_loader.load_from_string.return_value = Mock()
+        mock_fuzzer_class.return_value.run_dsl_test.return_value = mock_result
+        args = SimpleNamespace(
+            file=str(dsl_file),
+            valkey_binary=None,
+            output=None,
+            verbose=False,
+        )
+
+        assert FuzzerCLI().run_dsl_test(args) == 0
+        mock_loader.load_from_string.assert_called_once_with(source)
+        mock_runtime_class.assert_not_called()
+
+    @patch("src.cli.ClusterBusFuzzer")
+    def test_malformed_legacy_run_preserves_failure_exit_code(
+        self,
+        mock_fuzzer_class,
+        tmp_path,
+    ):
+        dsl_file = tmp_path / "broken-v2.yaml"
+        dsl_file.write_text("api_version: v2\ntopology: [\n")
+
+        assert FuzzerCLI().run_dsl_test(SimpleNamespace(file=str(dsl_file), verbose=False)) == 1
+        mock_fuzzer_class.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("option", "value"),
+        [
+            ("feature_pack_dirs", ["packs"]),
+            ("no_plugins", True),
+            ("artifact_dir", "artifacts"),
+            ("timeout", 1.0),
+            ("allow_unsupported", True),
+        ],
+    )
+    @patch("src.cli.FeatureRuntime")
+    @patch("src.cli.ClusterBusFuzzer")
+    def test_legacy_scenario_rejects_v3_only_run_options(
+        self,
+        mock_fuzzer_class,
+        mock_runtime_class,
+        option,
+        value,
+        tmp_path,
+    ):
+        dsl_file = tmp_path / "legacy.yaml"
+        dsl_file.write_text(
+            "api_version: v2\nscenario_id: legacy\nseed: 1\ntopology: {type: standalone}\noperations: []\n"
+        )
+        values = {
+            "file": str(dsl_file),
+            "valkey_binary": None,
+            "feature_pack_dirs": [],
+            "no_plugins": False,
+            "artifact_dir": "",
+            "timeout": None,
+            "allow_unsupported": False,
+            "output": None,
+            "format": "json",
+            "verbose": False,
+        }
+        values[option] = value
+
+        assert FuzzerCLI().run_dsl_test(SimpleNamespace(**values)) == 2
+        mock_runtime_class.assert_not_called()
+        mock_fuzzer_class.assert_not_called()
 
     @patch("src.cli.ClusterBusFuzzer")
     def test_run_dsl_test_file_not_found(self, mock_fuzzer_class, capsys):
@@ -297,7 +838,7 @@ class TestFuzzerCLI:
         )
 
         mock_dsl_config = Mock(config_text="test config")
-        mock_loader.load_from_file.return_value = mock_dsl_config
+        mock_loader.load_from_string.return_value = mock_dsl_config
 
         mock_scenario = Mock(
             scenario_id="test-123",
@@ -328,7 +869,7 @@ class TestFuzzerCLI:
         dsl_file = tmp_path / "replication.yaml"
         dsl_file.write_text("api_version: v2\ntopology:\n  type: replication\n")
 
-        mock_loader.load_from_file.return_value = Mock(config_text="test config")
+        mock_loader.load_from_string.return_value = Mock(config_text="test config")
         mock_scenario = Mock(
             scenario_id="replication-test",
             api_version="v2",
@@ -360,7 +901,7 @@ class TestFuzzerCLI:
         """Test zero-operation scenarios do not imply that chaos will run."""
         dsl_file = tmp_path / "standalone.yaml"
         dsl_file.write_text("api_version: v2\ntopology:\n  type: standalone\n")
-        mock_loader.load_from_file.return_value = Mock(config_text="test config")
+        mock_loader.load_from_string.return_value = Mock(config_text="test config")
         mock_generator = Mock()
         mock_generator.parse_dsl_config.return_value = Mock(
             scenario_id="standalone-test",
@@ -380,6 +921,90 @@ class TestFuzzerCLI:
 
         assert result == 0
         assert "Chaos: disabled (no operations)" in capsys.readouterr().out
+
+    @patch("src.cli.ClusterBusFuzzer")
+    @patch("src.cli.FeatureRuntime")
+    def test_validate_v3_compiles_and_preflights_without_execution(
+        self,
+        mock_runtime_class,
+        mock_fuzzer_class,
+        tmp_path,
+        capsys,
+    ):
+        dsl_file = tmp_path / "feature.yaml"
+        dsl_file.write_text(
+            "api_version: v3\nscenario_id: feature-scenario\nseed: 1\n"
+            "feature: {use: tests.feature, version: '1', with: {}}\n"
+            "topology: {type: standalone}\n"
+        )
+        outcome = feature_outcome()
+        runtime = mock_runtime_class.return_value
+        runtime.compile.return_value = outcome.plan
+        args = SimpleNamespace(
+            file=str(dsl_file),
+            valkey_binary="/tmp/valkey-server",
+            feature_pack_dirs=["packs"],
+            no_plugins=True,
+            verbose=True,
+        )
+
+        result = FuzzerCLI().validate_dsl(args)
+
+        assert result == 0
+        runtime.compile.assert_called_once()
+        assert runtime.compile.call_args.kwargs["topology_overrides"] == {"valkey_binary": "/tmp/valkey-server"}
+        runtime.validate_plan.assert_called_once_with(outcome.plan)
+        runtime.run_plan.assert_not_called()
+        mock_fuzzer_class.assert_not_called()
+        output = capsys.readouterr().out
+        assert "Structural topology preflight completed without provisioning" in output
+        assert "Component factories were not instantiated" in output
+        assert "Valkey binary availability was not checked" in output
+        assert "tests.feature@1" in output
+
+    @pytest.mark.parametrize(
+        ("option", "value"),
+        [
+            ("feature_pack_dirs", ["packs"]),
+            ("no_plugins", True),
+            ("valkey_binary", "/tmp/valkey-server"),
+        ],
+    )
+    @patch("src.cli.FeatureRuntime")
+    @patch("src.cli.DSLLoader")
+    @patch("src.cli.ScenarioGenerator")
+    def test_validate_legacy_rejects_v3_only_options(
+        self,
+        mock_generator_class,
+        mock_loader,
+        mock_runtime_class,
+        option,
+        value,
+        tmp_path,
+    ):
+        dsl_file = tmp_path / "legacy.yaml"
+        dsl_file.write_text(
+            "api_version: v2\nscenario_id: legacy\nseed: 1\ntopology: {type: standalone}\noperations: []\n"
+        )
+        values = {
+            "file": str(dsl_file),
+            "valkey_binary": None,
+            "feature_pack_dirs": [],
+            "no_plugins": False,
+            "verbose": False,
+        }
+        values[option] = value
+
+        assert FuzzerCLI().validate_dsl(SimpleNamespace(**values)) == 2
+        mock_runtime_class.assert_not_called()
+        mock_loader.load_from_string.assert_not_called()
+        mock_generator_class.assert_not_called()
+
+    def test_malformed_legacy_validation_preserves_failure_exit_code(self, tmp_path):
+        dsl_file = tmp_path / "broken-v2.yaml"
+        dsl_file.write_text("api_version: v2\ntopology: [\n")
+
+        assert FuzzerCLI().validate_dsl(SimpleNamespace(file=str(dsl_file), verbose=False)) == 1
 
     def test_format_topology_summary_singular_replica(self):
         """Test topology summaries use singular grammar for one replica."""
@@ -404,6 +1029,57 @@ class TestFuzzerCLI:
         assert result_dict["operations_executed"] == 3
         assert result_dict["chaos_events"] == 1
         assert result_dict["seed"] == 42
+
+    @pytest.mark.parametrize("format", ["json", "yaml"])
+    def test_generic_report_round_trips_complete_outcome(self, format, tmp_path):
+        outcome = feature_outcome(OutcomeStatus.SKIP_UNSUPPORTED)
+        output_file = tmp_path / f"result.{format}"
+
+        FuzzerCLI()._save_feature_outcomes((outcome,), str(output_file), format)
+
+        with output_file.open(encoding="utf-8") as report_file:
+            report = json.load(report_file) if format == "json" else yaml.safe_load(report_file)
+        assert report["report_api_version"] == "v1"
+        assert report["summary"] == {
+            "total": 1,
+            "passed": 0,
+            "failed": 0,
+            "errors": 0,
+            "skipped_unsupported": 1,
+        }
+        assert RunOutcome.from_data(report["results"][0]) == outcome
+
+    @patch("src.cli.FeatureRuntime")
+    def test_v3_report_write_failure_returns_harness_error(
+        self,
+        mock_runtime_class,
+        tmp_path,
+    ):
+        dsl_file = tmp_path / "feature.yaml"
+        dsl_file.write_text(
+            "api_version: v3\nscenario_id: feature-scenario\nseed: 1\n"
+            "feature: {use: tests.feature, version: '1', with: {}}\n"
+            "topology: {type: standalone}\n"
+        )
+        outcome = feature_outcome()
+        runtime = mock_runtime_class.return_value
+        runtime.compile.return_value = outcome.plan
+        runtime.run_plan.return_value = outcome
+        args = SimpleNamespace(
+            file=str(dsl_file),
+            valkey_binary=None,
+            feature_pack_dirs=[],
+            no_plugins=False,
+            artifact_dir="",
+            timeout=None,
+            allow_unsupported=False,
+            output=str(tmp_path),
+            format="json",
+            verbose=False,
+        )
+
+        assert FuzzerCLI().run_dsl_test(args) == 2
+        assert not tuple(tmp_path.parent.glob(f".{tmp_path.name}.*.tmp"))
 
 
 class TestCLIParser:
@@ -469,6 +1145,55 @@ class TestCLIParser:
         assert args.output == "results.yaml"
         assert args.format == "yaml"
         assert args.verbose is True
+
+    def test_parse_v3_runtime_options(self):
+        parser = create_parser()
+        args = parser.parse_args(
+            [
+                "run",
+                "feature.yaml",
+                "--feature-pack-dir",
+                "packs-a",
+                "--feature-pack-dir",
+                "packs-b",
+                "--no-plugins",
+                "--artifact-dir",
+                "artifacts",
+                "--timeout",
+                "12.5",
+                "--allow-unsupported",
+            ]
+        )
+
+        assert args.feature_pack_dirs == ["packs-a", "packs-b"]
+        assert args.no_plugins is True
+        assert args.artifact_dir == "artifacts"
+        assert args.timeout == 12.5
+        assert args.allow_unsupported is True
+
+    def test_parse_validate_v3_runtime_options(self):
+        parser = create_parser()
+        args = parser.parse_args(
+            [
+                "validate",
+                "feature.yaml",
+                "--feature-pack-dir",
+                "packs",
+                "--no-plugins",
+                "--valkey-binary",
+                "/tmp/valkey-server",
+            ]
+        )
+
+        assert args.feature_pack_dirs == ["packs"]
+        assert args.no_plugins is True
+        assert args.valkey_binary == "/tmp/valkey-server"
+
+    @pytest.mark.parametrize("value", ["0", "-1", "nan", "inf"])
+    def test_parse_rejects_invalid_v3_timeout(self, value):
+        parser = create_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["run", "feature.yaml", "--timeout", value])
 
     def test_help_is_topology_neutral(self):
         """Test top-level help describes every supported topology."""
@@ -562,6 +1287,7 @@ class TestCLIMain:
         mock_cli.run_dsl_test.assert_called_once()
         dsl_args = mock_cli.run_dsl_test.call_args.args[0]
         assert dsl_args.valkey_binary is None
+        assert dsl_args.legacy_only is True
 
     @patch("src.cli.FuzzerCLI")
     def test_main_dsl_command_with_valkey_binary(self, mock_cli_class):

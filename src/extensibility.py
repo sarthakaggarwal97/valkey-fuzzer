@@ -1285,7 +1285,14 @@ T = TypeVar("T")
 
 @dataclass(frozen=True)
 class ComponentRegistration(Generic[T]):
-    """Typed factory plus compatibility metadata stored by a registry."""
+    """Typed factory plus compatibility metadata stored by a registry.
+
+    Factories MUST only construct in-memory component state; external resource
+    acquisition belongs in component lifecycle methods. Validators MUST be
+    deterministic, side-effect-free, idempotent, and re-entrant because the
+    compiler, explicit validation, and execution preflight may invoke them
+    independently.
+    """
 
     component_id: str
     kind: ComponentKind
@@ -1333,10 +1340,18 @@ class Registry(Generic[T]):
     """Thread-safe, typed registry for one component kind and API version."""
 
     def __init__(self, kind: ComponentKind, api_version: str = EXTENSION_API_VERSION):
-        self.kind = ComponentKind(kind)
-        self.api_version = _require_text(api_version, "api_version")
+        self._kind = ComponentKind(kind)
+        self._api_version = _require_text(api_version, "api_version")
         self._registrations: dict[str, ComponentRegistration[T]] = {}
         self._lock = threading.RLock()
+
+    @property
+    def kind(self) -> ComponentKind:
+        return self._kind
+
+    @property
+    def api_version(self) -> str:
+        return self._api_version
 
     def _validate_many(self, registrations: Sequence[ComponentRegistration[T]]) -> None:
         seen = set()

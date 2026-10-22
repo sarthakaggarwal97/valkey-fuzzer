@@ -180,7 +180,7 @@ only selecting server configuration. A proposed artifact layer names immutable
 binaries and then assigns them globally, by role, or by exact node:
 
 ```yaml
-# Proposed feature-pack DSL; not accepted by the current parser yet.
+# Proposed artifact-provider extension; the current v3 envelope does not accept it yet.
 artifacts:
   old:
     binary: /opt/valkey-old/src/valkey-server
@@ -329,10 +329,15 @@ registries, lifecycle event journal, uniform outcomes, and trusted Python
 entry-point discovery in `src/extensibility.py`. They deliberately do not yet
 alter the v1/v2 execution path.
 
-The generic pack compiler, runner, and local topology provider now exist as an
-isolated programmatic path. The remaining integration is CLI/reporting wiring,
-built-in reusable components, and complete feature packs. The v3 scenario
-envelope remains stable as features are added:
+The generic pack compiler, runner, and local topology provider now have a
+CLI-facing runtime. The `run` and `validate` commands dispatch v3 scenarios to
+that runtime while v1/v2 remain on the legacy engine. This completes the basic
+CLI slice only. Reusable built-ins, mandatory baseline safety oracles,
+provenance, managed artifact/resource providers, per-node binaries, and
+complete feature packs remain pending. The core v3 envelope is intentionally
+small and versioned; future resources and artifacts may require an additive
+extension or a later scenario API rather than feature-specific top-level
+branches:
 
 ```yaml
 api_version: v3
@@ -350,6 +355,32 @@ topology:
   type: standalone
   base_port: 7400
 ```
+
+Explicit manifests are loaded from repeatable `--feature-pack-dir` options,
+then trusted installed code is discovered from the `valkey_fuzzer.plugins`
+entry-point group. Plugin discovery can be disabled:
+
+```bash
+valkey-fuzzer validate scenario.yaml \
+  --feature-pack-dir ./feature-packs \
+  --no-plugins
+
+valkey-fuzzer run scenario.yaml \
+  --feature-pack-dir ./feature-packs \
+  --output result.json
+```
+
+Validation compiles the complete plan, runs component validation hooks, and
+calls the selected topology provider's pure `validate` contract. It does not
+construct component instances, provision a topology, resolve the Valkey binary,
+or prove environment readiness. Provider factories, component factories, and
+validators are contractually side-effect-free; validators are also
+deterministic, idempotent, and re-entrant because compilation and execution
+preflight may both invoke them. Execution returns the uniform `PASS`, `FAIL`,
+`SKIP_UNSUPPORTED`, or `ERROR` outcome and serializes the complete plan,
+component results, evidence, and diagnostics through the same generic reporter.
+Plugin distribution versions, manifest digests, and tested-binary digests are
+not yet included, so the report is not a complete reproducer.
 
 The v3 parser validates only this envelope. The selected feature pack validates
 the opaque `feature.with` values and compiles them into a `RunPlan`; registered
@@ -382,10 +413,13 @@ Discovery must:
 - record pack, plugin, component, and tested-binary versions or digests in the
   reproducer
 
-Every component receives a narrow run context: structured node selection,
-client access, deterministic per-component randomness, named events, an
-evidence/artifact store, workload ledger, deadlines/cancellation, cleanup
-registration, and logging. Plugins do not import the current engine internals.
+The current narrow run context exposes the immutable plan, lifecycle event bus,
+deterministic per-component randomness, named topology services, a raw artifact
+directory path, and a cooperative deadline. Structured node selection and
+client access are currently provided through topology services. A managed
+evidence/artifact store, workload ledger, cancellation token, cleanup
+registration, and structured logging remain target additions. Plugins do not
+import the current engine internals.
 
 ## Resources beyond Valkey nodes
 
@@ -545,7 +579,7 @@ preserving both path evidence and the violated invariant.
 4. Add the generic lifecycle runner and local standalone/replication/cluster
    provider. **Implemented and unit tested.**
 5. Wire v3 compilation/execution/result reporting into the CLI and add a legacy
-   compatibility adapter.
+   compatibility adapter. **Implemented and unit tested.**
 6. Wrap current failover, process kill, and state validations as built-in
    components.
 7. Build a vertical forkless-save pack for standalone: managed mutation
@@ -568,3 +602,8 @@ The extensibility milestone is complete only when two tests pass:
 2. A separately packaged wheel contributes a new entry-point component, a
    manifest uses it, and the same unmodified execution path runs and reports
    the scenario.
+
+These final gates remain pending. Current in-process acceptance coverage proves
+the unchanged CLI-to-plugin-to-provider-to-report path, but there are no
+reusable built-in components for a manifest-only feature and no isolated
+installed-wheel subprocess test yet.

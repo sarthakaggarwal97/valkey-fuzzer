@@ -58,6 +58,10 @@ class ProvisionedTopology:
 class TopologyProvider(Protocol):
     """Topology lifecycle contract used by the generic runner.
 
+    Provider factories and provider constructors MUST only create in-memory
+    ownership state. External acquisition belongs in ``provision`` so failed
+    validation never needs lifecycle cleanup.
+
     ``validate`` is pure and must not create processes, files, sockets, or
     other externally visible state.  If ``provision`` fails or returns an
     invalid value, the runner invokes ``rollback``.  Once a valid topology is
@@ -92,6 +96,20 @@ class _ResolvedComponent:
     registry: Registry[Any]
     registration: ComponentRegistration[Any]
     instance: Any
+
+
+@dataclass(frozen=True)
+class _ValidatedComponent:
+    spec: ComponentSpec
+    registry: Registry[Any]
+    registration: ComponentRegistration[Any]
+
+
+@dataclass(frozen=True)
+class _PreparedPlan:
+    ordered: tuple[ComponentSpec, ...]
+    effective_required: frozenset[str]
+    provider: TopologyProvider
 
 
 @dataclass(frozen=True)
@@ -419,6 +437,99 @@ class FeatureRunner:
             ended_at=self._clock(),
         )
 
+    def _validate_component_registration(
+        self,
+        plan: RunPlan,
+        spec: ComponentSpec,
+    ) -> _ValidatedComponent:
+        registry = self._registries.get(spec.kind)
+        if registry is None:
+            raise FeatureRunnerError(f"no registry is configured for component kind {spec.kind.value!r}")
+        if registry.api_version != plan.api_version:
+            raise FeatureRunnerError(
+                f"registry for {spec.kind.value!r} uses API {registry.api_version!r}, expected {plan.api_version!r}"
+            )
+        try:
+            registration = registry.resolve(spec.component_id)
+        except Exception as exc:
+            raise FeatureRunnerError(
+                f"cannot resolve {spec.kind.value} component {spec.component_id!r}: {exc}"
+            ) from exc
+        if registration.kind is not spec.kind or registration.api_version != plan.api_version:
+            raise FeatureRunnerError(
+                f"registration {spec.component_id!r} is incompatible with {spec.kind.value} API {plan.api_version!r}"
+            )
+        _require_signature(
+            registration.factory,
+            (),
+            f"factory for component {spec.component_id!r}",
+        )
+        if registration.validator is not None:
+            _require_signature(
+                registration.validator,
+                (spec, plan),
+                f"validator for component {spec.component_id!r}",
+            )
+            try:
+                validation_return = registration.validator(spec, plan)
+            except Exception as exc:
+                raise FeatureRunnerError(
+                    f"component {spec.component_id!r} rejected instance {spec.instance_id!r}: {exc}"
+                ) from exc
+            if validation_return is not None:
+                raise FeatureRunnerError(f"validator for component {spec.component_id!r} must return None")
+        return _ValidatedComponent(
+            spec=spec,
+            registry=registry,
+            registration=registration,
+        )
+
+    def _validate_component_registrations(
+        self,
+        plan: RunPlan,
+        ordered: Sequence[ComponentSpec],
+    ) -> tuple[_ValidatedComponent, ...]:
+        validated = tuple(self._validate_component_registration(plan, spec) for spec in ordered)
+        self._check_registry_drift(validated)
+        return validated
+
+    def _instantiate_component(
+        self,
+        item: _ValidatedComponent,
+        context: _RunnerContext,
+    ) -> _ResolvedComponent:
+        self._check_registry_drift((item,))
+        spec = item.spec
+        registration = item.registration
+        try:
+            instance = registration.factory()
+        except Exception as exc:
+            raise FeatureRunnerError(f"factory for component {spec.component_id!r} failed: {exc}") from exc
+        protocol = _PROTOCOLS[spec.kind]
+        if isinstance(instance, type) or not isinstance(instance, protocol):
+            raise FeatureRunnerError(
+                f"factory for component {spec.component_id!r} returned "
+                f"{type(instance).__name__}, which does not implement {protocol.__name__}"
+            )
+        for method_name, extra_argument_count in _COMPONENT_METHODS[spec.kind]:
+            method = getattr(instance, method_name, None)
+            args: tuple[Any, ...] = (context, spec)
+            if extra_argument_count:
+                args += ((),)
+            _require_signature(
+                method,
+                args,
+                f"{spec.kind.value} method {spec.component_id!r}.{method_name}",
+            )
+        resolved = _ResolvedComponent(
+            spec=spec,
+            registry=item.registry,
+            registration=registration,
+            instance=instance,
+        )
+        self._check_registry_drift((resolved,))
+        return resolved
+
     def _preflight_components(
         self,
         plan: RunPlan,
@@ -427,76 +538,20 @@ class FeatureRunner:
     ) -> tuple[_ResolvedComponent, ...]:
         resolved = []
         for spec in ordered:
-            registry = self._registries.get(spec.kind)
-            if registry is None:
-                raise FeatureRunnerError(f"no registry is configured for component kind {spec.kind.value!r}")
-            if registry.api_version != plan.api_version:
-                raise FeatureRunnerError(
-                    f"registry for {spec.kind.value!r} uses API {registry.api_version!r}, expected {plan.api_version!r}"
-                )
-            try:
-                registration = registry.resolve(spec.component_id)
-            except Exception as exc:
-                raise FeatureRunnerError(
-                    f"cannot resolve {spec.kind.value} component {spec.component_id!r}: {exc}"
-                ) from exc
-            if registration.kind is not spec.kind or registration.api_version != plan.api_version:
-                raise FeatureRunnerError(
-                    f"registration {spec.component_id!r} is incompatible with "
-                    f"{spec.kind.value} API {plan.api_version!r}"
-                )
-            _require_signature(
-                registration.factory,
-                (),
-                f"factory for component {spec.component_id!r}",
-            )
-            if registration.validator is not None:
-                _require_signature(
-                    registration.validator,
-                    (spec, plan),
-                    f"validator for component {spec.component_id!r}",
-                )
-                try:
-                    validation_return = registration.validator(spec, plan)
-                except Exception as exc:
-                    raise FeatureRunnerError(
-                        f"component {spec.component_id!r} rejected instance {spec.instance_id!r}: {exc}"
-                    ) from exc
-                if validation_return is not None:
-                    raise FeatureRunnerError(f"validator for component {spec.component_id!r} must return None")
-            try:
-                instance = registration.factory()
-            except Exception as exc:
-                raise FeatureRunnerError(f"factory for component {spec.component_id!r} failed: {exc}") from exc
-            protocol = _PROTOCOLS[spec.kind]
-            if isinstance(instance, type) or not isinstance(instance, protocol):
-                raise FeatureRunnerError(
-                    f"factory for component {spec.component_id!r} returned "
-                    f"{type(instance).__name__}, which does not implement {protocol.__name__}"
-                )
-            for method_name, extra_argument_count in _COMPONENT_METHODS[spec.kind]:
-                method = getattr(instance, method_name, None)
-                args: tuple[Any, ...] = (context, spec)
-                if extra_argument_count:
-                    args += ((),)
-                _require_signature(
-                    method,
-                    args,
-                    f"{spec.kind.value} method {spec.component_id!r}.{method_name}",
-                )
+            validated = self._validate_component_registration(plan, spec)
             resolved.append(
-                _ResolvedComponent(
-                    spec=spec,
-                    registry=registry,
-                    registration=registration,
-                    instance=instance,
+                self._instantiate_component(
+                    validated,
+                    context,
                 )
             )
         self._check_registry_drift(resolved)
         return tuple(resolved)
 
     @staticmethod
-    def _check_registry_drift(resolved: Sequence[_ResolvedComponent]) -> None:
+    def _check_registry_drift(
+        resolved: Sequence[Union[_ValidatedComponent, _ResolvedComponent]],
+    ) -> None:
         for item in resolved:
             if item.registry.kind is not item.spec.kind or item.registry.api_version != item.registration.api_version:
                 raise FeatureRunnerError(f"registry drift detected for component {item.spec.component_id!r}")
@@ -506,6 +561,85 @@ class FeatureRunner:
                 raise FeatureRunnerError(f"registry drift removed component {item.spec.component_id!r}") from exc
             if current is not item.registration:
                 raise FeatureRunnerError(f"registry drift replaced component {item.spec.component_id!r}")
+
+    def _prepare_plan(
+        self,
+        plan: RunPlan,
+        context: _RunnerContext,
+    ) -> _PreparedPlan:
+        _validate_feature_mode(plan)
+        ordered = stable_topological_order(plan.components)
+        _validate_phase_dependencies(ordered)
+        effective_required = _effective_required_instances(plan)
+        provider_entry = self._topology_providers.get(plan.topology)
+        if provider_entry is None:
+            raise FeatureRunnerError(f"no topology provider is registered for {plan.topology!r}")
+
+        if not isinstance(provider_entry, type) and isinstance(provider_entry, TopologyProvider):
+            provider = provider_entry
+        else:
+            _require_signature(
+                provider_entry,
+                (),
+                f"topology provider factory for {plan.topology!r}",
+            )
+            try:
+                provider = provider_entry()
+            except Exception as exc:
+                raise FeatureRunnerError(f"topology provider factory for {plan.topology!r} failed: {exc}") from exc
+        if isinstance(provider, type) or not isinstance(provider, TopologyProvider):
+            raise FeatureRunnerError(
+                f"topology provider factory for {plan.topology!r} returned "
+                f"{type(provider).__name__}, which does not implement TopologyProvider"
+            )
+        _require_signature(
+            provider.validate,
+            (plan,),
+            f"topology provider {plan.topology!r}.validate",
+        )
+        _require_signature(
+            provider.provision,
+            (context,),
+            f"topology provider {plan.topology!r}.provision",
+        )
+        _require_signature(
+            provider.rollback,
+            (context,),
+            f"topology provider {plan.topology!r}.rollback",
+        )
+        _require_signature(
+            provider.cleanup,
+            (context, ProvisionedTopology()),
+            f"topology provider {plan.topology!r}.cleanup",
+        )
+        validation_return = provider.validate(plan)
+        if validation_return is not None:
+            raise FeatureRunnerError("topology provider validation must return None")
+
+        return _PreparedPlan(
+            ordered=ordered,
+            effective_required=effective_required,
+            provider=provider,
+        )
+
+    def validate(self, plan: RunPlan) -> None:
+        """Preflight a plan without provisioning a topology or running components.
+
+        Topology provider factories are resolved so their pure ``validate``
+        method can inspect the complete plan. Component factories are checked
+        for zero-argument compatibility but are deliberately not invoked.
+        """
+
+        if not isinstance(plan, RunPlan):
+            raise TypeError("plan must be a RunPlan")
+        context = _RunnerContext(
+            plan,
+            LifecycleEventBus(clock=self._clock),
+            self._artifact_dir,
+            None,
+        )
+        prepared = self._prepare_plan(plan, context)
+        self._validate_component_registrations(plan, prepared.ordered)
 
     def _deadline_for(self, context: _RunnerContext, spec: ComponentSpec, started_at: float) -> Optional[float]:
         if spec.timeout_s is None:
@@ -800,55 +934,10 @@ class FeatureRunner:
         event_bus.publish("run.started", source="runner", payload={"scenario_id": plan.scenario_id})
 
         try:
-            _validate_feature_mode(plan)
-            ordered = stable_topological_order(plan.components)
-            _validate_phase_dependencies(ordered)
-            effective_required = _effective_required_instances(plan)
-            provider_entry = self._topology_providers.get(plan.topology)
-            if provider_entry is None:
-                raise FeatureRunnerError(f"no topology provider is registered for {plan.topology!r}")
-
-            if not isinstance(provider_entry, type) and isinstance(provider_entry, TopologyProvider):
-                provider = provider_entry
-            else:
-                _require_signature(
-                    provider_entry,
-                    (),
-                    f"topology provider factory for {plan.topology!r}",
-                )
-                try:
-                    provider = provider_entry()
-                except Exception as exc:
-                    raise FeatureRunnerError(f"topology provider factory for {plan.topology!r} failed: {exc}") from exc
-            if isinstance(provider, type) or not isinstance(provider, TopologyProvider):
-                raise FeatureRunnerError(
-                    f"topology provider factory for {plan.topology!r} returned "
-                    f"{type(provider).__name__}, which does not implement TopologyProvider"
-                )
-            _require_signature(
-                provider.validate,
-                (plan,),
-                f"topology provider {plan.topology!r}.validate",
-            )
-            _require_signature(
-                provider.provision,
-                (context,),
-                f"topology provider {plan.topology!r}.provision",
-            )
-            _require_signature(
-                provider.rollback,
-                (context,),
-                f"topology provider {plan.topology!r}.rollback",
-            )
-            _require_signature(
-                provider.cleanup,
-                (context, ProvisionedTopology()),
-                f"topology provider {plan.topology!r}.cleanup",
-            )
-            validation_return = provider.validate(plan)
-            if validation_return is not None:
-                raise FeatureRunnerError("topology provider validation must return None")
-
+            prepared = self._prepare_plan(plan, context)
+            ordered = prepared.ordered
+            effective_required = prepared.effective_required
+            provider = prepared.provider
             resolved = self._preflight_components(plan, ordered, context)
             by_instance = {item.spec.instance_id: item for item in resolved}
 
