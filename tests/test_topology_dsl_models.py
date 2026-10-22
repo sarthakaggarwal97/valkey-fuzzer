@@ -5,9 +5,9 @@ from unittest.mock import Mock, patch
 import pytest
 import yaml
 
-from src.fuzzer_engine.dsl_utils import DSLLoader, DSLValidator
-from src.fuzzer_engine.test_case_generator import ScenarioGenerator
-from src.models import (
+from valkey_fuzzer.fuzzer_engine.dsl_utils import DSLLoader, DSLValidator
+from valkey_fuzzer.fuzzer_engine.test_case_generator import ScenarioGenerator
+from valkey_fuzzer.models import (
     ChaosConfig,
     ChaosCoordination,
     ChaosTiming,

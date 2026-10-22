@@ -2,8 +2,8 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from src.fuzzer_engine.chaos_coordinator import ChaosCoordinator
-from src.models import (
+from valkey_fuzzer.fuzzer_engine.chaos_coordinator import ChaosCoordinator
+from valkey_fuzzer.models import (
     ChaosConfig,
     ChaosCoordination,
     ChaosResult,
@@ -247,7 +247,7 @@ def test_randomization_distribution(chaos_coordinator, base_chaos_config):
 # ============================================================================
 
 
-@patch("src.fuzzer_engine.chaos_coordinator.time.sleep")
+@patch("valkey_fuzzer.fuzzer_engine.chaos_coordinator.time.sleep")
 def test_coordinate_chaos_without_randomization(mock_sleep, chaos_coordinator, mock_cluster_connection):
     """Test that chaos is deterministic when randomize_per_operation=False."""
     chaos_types_used = []
@@ -306,7 +306,7 @@ def test_coordinate_chaos_without_randomization(mock_sleep, chaos_coordinator, m
     assert all(ct == ProcessChaosType.SIGKILL for ct in chaos_types_used), "Unset should default to SIGKILL"
 
 
-@patch("src.fuzzer_engine.chaos_coordinator.time.sleep")
+@patch("valkey_fuzzer.fuzzer_engine.chaos_coordinator.time.sleep")
 def test_timing_delay_randomization(mock_sleep, chaos_coordinator, mock_cluster_connection):
     """
     Test that timing delays are randomized within ±20% when randomization is enabled.
@@ -369,7 +369,7 @@ def test_timing_delay_randomization(mock_sleep, chaos_coordinator, mock_cluster_
         assert 8.0 <= sleep_value <= 12.0, f"Sleep value {sleep_value} not in expected range [8.0, 12.0]"
 
 
-@patch("src.fuzzer_engine.chaos_coordinator.time.sleep")
+@patch("valkey_fuzzer.fuzzer_engine.chaos_coordinator.time.sleep")
 def test_chaos_randomization_across_operations(mock_sleep, mock_cluster_connection):
     """
     Integration test: Verify that chaos is randomized across multiple operations.
@@ -465,7 +465,7 @@ def test_chaos_randomization_across_operations(mock_sleep, mock_cluster_connecti
         print(f"  {node_id} ({role}): {count}")
 
 
-@patch("src.fuzzer_engine.chaos_coordinator.time.sleep")
+@patch("valkey_fuzzer.fuzzer_engine.chaos_coordinator.time.sleep")
 def test_chaos_without_randomization_is_consistent(mock_sleep, mock_cluster_connection):
     """
     Integration test: Verify that when randomization is disabled, chaos remains consistent.

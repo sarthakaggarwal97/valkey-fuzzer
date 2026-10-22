@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from src.extensibility import (
+from valkey_fuzzer.extensibility import (
     ComponentKind,
     ComponentRegistration,
     ComponentResult,
@@ -25,7 +25,7 @@ from src.extensibility import (
     TopologyProviderRegistry,
     discover_plugins,
 )
-from src.feature_packs import (
+from valkey_fuzzer.feature_packs import (
     AmbiguousFeaturePackError,
     ComponentCompatibilityError,
     DuplicateFeaturePackError,
@@ -890,7 +890,7 @@ def test_external_entry_point_can_add_component_and_pack_then_compile(monkeypatc
         feature_packs=(pack,),
     )
     monkeypatch.setattr(
-        "src.extensibility.importlib_metadata.entry_points",
+        "valkey_fuzzer.extensibility.importlib_metadata.entry_points",
         lambda: _SelectableEntryPoints([_EntryPoint("external.plugin", "external-distribution", plugin)]),
     )
     catalog = FeaturePackCatalog()
@@ -922,7 +922,7 @@ def test_plugin_pack_collision_is_atomic_across_catalog_and_registry(monkeypatch
         feature_packs=(parse_feature_pack_document(_manifest()),),
     )
     monkeypatch.setattr(
-        "src.extensibility.importlib_metadata.entry_points",
+        "valkey_fuzzer.extensibility.importlib_metadata.entry_points",
         lambda: _SelectableEntryPoints([_EntryPoint("collision.plugin", "distribution", plugin)]),
     )
 
@@ -944,7 +944,7 @@ def test_plugin_commit_failure_rolls_back_every_registry_and_catalog(monkeypatch
         feature_packs=(pack,),
     )
     monkeypatch.setattr(
-        "src.extensibility.importlib_metadata.entry_points",
+        "valkey_fuzzer.extensibility.importlib_metadata.entry_points",
         lambda: _SelectableEntryPoints([_EntryPoint("rollback.plugin", "distribution", plugin)]),
     )
     catalog = FeaturePackCatalog()
@@ -973,7 +973,7 @@ def test_plugin_api_mismatch_and_registry_api_mismatch_are_clean(monkeypatch):
         feature_packs=(future_pack,),
     )
     monkeypatch.setattr(
-        "src.extensibility.importlib_metadata.entry_points",
+        "valkey_fuzzer.extensibility.importlib_metadata.entry_points",
         lambda: _SelectableEntryPoints([_EntryPoint("future.plugin", "distribution", future_plugin)]),
     )
     catalog = FeaturePackCatalog()

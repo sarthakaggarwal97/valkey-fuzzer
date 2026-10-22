@@ -2,7 +2,7 @@
 Simple unit tests for zero-replica cluster validation configuration
 """
 
-from src.models import ClusterConfig, StateValidationConfig
+from valkey_fuzzer.models import ClusterConfig, StateValidationConfig
 
 
 def test_default_replication_config_has_min_replicas():

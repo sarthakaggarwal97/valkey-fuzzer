@@ -1,7 +1,7 @@
 """Transactional runtime lifecycle for generic environment declarations.
 
 This module owns no concrete artifact or resource behavior. It coordinates
-extension-provided providers using the contracts in :mod:`src.environment`.
+extension-provided providers using the contracts in :mod:`valkey_fuzzer.environment`.
 The resulting session and binding are deliberately runtime-only: provider
 outputs, services, and handles must never be serialized into a run plan or
 report.

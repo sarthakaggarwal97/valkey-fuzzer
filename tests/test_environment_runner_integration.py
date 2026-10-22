@@ -6,13 +6,13 @@ from typing import Any
 
 import pytest
 
-from src.bound_plan import (
+from valkey_fuzzer.bound_plan import (
     BoundComponentSpec,
     BoundPlanExpiredError,
     BoundPolicy,
     BoundRunPlan,
 )
-from src.environment import (
+from valkey_fuzzer.environment import (
     ArtifactProviderRegistration,
     ArtifactProviderRegistry,
     ArtifactSpec,
@@ -25,8 +25,8 @@ from src.environment import (
     SupportDecision,
     parse_environment_reference,
 )
-from src.environment_lifecycle import EnvironmentManager
-from src.extensibility import (
+from valkey_fuzzer.environment_lifecycle import EnvironmentManager
+from valkey_fuzzer.extensibility import (
     ComponentKind,
     ComponentRegistration,
     ComponentResult,
@@ -39,7 +39,7 @@ from src.extensibility import (
     TopologyProviderIdentity,
     TopologyProviderRegistration,
 )
-from src.feature_runner import (
+from valkey_fuzzer.feature_runner import (
     FeatureRunner,
     ProvisionedTopology,
     normalize_artifact_root,

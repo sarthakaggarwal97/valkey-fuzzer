@@ -7,7 +7,7 @@ from types import MappingProxyType
 
 import pytest
 
-from src.environment import (
+from valkey_fuzzer.environment import (
     ArtifactProviderRegistration,
     ArtifactProviderRegistry,
     ArtifactSpec,
@@ -21,7 +21,7 @@ from src.environment import (
     SupportDecision,
     parse_environment_reference,
 )
-from src.environment_lifecycle import (
+from valkey_fuzzer.environment_lifecycle import (
     EnvironmentArtifactPathError,
     EnvironmentCleanupError,
     EnvironmentLifecycleOutcome,
@@ -34,7 +34,7 @@ from src.environment_lifecycle import (
     EnvironmentSessionState,
     UnsupportedEnvironmentError,
 )
-from src.extensibility import to_plain_data
+from valkey_fuzzer.extensibility import to_plain_data
 
 
 def _ref(path):

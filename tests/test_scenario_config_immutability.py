@@ -1,6 +1,6 @@
 from copy import deepcopy
 
-from src.models import StateValidationConfig
+from valkey_fuzzer.models import StateValidationConfig
 
 
 def test_deepcopy_preserves_validation_config():

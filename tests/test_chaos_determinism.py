@@ -6,8 +6,8 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from src.fuzzer_engine.chaos_coordinator import ChaosCoordinator
-from src.models import (
+from valkey_fuzzer.fuzzer_engine.chaos_coordinator import ChaosCoordinator
+from valkey_fuzzer.models import (
     ChaosConfig,
     ChaosCoordination,
     ChaosTiming,
@@ -115,7 +115,7 @@ def mock_cluster_connection(cluster_nodes):
     return mock_conn
 
 
-@patch("src.fuzzer_engine.chaos_coordinator.time.sleep")
+@patch("valkey_fuzzer.fuzzer_engine.chaos_coordinator.time.sleep")
 def test_seeded_chaos_coordinator_is_deterministic(mock_sleep, cluster_nodes, mock_cluster_connection):
     """Test that using the same seed produces identical chaos selections"""
 
@@ -204,7 +204,7 @@ def test_seeded_chaos_coordinator_is_deterministic(mock_sleep, cluster_nodes, mo
     print(f"Chaos types (coordinator 2): {[inj['chaos_type'] for inj in chaos_injections_2]}")
 
 
-@patch("src.fuzzer_engine.chaos_coordinator.time.sleep")
+@patch("valkey_fuzzer.fuzzer_engine.chaos_coordinator.time.sleep")
 def test_different_seeds_produce_different_chaos(mock_sleep, cluster_nodes, mock_cluster_connection):
     """Test that different seeds produce different chaos selections"""
 
@@ -294,7 +294,7 @@ def test_different_seeds_produce_different_chaos(mock_sleep, cluster_nodes, mock
     print(f"Nodes selected (seed 99): {nodes_2}")
 
 
-@patch("src.fuzzer_engine.chaos_coordinator.time.sleep")
+@patch("valkey_fuzzer.fuzzer_engine.chaos_coordinator.time.sleep")
 def test_target_selector_uses_seeded_rng(mock_sleep, cluster_nodes, mock_cluster_connection):
     """Test that the target selector uses the seeded RNG for node selection"""
 

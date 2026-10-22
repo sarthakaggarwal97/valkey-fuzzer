@@ -285,7 +285,8 @@ feature coverage.
 ## Registries and plugins
 
 Built-in registrations and separately packaged plugins populate one registry
-per component role plus registries for artifact and resource providers.
+per component role plus registries for artifact, resource, and topology
+providers.
 Registrations may be added directly to a `FeatureRuntime` or supplied by
 external code discovered through the `valkey_fuzzer.plugins` Python entry-point
 group. Plugins are trusted executable code.
@@ -294,7 +295,7 @@ Discovery and compilation must:
 
 - be deterministic
 - reject duplicate component identities
-- reject duplicate artifact or resource provider identities
+- reject duplicate artifact, resource, or topology provider identities
 - reject duplicate pack ID/version pairs
 - prevent plugins from replacing built-ins
 - fail atomically across components, packs, and providers if one plugin
@@ -309,12 +310,17 @@ Explicit manifest directories are loaded in caller order and files within each
 directory are loaded deterministically.
 
 The README's “Minimal trusted plugin” section gives the concrete packaging and
-code shape. The entry-point name must equal `PluginManifest.plugin_id`.
-Component and provider factories are zero-argument; component validators receive
-`(spec, plan)`, provider static validators receive `(spec)`, and provider
+code shape. External plugins import author-facing contracts only from
+`valkey_fuzzer.extensions`; other `valkey_fuzzer` modules are framework
+internals rather than extension APIs.
+The entry-point name must equal `PluginManifest.plugin_id`. Component and
+provider factories are zero-argument; component validators receive
+`(spec, plan)`, environment-provider static validators receive `(spec)`, and
 post-binding validators receive `(spec, resolved_config)`. Artifact providers
 implement `check_support`, `resolve`, `rollback`, and `cleanup`; resource
 providers implement the same lifecycle with `provision` replacing `resolve`.
+Topology providers implement pure `validate`, followed by `provision`,
+`rollback`, and `cleanup`.
 
 ## Plans, dependencies, and scheduling
 
@@ -370,6 +376,14 @@ A topology provider owns:
 - restart behavior
 - rollback after partial provisioning
 - cleanup after a successful provision
+
+Topology providers are first-class plugin registrations rather than a
+constructor-only runner option. Each topology ID resolves to a fresh-provider
+factory with an API version and immutable replay identity. The compiler records
+that identity in the `RunPlan`; validation and execution reject registry or
+implementation drift before trusting the run. A plugin can therefore introduce
+a new topology document and lifecycle without adding a topology switch to the
+CLI, compiler, or runner.
 
 The local provider implements:
 
@@ -725,9 +739,10 @@ The architecture is credible only when these end-to-end tests pass:
    result schema.
 
 The repository currently covers the generic CLI/component path, static
-environment compilation, direct and plugin provider registration, atomic
-discovery failure, provider/output/reference validation, transactional
-acquisition, `BoundRunPlan` materialization, passive policy transport, service
-namespace isolation, rollback, and teardown precedence. Reusable built-ins, an
-isolated-wheel acceptance test, per-node artifact assignment, and the
+environment compilation, direct and plugin provider registration (including
+topology providers), atomic discovery failure, provider/output/reference
+validation, transactional acquisition, `BoundRunPlan` materialization, passive
+policy transport, service namespace isolation, rollback, teardown precedence,
+and an isolated-wheel test that adds a topology and feature pack through the
+unchanged CLI. Reusable built-ins, per-node artifact assignment, and the
 end-to-end portions of gates 3–6 remain pending.

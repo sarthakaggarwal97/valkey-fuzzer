@@ -4,7 +4,7 @@ Tests for core data models
 
 import pytest
 
-from src.models import (
+from valkey_fuzzer.models import (
     ChaosConfig,
     ChaosCoordination,
     ChaosTiming,

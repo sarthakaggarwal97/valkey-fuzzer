@@ -2,7 +2,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from src.utils.valkey_utils import parse_cluster_info_response, query_cluster_info
+from valkey_fuzzer.utils.valkey_utils import parse_cluster_info_response, query_cluster_info
 
 
 @pytest.mark.parametrize(

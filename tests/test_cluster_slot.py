@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.utils.cluster_parser import compute_cluster_slot
+from valkey_fuzzer.utils.cluster_parser import compute_cluster_slot
 
 
 @pytest.mark.parametrize(

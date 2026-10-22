@@ -4,9 +4,9 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from src.cluster_orchestrator.orchestrator import ClusterManager, ConfigurationManager, PortManager
-from src.fuzzer_engine.cluster_coordinator import ClusterCoordinator
-from src.models import ClusterConfig, ClusterInstance, NodeInfo, TopologyType
+from valkey_fuzzer.cluster_orchestrator.orchestrator import ClusterManager, ConfigurationManager, PortManager
+from valkey_fuzzer.fuzzer_engine.cluster_coordinator import ClusterCoordinator
+from valkey_fuzzer.models import ClusterConfig, ClusterInstance, NodeInfo, TopologyType
 
 
 def make_node(
@@ -155,8 +155,12 @@ def test_spawn_and_restart_preserve_resolved_server_config(tmp_path):
 
     with ExitStack() as stack:
         build_command = stack.enter_context(patch.object(manager, "build_node_command", return_value=["valkey-server"]))
-        stack.enter_context(patch("src.cluster_orchestrator.orchestrator.subprocess.Popen", return_value=process))
-        stack.enter_context(patch("src.cluster_orchestrator.orchestrator.valkey_client", return_value=client_context))
+        stack.enter_context(
+            patch("valkey_fuzzer.cluster_orchestrator.orchestrator.subprocess.Popen", return_value=process)
+        )
+        stack.enter_context(
+            patch("valkey_fuzzer.cluster_orchestrator.orchestrator.valkey_client", return_value=client_context)
+        )
         node = manager.spawn_all_nodes([plan])[0]
         manager.restart_node(node, wait_ready=False)
 

@@ -4,10 +4,10 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from src.cluster_orchestrator.orchestrator import ConfigurationManager, PortManager
-from src.fuzzer_engine.state_validator import DataConsistencyValidator, ReplicationValidator
-from src.fuzzer_engine.state_validator_helpers import compute_cluster_slot
-from src.models import (
+from valkey_fuzzer.cluster_orchestrator.orchestrator import ConfigurationManager, PortManager
+from valkey_fuzzer.fuzzer_engine.state_validator import DataConsistencyValidator, ReplicationValidator
+from valkey_fuzzer.fuzzer_engine.state_validator_helpers import compute_cluster_slot
+from valkey_fuzzer.models import (
     ClusterConfig,
     DataConsistencyValidationConfig,
     NodeInfo,
@@ -80,12 +80,12 @@ def test_replication_validator_rejects_replica_attached_to_wrong_primary():
 
     with (
         patch(
-            "src.fuzzer_engine.state_validator.valkey_client",
+            "valkey_fuzzer.fuzzer_engine.state_validator.valkey_client",
             return_value=_client_context(replica_client),
         ),
-        patch("src.fuzzer_engine.state_validator.query_cluster_nodes") as cluster_nodes,
+        patch("valkey_fuzzer.fuzzer_engine.state_validator.query_cluster_nodes") as cluster_nodes,
         patch(
-            "src.fuzzer_engine.state_validator.safe_query_node",
+            "valkey_fuzzer.fuzzer_engine.state_validator.safe_query_node",
             return_value={"connected_slaves": "0"},
         ),
     ):
@@ -115,7 +115,7 @@ def test_replication_validator_checks_offset_against_planned_primary_independent
 
     with (
         patch(
-            "src.fuzzer_engine.state_validator.valkey_client",
+            "valkey_fuzzer.fuzzer_engine.state_validator.valkey_client",
             return_value=_client_context(replica_client),
         ),
         patch.object(
@@ -124,10 +124,10 @@ def test_replication_validator_checks_offset_against_planned_primary_independent
             return_value=7,
         ) as offset_difference,
         patch(
-            "src.fuzzer_engine.state_validator.safe_query_node",
+            "valkey_fuzzer.fuzzer_engine.state_validator.safe_query_node",
             return_value={"connected_slaves": "1"},
         ),
-        patch("src.fuzzer_engine.state_validator.query_cluster_nodes") as cluster_nodes,
+        patch("valkey_fuzzer.fuzzer_engine.state_validator.query_cluster_nodes") as cluster_nodes,
     ):
         result = ReplicationValidator().validate(
             connection,
@@ -160,14 +160,14 @@ def test_replication_validator_fails_when_offset_cannot_be_measured():
 
     with (
         patch(
-            "src.fuzzer_engine.state_validator.valkey_client",
+            "valkey_fuzzer.fuzzer_engine.state_validator.valkey_client",
             side_effect=[
                 _client_context(replica_client),
                 RuntimeError("offset query failed"),
             ],
         ),
         patch(
-            "src.fuzzer_engine.state_validator.safe_query_node",
+            "valkey_fuzzer.fuzzer_engine.state_validator.safe_query_node",
             return_value={"connected_slaves": "1"},
         ),
     ):
@@ -193,13 +193,13 @@ def test_cluster_replica_count_mismatch_remains_advisory_during_failover():
 
     with (
         patch(
-            "src.fuzzer_engine.state_validator.valkey_client",
+            "valkey_fuzzer.fuzzer_engine.state_validator.valkey_client",
             return_value=_client_context(replica_client),
         ),
         patch.object(ReplicationValidator, "_get_master_node_id", return_value=primary.node_id),
         patch.object(ReplicationValidator, "_get_offset_difference", return_value=0),
         patch(
-            "src.fuzzer_engine.state_validator.safe_query_node",
+            "valkey_fuzzer.fuzzer_engine.state_validator.safe_query_node",
             return_value={"connected_slaves": "0"},
         ),
     ):
@@ -226,11 +226,11 @@ def test_replication_validator_fails_primary_replica_count_mismatch():
 
     with (
         patch(
-            "src.fuzzer_engine.state_validator.valkey_client",
+            "valkey_fuzzer.fuzzer_engine.state_validator.valkey_client",
             return_value=_client_context(replica_client),
         ),
         patch(
-            "src.fuzzer_engine.state_validator.safe_query_node",
+            "valkey_fuzzer.fuzzer_engine.state_validator.safe_query_node",
             return_value={"connected_slaves": "0"},
         ),
     ):
@@ -258,10 +258,10 @@ def test_replication_validator_rejects_disconnected_planned_primary_without_offs
 
     with (
         patch(
-            "src.fuzzer_engine.state_validator.valkey_client",
+            "valkey_fuzzer.fuzzer_engine.state_validator.valkey_client",
             return_value=_client_context(replica_client),
         ),
-        patch("src.fuzzer_engine.state_validator.safe_query_node", return_value=None),
+        patch("valkey_fuzzer.fuzzer_engine.state_validator.safe_query_node", return_value=None),
     ):
         result = ReplicationValidator().validate(
             connection,
@@ -286,10 +286,10 @@ def test_replication_validator_rejects_unqueryable_planned_primary():
 
     with (
         patch(
-            "src.fuzzer_engine.state_validator.valkey_client",
+            "valkey_fuzzer.fuzzer_engine.state_validator.valkey_client",
             return_value=_client_context(replica_client),
         ),
-        patch("src.fuzzer_engine.state_validator.safe_query_node", return_value=None),
+        patch("valkey_fuzzer.fuzzer_engine.state_validator.safe_query_node", return_value=None),
     ):
         result = ReplicationValidator().validate(
             connection,
@@ -321,11 +321,11 @@ def test_replication_replica_restart_reapplies_upstream(tmp_path):
 
     with (
         patch(
-            "src.cluster_orchestrator.orchestrator.subprocess.Popen",
+            "valkey_fuzzer.cluster_orchestrator.orchestrator.subprocess.Popen",
             side_effect=processes,
         ) as popen,
         patch(
-            "src.cluster_orchestrator.orchestrator.valkey_client",
+            "valkey_fuzzer.cluster_orchestrator.orchestrator.valkey_client",
             return_value=_client_context(ping_client),
         ),
     ):
@@ -359,7 +359,7 @@ def test_spawn_failure_releases_ports_processes_and_data(tmp_path):
 
     with (
         patch(
-            "src.cluster_orchestrator.orchestrator.subprocess.Popen",
+            "valkey_fuzzer.cluster_orchestrator.orchestrator.subprocess.Popen",
             side_effect=[first_process, OSError("spawn failed")],
         ),
         pytest.raises(OSError, match="spawn failed"),
@@ -390,7 +390,7 @@ def test_write_test_keys_requires_every_requested_write():
     primary_client.set.side_effect = [True, RuntimeError("SET failed"), True]
 
     with patch(
-        "src.fuzzer_engine.state_validator.valkey_client",
+        "valkey_fuzzer.fuzzer_engine.state_validator.valkey_client",
         return_value=_client_context(primary_client),
     ):
         result = validator.write_test_keys(
@@ -421,7 +421,7 @@ def test_test_values_are_reproducible_with_an_isolated_rng():
     config = DataConsistencyValidationConfig(num_test_keys=3)
 
     with patch(
-        "src.fuzzer_engine.state_validator.valkey_client",
+        "valkey_fuzzer.fuzzer_engine.state_validator.valkey_client",
         side_effect=[_client_context(first_client), _client_context(second_client)],
     ):
         first = DataConsistencyValidator(rng=random.Random(99))
@@ -465,11 +465,11 @@ def test_cluster_test_key_seeding_covers_every_authoritative_primary():
 
     with (
         patch(
-            "src.fuzzer_engine.state_validator.fetch_cluster_slot_assignments",
+            "valkey_fuzzer.fuzzer_engine.state_validator.fetch_cluster_slot_assignments",
             return_value=slot_map,
         ),
         patch(
-            "src.fuzzer_engine.state_validator.valkey.ValkeyCluster",
+            "valkey_fuzzer.fuzzer_engine.state_validator.valkey.ValkeyCluster",
             return_value=cluster_client,
         ),
     ):
@@ -497,7 +497,7 @@ def test_cluster_test_key_seeding_rejects_too_few_keys_for_live_primaries(caplog
         for index in range(2)
     ]
 
-    with patch("src.fuzzer_engine.state_validator.valkey.ValkeyCluster") as cluster_client:
+    with patch("valkey_fuzzer.fuzzer_engine.state_validator.valkey.ValkeyCluster") as cluster_client:
         assert (
             validator.write_test_keys(
                 connection,
@@ -536,7 +536,7 @@ def test_cross_replica_get_error_is_recorded_and_fails_validation():
     primary_client.get.return_value = "expected"
 
     with patch(
-        "src.fuzzer_engine.state_validator.valkey_client",
+        "valkey_fuzzer.fuzzer_engine.state_validator.valkey_client",
         side_effect=[
             _client_context(primary_client),
             RuntimeError("replica read failed"),
@@ -569,10 +569,10 @@ def test_cross_replica_sample_is_stable_across_retries():
 
     with (
         patch(
-            "src.fuzzer_engine.state_validator.valkey_client",
+            "valkey_fuzzer.fuzzer_engine.state_validator.valkey_client",
             return_value=_client_context(replica_client),
         ),
-        patch("src.fuzzer_engine.state_validator.random.sample") as random_sample,
+        patch("valkey_fuzzer.fuzzer_engine.state_validator.random.sample") as random_sample,
     ):
         validator._check_cross_replica_consistency(
             connection,
@@ -628,11 +628,11 @@ def test_cluster_cross_replica_reads_only_owned_keys_in_readonly_mode():
 
     with (
         patch(
-            "src.fuzzer_engine.state_validator.fetch_cluster_slot_assignments",
+            "valkey_fuzzer.fuzzer_engine.state_validator.fetch_cluster_slot_assignments",
             return_value=slot_map,
         ),
         patch(
-            "src.fuzzer_engine.state_validator.valkey_client",
+            "valkey_fuzzer.fuzzer_engine.state_validator.valkey_client",
             return_value=_client_context(replica_client),
         ),
     ):
@@ -677,7 +677,7 @@ def test_cluster_cross_replica_validation_fails_when_shard_has_no_seeded_key():
 
     with (
         patch(
-            "src.fuzzer_engine.state_validator.fetch_cluster_slot_assignments",
+            "valkey_fuzzer.fuzzer_engine.state_validator.fetch_cluster_slot_assignments",
             return_value=slot_map,
         ),
         pytest.raises(RuntimeError, match="cross-replica coverage is incomplete"),

@@ -1,15 +1,15 @@
 import random
 from unittest.mock import Mock, patch
 
-from src.cluster_orchestrator.orchestrator import ClusterManager, ConfigurationManager, PortManager
-from src.models import ClusterConfig, TopologyType
-from src.valkey_client.load_data import load_all_slots
+from valkey_fuzzer.cluster_orchestrator.orchestrator import ClusterManager, ConfigurationManager, PortManager
+from valkey_fuzzer.models import ClusterConfig, TopologyType
+from valkey_fuzzer.valkey_client.load_data import load_all_slots
 
 
 def test_load_all_slots_is_a_noop_outside_cluster_mode():
     connection = Mock(topology_type=TopologyType.STANDALONE)
 
-    with patch("src.valkey_client.load_data.valkey.ValkeyCluster") as cluster_client:
+    with patch("valkey_fuzzer.valkey_client.load_data.valkey.ValkeyCluster") as cluster_client:
         assert load_all_slots(connection, keys_per_slot=1) is True
 
     cluster_client.assert_not_called()
@@ -27,10 +27,10 @@ def test_load_all_slots_uses_supplied_rng_instead_of_global_random():
 
     with (
         patch(
-            "src.valkey_client.load_data.valkey.ValkeyCluster",
+            "valkey_fuzzer.valkey_client.load_data.valkey.ValkeyCluster",
             side_effect=[first_client, second_client],
         ),
-        patch("src.valkey_client.load_data.random.randint") as global_randint,
+        patch("valkey_fuzzer.valkey_client.load_data.random.randint") as global_randint,
     ):
         assert load_all_slots(connection, keys_per_slot=1, rng=random.Random(1234)) is True
         assert load_all_slots(connection, keys_per_slot=1, rng=random.Random(1234)) is True

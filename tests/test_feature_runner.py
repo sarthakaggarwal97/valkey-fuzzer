@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 import pytest
 
-from src.extensibility import (
+from valkey_fuzzer.extensibility import (
     ComponentKind,
     ComponentRegistration,
     ComponentResult,
@@ -27,8 +27,8 @@ from src.extensibility import (
     TopologyProviderRegistry,
     discover_plugins,
 )
-from src.feature_packs import FeaturePackCatalog, compile_scenario
-from src.feature_runner import FeatureRunner, ProvisionedTopology, stable_topological_order
+from valkey_fuzzer.feature_packs import FeaturePackCatalog, compile_scenario
+from valkey_fuzzer.feature_runner import FeatureRunner, ProvisionedTopology, stable_topological_order
 
 
 def _result(
@@ -898,7 +898,7 @@ def test_bad_plugin_protocol_or_result_becomes_error(factory, expected_phase):
 
     assert outcome.status is OutcomeStatus.ERROR
     assert outcome.diagnostics["error"] == {
-        "type": "src.feature_runner.FeatureRunnerError",
+        "type": "valkey_fuzzer.feature_runner.FeatureRunnerError",
         "phase": expected_phase,
     }
     if expected_phase == "preflight":
@@ -972,7 +972,7 @@ def test_expired_cooperative_deadline_is_error_without_provision():
 
     assert outcome.status is OutcomeStatus.ERROR
     assert outcome.diagnostics["error"] == {
-        "type": "src.feature_runner.CooperativeDeadlineError",
+        "type": "valkey_fuzzer.feature_runner.CooperativeDeadlineError",
         "phase": "topology.provision",
     }
     assert provider.provisioned is None
@@ -1197,7 +1197,7 @@ def test_runner_component_validator_rejects_before_factory_or_provision():
 
     assert outcome.status is OutcomeStatus.ERROR
     assert outcome.diagnostics["error"] == {
-        "type": "src.feature_runner.FeatureRunnerError",
+        "type": "valkey_fuzzer.feature_runner.FeatureRunnerError",
         "phase": "static preflight",
     }
     assert calls == [
@@ -1597,7 +1597,7 @@ def test_external_plugin_compiles_and_executes_without_runner_changes(monkeypatc
         feature_packs=(pack,),
     )
     monkeypatch.setattr(
-        "src.extensibility.importlib_metadata.entry_points",
+        "valkey_fuzzer.extensibility.importlib_metadata.entry_points",
         lambda: _EntryPoints(_EntryPoint(manifest)),
     )
     catalog = FeaturePackCatalog()

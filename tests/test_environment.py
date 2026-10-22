@@ -7,7 +7,7 @@ from types import MappingProxyType
 
 import pytest
 
-from src.environment import (
+from valkey_fuzzer.environment import (
     ENVIRONMENT_EXTENSION_API_VERSION,
     ENVIRONMENT_REFERENCE_DATA_KEY,
     ArtifactProvider,
@@ -45,9 +45,9 @@ from src.environment import (
     stable_environment_order,
     validate_environment_dependencies,
 )
-from src.extensibility import to_plain_data
-from src.extension_contract import EXTENSION_API_VERSION
-from src.run_state import canonical_snapshot
+from valkey_fuzzer.extensibility import to_plain_data
+from valkey_fuzzer.extension_contract import EXTENSION_API_VERSION
+from valkey_fuzzer.run_state import canonical_snapshot
 
 
 def _ref(path: str) -> EnvironmentReference:

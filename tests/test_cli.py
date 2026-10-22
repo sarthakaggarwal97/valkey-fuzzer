@@ -8,8 +8,8 @@ from unittest.mock import Mock, patch
 import pytest
 import yaml
 
-import src.cli as cli_module
-from src.cli import (
+import valkey_fuzzer.cli as cli_module
+from valkey_fuzzer.cli import (
     EXIT_FEATURE_FAILURE,
     EXIT_HARNESS_ERROR,
     EXIT_SUCCESS,
@@ -18,7 +18,7 @@ from src.cli import (
     create_parser,
     main,
 )
-from src.extensibility import (
+from valkey_fuzzer.extensibility import (
     EXTENSION_API_VERSION,
     ComponentKind,
     ComponentRegistration,
@@ -33,7 +33,7 @@ from src.extensibility import (
     TopologyProviderIdentity,
     TopologyProviderRegistration,
 )
-from src.feature_runner import ProvisionedTopology
+from valkey_fuzzer.feature_runner import ProvisionedTopology
 
 
 def _plan() -> RunPlan:
@@ -126,7 +126,7 @@ def test_cli_exposes_no_legacy_engine_or_version_router():
         (OutcomeStatus.SKIP_UNSUPPORTED, True, EXIT_SUCCESS),
     ],
 )
-@patch("src.cli.FeatureRuntime")
+@patch("valkey_fuzzer.cli.FeatureRuntime")
 def test_run_uses_one_generic_compile_and_run_path(
     runtime_class,
     status,
@@ -168,8 +168,8 @@ def test_run_uses_one_generic_compile_and_run_path(
     runtime.run_plan.assert_called_once_with(outcome.plan, deadline=None)
 
 
-@patch("src.cli.time.monotonic", return_value=100.0)
-@patch("src.cli.FeatureRuntime")
+@patch("valkey_fuzzer.cli.time.monotonic", return_value=100.0)
+@patch("valkey_fuzzer.cli.FeatureRuntime")
 def test_run_converts_relative_timeout_to_absolute_deadline(runtime_class, monotonic, tmp_path):
     scenario = tmp_path / "scenario.yaml"
     scenario.write_text(_scenario_text(), encoding="utf-8")
@@ -183,7 +183,7 @@ def test_run_converts_relative_timeout_to_absolute_deadline(runtime_class, monot
     monotonic.assert_called_once_with()
 
 
-@patch("src.cli.FeatureRuntime")
+@patch("valkey_fuzzer.cli.FeatureRuntime")
 def test_run_compile_error_is_a_harness_error_and_never_executes(runtime_class, tmp_path, capsys):
     scenario = tmp_path / "scenario.yaml"
     scenario.write_text(_scenario_text(), encoding="utf-8")
@@ -195,7 +195,7 @@ def test_run_compile_error_is_a_harness_error_and_never_executes(runtime_class, 
     assert "unknown scenario field" in capsys.readouterr().out
 
 
-@patch("src.cli.FeatureRuntime")
+@patch("valkey_fuzzer.cli.FeatureRuntime")
 def test_missing_or_non_file_scenario_fails_before_runtime_construction(runtime_class, tmp_path):
     assert FuzzerCLI().run_scenario(_run_args(tmp_path / "missing.yaml")) == EXIT_HARNESS_ERROR
     assert FuzzerCLI().validate_scenario(_validate_args(tmp_path)) == EXIT_HARNESS_ERROR
@@ -240,7 +240,7 @@ topology: {type: standalone}
     assert "unknown fields: ['api_version']" in capsys.readouterr().out
 
 
-@patch("src.cli.FeatureRuntime")
+@patch("valkey_fuzzer.cli.FeatureRuntime")
 def test_validate_compiles_and_preflights_without_execution(runtime_class, tmp_path, capsys):
     scenario = tmp_path / "scenario.yaml"
     source = _scenario_text()
@@ -280,7 +280,7 @@ def test_validate_compiles_and_preflights_without_execution(runtime_class, tmp_p
     assert "Extension API" not in output
 
 
-@patch("src.cli.FeatureRuntime")
+@patch("valkey_fuzzer.cli.FeatureRuntime")
 def test_validate_error_is_a_harness_error(runtime_class, tmp_path):
     scenario = tmp_path / "scenario.yaml"
     scenario.write_text(_scenario_text(), encoding="utf-8")
@@ -311,7 +311,7 @@ def test_report_round_trips_the_complete_outcome_without_dsl_version(output_form
     assert RunOutcome.from_data(report["results"][0]) == outcome
 
 
-@patch("src.cli.FeatureRuntime")
+@patch("valkey_fuzzer.cli.FeatureRuntime")
 def test_report_write_failure_is_a_harness_error_and_removes_temporary_file(runtime_class, tmp_path):
     scenario = tmp_path / "scenario.yaml"
     scenario.write_text(_scenario_text(), encoding="utf-8")
@@ -458,9 +458,9 @@ def test_cli_executes_plugin_manifest_provider_and_oracle_end_to_end(tmp_path, m
             assert group == "valkey_fuzzer.plugins"
             return (EntryPoint(),)
 
-    monkeypatch.setattr("src.extensibility.importlib_metadata.entry_points", EntryPoints)
+    monkeypatch.setattr("valkey_fuzzer.extensibility.importlib_metadata.entry_points", EntryPoints)
     monkeypatch.setattr(
-        "src.feature_runtime.local_topology_provider_registrations",
+        "valkey_fuzzer.feature_runtime.local_topology_provider_registrations",
         lambda coordinator_factory, *, api_version: {
             "standalone": TopologyProviderRegistration(
                 topology="standalone",
@@ -613,21 +613,21 @@ class TestParser:
 
 
 class TestMain:
-    @patch("src.cli.FuzzerCLI")
+    @patch("valkey_fuzzer.cli.FuzzerCLI")
     def test_run_dispatch(self, cli_class):
         cli_class.return_value.run_scenario.return_value = EXIT_SUCCESS
         with patch("sys.argv", ["cli", "run", "scenario.yaml"]):
             assert main() == EXIT_SUCCESS
         cli_class.return_value.run_scenario.assert_called_once()
 
-    @patch("src.cli.FuzzerCLI")
+    @patch("valkey_fuzzer.cli.FuzzerCLI")
     def test_validate_dispatch(self, cli_class):
         cli_class.return_value.validate_scenario.return_value = EXIT_SUCCESS
         with patch("sys.argv", ["cli", "validate", "scenario.yaml"]):
             assert main() == EXIT_SUCCESS
         cli_class.return_value.validate_scenario.assert_called_once()
 
-    @patch("src.cli.cleanup_logs", return_value=EXIT_SUCCESS)
+    @patch("valkey_fuzzer.cli.cleanup_logs", return_value=EXIT_SUCCESS)
     def test_cleanup_dispatch(self, cleanup):
         with patch("sys.argv", ["cli", "cleanup-logs", "42", "--data-dir", "/tmp/test", "--force"]):
             assert main() == EXIT_SUCCESS
@@ -637,13 +637,13 @@ class TestMain:
         with patch("sys.argv", ["cli"]):
             assert main() == EXIT_FEATURE_FAILURE
 
-    @patch("src.cli.FuzzerCLI")
+    @patch("valkey_fuzzer.cli.FuzzerCLI")
     def test_keyboard_interrupt_maps_to_130(self, cli_class):
         cli_class.return_value.run_scenario.side_effect = KeyboardInterrupt()
         with patch("sys.argv", ["cli", "run", "scenario.yaml"]):
             assert main() == 130
 
-    @patch("src.cli.FuzzerCLI")
+    @patch("valkey_fuzzer.cli.FuzzerCLI")
     def test_unexpected_dispatch_error_is_a_harness_error(self, cli_class):
         cli_class.return_value.run_scenario.side_effect = RuntimeError("boom")
         with patch("sys.argv", ["cli", "run", "scenario.yaml"]):

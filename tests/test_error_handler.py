@@ -5,7 +5,7 @@ Tests for error handling and recovery mechanisms
 import time
 from unittest.mock import Mock
 
-from src.fuzzer_engine.error_handler import (
+from valkey_fuzzer.fuzzer_engine.error_handler import (
     ErrorCategory,
     ErrorContext,
     ErrorHandler,

@@ -3,9 +3,9 @@ from unittest.mock import Mock, call, patch
 
 import pytest
 
-from src.cluster_orchestrator.orchestrator import ClusterManager, ConfigurationManager, PortManager
-from src.fuzzer_engine.cluster_coordinator import ClusterCoordinator
-from src.models import ClusterConfig, NodeInfo, TopologyType
+from valkey_fuzzer.cluster_orchestrator.orchestrator import ClusterManager, ConfigurationManager, PortManager
+from valkey_fuzzer.fuzzer_engine.cluster_coordinator import ClusterCoordinator
+from valkey_fuzzer.models import ClusterConfig, NodeInfo, TopologyType
 
 
 def make_node(
@@ -54,7 +54,7 @@ def test_spawn_keyboard_interrupt_cleans_partial_nodes(tmp_path):
 
     with (
         patch(
-            "src.cluster_orchestrator.orchestrator.subprocess.Popen",
+            "valkey_fuzzer.cluster_orchestrator.orchestrator.subprocess.Popen",
             side_effect=[first_process, KeyboardInterrupt()],
         ),
         pytest.raises(KeyboardInterrupt),
@@ -83,9 +83,9 @@ def test_spawn_readiness_keyboard_interrupt_cleans_node(tmp_path):
     process.poll.return_value = None
 
     with (
-        patch("src.cluster_orchestrator.orchestrator.subprocess.Popen", return_value=process),
+        patch("valkey_fuzzer.cluster_orchestrator.orchestrator.subprocess.Popen", return_value=process),
         patch(
-            "src.cluster_orchestrator.orchestrator.valkey_client",
+            "valkey_fuzzer.cluster_orchestrator.orchestrator.valkey_client",
             side_effect=KeyboardInterrupt(),
         ),
         pytest.raises(KeyboardInterrupt),
@@ -112,9 +112,9 @@ def test_spawn_interrupt_after_process_creation_terminates_untracked_process(tmp
     process.poll.return_value = None
 
     with (
-        patch("src.cluster_orchestrator.orchestrator.subprocess.Popen", return_value=process),
+        patch("valkey_fuzzer.cluster_orchestrator.orchestrator.subprocess.Popen", return_value=process),
         patch(
-            "src.cluster_orchestrator.orchestrator.NodeInfo",
+            "valkey_fuzzer.cluster_orchestrator.orchestrator.NodeInfo",
             side_effect=KeyboardInterrupt(),
         ),
         pytest.raises(KeyboardInterrupt),
@@ -138,7 +138,7 @@ def test_coordinator_keyboard_interrupt_during_formation_cleans_and_reraises():
     cluster_manager.form_cluster.side_effect = KeyboardInterrupt()
 
     with patch(
-        "src.fuzzer_engine.cluster_coordinator.ConfigurationManager",
+        "valkey_fuzzer.fuzzer_engine.cluster_coordinator.ConfigurationManager",
         return_value=config_manager,
     ):
         coordinator = ClusterCoordinator()
@@ -162,7 +162,7 @@ def test_coordinator_cleans_tracked_nodes_when_spawn_does_not_return():
     cluster_manager = Mock()
 
     with patch(
-        "src.fuzzer_engine.cluster_coordinator.ConfigurationManager",
+        "valkey_fuzzer.fuzzer_engine.cluster_coordinator.ConfigurationManager",
         return_value=config_manager,
     ):
         coordinator = ClusterCoordinator()
@@ -233,7 +233,7 @@ def test_cleanup_attempts_all_resources_before_reporting_failures(tmp_path):
             side_effect=[RuntimeError("release failed"), None],
         ) as release_ports,
         patch(
-            "src.cluster_orchestrator.orchestrator.shutil.rmtree",
+            "valkey_fuzzer.cluster_orchestrator.orchestrator.shutil.rmtree",
             side_effect=OSError("rmtree failed"),
         ) as rmtree,
         pytest.raises(RuntimeError, match="completed with failures"),
@@ -297,9 +297,9 @@ def test_replication_replica_restart_waits_for_role_upstream_and_link(tmp_path):
     }
 
     with (
-        patch("src.cluster_orchestrator.orchestrator.subprocess.Popen", return_value=restarted_process),
+        patch("valkey_fuzzer.cluster_orchestrator.orchestrator.subprocess.Popen", return_value=restarted_process),
         patch(
-            "src.cluster_orchestrator.orchestrator.valkey_client",
+            "valkey_fuzzer.cluster_orchestrator.orchestrator.valkey_client",
             return_value=client_context(client),
         ),
     ):
@@ -333,13 +333,13 @@ def test_replication_replica_restart_rejects_wrong_upstream(tmp_path):
     }
 
     with (
-        patch("src.cluster_orchestrator.orchestrator.subprocess.Popen", return_value=restarted_process),
+        patch("valkey_fuzzer.cluster_orchestrator.orchestrator.subprocess.Popen", return_value=restarted_process),
         patch(
-            "src.cluster_orchestrator.orchestrator.valkey_client",
+            "valkey_fuzzer.cluster_orchestrator.orchestrator.valkey_client",
             return_value=client_context(client),
         ),
         patch(
-            "src.cluster_orchestrator.orchestrator.time.monotonic",
+            "valkey_fuzzer.cluster_orchestrator.orchestrator.time.monotonic",
             side_effect=[0.0, 0.0, 0.0, 11.0, 11.0],
         ),
         pytest.raises(Exception, match="failed to become ready"),
@@ -363,9 +363,9 @@ def test_restart_readiness_keyboard_interrupt_terminates_new_process(tmp_path):
     restarted_process.poll.return_value = None
 
     with (
-        patch("src.cluster_orchestrator.orchestrator.subprocess.Popen", return_value=restarted_process),
+        patch("valkey_fuzzer.cluster_orchestrator.orchestrator.subprocess.Popen", return_value=restarted_process),
         patch(
-            "src.cluster_orchestrator.orchestrator.valkey_client",
+            "valkey_fuzzer.cluster_orchestrator.orchestrator.valkey_client",
             side_effect=KeyboardInterrupt(),
         ),
         pytest.raises(KeyboardInterrupt),

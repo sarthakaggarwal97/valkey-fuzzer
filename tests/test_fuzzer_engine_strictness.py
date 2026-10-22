@@ -7,10 +7,10 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from src.fuzzer_engine.fuzzer_engine import FuzzerEngine
-from src.fuzzer_engine.parallel_executor import ParallelExecutor
-from src.fuzzer_engine.state_validator import StateValidator
-from src.models import (
+from valkey_fuzzer.fuzzer_engine.fuzzer_engine import FuzzerEngine
+from valkey_fuzzer.fuzzer_engine.parallel_executor import ParallelExecutor
+from valkey_fuzzer.fuzzer_engine.state_validator import StateValidator
+from valkey_fuzzer.models import (
     ChaosConfig,
     ChaosCoordination,
     ChaosResult,
@@ -99,10 +99,10 @@ def build_cluster_instance():
     return Mock(cluster_id="cluster-1", nodes=[node])
 
 
-@patch("src.fuzzer_engine.fuzzer_engine.load_all_slots")
-@patch("src.fuzzer_engine.fuzzer_engine.StateValidator")
-@patch("src.fuzzer_engine.fuzzer_engine.ClusterConnection")
-@patch("src.fuzzer_engine.fuzzer_engine.ParallelExecutor")
+@patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.load_all_slots")
+@patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.StateValidator")
+@patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.ClusterConnection")
+@patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.ParallelExecutor")
 def test_execute_test_fails_when_not_all_operations_succeed(
     mock_executor_class,
     mock_connection_class,
@@ -145,10 +145,10 @@ def test_execute_test_fails_when_not_all_operations_succeed(
     assert preload_rng.getstate() != validation_rng.getstate()
 
 
-@patch("src.fuzzer_engine.fuzzer_engine.load_all_slots")
-@patch("src.fuzzer_engine.fuzzer_engine.StateValidator")
-@patch("src.fuzzer_engine.fuzzer_engine.ClusterConnection")
-@patch("src.fuzzer_engine.fuzzer_engine.ParallelExecutor")
+@patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.load_all_slots")
+@patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.StateValidator")
+@patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.ClusterConnection")
+@patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.ParallelExecutor")
 def test_execute_test_fails_when_post_operation_validation_fails(
     mock_executor_class,
     mock_connection_class,
@@ -184,10 +184,10 @@ def test_execute_test_fails_when_post_operation_validation_fails(
     assert "post-operation validation wave(s) failed" in result.error_message
 
 
-@patch("src.fuzzer_engine.fuzzer_engine.load_all_slots")
-@patch("src.fuzzer_engine.fuzzer_engine.StateValidator")
-@patch("src.fuzzer_engine.fuzzer_engine.ClusterConnection")
-@patch("src.fuzzer_engine.fuzzer_engine.ParallelExecutor")
+@patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.load_all_slots")
+@patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.StateValidator")
+@patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.ClusterConnection")
+@patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.ParallelExecutor")
 def test_execute_test_fails_when_chaos_injection_fails(
     mock_executor_class,
     mock_connection_class,
@@ -233,10 +233,10 @@ def test_execute_test_fails_when_chaos_injection_fails(
     assert result.error_message == "1 chaos injection(s) failed"
 
 
-@patch("src.fuzzer_engine.fuzzer_engine.load_all_slots")
-@patch("src.fuzzer_engine.fuzzer_engine.StateValidator")
-@patch("src.fuzzer_engine.fuzzer_engine.ClusterConnection")
-@patch("src.fuzzer_engine.fuzzer_engine.ParallelExecutor")
+@patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.load_all_slots")
+@patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.StateValidator")
+@patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.ClusterConnection")
+@patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.ParallelExecutor")
 def test_execute_test_fails_when_data_consistency_setup_fails(
     mock_executor_class,
     mock_connection_class,
@@ -264,10 +264,10 @@ def test_execute_test_fails_when_data_consistency_setup_fails(
     mock_executor_class.assert_not_called()
 
 
-@patch("src.fuzzer_engine.fuzzer_engine.load_all_slots")
-@patch("src.fuzzer_engine.fuzzer_engine.StateValidator")
-@patch("src.fuzzer_engine.fuzzer_engine.ClusterConnection")
-@patch("src.fuzzer_engine.fuzzer_engine.ParallelExecutor")
+@patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.load_all_slots")
+@patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.StateValidator")
+@patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.ClusterConnection")
+@patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.ParallelExecutor")
 def test_execute_test_keeps_default_cluster_state_validation_strict(
     mock_executor_class,
     mock_connection_class,
@@ -405,10 +405,10 @@ def test_scenario_rng_streams_are_reproducible_and_independent():
     assert first_slot_values != validation_values
 
 
-@patch("src.fuzzer_engine.fuzzer_engine.load_all_slots")
-@patch("src.fuzzer_engine.fuzzer_engine.StateValidator")
-@patch("src.fuzzer_engine.fuzzer_engine.ClusterConnection")
-@patch("src.fuzzer_engine.fuzzer_engine.ParallelExecutor")
+@patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.load_all_slots")
+@patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.StateValidator")
+@patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.ClusterConnection")
+@patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.ParallelExecutor")
 def test_zero_operation_standalone_skips_slot_preload_and_runs_final_validation(
     mock_executor_class,
     mock_connection_class,

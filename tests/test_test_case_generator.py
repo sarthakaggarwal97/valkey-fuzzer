@@ -4,8 +4,8 @@ Tests for Scenario Generator
 
 import pytest
 
-from src.fuzzer_engine.test_case_generator import ScenarioGenerator
-from src.models import ChaosType, OperationType, ProcessChaosType
+from valkey_fuzzer.fuzzer_engine.test_case_generator import ScenarioGenerator
+from valkey_fuzzer.models import ChaosType, OperationType, ProcessChaosType
 
 
 def test_generate_random_scenario_with_seed():
@@ -289,7 +289,7 @@ chaos:
 
 def test_dsl_roundtrip_with_none_process_chaos_type(tmp_path):
     """Test that scenarios with None process_chaos_type can round-trip through DSL"""
-    from src.fuzzer_engine.dsl_utils import DSLLoader
+    from valkey_fuzzer.fuzzer_engine.dsl_utils import DSLLoader
 
     generator = ScenarioGenerator()
 

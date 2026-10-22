@@ -41,17 +41,13 @@ Repository = "https://github.com/valkey-io/valkey-fuzzer"
 Issues = "https://github.com/valkey-io/valkey-fuzzer/issues"
 
 [project.scripts]
-valkey-fuzzer = "src.cli:main"
+valkey-fuzzer = "valkey_fuzzer.cli:main"
 
-[tool.setuptools]
-packages = [
-    "src",
-    "src.chaos_engine",
-    "src.cluster_orchestrator",
-    "src.fuzzer_engine",
-    "src.utils",
-    "src.valkey_client",
-]
+[tool.setuptools.packages.find]
+include = ["valkey_fuzzer*"]
+
+[tool.setuptools.package-data]
+valkey_fuzzer = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -61,7 +57,7 @@ python_functions = ["test_*"]
 addopts = "-v --tb=short"
 
 [tool.coverage.run]
-source = ["src"]
+source = ["valkey_fuzzer"]
 omit = ["tests/*", "examples/*"]
 
 [tool.coverage.report]
@@ -100,7 +96,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["src"]
+known-first-party = ["valkey_fuzzer"]
 
 [tool.ruff.format]
 quote-style = "double"

@@ -6,8 +6,8 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
-from src.fuzzer_engine.chaos_coordinator import ChaosCoordinator
-from src.models import (
+from valkey_fuzzer.fuzzer_engine.chaos_coordinator import ChaosCoordinator
+from valkey_fuzzer.models import (
     ChaosConfig,
     ChaosCoordination,
     ChaosResult,
@@ -417,7 +417,7 @@ def test_stop_all_chaos():
     assert len(coordinator.chaos_engine.active_chaos) == 0
 
 
-@patch("src.fuzzer_engine.chaos_coordinator.time.sleep")
+@patch("valkey_fuzzer.fuzzer_engine.chaos_coordinator.time.sleep")
 def test_coordinate_chaos_with_operation_no_target(mock_sleep):
     """Test coordinating chaos when no suitable target found"""
     coordinator = ChaosCoordinator()
@@ -448,7 +448,7 @@ def test_coordinate_chaos_with_operation_no_target(mock_sleep):
     assert coordinator.chaos_history == results
 
 
-@patch("src.fuzzer_engine.chaos_coordinator.time.sleep")
+@patch("valkey_fuzzer.fuzzer_engine.chaos_coordinator.time.sleep")
 def test_coordinate_chaos_with_operation_returns_failure_result_on_exception(mock_sleep):
     """Test that unexpected coordination exceptions become explicit failed chaos results"""
     coordinator = ChaosCoordinator()
@@ -479,7 +479,7 @@ def test_coordinate_chaos_with_operation_returns_failure_result_on_exception(moc
     assert coordinator.chaos_history == results
 
 
-@patch("src.fuzzer_engine.chaos_coordinator.time.sleep")
+@patch("valkey_fuzzer.fuzzer_engine.chaos_coordinator.time.sleep")
 def test_coordinate_chaos_with_operation_preserves_failure_for_non_safety_target_miss(mock_sleep):
     """Missing primaries/replicas should still report a failed chaos result."""
     coordinator = ChaosCoordinator()

@@ -6,7 +6,7 @@ from types import MappingProxyType
 
 import pytest
 
-from src.bound_plan import (
+from valkey_fuzzer.bound_plan import (
     BoundComponentSpec,
     BoundNodeSelector,
     BoundPlanBindingMismatchError,
@@ -17,7 +17,7 @@ from src.bound_plan import (
     RunServices,
     UnresolvedBoundPlanReferenceError,
 )
-from src.environment import (
+from valkey_fuzzer.environment import (
     ArtifactSpec,
     PolicySpec,
     ProvisionedResource,
@@ -27,8 +27,8 @@ from src.environment import (
     parse_environment_reference,
     resolve_environment_references,
 )
-from src.environment_lifecycle import EnvironmentBinding, EnvironmentSessionClosedError
-from src.extensibility import (
+from valkey_fuzzer.environment_lifecycle import EnvironmentBinding, EnvironmentSessionClosedError
+from valkey_fuzzer.extensibility import (
     ComponentKind,
     ComponentSpec,
     EvidenceRequirement,

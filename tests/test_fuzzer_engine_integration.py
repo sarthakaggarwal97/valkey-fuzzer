@@ -4,8 +4,8 @@ Integration tests for Fuzzer Engine end-to-end test execution
 
 import pytest
 
-from src.fuzzer_engine import DSLLoader, FuzzerEngine
-from src.models import (
+from valkey_fuzzer.fuzzer_engine import DSLLoader, FuzzerEngine
+from valkey_fuzzer.models import (
     ChaosConfig,
     ChaosCoordination,
     ChaosTiming,
@@ -95,7 +95,7 @@ state_validation:
     max_acceptable_lag: 5.0
 """
 
-        from src.models import DSLConfig
+        from valkey_fuzzer.models import DSLConfig
 
         DSLConfig(config_text=dsl_text)
 

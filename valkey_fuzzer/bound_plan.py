@@ -1,6 +1,6 @@
 """Runtime-only materialization of an acquired environment and a run plan.
 
-The declarative :class:`~src.extensibility.RunPlan` remains the durable,
+The declarative :class:`~valkey_fuzzer.extensibility.RunPlan` remains the durable,
 reportable description of a run.  The models in this module contain resolved
 provider outputs and live service handles, so they deliberately provide no
 data or JSON serialization API and reject pickling.

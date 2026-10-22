@@ -3,8 +3,8 @@ from unittest.mock import patch
 
 import pytest
 
-from src.cluster_orchestrator.orchestrator import ClusterManager, ConfigurationManager, PortManager
-from src.models import ClusterConfig
+from valkey_fuzzer.cluster_orchestrator.orchestrator import ClusterManager, ConfigurationManager, PortManager
+from valkey_fuzzer.models import ClusterConfig
 
 logging.basicConfig(format="%(levelname)-5s | %(filename)s:%(lineno)-3d | %(message)s", level=logging.INFO, force=True)
 

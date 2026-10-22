@@ -1189,6 +1189,30 @@ class EventSubscription:
     event_name: str
 
 
+@runtime_checkable
+class EventBus(Protocol):
+    """Component-facing lifecycle event stream.
+
+    The runner owns dispatch, shutdown, and failure handling. Extensions may
+    publish report-safe events, subscribe to events, and inspect only events
+    whose subscriber dispatch completed successfully.
+    """
+
+    def subscribe(self, event_name: str, handler: EventHandler) -> EventSubscription: ...
+
+    def unsubscribe(self, subscription: EventSubscription) -> bool: ...
+
+    def publish(
+        self,
+        name: str,
+        *,
+        source: str,
+        payload: Optional[Mapping[str, Any]] = None,
+    ) -> LifecycleEvent: ...
+
+    def committed_history(self, event_name: Optional[str] = None) -> tuple[LifecycleEvent, ...]: ...
+
+
 class EventDispatchError(RuntimeError):
     """A subscriber failed while handling a lifecycle event."""
 
@@ -1544,7 +1568,7 @@ class RunContext(Protocol):
     def plan(self) -> ExecutableRunPlan: ...
 
     @property
-    def event_bus(self) -> LifecycleEventBus: ...
+    def event_bus(self) -> EventBus: ...
 
     def rng(self, component_instance_id: str, stream: str = "default") -> random.Random: ...
 
@@ -2531,6 +2555,7 @@ __all__ = [
     "ComponentStatus",
     "DuplicateRegistrationError",
     "DuplicateTopologyProviderRegistrationError",
+    "EventBus",
     "EventBusQuiescedError",
     "EventDispatchAbortedError",
     "EventDispatchError",

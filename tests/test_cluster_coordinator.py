@@ -6,8 +6,8 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from src.fuzzer_engine.cluster_coordinator import ClusterCoordinator
-from src.models import ClusterConfig, ClusterInstance, NodeInfo
+from valkey_fuzzer.fuzzer_engine.cluster_coordinator import ClusterCoordinator
+from valkey_fuzzer.models import ClusterConfig, ClusterInstance, NodeInfo
 
 
 def test_cluster_coordinator_initialization():
@@ -66,8 +66,8 @@ def test_restart_node_cluster_not_found():
     assert result is False
 
 
-@patch("src.fuzzer_engine.cluster_coordinator.ConfigurationManager")
-@patch("src.fuzzer_engine.cluster_coordinator.ClusterManager")
+@patch("valkey_fuzzer.fuzzer_engine.cluster_coordinator.ConfigurationManager")
+@patch("valkey_fuzzer.fuzzer_engine.cluster_coordinator.ClusterManager")
 def test_create_cluster_success(mock_cluster_manager_class, mock_config_manager_class):
     """Test successful cluster creation"""
     # Setup mocks
@@ -113,8 +113,8 @@ def test_create_cluster_success(mock_cluster_manager_class, mock_config_manager_
     assert len(cluster_instance.nodes) == 1
 
 
-@patch("src.fuzzer_engine.cluster_coordinator.ConfigurationManager")
-@patch("src.fuzzer_engine.cluster_coordinator.ClusterManager")
+@patch("valkey_fuzzer.fuzzer_engine.cluster_coordinator.ConfigurationManager")
+@patch("valkey_fuzzer.fuzzer_engine.cluster_coordinator.ClusterManager")
 def test_create_cluster_cleanup_on_formation_failure(mock_cluster_manager_class, mock_config_manager_class):
     """Test that spawned nodes are cleaned up when cluster formation fails"""
     # Setup mocks
@@ -173,8 +173,8 @@ def test_create_cluster_cleanup_on_formation_failure(mock_cluster_manager_class,
     assert len(coordinator.active_clusters) == 0
 
 
-@patch("src.fuzzer_engine.cluster_coordinator.ConfigurationManager")
-@patch("src.fuzzer_engine.cluster_coordinator.ClusterManager")
+@patch("valkey_fuzzer.fuzzer_engine.cluster_coordinator.ConfigurationManager")
+@patch("valkey_fuzzer.fuzzer_engine.cluster_coordinator.ClusterManager")
 def test_create_cluster_cleanup_on_exception(mock_cluster_manager_class, mock_config_manager_class):
     """Test that spawned nodes are cleaned up when cluster formation raises an exception"""
     # Setup mocks

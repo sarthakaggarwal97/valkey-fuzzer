@@ -9,8 +9,8 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock
 
-from src.chaos_engine.base import ChaosTargetSelector
-from src.models import NodeInfo, TargetSelection
+from valkey_fuzzer.chaos_engine.base import ChaosTargetSelector
+from valkey_fuzzer.models import NodeInfo, TargetSelection
 
 
 def _node(node_id, shard_id, role="replica", port=7000):
@@ -352,8 +352,8 @@ def test_no_chaos_coordination_does_not_leak_reservations():
     subsequent operations can still select targets."""
     from unittest.mock import Mock
 
-    from src.fuzzer_engine.chaos_coordinator import ChaosCoordinator
-    from src.models import (
+    from valkey_fuzzer.fuzzer_engine.chaos_coordinator import ChaosCoordinator
+    from valkey_fuzzer.models import (
         ChaosConfig,
         ChaosCoordination,
         ChaosTiming,
@@ -429,8 +429,8 @@ def test_exception_during_chaos_releases_reservation():
     the eager reservation must be released."""
     from unittest.mock import Mock, PropertyMock
 
-    from src.fuzzer_engine.chaos_coordinator import ChaosCoordinator
-    from src.models import (
+    from valkey_fuzzer.fuzzer_engine.chaos_coordinator import ChaosCoordinator
+    from valkey_fuzzer.models import (
         ChaosConfig,
         ChaosCoordination,
         ChaosType,
@@ -493,8 +493,8 @@ def test_exception_during_chaos_releases_reservation():
 
 def test_no_safe_target_is_skipped_without_failed_chaos_result():
     """Shard-safety exhaustion should skip chaos instead of recording a failure."""
-    from src.fuzzer_engine.chaos_coordinator import ChaosCoordinator
-    from src.models import (
+    from valkey_fuzzer.fuzzer_engine.chaos_coordinator import ChaosCoordinator
+    from valkey_fuzzer.models import (
         ChaosConfig,
         ChaosCoordination,
         ChaosTiming,
@@ -547,8 +547,8 @@ def test_no_safe_target_is_skipped_without_failed_chaos_result():
 
 def test_no_quorum_safe_primary_target_is_skipped_without_failed_chaos_result():
     """Quorum-safety exhaustion should also skip chaos without recording a failure."""
-    from src.fuzzer_engine.chaos_coordinator import ChaosCoordinator
-    from src.models import (
+    from valkey_fuzzer.fuzzer_engine.chaos_coordinator import ChaosCoordinator
+    from valkey_fuzzer.models import (
         ChaosConfig,
         ChaosCoordination,
         ChaosTiming,
@@ -609,9 +609,9 @@ def test_no_quorum_safe_primary_target_is_skipped_without_failed_chaos_result():
 
 def test_parallel_executor_releases_deferred_reservation_on_operation_exception():
     """Deferred after-operation chaos should unreserve its target if the op raises."""
-    from src.fuzzer_engine.chaos_coordinator import ChaosCoordinator
-    from src.fuzzer_engine.parallel_executor import ParallelExecutor
-    from src.models import (
+    from valkey_fuzzer.fuzzer_engine.chaos_coordinator import ChaosCoordinator
+    from valkey_fuzzer.fuzzer_engine.parallel_executor import ParallelExecutor
+    from valkey_fuzzer.models import (
         ChaosConfig,
         ChaosCoordination,
         ChaosTiming,
@@ -677,9 +677,9 @@ def test_parallel_executor_preserves_reservation_after_immediate_chaos_success()
     """Operation exceptions must not clear a target already killed before the deferred phase."""
     from unittest.mock import patch
 
-    from src.fuzzer_engine.chaos_coordinator import ChaosCoordinator
-    from src.fuzzer_engine.parallel_executor import ParallelExecutor
-    from src.models import (
+    from valkey_fuzzer.fuzzer_engine.chaos_coordinator import ChaosCoordinator
+    from valkey_fuzzer.fuzzer_engine.parallel_executor import ParallelExecutor
+    from valkey_fuzzer.models import (
         ChaosConfig,
         ChaosCoordination,
         ChaosResult,
@@ -754,7 +754,7 @@ def test_parallel_executor_preserves_reservation_after_immediate_chaos_success()
 
 def test_update_node_registration_clears_recovered_kill_state():
     """Restarted nodes should become eligible targets again after re-registration."""
-    from src.fuzzer_engine.chaos_coordinator import ChaosCoordinator
+    from valkey_fuzzer.fuzzer_engine.chaos_coordinator import ChaosCoordinator
 
     coordinator = ChaosCoordinator(seed=1)
     nodes = [
@@ -777,8 +777,8 @@ def test_successful_chaos_reservation_survives_later_coordination_error():
     """A later exception must not clear a reservation after a real kill succeeded."""
     from unittest.mock import patch
 
-    from src.fuzzer_engine.chaos_coordinator import ChaosCoordinator
-    from src.models import (
+    from valkey_fuzzer.fuzzer_engine.chaos_coordinator import ChaosCoordinator
+    from valkey_fuzzer.models import (
         ChaosConfig,
         ChaosCoordination,
         ChaosResult,
@@ -875,7 +875,7 @@ def test_reset_cluster_topology_replaces_stale_snapshot_for_reused_cluster_id():
 
 def test_cleanup_chaos_clears_selector_state():
     """Cluster cleanup should drop cached topology and reservations for that cluster."""
-    from src.fuzzer_engine.chaos_coordinator import ChaosCoordinator
+    from valkey_fuzzer.fuzzer_engine.chaos_coordinator import ChaosCoordinator
 
     coordinator = ChaosCoordinator()
     nodes = [

@@ -6,8 +6,8 @@ from unittest.mock import Mock, call, patch
 
 import pytest
 
-from src.cluster_orchestrator.orchestrator import ConfigurationManager, PortManager
-from src.extensibility import (
+from valkey_fuzzer.cluster_orchestrator.orchestrator import ConfigurationManager, PortManager
+from valkey_fuzzer.extensibility import (
     NodeSelector,
     OutcomeStatus,
     RunMode,
@@ -15,10 +15,10 @@ from src.extensibility import (
     StartupOverlay,
     TopologyProviderIdentity,
 )
-from src.feature_runner import FeatureRunner, ProvisionedTopology
-from src.fuzzer_engine.cluster_coordinator import ClusterCoordinator
-from src.fuzzer_engine.test_case_generator import ScenarioGenerator
-from src.local_topology_provider import (
+from valkey_fuzzer.feature_runner import FeatureRunner, ProvisionedTopology
+from valkey_fuzzer.fuzzer_engine.cluster_coordinator import ClusterCoordinator
+from valkey_fuzzer.fuzzer_engine.test_case_generator import ScenarioGenerator
+from valkey_fuzzer.local_topology_provider import (
     LOCAL_TOPOLOGY_PROVIDER_ID,
     LOCAL_TOPOLOGY_PROVIDER_IMPLEMENTATION_VERSION,
     LOCAL_TOPOLOGY_SERVICE,
@@ -31,8 +31,8 @@ from src.local_topology_provider import (
     local_topology_provider_factories,
     local_topology_provider_registrations,
 )
-from src.models import ClusterConfig, ClusterInstance, NodeInfo, NodePlan, TopologyType
-from src.utils.topology_config import cluster_config_from_topology_document
+from valkey_fuzzer.models import ClusterConfig, ClusterInstance, NodeInfo, NodePlan, TopologyType
+from valkey_fuzzer.utils.topology_config import cluster_config_from_topology_document
 
 
 def make_plan(
@@ -588,10 +588,10 @@ def test_coordinator_configurator_runs_after_plan_and_before_spawn():
 
     with (
         patch(
-            "src.fuzzer_engine.cluster_coordinator.ConfigurationManager",
+            "valkey_fuzzer.fuzzer_engine.cluster_coordinator.ConfigurationManager",
             return_value=manager,
         ),
-        patch("src.fuzzer_engine.cluster_coordinator.detect_valkey_sha", return_value=None),
+        patch("valkey_fuzzer.fuzzer_engine.cluster_coordinator.detect_valkey_sha", return_value=None),
     ):
         coordinator = ClusterCoordinator()
         coordinator.cluster_manager = cluster_manager
@@ -611,10 +611,10 @@ def test_coordinator_rejects_configurator_return_before_spawn():
 
     with (
         patch(
-            "src.fuzzer_engine.cluster_coordinator.ConfigurationManager",
+            "valkey_fuzzer.fuzzer_engine.cluster_coordinator.ConfigurationManager",
             return_value=manager,
         ),
-        patch("src.fuzzer_engine.cluster_coordinator.detect_valkey_sha", return_value=None),
+        patch("valkey_fuzzer.fuzzer_engine.cluster_coordinator.detect_valkey_sha", return_value=None),
     ):
         coordinator = ClusterCoordinator()
         coordinator.cluster_manager = Mock()
@@ -942,7 +942,7 @@ def test_provider_preserves_keyboard_interrupt_while_attempting_rollback():
 
     with (
         patch(
-            "src.local_topology_provider.LocalValkeyTopologyHandle",
+            "valkey_fuzzer.local_topology_provider.LocalValkeyTopologyHandle",
             side_effect=KeyboardInterrupt("provision interrupted"),
         ),
         pytest.raises(KeyboardInterrupt, match="provision interrupted"),

@@ -11,9 +11,9 @@ from pathlib import Path
 
 import pytest
 
-from src.fuzzer_engine import DSLLoader, FuzzerEngine
-from src.main import ClusterBusFuzzer
-from src.models import (
+from valkey_fuzzer.fuzzer_engine import DSLLoader, FuzzerEngine
+from valkey_fuzzer.main import ClusterBusFuzzer
+from valkey_fuzzer.models import (
     ChaosConfig,
     ChaosCoordination,
     ChaosTiming,

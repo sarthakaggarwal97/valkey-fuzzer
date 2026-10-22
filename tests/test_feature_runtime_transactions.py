@@ -5,7 +5,7 @@ from typing import Any, Callable, Optional
 
 import pytest
 
-from src.environment import (
+from valkey_fuzzer.environment import (
     ArtifactProviderRegistration,
     ArtifactSpec,
     EnvironmentDependencyCycleError,
@@ -20,7 +20,7 @@ from src.environment import (
     UnknownEnvironmentTargetError,
     UnknownProviderError,
 )
-from src.extensibility import (
+from valkey_fuzzer.extensibility import (
     ComponentKind,
     ComponentRegistration,
     ComponentResult,
@@ -35,9 +35,9 @@ from src.extensibility import (
     TopologyProviderRegistration,
     discover_plugins,
 )
-from src.feature_packs import FeaturePackCatalog
-from src.feature_runner import FeatureRunnerError, ProvisionedTopology
-from src.feature_runtime import FeatureRuntime, FeatureRuntimeError
+from valkey_fuzzer.feature_packs import FeaturePackCatalog
+from valkey_fuzzer.feature_runner import FeatureRunnerError, ProvisionedTopology
+from valkey_fuzzer.feature_runtime import FeatureRuntime, FeatureRuntimeError
 
 
 class _TopologyProvider:

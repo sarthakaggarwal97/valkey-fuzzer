@@ -1,7 +1,7 @@
 """Data-only feature-pack catalog and generic scenario compiler.
 
 The compiler turns one strict scenario intent plus an installed feature-pack
-manifest into the immutable :class:`~src.extensibility.RunPlan` consumed by
+manifest into the immutable :class:`~valkey_fuzzer.extensibility.RunPlan` consumed by
 the generic runner. The authored format intentionally has no public schema
 generation selector: there is one execution model and one validation path.
 """

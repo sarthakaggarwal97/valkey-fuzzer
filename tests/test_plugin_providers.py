@@ -5,14 +5,14 @@ from typing import Any
 
 import pytest
 
-from src.environment import (
+from valkey_fuzzer.environment import (
     ArtifactProviderRegistration,
     ArtifactProviderRegistry,
     DuplicateProviderRegistrationError,
     ResourceProviderRegistration,
     ResourceProviderRegistry,
 )
-from src.extensibility import (
+from valkey_fuzzer.extensibility import (
     ComponentKind,
     ComponentRegistration,
     ComponentSpec,
@@ -30,9 +30,9 @@ from src.extensibility import (
     UnknownTopologyProviderError,
     discover_plugins,
 )
-from src.feature_packs import FeaturePackCatalog, ScenarioCompileError
-from src.feature_runner import ProvisionedTopology
-from src.feature_runtime import FeatureRuntime
+from valkey_fuzzer.feature_packs import FeaturePackCatalog, ScenarioCompileError
+from valkey_fuzzer.feature_runner import ProvisionedTopology
+from valkey_fuzzer.feature_runtime import FeatureRuntime
 
 
 class _EntryPoint:
@@ -61,7 +61,7 @@ class _EntryPoints:
 def _install_entry_points(monkeypatch, *manifests: PluginManifest) -> _EntryPoints:
     entry_points = _EntryPoints(*(_EntryPoint(manifest) for manifest in manifests))
     monkeypatch.setattr(
-        "src.extensibility.importlib_metadata.entry_points",
+        "valkey_fuzzer.extensibility.importlib_metadata.entry_points",
         lambda: entry_points,
     )
     return entry_points

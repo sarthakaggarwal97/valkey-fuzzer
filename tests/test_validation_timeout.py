@@ -7,8 +7,8 @@ from unittest.mock import Mock
 
 import pytest
 
-from src.fuzzer_engine.state_validator import StateValidator, ValidationTimeoutError, validation_timeout
-from src.models import ClusterConnection, StateValidationConfig
+from valkey_fuzzer.fuzzer_engine.state_validator import StateValidator, ValidationTimeoutError, validation_timeout
+from valkey_fuzzer.models import ClusterConnection, StateValidationConfig
 
 
 def test_validation_timeout_sub_second():

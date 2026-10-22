@@ -1,6 +1,6 @@
 import pytest
 
-from src.utils.cluster_utils import (
+from valkey_fuzzer.utils.cluster_utils import (
     find_node_by_identifier,
     find_primary_node_by_identifier,
     find_replica_nodes_by_primary,

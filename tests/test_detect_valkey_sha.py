@@ -3,7 +3,7 @@
 import subprocess
 from unittest.mock import patch
 
-from src.cluster_orchestrator.orchestrator import detect_valkey_sha
+from valkey_fuzzer.cluster_orchestrator.orchestrator import detect_valkey_sha
 
 
 def _ok(stdout: str) -> subprocess.CompletedProcess:

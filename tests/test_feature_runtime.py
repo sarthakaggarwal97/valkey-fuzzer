@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from src.extensibility import (
+from valkey_fuzzer.extensibility import (
     ComponentKind,
     ComponentRegistration,
     ComponentResult,
@@ -19,13 +19,13 @@ from src.extensibility import (
     RunPlan,
     TopologyProviderRegistration,
 )
-from src.feature_packs import (
+from valkey_fuzzer.feature_packs import (
     DuplicateFeaturePackError,
     FeaturePackDocumentError,
     load_feature_pack_yaml,
 )
-from src.feature_runner import ProvisionedTopology
-from src.feature_runtime import FeatureRuntime, FeatureRuntimeError
+from valkey_fuzzer.feature_runner import ProvisionedTopology
+from valkey_fuzzer.feature_runtime import FeatureRuntime, FeatureRuntimeError
 
 
 def _manifest(pack_id: str = "example.feature") -> str:
@@ -149,11 +149,11 @@ def test_runtime_constructs_all_registries_and_uses_local_provider_factories(mon
         return _topology_providers(lambda: provider)
 
     monkeypatch.setattr(
-        "src.feature_runtime.local_topology_provider_registrations",
+        "valkey_fuzzer.feature_runtime.local_topology_provider_registrations",
         local_registrations,
     )
     monkeypatch.setattr(
-        "src.extensibility.importlib_metadata.entry_points",
+        "valkey_fuzzer.extensibility.importlib_metadata.entry_points",
         lambda: pytest.fail("plugin discovery must be optional"),
     )
 
@@ -196,7 +196,7 @@ def test_runtime_discovers_plugin_components_before_compiling_directory_manifest
     )
     entry_points = _EntryPoints(_EntryPoint(manifest))
     monkeypatch.setattr(
-        "src.extensibility.importlib_metadata.entry_points",
+        "valkey_fuzzer.extensibility.importlib_metadata.entry_points",
         lambda: entry_points,
     )
     (tmp_path / "feature.yaml").write_text(_manifest(), encoding="utf-8")
@@ -281,7 +281,7 @@ pack_id: example.second
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        "src.extensibility.importlib_metadata.entry_points",
+        "valkey_fuzzer.extensibility.importlib_metadata.entry_points",
         lambda: pytest.fail("plugins must not load after a manifest failure"),
     )
 
@@ -520,7 +520,7 @@ def test_runtime_rejects_recursive_execution_from_component(tmp_path):
 
 def test_invalid_runtime_configuration_fails_before_plugin_discovery(monkeypatch):
     monkeypatch.setattr(
-        "src.extensibility.importlib_metadata.entry_points",
+        "valkey_fuzzer.extensibility.importlib_metadata.entry_points",
         lambda: pytest.fail("invalid runtime configuration must not execute plugins"),
     )
 
@@ -541,7 +541,7 @@ def test_explicit_manifest_identity_preempts_plugin_pack(
     )
     entry_points = _EntryPoints(_EntryPoint(plugin))
     monkeypatch.setattr(
-        "src.extensibility.importlib_metadata.entry_points",
+        "valkey_fuzzer.extensibility.importlib_metadata.entry_points",
         lambda: entry_points,
     )
 

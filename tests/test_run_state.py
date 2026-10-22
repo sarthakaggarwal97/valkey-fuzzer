@@ -7,7 +7,7 @@ from itertools import count
 
 import pytest
 
-from src.run_state import (
+from valkey_fuzzer.run_state import (
     CheckpointSnapshot,
     CheckpointStore,
     InvalidOperationTransitionError,

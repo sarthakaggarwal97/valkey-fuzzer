@@ -6,8 +6,8 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from src.fuzzer_engine.operation_orchestrator import OperationOrchestrator
-from src.models import ClusterConnection, NodeInfo, Operation, OperationTiming, OperationType
+from valkey_fuzzer.fuzzer_engine.operation_orchestrator import OperationOrchestrator
+from valkey_fuzzer.models import ClusterConnection, NodeInfo, Operation, OperationTiming, OperationType
 
 
 def test_operation_orchestrator_initialization():
@@ -79,7 +79,7 @@ def test_execute_failover_exact_node_id_match():
     operation = Operation(type=OperationType.FAILOVER, target_node="node-1", parameters={}, timing=OperationTiming())
 
     # Mock the Valkey client
-    with patch("src.utils.valkey_utils.valkey.Valkey") as mock_valkey:
+    with patch("valkey_fuzzer.utils.valkey_utils.valkey.Valkey") as mock_valkey:
         mock_client = Mock()
         mock_valkey.return_value = mock_client
 
@@ -158,7 +158,7 @@ def test_execute_failover_shard_based_matching():
     )
 
     # Mock the Valkey client
-    with patch("src.utils.valkey_utils.valkey.Valkey") as mock_valkey:
+    with patch("valkey_fuzzer.utils.valkey_utils.valkey.Valkey") as mock_valkey:
         mock_client = Mock()
         mock_valkey.return_value = mock_client
         # Mock CLUSTER FAILOVER response
@@ -197,7 +197,7 @@ def test_execute_failover_port_matching():
     operation = Operation(type=OperationType.FAILOVER, target_node="7001", parameters={}, timing=OperationTiming())
 
     # Mock the Valkey client
-    with patch("src.utils.valkey_utils.valkey.Valkey") as mock_valkey:
+    with patch("valkey_fuzzer.utils.valkey_utils.valkey.Valkey") as mock_valkey:
         mock_client = Mock()
         mock_valkey.return_value = mock_client
         # Mock CLUSTER FAILOVER response

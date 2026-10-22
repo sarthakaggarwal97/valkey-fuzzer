@@ -7,8 +7,8 @@ import time
 
 import pytest
 
-from src.fuzzer_engine.test_logger import FuzzerLogger
-from src.models import (
+from valkey_fuzzer.fuzzer_engine.test_logger import FuzzerLogger
+from valkey_fuzzer.models import (
     ChaosConfig,
     ChaosCoordination,
     ChaosResult,
@@ -390,7 +390,7 @@ if __name__ == "__main__":
 
 def test_serialize_state_validation_config_complete(test_logger):
     """Test that _serialize_state_validation_config includes all nested configs"""
-    from src.models import (
+    from valkey_fuzzer.models import (
         ClusterStatusValidationConfig,
         DataConsistencyValidationConfig,
         ReplicationValidationConfig,

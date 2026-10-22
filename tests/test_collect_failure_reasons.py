@@ -7,8 +7,8 @@ Each test targets a concrete edge case raised during code review.
 import time
 from unittest.mock import Mock
 
-from src.fuzzer_engine.fuzzer_engine import FuzzerEngine
-from src.models import (
+from valkey_fuzzer.fuzzer_engine.fuzzer_engine import FuzzerEngine
+from valkey_fuzzer.models import (
     ChaosConfig,
     ChaosCoordination,
     ChaosResult,

@@ -1,7 +1,7 @@
 # valkey-fuzzer
 
 valkey-fuzzer is a topology-neutral framework for testing Valkey features in
-standalone, primary–replica, and cluster deployments.
+standalone, primary–replica, cluster, and extension-defined deployments.
 
 The project is intentionally greenfield. There is one scenario format and one
 execution path: a scenario selects a feature pack, the pack compiles to an
@@ -23,12 +23,14 @@ The generic foundation is usable for extension development:
 - strict, duplicate-free YAML scenarios and feature-pack manifests
 - exact feature-pack selection and input validation
 - deterministic component seeds and dependency ordering
-- standalone, replication, and cluster topology providers
+- standalone, replication, and cluster topology providers, plus trusted-plugin
+  registration for entirely new topology types
 - startup configuration overlays by role or exact node
 - optional artifact, resource, and policy declarations in the compiled plan
 - static provider, dependency-graph, declared-output, and reference validation
-- artifact and resource providers registered directly or through trusted Python
-  plugins in `valkey_fuzzer.plugins`
+- component, artifact, resource, topology, and feature-pack registrations
+  discovered atomically through trusted Python plugins in
+  `valkey_fuzzer.plugins`
 - symbolic environment references and provider results that exclude runtime
   values from serialization; extension-supplied configs and report fields must
   remain non-secret
@@ -73,7 +75,7 @@ scenario
   │ selects pack + inputs + topology
   │ optionally declares artifacts + resources + policies
   ▼
-compiler + component/provider registries
+compiler + component/environment/topology registries
   │ statically validates dependencies, outputs, and symbolic references
   │
   ▼
@@ -365,10 +367,11 @@ decoder or platform-specific fault injector—through the
 `valkey_fuzzer.plugins` entry-point group. Plugins are trusted executable code;
 use `--no-plugins` when only explicit manifests should be considered.
 
-Artifact and resource provider registrations use the same internal extension
-contract. They may be added directly to a `FeatureRuntime` registry or supplied
-by a trusted plugin; plugin discovery commits component, pack, and provider
-registrations atomically.
+Artifact, resource, and topology provider registrations use the same public
+extension boundary. They may be supplied directly to a `FeatureRuntime` or by a
+trusted plugin; plugin discovery commits component, pack, and every provider
+registration atomically. A plugin-defined topology is selected through the
+same `topology.type` field and does not require a CLI or runner branch.
 
 ### Minimal trusted plugin
 
@@ -382,21 +385,20 @@ object or a zero-argument callable returning one:
 ```
 
 This neutral example registers one action and one artifact provider without
-adding a feature-specific core path:
+adding a feature-specific core path. External packages import only the stable
+`valkey_fuzzer.extensions` boundary:
 
 ```python
-from src.environment import (
-    ArtifactProviderRegistration,
-    ResolvedArtifact,
-    SupportDecision,
-)
-from src.extensibility import (
+from valkey_fuzzer.extensions import (
     EXTENSION_API_VERSION,
+    ArtifactProviderRegistration,
     ComponentKind,
     ComponentRegistration,
     ComponentResult,
     ComponentStatus,
     PluginManifest,
+    ResolvedArtifact,
+    SupportDecision,
 )
 
 
@@ -463,15 +465,18 @@ select `example.configured-artifact`; neither requires a core-code change.
 
 Component factories are zero-argument and construct in-memory state; the
 returned object implements the selected role (`run` for an action, for example).
-An optional component validator has signature `(spec, plan)`. Artifact and
-resource provider factories are also zero-argument. They may declare exact
-`outputs` and runtime `services`, a pure symbolic `validator(spec)`, and a pure
+An optional component validator has signature `(spec, plan)`. Artifact,
+resource, and topology provider factories are also zero-argument. Artifact and
+resource registrations may declare exact `outputs` and runtime `services`, a
+pure symbolic `validator(spec)`, and a pure
 `resolved_config_validator(spec, resolved_config)`. Artifact providers implement
 `check_support`, `resolve`, `rollback`, and `cleanup`; resource providers use
-`provision` in place of `resolve` and return `ProvisionedResource`. Support
-checks and validators must not mutate external state. Provider event details,
-provenance, and every component-supplied summary, evidence value, diagnostic,
-and event payload must remain non-secret.
+`provision` in place of `resolve` and return `ProvisionedResource`. Topology
+providers implement pure `validate`, followed by `provision`, `rollback`, and
+`cleanup`, and each registration carries a replay identity. Support checks and
+validators must not mutate external state. Provider event details, provenance,
+and every component-supplied summary, evidence value, diagnostic, and event
+payload must remain non-secret.
 
 During execution, components receive three collision-free service namespaces:
 
@@ -503,8 +508,11 @@ valkey-fuzzer validate examples/standalone_scenario.yaml \
 Validation checks the scenario, selected pack, component and provider
 registrations, both dependency graphs, declared provider outputs, symbolic
 environment references, startup overlays, and pure topology preflight. It does
-not instantiate component or provider factories, resolve or execute the Valkey
-binary, create directories, open sockets, or prove environment readiness.
+not instantiate component, artifact, or resource provider factories, resolve or
+execute the Valkey binary, create directories, open sockets, or prove
+environment readiness. It does create a fresh topology-provider instance and
+invoke its pure `validate` method; topology-provider constructors and validation
+therefore must not acquire external state.
 
 Run the example topology smoke:
 

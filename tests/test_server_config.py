@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.utils.server_config import build_server_config_arguments
+from valkey_fuzzer.utils.server_config import build_server_config_arguments
 
 
 def test_server_config_normalizes_keys_and_booleans():

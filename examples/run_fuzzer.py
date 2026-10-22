@@ -8,8 +8,8 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from src.extensibility import OutcomeStatus  # noqa: E402
-from src.feature_runtime import FeatureRuntime  # noqa: E402
+from valkey_fuzzer.extensibility import OutcomeStatus  # noqa: E402
+from valkey_fuzzer.feature_runtime import FeatureRuntime  # noqa: E402
 
 
 def main() -> int:

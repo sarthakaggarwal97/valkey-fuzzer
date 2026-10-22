@@ -7,8 +7,8 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from src.fuzzer_engine.state_validator import ClusterStatusValidator, DataConsistencyValidator, StateValidator
-from src.models import (
+from valkey_fuzzer.fuzzer_engine.state_validator import ClusterStatusValidator, DataConsistencyValidator, StateValidator
+from valkey_fuzzer.models import (
     ClusterStatusValidationConfig,
     DataConsistencyValidationConfig,
     StateValidationConfig,
@@ -61,7 +61,7 @@ def test_cluster_status_uses_cluster_info_command_for_health_fields():
     )
 
     with patch(
-        "src.fuzzer_engine.state_validator.valkey_client",
+        "valkey_fuzzer.fuzzer_engine.state_validator.valkey_client",
         return_value=_client_context(client),
     ):
         result = validator.validate(connection, ClusterStatusValidationConfig())
@@ -97,7 +97,7 @@ def test_cluster_status_rejects_missing_state_even_when_failed_node_matches_chao
     malformed_client.execute_command.return_value = "cluster_known_nodes:2\r\n"
 
     with patch(
-        "src.fuzzer_engine.state_validator.valkey_client",
+        "valkey_fuzzer.fuzzer_engine.state_validator.valkey_client",
         side_effect=[
             _client_context(malformed_client),
             ConnectionError("killed replica"),
@@ -139,7 +139,7 @@ def test_cluster_status_does_not_implicitly_allow_reported_unknown_after_chaos()
     client.execute_command.return_value = "cluster_state:unknown\r\n"
 
     with patch(
-        "src.fuzzer_engine.state_validator.valkey_client",
+        "valkey_fuzzer.fuzzer_engine.state_validator.valkey_client",
         side_effect=[
             _client_context(client),
             ConnectionError("killed replica"),
@@ -175,7 +175,7 @@ def test_cluster_status_rejects_mixed_node_reports_instead_of_majority_voting():
         client.execute_command.return_value = f"cluster_state:{state}\r\n"
 
     with patch(
-        "src.fuzzer_engine.state_validator.valkey_client",
+        "valkey_fuzzer.fuzzer_engine.state_validator.valkey_client",
         side_effect=[_client_context(client) for client in clients],
     ):
         result = validator.validate(connection, ClusterStatusValidationConfig())
@@ -206,7 +206,7 @@ def test_cluster_status_allows_mixed_reports_only_when_each_state_is_explicitly_
     fail_client.execute_command.return_value = "cluster_state:fail\r\n"
 
     with patch(
-        "src.fuzzer_engine.state_validator.valkey_client",
+        "valkey_fuzzer.fuzzer_engine.state_validator.valkey_client",
         side_effect=[_client_context(ok_client), _client_context(fail_client)],
     ):
         result = validator.validate(
@@ -240,8 +240,10 @@ def test_standalone_data_consistency_uses_direct_primary_client():
     )
 
     with (
-        patch("src.fuzzer_engine.state_validator.valkey_client", return_value=_client_context(direct_client)) as direct,
-        patch("src.fuzzer_engine.state_validator.valkey.ValkeyCluster") as cluster_client,
+        patch(
+            "valkey_fuzzer.fuzzer_engine.state_validator.valkey_client", return_value=_client_context(direct_client)
+        ) as direct,
+        patch("valkey_fuzzer.fuzzer_engine.state_validator.valkey.ValkeyCluster") as cluster_client,
     ):
         assert validator.write_test_keys(connection, config) is True
         result = validator.validate(connection, config)
@@ -282,10 +284,10 @@ def test_replication_data_consistency_reads_primary_and_checks_replicas():
 
     with (
         patch(
-            "src.fuzzer_engine.state_validator.valkey_client",
+            "valkey_fuzzer.fuzzer_engine.state_validator.valkey_client",
             side_effect=[_client_context(primary_client), _client_context(replica_client)],
         ) as direct,
-        patch("src.fuzzer_engine.state_validator.valkey.ValkeyCluster") as cluster_client,
+        patch("valkey_fuzzer.fuzzer_engine.state_validator.valkey.ValkeyCluster") as cluster_client,
     ):
         result = validator.validate(connection, DataConsistencyValidationConfig())
 
@@ -316,8 +318,10 @@ def test_cluster_data_consistency_keeps_cluster_aware_routing():
     cluster_client.get.return_value = "expected"
 
     with (
-        patch("src.fuzzer_engine.state_validator.valkey.ValkeyCluster", return_value=cluster_client) as cluster_factory,
-        patch("src.fuzzer_engine.state_validator.valkey_client") as direct,
+        patch(
+            "valkey_fuzzer.fuzzer_engine.state_validator.valkey.ValkeyCluster", return_value=cluster_client
+        ) as cluster_factory,
+        patch("valkey_fuzzer.fuzzer_engine.state_validator.valkey_client") as direct,
     ):
         result = validator.validate(
             connection,
@@ -337,8 +341,8 @@ def test_topology_validation_zero_replicas_with_killed_primary():
     """Test that topology validation handles zero-replica clusters correctly when primaries are killed"""
     from unittest.mock import Mock
 
-    from src.fuzzer_engine.state_validator import TopologyValidator
-    from src.models import ExpectedTopology, TopologyValidationConfig
+    from valkey_fuzzer.fuzzer_engine.state_validator import TopologyValidator
+    from valkey_fuzzer.models import ExpectedTopology, TopologyValidationConfig
 
     config = TopologyValidationConfig()
     validator = TopologyValidator()
@@ -381,8 +385,8 @@ def test_topology_validation_zero_replicas_multiple_killed():
     """Test that topology validation handles zero-replica clusters when multiple primaries are killed"""
     from unittest.mock import Mock
 
-    from src.fuzzer_engine.state_validator import TopologyValidator
-    from src.models import ExpectedTopology, TopologyValidationConfig
+    from valkey_fuzzer.fuzzer_engine.state_validator import TopologyValidator
+    from valkey_fuzzer.models import ExpectedTopology, TopologyValidationConfig
 
     config = TopologyValidationConfig()
     validator = TopologyValidator()
@@ -427,7 +431,7 @@ def test_validate_cluster_state_zero_replicas():
     """Test that validate_cluster_state correctly handles zero-replica clusters"""
     from unittest.mock import Mock, patch
 
-    from src.fuzzer_engine.fuzzer_engine import FuzzerEngine
+    from valkey_fuzzer.fuzzer_engine.fuzzer_engine import FuzzerEngine
 
     # Create a fuzzer instance
     fuzzer = FuzzerEngine()
@@ -446,8 +450,8 @@ def test_validate_cluster_state_zero_replicas():
 
     # Mock the ClusterConnection and validator
     with (
-        patch("src.fuzzer_engine.fuzzer_engine.ClusterConnection") as mock_conn_class,
-        patch("src.fuzzer_engine.fuzzer_engine.StateValidator") as mock_validator_class,
+        patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.ClusterConnection") as mock_conn_class,
+        patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.StateValidator") as mock_validator_class,
     ):
         mock_connection = Mock()
         mock_conn_class.return_value = mock_connection
@@ -456,7 +460,7 @@ def test_validate_cluster_state_zero_replicas():
         mock_validator_class.return_value = mock_validator
 
         # Mock validation result
-        from src.models import StateValidationResult
+        from valkey_fuzzer.models import StateValidationResult
 
         mock_result = StateValidationResult(
             overall_success=True,
@@ -502,7 +506,7 @@ def test_validate_cluster_state_with_replicas():
     """Test that validate_cluster_state correctly handles clusters with replicas"""
     from unittest.mock import Mock, patch
 
-    from src.fuzzer_engine.fuzzer_engine import FuzzerEngine
+    from valkey_fuzzer.fuzzer_engine.fuzzer_engine import FuzzerEngine
 
     # Create a fuzzer instance
     fuzzer = FuzzerEngine()
@@ -526,8 +530,8 @@ def test_validate_cluster_state_with_replicas():
 
     # Mock the ClusterConnection and validator
     with (
-        patch("src.fuzzer_engine.fuzzer_engine.ClusterConnection") as mock_conn_class,
-        patch("src.fuzzer_engine.fuzzer_engine.StateValidator") as mock_validator_class,
+        patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.ClusterConnection") as mock_conn_class,
+        patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.StateValidator") as mock_validator_class,
     ):
         mock_connection = Mock()
         mock_conn_class.return_value = mock_connection
@@ -536,7 +540,7 @@ def test_validate_cluster_state_with_replicas():
         mock_validator_class.return_value = mock_validator
 
         # Mock validation result
-        from src.models import StateValidationResult
+        from valkey_fuzzer.models import StateValidationResult
 
         mock_result = StateValidationResult(
             overall_success=True,
@@ -575,8 +579,8 @@ def test_validate_cluster_state_with_replicas():
 
 def test_replication_validator_ignores_expected_link_down_when_primary_killed():
     """Reachable replicas with link-down are expected if their primary was killed."""
-    from src.fuzzer_engine.state_validator import ReplicationValidator
-    from src.models import ReplicationValidationConfig
+    from valkey_fuzzer.fuzzer_engine.state_validator import ReplicationValidator
+    from valkey_fuzzer.models import ReplicationValidationConfig
 
     validator = ReplicationValidator()
     cluster_connection = Mock()
@@ -602,9 +606,9 @@ def test_replication_validator_ignores_expected_link_down_when_primary_killed():
     client_cm.__exit__ = Mock(return_value=False)
 
     with (
-        patch("src.fuzzer_engine.state_validator.valkey_client", return_value=client_cm),
+        patch("valkey_fuzzer.fuzzer_engine.state_validator.valkey_client", return_value=client_cm),
         patch.object(ReplicationValidator, "_get_master_node_id", return_value="primary-1"),
-        patch("src.fuzzer_engine.state_validator.safe_query_node", return_value={"connected_slaves": "0"}),
+        patch("valkey_fuzzer.fuzzer_engine.state_validator.safe_query_node", return_value={"connected_slaves": "0"}),
     ):
         result = validator.validate(
             cluster_connection,
@@ -620,8 +624,8 @@ def test_replication_validator_ignores_expected_link_down_when_primary_killed():
 
 def test_replication_validator_stops_suppressing_once_new_primary_is_live():
     """Historical primary kills should not mask later replica link-down regressions."""
-    from src.fuzzer_engine.state_validator import ReplicationValidator
-    from src.models import ReplicationValidationConfig
+    from valkey_fuzzer.fuzzer_engine.state_validator import ReplicationValidator
+    from valkey_fuzzer.models import ReplicationValidationConfig
 
     validator = ReplicationValidator()
     cluster_connection = Mock()
@@ -648,9 +652,9 @@ def test_replication_validator_stops_suppressing_once_new_primary_is_live():
     client_cm.__exit__ = Mock(return_value=False)
 
     with (
-        patch("src.fuzzer_engine.state_validator.valkey_client", return_value=client_cm),
+        patch("valkey_fuzzer.fuzzer_engine.state_validator.valkey_client", return_value=client_cm),
         patch.object(ReplicationValidator, "_get_master_node_id", return_value="new-primary"),
-        patch("src.fuzzer_engine.state_validator.safe_query_node", return_value={"connected_slaves": "0"}),
+        patch("valkey_fuzzer.fuzzer_engine.state_validator.safe_query_node", return_value={"connected_slaves": "0"}),
     ):
         result = validator.validate(
             cluster_connection,
@@ -664,8 +668,8 @@ def test_replication_validator_stops_suppressing_once_new_primary_is_live():
 
 def test_replication_validator_respects_offset_guard_for_lag_detection():
     """Lag alone should not fail when offset checks are enabled and diff is zero."""
-    from src.fuzzer_engine.state_validator import ReplicationValidator
-    from src.models import ReplicationValidationConfig
+    from valkey_fuzzer.fuzzer_engine.state_validator import ReplicationValidator
+    from valkey_fuzzer.models import ReplicationValidationConfig
 
     validator = ReplicationValidator()
     cluster_connection = Mock()
@@ -684,10 +688,10 @@ def test_replication_validator_respects_offset_guard_for_lag_detection():
     client_cm.__exit__ = Mock(return_value=False)
 
     with (
-        patch("src.fuzzer_engine.state_validator.valkey_client", return_value=client_cm),
+        patch("valkey_fuzzer.fuzzer_engine.state_validator.valkey_client", return_value=client_cm),
         patch.object(ReplicationValidator, "_get_master_node_id", return_value="primary-1"),
         patch.object(ReplicationValidator, "_get_offset_difference", return_value=0),
-        patch("src.fuzzer_engine.state_validator.safe_query_node", return_value={"connected_slaves": "1"}),
+        patch("valkey_fuzzer.fuzzer_engine.state_validator.safe_query_node", return_value={"connected_slaves": "1"}),
     ):
         result = validator.validate(
             cluster_connection,

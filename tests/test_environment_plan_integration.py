@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from src.environment import (
+from valkey_fuzzer.environment import (
     ENVIRONMENT_REFERENCE_DATA_KEY,
     ArtifactProviderRegistration,
     ArtifactProviderRegistry,
@@ -26,7 +26,7 @@ from src.environment import (
     UnknownProviderError,
     parse_environment_reference,
 )
-from src.extensibility import (
+from valkey_fuzzer.extensibility import (
     ComponentKind,
     ComponentRegistration,
     ComponentResult,
@@ -41,7 +41,7 @@ from src.extensibility import (
     TopologyProviderRegistry,
     to_plain_data,
 )
-from src.feature_packs import (
+from valkey_fuzzer.feature_packs import (
     FeaturePackCatalog,
     FeaturePackCompiler,
     FeaturePackDocumentError,
@@ -51,8 +51,8 @@ from src.feature_packs import (
     load_feature_pack_yaml,
     validate_run_plan_environment,
 )
-from src.feature_runner import FeatureRunner, ProvisionedTopology
-from src.feature_runtime import FeatureRuntime, FeatureRuntimeError
+from valkey_fuzzer.feature_runner import FeatureRunner, ProvisionedTopology
+from valkey_fuzzer.feature_runtime import FeatureRuntime, FeatureRuntimeError
 
 
 def _ref(path: str) -> EnvironmentReference:

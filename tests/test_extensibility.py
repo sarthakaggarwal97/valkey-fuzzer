@@ -10,7 +10,7 @@ from typing import Any, Optional
 import pytest
 import yaml
 
-from src.extensibility import (
+from valkey_fuzzer.extensibility import (
     Action,
     ComponentKind,
     ComponentRegistration,
@@ -750,7 +750,7 @@ def test_plugin_discovery_is_sorted_and_registers_manifests(monkeypatch):
     beta = _EntryPoint("beta.plugin", "z-distribution", lambda: manifest("beta.plugin", "beta.action"))
     alpha = _EntryPoint("alpha.plugin", "a-distribution", lambda: manifest("alpha.plugin", "alpha.action"))
     entry_points = _SelectableEntryPoints([beta, alpha])
-    monkeypatch.setattr("src.extensibility.importlib_metadata.entry_points", lambda: entry_points)
+    monkeypatch.setattr("valkey_fuzzer.extensibility.importlib_metadata.entry_points", lambda: entry_points)
     registry = Registry[Any](ComponentKind.ACTION)
     feature_pack_catalog = _FeaturePackCatalog()
 
@@ -775,7 +775,7 @@ def test_plugin_discovery_rejects_feature_packs_without_catalog(monkeypatch):
         feature_packs=(_feature_pack(),),
     )
     monkeypatch.setattr(
-        "src.extensibility.importlib_metadata.entry_points",
+        "valkey_fuzzer.extensibility.importlib_metadata.entry_points",
         lambda: _SelectableEntryPoints([_EntryPoint("example.plugin", "distribution", plugin)]),
     )
     registry = Registry[Any](ComponentKind.ACTION)
@@ -799,7 +799,7 @@ def test_plugin_load_failure_is_wrapped_and_leaves_registries_unchanged(monkeypa
     )
     broken = _EntryPoint("beta.plugin", "b-distribution", RuntimeError("cannot import dependency"))
     monkeypatch.setattr(
-        "src.extensibility.importlib_metadata.entry_points",
+        "valkey_fuzzer.extensibility.importlib_metadata.entry_points",
         lambda: _SelectableEntryPoints([valid, broken]),
     )
     registry = Registry[Any](ComponentKind.ACTION)
@@ -825,7 +825,7 @@ def test_plugin_preflight_failure_leaves_all_registries_unchanged(monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        "src.extensibility.importlib_metadata.entry_points",
+        "valkey_fuzzer.extensibility.importlib_metadata.entry_points",
         lambda: _SelectableEntryPoints([_EntryPoint("example.plugin", "distribution", plugin)]),
     )
 
@@ -848,7 +848,7 @@ def test_plugin_discovery_supports_python_39_mapping_entry_points(monkeypatch):
         registrations=(_registration(),),
     )
     monkeypatch.setattr(
-        "src.extensibility.importlib_metadata.entry_points",
+        "valkey_fuzzer.extensibility.importlib_metadata.entry_points",
         lambda: {"valkey_fuzzer.plugins": [_EntryPoint("example.plugin", "distribution", plugin)]},
     )
     registry = Registry[Any](ComponentKind.ACTION)
