@@ -39,6 +39,8 @@ The generic foundation is usable for extension development:
   namespaced artifact/resource/topology services
 - uniform `PASS`, `FAIL`, `SKIP_UNSUPPORTED`, and `ERROR` outcomes
 - component evidence, lifecycle events, structural validation, and cleanup
+- committed lifecycle-event cursors plus a deterministic activation planner,
+  exact schedule journal, and replay verifier
 - append-only operation-ledger and recovery-checkpoint primitives
 - JSON or YAML result bundles
 
@@ -52,7 +54,8 @@ framework milestone.
 The following major pieces remain:
 
 - reusable feature-neutral components and onboarding acceptance fixtures
-- an event-driven scheduler for precise fault and observer placement
+- runner coordination for event-driven/concurrent activation, cancellation,
+  worker shutdown, and schedule-journal reporting
 - mandatory baseline crash, liveness, and data-safety oracles
 - a managed artifact store and complete binary/plugin/manifest provenance
 - per-node immutable binaries for mixed-version tests
@@ -357,6 +360,30 @@ The IDs above illustrate the intended built-in/plugin boundary; those
 components are not shipped yet. A manifest is executable only when every
 referenced component is registered.
 
+Every component has one feature-neutral `activation` declaration. Omitting it
+means serial invocation as soon as dependencies are ready:
+
+```yaml
+components:
+  - kind: action
+    component_id: example.feature.activate
+    instance_id: activate
+    activation:
+      mode: serial
+      trigger:
+        kind: ready
+```
+
+The declaration model also represents committed-event triggers, occurrence and
+source selection, offsets, trigger timeouts, and concurrent invocation. Those
+non-default declarations already parse, compile, bind, and persist in canonical
+`RunPlan` data. The current runner deliberately rejects them during static
+preflight, before topology/provider/component callbacks or environment
+acquisition, until the scheduler coordinator owns their execution semantics.
+`activation.trigger.timeout_s` limits how long an event trigger may wait after
+dependency readiness; the component-level `timeout_s` is a separate cooperative
+limit on the component invocation itself.
+
 `mode: feature` requires at least one required oracle and one required evidence
 declaration. `mode: topology_smoke` is reserved for infrastructure checks and
 must not be reported as feature coverage.
@@ -462,6 +489,11 @@ def plugin():
 
 A data-only pack can reference `example.marker-action`, and a scenario can
 select `example.configured-artifact`; neither requires a core-code change.
+
+The public plugin facade also exports the six declarative scheduling types:
+`ActivationSpec`, `ActivationMode`, `TriggerSpec`, `TriggerKind`,
+`EventSelector`, and `EventScope`. Planner state, journals, replay machinery,
+and coordinator internals remain framework-private.
 
 Component factories are zero-argument and construct in-memory state; the
 returned object implements the selected role (`run` for an action, for example).

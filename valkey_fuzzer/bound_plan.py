@@ -30,6 +30,7 @@ from .extensibility import (
     StartupOverlay,
     TopologyProviderIdentity,
 )
+from .scheduling import ActivationSpec
 
 
 class BoundPlanError(ValueError):
@@ -488,6 +489,7 @@ class BoundComponentSpec(_RuntimeOnly):
     """Executable component declaration with a fully resolved configuration."""
 
     __slots__ = (
+        "_activation",
         "_component_id",
         "_config",
         "_depends_on",
@@ -496,7 +498,6 @@ class BoundComponentSpec(_RuntimeOnly):
         "_lease",
         "_required",
         "_timeout_s",
-        "_when_event",
     )
 
     def __init__(
@@ -508,7 +509,7 @@ class BoundComponentSpec(_RuntimeOnly):
         config: Mapping[str, Any],
         required: bool,
         depends_on: Sequence[str],
-        when_event: Optional[str],
+        activation: ActivationSpec,
         timeout_s: Optional[float],
         _lease: Optional[_BoundLease] = None,
     ):
@@ -525,8 +526,8 @@ class BoundComponentSpec(_RuntimeOnly):
         if not isinstance(required, bool):
             raise TypeError("required must be a boolean")
         dependencies = _string_tuple(depends_on, "depends_on")
-        if when_event is not None:
-            _require_text(when_event, "when_event")
+        if type(activation) is not ActivationSpec:
+            raise TypeError("activation must be an ActivationSpec")
         if timeout_s is not None and (
             isinstance(timeout_s, bool)
             or not isinstance(timeout_s, (int, float))
@@ -550,7 +551,7 @@ class BoundComponentSpec(_RuntimeOnly):
         )
         object.__setattr__(self, "_required", required)
         object.__setattr__(self, "_depends_on", dependencies)
-        object.__setattr__(self, "_when_event", when_event)
+        object.__setattr__(self, "_activation", activation)
         object.__setattr__(self, "_timeout_s", timeout_s)
 
     @classmethod
@@ -573,7 +574,7 @@ class BoundComponentSpec(_RuntimeOnly):
             config=binding.resolve(source.config),
             required=source.required,
             depends_on=source.depends_on,
-            when_event=source.when_event,
+            activation=source.activation,
             timeout_s=source.timeout_s,
             _lease=lease,
         )
@@ -609,9 +610,9 @@ class BoundComponentSpec(_RuntimeOnly):
         return self._depends_on
 
     @property
-    def when_event(self) -> Optional[str]:
+    def activation(self) -> ActivationSpec:
         self._lease.ensure_active()
-        return self._when_event
+        return self._activation
 
     @property
     def timeout_s(self) -> Optional[float]:
@@ -939,7 +940,7 @@ class BoundRunPlan(_RuntimeOnly):
                 or component.component_id != source.component_id
                 or component.required is not source.required
                 or component.depends_on != source.depends_on
-                or component.when_event != source.when_event
+                or component.activation != source.activation
                 or component.timeout_s != source.timeout_s
             ):
                 raise ValueError(

@@ -58,11 +58,21 @@ from .extensibility import (
     TopologyProviderRegistration,
     Workload,
 )
+from .scheduling import (
+    ActivationMode,
+    ActivationSpec,
+    EventScope,
+    EventSelector,
+    TriggerKind,
+    TriggerSpec,
+)
 
 __all__ = [
     "EXTENSION_API_VERSION",
     "PLUGIN_ENTRY_POINT_GROUP",
     "Action",
+    "ActivationMode",
+    "ActivationSpec",
     "ArtifactProvider",
     "ArtifactProviderRegistration",
     "ArtifactProviderResolvedConfigValidator",
@@ -78,6 +88,8 @@ __all__ = [
     "EnvironmentProviderContext",
     "EnvironmentReference",
     "EventBus",
+    "EventScope",
+    "EventSelector",
     "EventSubscription",
     "Evidence",
     "EvidenceRequirement",
@@ -108,5 +120,7 @@ __all__ = [
     "TopologyProvider",
     "TopologyProviderIdentity",
     "TopologyProviderRegistration",
+    "TriggerKind",
+    "TriggerSpec",
     "Workload",
 ]

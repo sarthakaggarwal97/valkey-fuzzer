@@ -1,9 +1,11 @@
 """Contract tests for the external plugin import boundary."""
 
 import valkey_fuzzer
-from valkey_fuzzer import environment, extensibility, extensions
+from valkey_fuzzer import environment, extensibility, extensions, scheduling
 from valkey_fuzzer.extensions import (
     EXTENSION_API_VERSION,
+    ActivationMode,
+    ActivationSpec,
     ArtifactProviderRegistration,
     ComponentKind,
     ComponentRegistration,
@@ -14,12 +16,16 @@ from valkey_fuzzer.extensions import (
     ProvisionedTopology,
     RunMode,
     TopologyProviderRegistration,
+    TriggerKind,
+    TriggerSpec,
 )
 
 EXPECTED_PUBLIC_NAMES = {
     "EXTENSION_API_VERSION",
     "PLUGIN_ENTRY_POINT_GROUP",
     "Action",
+    "ActivationMode",
+    "ActivationSpec",
     "ArtifactProvider",
     "ArtifactProviderRegistration",
     "ArtifactProviderResolvedConfigValidator",
@@ -38,6 +44,8 @@ EXPECTED_PUBLIC_NAMES = {
     "EventSubscription",
     "Evidence",
     "EvidenceRequirement",
+    "EventScope",
+    "EventSelector",
     "ExecutableComponentSpec",
     "ExecutableNodeSelector",
     "ExecutablePolicySpec",
@@ -65,6 +73,8 @@ EXPECTED_PUBLIC_NAMES = {
     "TopologyProvider",
     "TopologyProviderIdentity",
     "TopologyProviderRegistration",
+    "TriggerKind",
+    "TriggerSpec",
     "Workload",
 }
 
@@ -86,10 +96,20 @@ FORBIDDEN_HOST_NAMES = {
 }
 
 FORBIDDEN_SCHEDULER_NAMES = {
-    "ActivationSpec",
     "DeterministicActivationPlanner",
+    "ScheduleJournalEntry",
     "ScheduleJournalSnapshot",
+    "ScheduledActivation",
     "validate_schedule_replay",
+}
+
+DECLARATIVE_SCHEDULER_NAMES = {
+    "ActivationMode",
+    "ActivationSpec",
+    "EventScope",
+    "EventSelector",
+    "TriggerKind",
+    "TriggerSpec",
 }
 
 
@@ -126,12 +146,14 @@ def test_public_extension_surface_is_explicit_and_author_facing():
     assert all(getattr(extensions, name) is not None for name in extensions.__all__)
     assert FORBIDDEN_HOST_NAMES.isdisjoint(extensions.__all__)
     assert FORBIDDEN_SCHEDULER_NAMES.isdisjoint(extensions.__all__)
+    assert set(extensions.__all__).intersection(scheduling.__all__) == DECLARATIVE_SCHEDULER_NAMES
 
 
 def test_public_exports_preserve_runtime_type_identity():
     assert extensions.ComponentSpec is extensibility.ComponentSpec
     assert extensions.ArtifactSpec is environment.ArtifactSpec
     assert extensions.EventBus is extensibility.EventBus
+    assert extensions.ActivationSpec is scheduling.ActivationSpec
     assert valkey_fuzzer.EXTENSION_API_VERSION == EXTENSION_API_VERSION
 
 
@@ -175,3 +197,21 @@ def test_plugin_manifest_can_be_authored_using_only_the_public_facade():
     )
 
     assert manifest.plugin_id == "example.public-api"
+
+
+def test_public_activation_contract_is_declarative_without_exposing_scheduler_internals():
+    activation = ActivationSpec(
+        trigger=TriggerSpec(kind=TriggerKind.READY, offset_s=0.5),
+        mode=ActivationMode.SERIAL,
+    )
+
+    assert activation.to_data() == {
+        "mode": "serial",
+        "trigger": {
+            "event": None,
+            "kind": "ready",
+            "offset_s": 0.5,
+            "scope": "after_ready",
+            "timeout_s": None,
+        },
+    }

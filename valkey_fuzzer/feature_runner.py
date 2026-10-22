@@ -58,6 +58,7 @@ from .extensibility import (
     Workload,
     to_plain_data,
 )
+from .scheduling import is_default_activation
 
 TopologyProviderFactory = Callable[[], TopologyProvider]
 TopologyProviderEntry = TopologyProviderRegistration
@@ -372,6 +373,15 @@ def _validate_phase_dependencies(
                 raise ValueError(
                     f"component {component.instance_id!r} cannot depend on post-execution oracle {dependency_id!r}"
                 )
+
+
+def _validate_supported_activations(plan: Union[RunPlan, BoundRunPlan]) -> None:
+    for component in plan.components:
+        if not is_default_activation(component.activation):
+            raise FeatureRunnerError(
+                f"component {component.instance_id!r} declares a non-default activation; "
+                "the activation coordinator is not implemented"
+            )
 
 
 def _effective_required_instances(plan: Union[RunPlan, BoundRunPlan]) -> frozenset[str]:
@@ -833,6 +843,8 @@ class FeatureRunner:
     def validate(self, plan: RunPlan) -> None:
         """Preflight a plan without provisioning a topology or running components.
 
+        Non-default activation declarations fail before any registry lookup or
+        extension callback because the scheduler coordinator is not integrated.
         Topology provider factories and signatures are resolved. Plan-specific
         topology validation and component validators are deferred only where
         typed environment references still require post-acquisition binding.
@@ -842,6 +854,7 @@ class FeatureRunner:
 
         if not isinstance(plan, RunPlan):
             raise TypeError("plan must be a RunPlan")
+        _validate_supported_activations(plan)
         context = _RunnerContext(
             plan,
             plan,
@@ -1152,6 +1165,7 @@ class FeatureRunner:
         resolved: tuple[_ResolvedComponent, ...] = ()
 
         try:
+            _validate_supported_activations(plan)
             _validate_feature_mode(plan)
             ordered = stable_topological_order(plan.components)
             _validate_phase_dependencies(ordered)
@@ -1660,6 +1674,7 @@ class FeatureRunner:
 
         validate_bound_topology = _topology_contains_environment_reference(plan)
         try:
+            _validate_supported_activations(plan)
             static_prepared = self._prepare_plan(
                 plan,
                 context,

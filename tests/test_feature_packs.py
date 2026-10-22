@@ -42,6 +42,14 @@ from valkey_fuzzer.feature_packs import (
     load_scenario_yaml,
     parse_feature_pack_document,
 )
+from valkey_fuzzer.scheduling import (
+    ActivationMode,
+    ActivationSpec,
+    EventScope,
+    EventSelector,
+    TriggerKind,
+    TriggerSpec,
+)
 
 
 def _registration(
@@ -204,6 +212,113 @@ supported_topologies: [standalone]
 components: []
 """
         )
+
+
+def test_feature_pack_activation_defaults_and_nondefault_declarations_compile_durably():
+    default_pack = parse_feature_pack_document(_manifest())
+    assert default_pack.components[0].activation == ActivationSpec()
+
+    manifest = _manifest()
+    manifest["components"][0]["activation"] = {
+        "mode": "concurrent",
+        "trigger": {
+            "kind": "event",
+            "event": {
+                "name": "action.started",
+                "source": "producer",
+                "occurrence": 2,
+            },
+            "scope": "run",
+            "offset_s": 0.25,
+            "timeout_s": 10,
+        },
+    }
+    expected = ActivationSpec(
+        trigger=TriggerSpec(
+            kind=TriggerKind.EVENT,
+            event=EventSelector(
+                name="action.started",
+                source="producer",
+                occurrence=2,
+            ),
+            scope=EventScope.RUN,
+            offset_s=0.25,
+            timeout_s=10,
+        ),
+        mode=ActivationMode.CONCURRENT,
+    )
+
+    compiler = _compiler_for(manifest)
+    plan = compiler.compile(_scenario())
+
+    assert compiler.catalog.resolve("example.feature", "1").components[0].activation == expected
+    assert plan.components[0].activation == expected
+    assert plan.to_data()["components"][0]["activation"] == expected.to_data()
+    assert RunPlan.from_json(plan.to_json()) == plan
+
+
+@pytest.mark.parametrize(
+    ("activation", "match"),
+    [
+        (None, "must not be null"),
+        ([], "must be a mapping"),
+        ({"unknown": True}, "activation contains unknown fields"),
+        ({"trigger": None}, r"activation\.trigger must not be null"),
+        ({"trigger": []}, "trigger must be a mapping"),
+        (
+            {"trigger": {"kind": "ready", "unknown": True}},
+            "trigger contains unknown fields",
+        ),
+        (
+            {"trigger": {"kind": "event", "event": None}},
+            r"activation\.trigger\.event must not be null",
+        ),
+        (
+            {
+                "trigger": {
+                    "kind": "event",
+                    "event": {"name": "action.started", "unknown": True},
+                }
+            },
+            "event selector contains unknown fields",
+        ),
+        (
+            {"trigger": {"kind": "event", "event": []}},
+            "event selector must be a mapping",
+        ),
+        (
+            {"trigger": {"kind": "event", "event": {"name": None}}},
+            r"activation\.trigger\.event\.name must not be null",
+        ),
+        (
+            {"trigger": {"kind": "event", "event": {"name": "action.started"}, "timeout_s": None}},
+            r"activation\.trigger\.timeout_s must not be null",
+        ),
+    ],
+)
+def test_feature_pack_activation_parser_rejects_null_wrong_and_unknown_nested_fields(activation, match):
+    manifest = _manifest()
+    manifest["components"][0]["activation"] = activation
+
+    with pytest.raises(FeaturePackDocumentError, match=match):
+        parse_feature_pack_document(manifest)
+
+
+def test_feature_pack_rejects_removed_when_event_field_and_nondefault_capability_activation():
+    manifest = _manifest()
+    manifest["components"][0]["when_event"] = "action.started"
+    with pytest.raises(FeaturePackDocumentError, match="unknown fields"):
+        parse_feature_pack_document(manifest)
+
+    manifest = _manifest(kind="capability", component_id="example.capability")
+    manifest["components"][0]["activation"] = {
+        "trigger": {
+            "kind": "ready",
+            "offset_s": 0.01,
+        }
+    }
+    with pytest.raises(FeaturePackDocumentError, match="capability probes require the default"):
+        parse_feature_pack_document(manifest)
 
 
 def test_feature_pack_sequences_reject_unordered_collections():

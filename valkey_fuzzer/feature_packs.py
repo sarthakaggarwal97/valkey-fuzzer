@@ -49,6 +49,7 @@ from .extensibility import (
     TopologyProviderRegistry,
     UnknownTopologyProviderError,
 )
+from .scheduling import ActivationSpec
 
 _NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
 _INPUT_SEGMENT = r"[A-Za-z0-9][A-Za-z0-9_-]*"
@@ -267,6 +268,28 @@ def _parse_policies(value: Any) -> tuple[PolicySpec, ...]:
     return tuple(result)
 
 
+def _reject_activation_nulls(value: Any, location: str) -> None:
+    if value is None:
+        raise FeaturePackDocumentError(f"{location} must not be null; omit the field to use its default")
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            _reject_activation_nulls(item, f"{location}.{key}")
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _reject_activation_nulls(item, f"{location}[{index}]")
+
+
+def _parse_activation(value: Any, component_index: int) -> ActivationSpec:
+    location = f"components[{component_index}].activation"
+    _reject_activation_nulls(value, location)
+    try:
+        return ActivationSpec.from_data(_mapping(value, location))
+    except FeaturePackDocumentError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise FeaturePackDocumentError(f"{location}: {exc}") from exc
+
+
 def _parse_component(value: Any, index: int) -> ComponentSpec:
     mapping = _fields(
         value,
@@ -278,7 +301,7 @@ def _parse_component(value: Any, index: int) -> ComponentSpec:
             "config",
             "required",
             "depends_on",
-            "when_event",
+            "activation",
             "timeout_s",
         ),
         required=("kind", "component_id", "instance_id"),
@@ -291,9 +314,13 @@ def _parse_component(value: Any, index: int) -> ComponentSpec:
             config=mapping.get("config", {}),
             required=mapping.get("required", True),
             depends_on=mapping.get("depends_on", ()),
-            when_event=mapping.get("when_event"),
+            activation=(
+                ActivationSpec() if "activation" not in mapping else _parse_activation(mapping["activation"], index)
+            ),
             timeout_s=mapping.get("timeout_s"),
         )
+    except FeaturePackDocumentError:
+        raise
     except (TypeError, ValueError) as exc:
         raise FeaturePackDocumentError(f"components[{index}]: {exc}") from exc
 
@@ -993,7 +1020,7 @@ def _resolve_pack_templates(spec: FeaturePackSpec, inputs: Mapping[str, Any]) ->
             ),
             required=component.required,
             depends_on=component.depends_on,
-            when_event=component.when_event,
+            activation=component.activation,
             timeout_s=component.timeout_s,
         )
         for component in spec.components
