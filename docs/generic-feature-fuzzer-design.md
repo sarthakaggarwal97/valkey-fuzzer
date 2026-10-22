@@ -5,8 +5,9 @@
 valkey-fuzzer should test an open-ended set of Valkey features without becoming
 a collection of feature-specific harnesses. Standalone, primary–replica, and
 cluster are deployment topologies. Forkless save, replication compression,
-future cluster protocols, durability, and data tiering are feature packs
-composed on top of the same execution model.
+durability, data tiering, and possible future protocols are stress cases used
+to test whether the extension model is broad enough. They are not planned
+core-owned feature packs.
 
 The project is greenfield. There is one strict scenario document, one compiler,
 one run plan, one lifecycle runner, and one result model. The public format has
@@ -21,9 +22,17 @@ The normal onboarding contract is:
 Onboarding a feature must not require a feature enum, CLI subcommand, parser
 branch, topology special case, or result-format fork.
 
+Core owns the scenario language, compiler, registries, execution lifecycle,
+topology and environment contracts, evidence transport, policy declaration and
+transport contracts, reporting, and feature-neutral test primitives. An
+extension owns feature configuration, capability probes, activation, path
+evidence, domain-specific faults, policy semantics, and oracles. No roadmap item
+should require the core project to implement a particular Valkey feature before
+the framework can be considered usable.
+
 ## Feature test contract
 
-Every pack must answer:
+Every feature extension must answer:
 
 1. **Eligibility:** Which topologies, artifacts, platforms, roles, and build
    capabilities can run it?
@@ -39,8 +48,10 @@ Every pack must answer:
    and protocol invariants must hold?
 
 Configuration is not path evidence. Successful reads are not necessarily path
-evidence either. A compression pack, for example, must observe negotiation or
-counter changes in addition to verifying replica correctness.
+evidence either. An extension testing compression, for example, must observe
+negotiation or counter changes in addition to verifying replica correctness.
+That example tests the abstraction; it is not a commitment to ship a
+compression implementation in core.
 
 ## One execution graph
 
@@ -49,51 +60,60 @@ scenario intent
       │
       ├── pack identity + inputs
       ├── topology intent
-      ├── artifact bindings             target
-      ├── managed resource bindings     target
-      └── policy/coverage intent         target
+      ├── artifact declarations          accepted
+      ├── managed resource declarations accepted
+      └── policy intent                  accepted
       │
       ▼
-strict compiler + complete preflight
+strict compiler + complete static preflight
       │
       ▼
-immutable RunPlan
+immutable RunPlan with symbolic environment references
       │
-      ├── resolve immutable artifacts
-      ├── provision resources
+      ├── validate providers, outputs, references, and dependency graph
+      ├── resolve immutable artifacts                     implemented
+      ├── provision resources transactionally             implemented
+      ▼
+immutable BoundRunPlan with runtime-only bindings          implemented
+      │
+      ├── probe capabilities before topology mutation
       ├── provision topology from resource/artifact outputs
-      ├── probe capabilities before mutation
-      ├── start observers and workloads
-      ├── arm event-triggered faults
-      ├── run actions and transitions
-      ├── quiesce workloads and observers
-      ├── evaluate evidence and oracles
+      ├── run dependency-ordered component phases          implemented
+      ├── event-triggered concurrent placement             target
       └── cleanup topology, resources, and artifacts in reverse order
       │
       ▼
-uniform outcome + evidence + complete reproducer
+uniform outcome + evidence + currently available reproducer metadata
 ```
 
-The currently implemented runner covers strict compilation, component
-registries, dependency-ordered lifecycle phases, the local topology lifecycle,
-evidence requirements, uniform outcomes, rollback, and cleanup. Artifact
-resolution, managed resources, a full event-driven scheduler, policy/ledger
-services, and complete provenance remain target work.
+The compiler now accepts optional artifact, resource, and policy declarations,
+preserves exact environment references symbolically, and validates provider
+selection, declared outputs, reference consumers, and the combined dependency
+graph without mutation. Artifact and resource provider contracts and
+registries also exist.
+
+The runner acquires artifacts and resources transactionally, materializes typed
+references into a runtime-only `BoundRunPlan`, repeats topology and component
+validation against resolved values, exposes immutable `artifacts`, `resources`,
+and `topology` service namespaces, and cleans up in reverse ownership order.
+Support denial becomes `SKIP_UNSUPPORTED` only after a clean unwind. Policies
+are ordered opaque context on the bound plan: core transports them but never
+dispatches on their names or asserts that their semantics were enforced.
 
 ## Scenario and identity model
 
 The only authored scenario envelope is:
 
 ```yaml
-scenario_id: replication-compression-candidate
+scenario_id: candidate-feature-replication
 seed: 202
 
 feature:
-  use: valkey.replication-compression
+  use: example.candidate-feature
   version: "2026.10"
   with:
-    codec: lz4
-    value_shape: compressible
+    workload_profile: sustained-writes
+    feature_mode: enabled
 
 topology:
   type: replication
@@ -101,10 +121,119 @@ topology:
   base_port: 7500
 ```
 
-The compiler rejects unknown top-level fields, missing required fields,
-duplicate YAML keys, invalid inputs, unavailable packs, incompatible
-topologies, missing components, and unresolved overlay resources before
-topology mutation.
+The accepted top-level fields are `scenario_id`, `seed`, `feature`, `topology`,
+`artifacts`, `resources`, and `policies`; the last three are optional. The
+compiler rejects unknown fields, missing required fields, duplicate YAML keys,
+invalid inputs, unavailable packs, incompatible topologies, missing components,
+unknown providers, dependency cycles, and invalid environment references
+before topology mutation.
+
+Environment declarations use one neutral shape:
+
+```yaml
+# Illustrative: the named providers must come from an installed trusted plugin.
+scenario_id: environment-wiring-check
+seed: 202
+
+feature:
+  use: example.topology-smoke
+  version: "1"
+  with: {}
+
+artifacts:
+  candidate:
+    use: example.local-artifact
+    with:
+      source: /opt/candidate/valkey-server
+
+resources:
+  helper:
+    use: example.managed-helper
+    depends_on: [artifacts.candidate]
+    with:
+      executable: {$ref: artifacts.candidate.path}
+
+policies:
+  run-budget:
+    use: example.run-budget
+    with:
+      endpoint: {$ref: resources.helper.endpoint}
+
+topology:
+  type: standalone
+  valkey_binary: {$ref: artifacts.candidate.path}
+```
+
+Artifact and resource entries accept `use`, optional `with`, and optional
+`depends_on`. Policy entries accept `use` and optional `with`; their
+environment edges are inferred from references because policies have no
+provider lifecycle. Dependencies use exact `artifacts.<id>` or
+`resources.<id>` paths. References use exact
+`artifacts.<id>.<output>` or `resources.<id>.<output>` paths.
+
+Authored bindings use exact `{$ref: artifacts.<id>.<output>}` or
+`{$ref: resources.<id>.<output>}` mappings. Compilation converts them to typed
+references. Canonical plan data and JSON persist the typed form as
+`{$valkey_fuzzer_ref: artifacts.<id>.<output>}` or
+`{$valkey_fuzzer_ref: resources.<id>.<output>}`. The
+`$valkey_fuzzer_ref` key is an internal serialization marker, not authored
+scenario syntax.
+
+A reusable feature pack opts into environment binding through an ordinary
+`feature.with` input; there is no parallel bindings envelope:
+
+```yaml
+input_schema:
+  type: object
+  properties:
+    candidate_binary:
+      type: environment_reference
+      reference_kinds: [artifacts]
+
+components:
+  - kind: action
+    component_id: example.action
+    instance_id: exercise
+    config:
+      binary: {$ref: inputs.candidate_binary}
+```
+
+A scenario can then set
+`feature.with.candidate_binary: {$ref: artifacts.candidate.path}`. The optional
+`reference_kinds` constraint accepts only `artifacts` and/or `resources`.
+Ordinary input rules continue to reject typed environment references, including
+nested references.
+
+The current input-schema language is a strict top-level subset, not general
+JSON Schema. The root supports `type: object`, `properties`, `required`, and
+boolean `additionalProperties`. A property supports `type`, `default`, `enum`,
+`minimum`, and `maximum`, with `reference_kinds` reserved for
+`type: environment_reference`. At the root, `title`, `description`, and
+`$schema` are accepted as metadata; property rules also accept `title` and
+`description`. Object and array rules validate only the container type. Nested
+`properties`, `items`, composition keywords, patterns, and length constraints
+require extension-owned component or provider validation.
+
+Any template-capable authored value that intentionally contains an ordinary
+`$ref` dictionary must use the literal escape:
+
+```yaml
+payload:
+  $valkey_fuzzer_literal:
+    $ref: "#/components/schemas/Request"
+```
+
+The `{$valkey_fuzzer_literal: <value>}` marker must contain no sibling keys.
+Its content is ordinary opaque data in feature inputs, topology, environment
+configuration, component configuration, and startup overlays. When the marker
+appears in `feature.with`, the unwrapped value is still checked against the
+feature pack's input schema.
+
+Typed references may remain in environment configuration, topology
+configuration, component configuration, and startup overlays. Persisted
+declarations must not contain credentials. Provider output values, runtime
+handles, and services are runtime-only and excluded from serialization; only
+output names and explicitly report-safe provenance may be recorded.
 
 There is deliberately no scenario `api_version`. These identities solve
 different problems:
@@ -130,7 +259,7 @@ A pack declares:
 - namespaced `pack_id` and pack `version`
 - `feature` or `topology_smoke` trust mode
 - supported topologies
-- a strict input schema
+- an input schema using the documented strict subset
 - ordered startup overlays
 - configured component instances and dependencies
 - required lifecycle events
@@ -156,35 +285,57 @@ feature coverage.
 ## Registries and plugins
 
 Built-in registrations and separately packaged plugins populate one registry
-per component role. Data-only manifests reference those registrations.
-External code is discovered through the `valkey_fuzzer.plugins` Python
-entry-point group and is trusted executable code.
+per component role plus registries for artifact and resource providers.
+Registrations may be added directly to a `FeatureRuntime` or supplied by
+external code discovered through the `valkey_fuzzer.plugins` Python entry-point
+group. Plugins are trusted executable code.
 
 Discovery and compilation must:
 
 - be deterministic
 - reject duplicate component identities
+- reject duplicate artifact or resource provider identities
 - reject duplicate pack ID/version pairs
 - prevent plugins from replacing built-ins
-- fail atomically if one plugin registration is invalid
+- fail atomically across components, packs, and providers if one plugin
+  registration is invalid
 - reject incompatible internal contracts before topology mutation
 - pin the resolved registry environment for validation and execution
-- record pack, plugin, component, and artifact identities in results
+- record available pack, component, provider, and artifact declaration
+  identities in results; immutable plugin and tested-artifact provenance remains
+  pending
 
 Explicit manifest directories are loaded in caller order and files within each
 directory are loaded deterministically.
+
+The README's “Minimal trusted plugin” section gives the concrete packaging and
+code shape. The entry-point name must equal `PluginManifest.plugin_id`.
+Component and provider factories are zero-argument; component validators receive
+`(spec, plan)`, provider static validators receive `(spec)`, and provider
+post-binding validators receive `(spec, resolved_config)`. Artifact providers
+implement `check_support`, `resolve`, `rollback`, and `cleanup`; resource
+providers implement the same lifecycle with `provision` replacing `resolve`.
 
 ## Plans, dependencies, and scheduling
 
 Compilation resolves pack inputs and safe `{$ref: inputs.name}` substitutions
 into an immutable `RunPlan`. Templates are data-only; Python, Jinja, shell, and
-`eval` are forbidden.
+`eval` are forbidden. Exact artifact and resource references deliberately
+remain typed symbolic bindings until the runtime acquisition phase; canonical
+plan serialization uses the reserved `$valkey_fuzzer_ref` marker rather than
+the authored `$ref` spelling.
 
 Component dependencies form a directed acyclic graph. Dependencies express
 semantic readiness, not timing by themselves. Every component receives an
 independent deterministic random stream derived from the scenario seed,
 component instance ID, and stream name so adding one component does not
 perturb another component’s randomness.
+
+Artifact and resource declarations form a second, cross-kind directed acyclic
+graph. The compiler validates explicit `depends_on` edges, dependencies implied
+by configuration references, selected provider registrations, and every
+referenced provider output. This is pure preflight: it does not instantiate a
+provider, call support checks, acquire an artifact, or provision a resource.
 
 The final scheduler should react to committed lifecycle events:
 
@@ -242,39 +393,38 @@ component registrations, validators, provider shape, node dimensions, ports,
 selectors, and configuration without starting Valkey or creating external
 resources.
 
-## Artifact provider target
+## Artifact declarations and providers
 
-New protocols and mixed-version behavior require immutable per-node artifacts:
+Artifact declarations and their immutable `ArtifactSpec` plan records are
+implemented. Each declaration selects a registered provider, carries
+JSON/YAML-safe configuration, and may depend on other artifacts or resources.
+Providers declare output names up front, so a reference such as
+`artifacts.candidate.path` can be rejected during compilation if `path` is not
+available.
 
-```yaml
-artifacts:
-  baseline:
-    source: /opt/valkey-baseline/src/valkey-server
-    expected_sha256: "..."
-  candidate:
-    source: /opt/valkey-candidate/src/valkey-server
-    expected_sha256: "..."
+The artifact provider contract defines side-effect-free support probing,
+resolution, rollback after failed resolution, cleanup after success, declared
+runtime services, and result validation. Providers can be registered directly
+or through the trusted plugin transaction. Framework-owned plan and result
+serialization omits resolved output values, handles, and services. Extensions
+must not copy sensitive values into provenance, events, component summaries,
+evidence, or diagnostics, because those extension-owned fields are reportable.
 
-topology:
-  type: cluster
-  artifact: candidate
-  node_artifacts:
-    node-0: baseline
-```
+The acquisition manager invokes these contracts in stable dependency order,
+pins selected registrations, rolls back failed acquisition, and retains
+successful results only for the lifetime of the owning environment session.
+Complete artifact attestations, managed result storage, per-node artifact
+assignment, and rolling transitions remain target work. Mixed-build and
+protocol-transition scenarios are architecture stress cases, not core feature
+deliverables.
 
-This is a target shape, not an accepted scenario field today.
+## Resource declarations and providers
 
-An artifact provider should resolve and attest binaries before resource or
-topology setup. Its immutable record should include digest, source commit,
-reported version, build flags/capabilities, platform, and relevant protocol
-support. Restarts and rolling upgrades must preserve or deliberately transition
-both artifact and resolved configuration.
-
-## Resource provider target
-
-Durability, data tiering, modules, and externally backed features need more than
-Valkey processes. They may require filesystems, object stores, proxies,
-sidecars, cgroups, capacity limits, or faultable dependencies.
+Some feature extensions need more than Valkey processes. Durability and data
+tiering are useful stress cases, but the same requirement applies to modules
+and any externally backed feature. Extensions may require filesystems, object
+stores, proxies, sidecars, cgroups, capacity limits, or faultable
+dependencies.
 
 ```text
 artifact resolver
@@ -291,13 +441,28 @@ resource graph
 topology provider ── component services
 ```
 
-Resource declarations and typed outputs are also target work, not accepted
-scenario fields today.
+Resource declarations, immutable `ResourceSpec` records, exact output
+references, the combined dependency graph, provider contracts, provider
+registries, and result records that exclude runtime output values, services,
+and handles are implemented. Extension-supplied configurations, provenance,
+events, and other report fields must remain non-secret. A resource provider
+owns support probing, provisioning, rollback, cleanup, report provenance, and
+any runtime-only outputs or services it exports.
 
-Each resource provider must own validation, provisioning, readiness, immutable
-provenance, fault hooks, rollback, and idempotent cleanup. A resource graph
-allows dependencies between resources and supports reverse-order release. Pack
-actions must not hide shell setup for storage or services.
+Transactional graph acquisition now probes before mutation, provisions in
+stable dependency order, rolls back partial setup, creates an immutable
+runtime-only `BoundRunPlan`, and releases topology, resources, and artifacts in
+reverse ownership order. Pack actions must not hide shell setup for storage or
+services.
+
+## Policy declarations
+
+Policy declarations are accepted as immutable intent with `use` and `with`.
+Their references participate in static target and output validation. Policies
+are materialized in declaration order and exposed through the bound plan. This
+is transport, not enforcement: core does not interpret policy types or claim
+their semantics were applied. Generic or extension-owned components and oracles
+consume policies without turning policy names into core feature dispatch.
 
 ## Workload and operation ledger target
 
@@ -327,7 +492,8 @@ expiry semantics, convergence deadlines, and explicit loss budgets.
 
 The default should require zero loss of unambiguously acknowledged, unexpired
 writes. Without a ledger and policy, a durability verdict is not trustworthy.
-The current runtime has evidence aggregation but not this operation ledger.
+The current code has standalone operation-ledger and checkpoint primitives, but
+they are not yet bound into run execution, reports, or policy evaluation.
 
 ## Evidence and oracle model
 
@@ -384,10 +550,13 @@ successful run to an error. Results should include attempted and committed
 events, all component results, evidence, cleanup diagnostics, and the resolved
 plan.
 
-## Feature sketches
+## Architecture stress cases, not core deliverables
 
-The names below are illustrative and build-dependent. A real pack must probe
-the exact target and skip unsupported combinations before mutation.
+The sketches below are requirements probes for the generic contracts. They are
+not implementation commitments, planned built-in packs, or framework-owned
+feature test suites. A feature owner may implement one as an external manifest
+or plugin; that extension must probe the exact target and skip unsupported
+combinations before mutation.
 
 ### Forkless save
 
@@ -456,9 +625,9 @@ Required framework services:
 - crash-consistent checkpoints and restart sequencing
 - recovery-time, data-survival, and file-integrity oracles
 
-The current framework can host durability components, but without the ledger,
-managed storage resources, and policy-aware recovery oracle it cannot make a
-complete durability claim.
+An extension cannot make a complete durability claim without these generic
+services. The feature-specific persistence configuration, failure semantics,
+and recovery oracle remain extension-owned.
 
 ### Data tiering
 
@@ -470,8 +639,9 @@ Required framework services:
 - residency, migration, eviction, and recall evidence
 - correctness and availability oracles across both tiers
 
-The generic component roles are sufficient, but the resource graph and these
-providers/oracles are pending.
+The generic resource graph and lifecycle contracts belong in the framework.
+Concrete tier providers, residency interpretation, and feature oracles remain
+extension-owned.
 
 ## Coverage and campaigns
 
@@ -508,19 +678,31 @@ pending.
 2. **Public cutover — implemented in the greenfield branch.** `run` and
    `validate` use only the generic runtime; examples and CI no longer expose a
    separate compatibility command.
-3. **Built-in vertical slice.** Wrap reusable command, keyspace workload,
-   process-fault, observation, crash detection, and data-validation primitives.
-   Deliver a complete standalone forkless-save pack.
-4. **Event-driven lifecycle.** Add bounded event subscriptions, deterministic
+3. **Declarative environment preflight — implemented.** Accept optional
+   artifact, resource, and policy intent; preserve symbolic references; validate
+   providers, declared outputs, and the cross-kind graph; register providers
+   directly or through the atomic plugin transaction.
+4. **Transactional environment materialization — implemented.** Provider
+   support probes, stable acquisition order, rollback, reverse cleanup,
+   immutable namespaced runtime services, passive policy transport, and an
+   immutable runtime-only `BoundRunPlan`.
+5. **Generic onboarding surface.** Add feature-neutral command, workload,
+   process-fault, observation, crash-detection, and data-validation primitives.
+   Prove data-only onboarding with neutral acceptance fixtures rather than a
+   core-owned Valkey feature pack.
+6. **Event-driven lifecycle.** Add bounded event subscriptions, deterministic
    offsets, cancellation, concurrent long-lived components, and cleanup
-   registration. Extend forkless coverage to replication and cluster.
-5. **Provenance and artifacts.** Add managed result artifacts, manifest/plugin
-   digests, tested-binary attestations, and per-node artifact assignment.
-6. **Resources and policies.** Add the resource graph, operation ledger,
-   durability/loss policies, storage faults, and recovery checkpoints.
-7. **Feature expansion.** Build replication-compression, mixed-version cluster
-   protocol, durability, and data-tiering packs using the same engine.
-8. **Campaign intelligence.** Add differential execution, semantic coverage,
+   registration. Prove timing and overlap semantics with synthetic components.
+7. **Provenance and state services.** Add managed result artifacts,
+   manifest/plugin digests, tested-binary attestations, and per-node artifact
+   assignment.
+   Integrate the existing operation-ledger and checkpoint primitives and add
+   configurable consistency/loss policies and generic resource faults.
+8. **Extension acceptance.** Test an unchanged core against a
+   data-only manifest, an independently packaged plugin, per-node artifact
+   bindings, a lifecycle-managed dependency, and a stateful recovery extension.
+   Keep every fixture feature-neutral or extension-owned.
+9. **Campaign intelligence.** Add differential execution, semantic coverage,
    corpus persistence, and failure minimization.
 
 ## Extensibility gates
@@ -533,11 +715,19 @@ The architecture is credible only when these end-to-end tests pass:
    CLI/compiler/runner executes and reports it.
 3. A mixed-artifact scenario assigns immutable binaries per node and survives a
    rolling transition without provider special cases.
-4. A durability pack uses the generic ledger, policy, resource, and recovery
-   services without pack-local infrastructure code.
-5. A data-tiering pack provisions and faults an external tier through resource
-   providers without core feature dispatch.
+4. An extension uses the generic ledger, policy, resource, and recovery
+   services to express its own state-survival contract without pack-local
+   infrastructure setup.
+5. An extension provisions, observes, and faults an external dependency through
+   resource providers without core feature dispatch.
+6. A plugin introduces new configuration, events, evidence, and an oracle
+   without changing the scenario parser, scheduler, topology provider, or
+   result schema.
 
-The repository currently has in-process coverage for the generic
-CLI-to-plugin-to-provider-to-report path. Reusable built-ins, an isolated-wheel
-acceptance test, and gates 3–5 remain pending.
+The repository currently covers the generic CLI/component path, static
+environment compilation, direct and plugin provider registration, atomic
+discovery failure, provider/output/reference validation, transactional
+acquisition, `BoundRunPlan` materialization, passive policy transport, service
+namespace isolation, rollback, and teardown precedence. Reusable built-ins, an
+isolated-wheel acceptance test, per-node artifact assignment, and the
+end-to-end portions of gates 3–6 remain pending.

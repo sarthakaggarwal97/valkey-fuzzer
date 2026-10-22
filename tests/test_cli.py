@@ -266,8 +266,8 @@ def test_validate_compiles_and_preflights_without_execution(runtime_class, tmp_p
     runtime.validate_plan.assert_called_once_with(runtime.compile_yaml.return_value)
     runtime.run_plan.assert_not_called()
     output = capsys.readouterr().out
-    assert "Structural topology preflight completed without provisioning" in output
-    assert "Component factories were not instantiated" in output
+    assert "Static scenario preflight completed without provisioning" in output
+    assert "bound environment values" in output
     assert "tests.feature@1" in output
     assert "Scenario API" not in output
     assert "Extension API" not in output

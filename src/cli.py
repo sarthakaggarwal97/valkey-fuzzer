@@ -115,8 +115,11 @@ class FuzzerCLI:
             runtime.validate_plan(plan)
 
             print("Scenario compiled successfully")
-            print("Structural topology preflight completed without provisioning")
-            print("Component factories were not instantiated; Valkey binary availability was not checked")
+            print("Static scenario preflight completed without provisioning")
+            print(
+                "Checks that require bound environment values, component instances, "
+                "or the Valkey binary remain execution-time checks"
+            )
             self._print_plan_summary(plan, verbose=getattr(args, "verbose", False))
             print("\nScenario passed structural validation!")
             return EXIT_SUCCESS
@@ -319,18 +322,18 @@ def _add_runtime_options(parser: argparse.ArgumentParser, *, execution: bool) ->
         action="append",
         default=[],
         metavar="DIR",
-        help="Directory containing feature-pack manifests; may be repeated",
+        help="Directory containing data-only feature-pack manifests; may be repeated",
     )
     parser.add_argument(
         "--no-plugins",
         action="store_true",
-        help="Disable trusted plugins from the valkey_fuzzer.plugins entry-point group",
+        help="Disable trusted installed plugins, which are loaded from valkey_fuzzer.plugins by default",
     )
     parser.add_argument(
         "--artifact-dir",
         default="",
         metavar="DIR",
-        help="Directory exposed to components for run artifacts",
+        help="Root for component artifacts and provider-scoped lifecycle directories",
     )
     if execution:
         parser.add_argument(
@@ -351,7 +354,7 @@ def create_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(
         prog="valkey-fuzzer",
-        description="Feature-pack-driven fuzzing for standalone, replication, and cluster Valkey topologies",
+        description="Generic, feature-pack-driven fuzzing for standalone, replication, and cluster Valkey topologies",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
