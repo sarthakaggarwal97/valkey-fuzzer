@@ -1,0 +1,17 @@
+scenario_id: cluster-topology-smoke
+seed: 303
+
+feature:
+  use: example.topology-smoke
+  version: "1"
+  with: {}
+
+topology:
+  type: cluster
+  num_shards: 3
+  replicas_per_shard: 1
+  base_port: 7600
+  enable_cleanup: true
+
+# A real cluster-protocol pack would add negotiation evidence, traffic,
+# topology transitions, transport faults, and independent safety oracles.

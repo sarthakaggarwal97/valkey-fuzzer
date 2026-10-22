@@ -1,4 +1,4 @@
-"""Focused tests for data-only feature packs and the generic v3 compiler."""
+"""Focused tests for data-only feature packs and the generic compiler."""
 
 import json
 from pathlib import Path
@@ -24,20 +24,20 @@ from src.extensibility import (
     discover_plugins,
 )
 from src.feature_packs import (
+    AmbiguousFeaturePackError,
     ComponentCompatibilityError,
     DuplicateFeaturePackError,
     FeaturePackCatalog,
     FeaturePackCompiler,
     FeaturePackDocumentError,
-    IncompatibleFeaturePackError,
     ReferenceInventory,
     ScenarioCompileError,
     UnresolvedReferenceError,
     UnsupportedResourceError,
-    compile_v3_scenario,
+    compile_scenario,
     load_feature_pack_directory,
     load_feature_pack_yaml,
-    load_v3_scenario_yaml,
+    load_scenario_yaml,
     parse_feature_pack_document,
 )
 
@@ -69,10 +69,8 @@ def _manifest(
     config: Any = None,
     input_schema: Any = None,
     startup_overlays: Any = None,
-    api_version: str = "v1",
 ) -> dict[str, Any]:
     return {
-        "api_version": api_version,
         "pack_id": pack_id,
         "version": version,
         "mode": "topology_smoke",
@@ -100,7 +98,6 @@ def _scenario(
     inputs: Any = None,
 ) -> dict[str, Any]:
     return {
-        "api_version": "v3",
         "scenario_id": "example-scenario",
         "seed": 123,
         "feature": {
@@ -141,24 +138,25 @@ def test_catalog_uses_exact_versions_and_batch_registration_is_atomic():
     catalog = FeaturePackCatalog()
     catalog.register_many((version_two, alpha))
 
+    assert not hasattr(catalog, "api_version")
     assert catalog.registered_keys == (("alpha.feature", "1"), ("example.feature", "2"))
     assert catalog.resolve("example.feature", "2") is version_two
+    assert catalog.resolve("alpha.feature") is alpha
 
     duplicate = parse_feature_pack_document(_manifest(version="3"))
     with pytest.raises(DuplicateFeaturePackError):
         catalog.register_many((duplicate, duplicate))
     assert catalog.registered_keys == (("alpha.feature", "1"), ("example.feature", "2"))
 
-    incompatible = parse_feature_pack_document(_manifest(pack_id="future.feature", api_version="v2"))
-    with pytest.raises(IncompatibleFeaturePackError):
-        catalog.register_many((incompatible,))
-    assert ("future.feature", "1") not in catalog
+    version_one = parse_feature_pack_document(_manifest())
+    catalog.register(version_one)
+    with pytest.raises(AmbiguousFeaturePackError, match=r"multiple registered versions.*feature\.version"):
+        catalog.resolve("example.feature")
 
 
 def test_yaml_parser_is_data_only_and_rejects_duplicate_keys():
     pack = load_feature_pack_yaml(
         """
-api_version: v1
 pack_id: example.yaml
 version: "1"
 mode: topology_smoke
@@ -222,7 +220,7 @@ def test_feature_manifest_preserves_mode_and_required_evidence_through_compile()
     oracle_registry = Registry[Any](ComponentKind.ORACLE)
     oracle_registry.register(_registration("example.oracle", ComponentKind.ORACLE))
 
-    plan = compile_v3_scenario(
+    plan = compile_scenario(
         _scenario(pack_id="example.real-feature"),
         catalog,
         {
@@ -305,10 +303,9 @@ def test_compiler_invokes_pure_component_validator_and_checks_signatures():
         ).compile(_scenario())
 
 
-def test_v3_yaml_loader_is_safe_and_rejects_duplicate_keys():
-    scenario = load_v3_scenario_yaml(
+def test_scenario_yaml_loader_is_safe_and_rejects_duplicate_keys():
+    scenario = load_scenario_yaml(
         """
-api_version: v3
 scenario_id: example-yaml
 seed: 123
 feature:
@@ -322,9 +319,8 @@ topology:
     assert scenario["feature"]["use"] == "example.feature"
 
     with pytest.raises(FeaturePackDocumentError, match="duplicate key"):
-        load_v3_scenario_yaml(
+        load_scenario_yaml(
             """
-api_version: v3
 scenario_id: first
 scenario_id: second
 seed: 123
@@ -337,7 +333,7 @@ topology:
 """
         )
     with pytest.raises(FeaturePackDocumentError):
-        load_v3_scenario_yaml("!!python/object/apply:os.system ['echo unsafe']")
+        load_scenario_yaml("!!python/object/apply:os.system ['echo unsafe']")
 
 
 def test_directory_load_is_sorted_and_does_not_partially_register(tmp_path: Path):
@@ -385,10 +381,9 @@ components: []
     assert len(empty_catalog) == 0
 
 
-def test_directory_manifest_and_v3_yaml_use_the_generic_compiler(tmp_path: Path):
+def test_directory_manifest_and_scenario_yaml_use_the_generic_compiler(tmp_path: Path):
     (tmp_path / "data-only.yaml").write_text(
         """
-api_version: v1
 pack_id: example.data-only
 version: "1"
 mode: topology_smoke
@@ -419,7 +414,6 @@ components:
 
     plan = compiler.compile_yaml(
         """
-api_version: v3
 scenario_id: data-only-yaml
 seed: 991
 feature:
@@ -522,19 +516,51 @@ def test_compile_resolves_inputs_and_preserves_complete_topology_and_plan_contra
     assert plan.startup_overlays[0].selector.labels["zone"] == "a"
     assert plan.required_events == ("action.completed",)
     assert plan.topology_document["opaque_future_field"]["values"] == (1, 2)
-    assert plan.scenario_api_version == "v3"
 
     original_pack = compiler.catalog.resolve("example.feature", "1")
+    assert not hasattr(original_pack, "api_version")
     assert original_pack.components[1].config["count"] == {"$ref": "inputs.count"}
     assert RunPlan.from_json(plan.to_json()) == plan
-    assert json.loads(plan.to_json())["topology_document"]["base_port"] == 7400
+    serialized_plan = json.loads(plan.to_json())
+    assert serialized_plan["topology_document"]["base_port"] == 7400
+    assert "api_version" not in serialized_plan
+    assert "scenario_api_version" not in serialized_plan
+
+
+def test_compile_defaults_optional_feature_fields_and_requires_version_only_when_ambiguous():
+    compiler = _compiler_for(_manifest())
+    scenario = _scenario()
+    del scenario["feature"]["version"]
+    del scenario["feature"]["with"]
+
+    plan = compiler.compile(scenario)
+
+    assert plan.pack_version == "1"
+    assert plan.inputs == {}
+
+    catalog = FeaturePackCatalog()
+    catalog.register_many(
+        (
+            parse_feature_pack_document(_manifest(version="1")),
+            parse_feature_pack_document(_manifest(version="2")),
+        )
+    )
+    registry = Registry[Any](ComponentKind.ACTION)
+    registry.register(_registration("example.action", ComponentKind.ACTION))
+    ambiguous_compiler = FeaturePackCompiler(catalog, {ComponentKind.ACTION: registry})
+
+    with pytest.raises(AmbiguousFeaturePackError, match=r"multiple registered versions.*feature\.version"):
+        ambiguous_compiler.compile(scenario)
+
+    scenario["feature"]["version"] = "2"
+    assert ambiguous_compiler.compile(scenario).pack_version == "2"
 
 
 @pytest.mark.parametrize(
     ("change", "match"),
     [
         (lambda scenario: scenario.update({"unexpected": True}), "unknown fields"),
-        (lambda scenario: scenario.update({"api_version": "v2"}), "incompatible"),
+        (lambda scenario: scenario.update({"api_version": "v2"}), "unknown fields"),
         (lambda scenario: scenario.update({"seed": True}), "seed must be an integer"),
         (lambda scenario: scenario.update({"feature": []}), "feature must be a mapping"),
         (
@@ -545,7 +571,7 @@ def test_compile_resolves_inputs_and_preserves_complete_topology_and_plan_contra
         (lambda scenario: scenario["feature"].update({"with": []}), "feature.with must be a mapping"),
     ],
 )
-def test_compile_rejects_malformed_v3_envelopes(change, match):
+def test_compile_rejects_malformed_envelopes(change, match):
     compiler = _compiler_for(_manifest())
     scenario = _scenario()
     change(scenario)
@@ -800,7 +826,7 @@ def test_external_entry_point_can_add_component_and_pack_then_compile(monkeypatc
         {ComponentKind.ACTION: registry},
         feature_pack_catalog=catalog,
     ) == (plugin,)
-    plan = compile_v3_scenario(
+    plan = compile_scenario(
         _scenario(pack_id="external.feature"),
         catalog,
         {ComponentKind.ACTION: registry},
@@ -863,8 +889,8 @@ def test_plugin_commit_failure_rolls_back_every_registry_and_catalog(monkeypatch
     assert len(catalog) == 0
 
 
-def test_pack_only_plugin_api_mismatch_and_registry_api_mismatch_are_clean(monkeypatch):
-    future_pack = parse_feature_pack_document(_manifest(pack_id="future.feature", api_version="v2"))
+def test_plugin_api_mismatch_and_registry_api_mismatch_are_clean(monkeypatch):
+    future_pack = parse_feature_pack_document(_manifest(pack_id="future.feature"))
     future_plugin = PluginManifest(
         plugin_id="future.plugin",
         api_version="v2",

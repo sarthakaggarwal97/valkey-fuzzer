@@ -1,8 +1,7 @@
 """Generic, topology-neutral executor for compiled feature-pack run plans.
 
-This module is intentionally isolated from the v1/v2 engine and the concrete
-Valkey topology implementations.  Topologies and feature behavior enter only
-through provider and component registries.
+Topologies and feature behavior enter only through provider and component
+registries; the runner never dispatches on individual Valkey features.
 """
 
 import inspect
@@ -445,19 +444,16 @@ class FeatureRunner:
         registry = self._registries.get(spec.kind)
         if registry is None:
             raise FeatureRunnerError(f"no registry is configured for component kind {spec.kind.value!r}")
-        if registry.api_version != plan.api_version:
-            raise FeatureRunnerError(
-                f"registry for {spec.kind.value!r} uses API {registry.api_version!r}, expected {plan.api_version!r}"
-            )
         try:
             registration = registry.resolve(spec.component_id)
         except Exception as exc:
             raise FeatureRunnerError(
                 f"cannot resolve {spec.kind.value} component {spec.component_id!r}: {exc}"
             ) from exc
-        if registration.kind is not spec.kind or registration.api_version != plan.api_version:
+        if registration.kind is not spec.kind or registration.api_version != registry.api_version:
             raise FeatureRunnerError(
-                f"registration {spec.component_id!r} is incompatible with {spec.kind.value} API {plan.api_version!r}"
+                f"registration {spec.component_id!r} is incompatible with "
+                f"{spec.kind.value} registry API {registry.api_version!r}"
             )
         _require_signature(
             registration.factory,

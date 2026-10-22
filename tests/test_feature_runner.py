@@ -24,7 +24,7 @@ from src.extensibility import (
     RunPlan,
     discover_plugins,
 )
-from src.feature_packs import FeaturePackCatalog, compile_v3_scenario
+from src.feature_packs import FeaturePackCatalog, compile_scenario
 from src.feature_runner import FeatureRunner, ProvisionedTopology, stable_topological_order
 
 
@@ -300,7 +300,6 @@ def _plan(
         seed=7,
         topology=topology,
         topology_document={"type": topology, "provider_option": "valid"},
-        scenario_api_version="v3",
     )
 
 
@@ -1489,9 +1488,8 @@ def test_external_plugin_compiles_and_executes_without_runner_changes(monkeypatc
         registries,
         feature_pack_catalog=catalog,
     )
-    plan = compile_v3_scenario(
+    plan = compile_scenario(
         {
-            "api_version": "v3",
             "scenario_id": "external-run",
             "seed": 1,
             "feature": {

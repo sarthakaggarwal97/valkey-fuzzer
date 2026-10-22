@@ -1,4 +1,4 @@
-"""Focused tests for the generic v3 runtime bootstrap."""
+"""Focused tests for the generic runtime bootstrap."""
 
 import threading
 import time
@@ -29,7 +29,6 @@ from src.feature_runtime import FeatureRuntime, FeatureRuntimeError
 
 def _manifest(pack_id: str = "example.feature") -> str:
     return f"""
-api_version: v1
 pack_id: {pack_id}
 version: "1"
 mode: topology_smoke
@@ -44,7 +43,6 @@ required_events: [action.completed]
 
 def _scenario(*, valkey_binary: str = "/original/valkey-server") -> str:
     return f"""
-api_version: v3
 scenario_id: runtime-test
 seed: 41
 feature:
@@ -156,8 +154,7 @@ def test_runtime_constructs_all_registries_and_uses_local_provider_factories(mon
         runtime.registries[ComponentKind.ACTION].kind = ComponentKind.ORACLE
     with pytest.raises(AttributeError):
         runtime.registries[ComponentKind.ACTION].api_version = "v999"
-    with pytest.raises(AttributeError):
-        runtime.catalog.api_version = "v999"
+    assert not hasattr(runtime.catalog, "api_version")
 
 
 def test_runtime_discovers_plugin_components_before_compiling_directory_manifest(
@@ -232,11 +229,8 @@ def test_multi_directory_manifest_load_is_atomic_and_ordered(tmp_path):
     )
 
 
-def test_manifest_staging_uses_the_runtime_extension_api(tmp_path):
-    (tmp_path / "feature.yaml").write_text(
-        _manifest().replace("api_version: v1", "api_version: v2"),
-        encoding="utf-8",
-    )
+def test_manifest_staging_is_independent_of_runtime_extension_api(tmp_path):
+    (tmp_path / "feature.yaml").write_text(_manifest(), encoding="utf-8")
 
     runtime = FeatureRuntime(
         tmp_path,
@@ -245,8 +239,9 @@ def test_manifest_staging_uses_the_runtime_extension_api(tmp_path):
         extension_api_version="v2",
     )
 
-    assert runtime.catalog.api_version == "v2"
-    assert runtime.manifest_feature_packs[0].api_version == "v2"
+    assert all(registry.api_version == "v2" for registry in runtime.registries.values())
+    assert not hasattr(runtime.catalog, "api_version")
+    assert not hasattr(runtime.manifest_feature_packs[0], "api_version")
 
 
 def test_manifest_failure_happens_before_plugin_discovery(tmp_path, monkeypatch):
@@ -308,7 +303,6 @@ def test_validate_plan_applies_overrides_without_provisioning_or_component_creat
         )
     )
     scenario = {
-        "api_version": "v3",
         "scenario_id": "runtime-test",
         "seed": 41,
         "feature": {
@@ -403,40 +397,25 @@ def test_runtime_rejects_registration_replacement_after_compile(tmp_path):
     assert provider_calls == []
 
 
-@pytest.mark.parametrize(
-    ("extension_api", "scenario_api", "message"),
-    [
-        ("v999", "v3", "extension API"),
-        ("v1", "v999", "scenario API"),
-        ("v1", None, "scenario API"),
-    ],
-)
-def test_runtime_rejects_incompatible_componentless_plans(
-    extension_api,
-    scenario_api,
-    message,
-):
+def test_componentless_plan_is_independent_of_runtime_extension_api():
     runtime = FeatureRuntime(
         discover_entry_points=False,
         topology_providers={"standalone": _Provider([])},
+        extension_api_version="v999",
     )
     plan = RunPlan(
         scenario_id="foreign-plan",
         pack_id="example.foreign",
         pack_version="1",
-        api_version=extension_api,
         seed=1,
         topology="standalone",
         components=(),
         mode=RunMode.TOPOLOGY_SMOKE,
         topology_document={"type": "standalone"},
-        scenario_api_version=scenario_api,
     )
 
-    with pytest.raises(FeatureRuntimeError, match=message):
-        runtime.validate_plan(plan)
-    with pytest.raises(FeatureRuntimeError, match=message):
-        runtime.run_plan(plan)
+    runtime.validate_plan(plan)
+    assert runtime.run_plan(plan).status is OutcomeStatus.PASS
 
 
 def test_runtime_serializes_provider_lifecycle_across_concurrent_runs(tmp_path):

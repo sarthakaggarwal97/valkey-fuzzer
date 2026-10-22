@@ -1,551 +1,325 @@
 # valkey-fuzzer
 
-A topology-aware foundation for running seeded Valkey scenarios across
+valkey-fuzzer is a topology-neutral framework for testing Valkey features in
 standalone, primary–replica, and cluster deployments.
 
-## Overview
+The project is intentionally greenfield. There is one scenario format and one
+execution path: a scenario selects a feature pack, the pack compiles to an
+immutable plan, and the generic runner executes registered capabilities,
+workloads, actions, faults, observers, and oracles. Adding a feature must not
+require a feature-specific CLI command or a switch in the core runner.
 
-valkey-fuzzer helps identify bugs that are difficult to catch through traditional
-integration testing. Existing cluster failover and process-chaos scenarios
-remain supported, while the v2 DSL adds topology-neutral lifecycle, layered
-server configuration, data seeding, and correctness checks.
+## Project status
 
-This is the foundation for feature packs such as forkless save, replication
-compression, and future cluster protocols. A complete feature pack still needs
-an activation action, workload lifecycle, path-evidence observer, and independent
-oracles; setting a server option alone does not prove that a feature ran.
+The generic foundation is usable for extension development:
 
-The target onboarding contract is “manifest, plus an optional small plugin”:
-new features must not require a new engine switch or topology special case.
-The repository now contains the topology foundation, extension API, v3
-feature-pack compiler, generic lifecycle runner, and local Valkey topology
-provider. The `run` and `validate` commands now route v3 scenarios through that
-generic path, loading data-only manifests from configured directories and
-trusted installed plugins. This is the basic CLI slice, not the completed
-extensibility roadmap: reusable built-ins, mandatory baseline safety oracles,
-provenance, managed resources, per-node artifacts, and real feature packs are
-still pending.
+- strict, duplicate-free YAML scenarios and feature-pack manifests
+- exact feature-pack selection and input validation
+- deterministic component seeds and dependency ordering
+- standalone, replication, and cluster topology providers
+- startup configuration overlays by role or exact node
+- trusted Python plugin discovery through `valkey_fuzzer.plugins`
+- uniform `PASS`, `FAIL`, `SKIP_UNSUPPORTED`, and `ERROR` outcomes
+- component evidence, lifecycle events, structural validation, and cleanup
+- JSON or YAML result bundles
 
-### Key Features
+The repository does **not** yet ship a complete built-in feature pack. The
+manifest under `examples/feature-packs/` is an honest topology smoke: it proves
+that the generic compiler and topology provider can be composed, but it does
+not claim to exercise a Valkey feature.
 
-- **Seeded Scenarios**: Generate and replay scenario descriptions using configurable seeds
-- **DSL-Based Configuration**: Create and reproduce specific test scenarios using a domain-specific language
-- **Multiple Topologies**: Run standalone, primary–replica, and cluster deployments
-- **Layered Server Configuration**: Configure all nodes, a role, or one exact node
-- **Current Chaos Support**: Inject process failures coordinated with cluster failover operations
-- **Topology-Aware Validation**: Apply only the checks meaningful for the selected deployment
-- **Extensible Foundation**: Add feature actions, workloads, observers, oracles, and additional faults
-- **Versioned Feature Packs**: Run v3 manifests and installed plugins without feature-specific CLI branches
+The following major pieces remain:
 
-## Architecture
+- reusable built-in components and real forkless/replication-compression packs
+- an event-driven scheduler for precise fault and observer placement
+- mandatory baseline crash, liveness, and data-safety oracles
+- a managed artifact store and complete binary/plugin/manifest provenance
+- per-node immutable binaries for mixed-version tests
+- lifecycle-managed filesystems, object stores, proxies, and sidecars
+- an acknowledged-operation ledger and explicit durability/loss policies
+- storage and resource faults, differential execution, coverage accounting,
+  and failure minimization
 
-The current execution path has five main responsibilities. The generic feature
-design extends them with workload, action, observer, and oracle registries:
+Until those exist, CI runs structural and unit acceptance checks rather than
+presenting a configuration smoke as feature fuzzing.
 
-### Components
+## The model
 
-- **Fuzzer Engine**: Coordinates scenario execution and result collection
-- **Topology Orchestrator**: Manages standalone, replication, and cluster lifecycle
-- **Operation Orchestrator**: Runs the currently supported cluster failover action
-- **Chaos Engine**: Injects process failures around cluster operations
-- **State Validator and Data Seeder**: Writes validation keys and checks topology,
-  replication, logs, and data consistency
+```text
+scenario
+  │ selects pack + inputs + topology
+  ▼
+feature-pack catalog ── trusted plugin registrations
+  │
+  ▼
+immutable RunPlan
+  │
+  ├── resolve artifacts                         (target)
+  ├── provision managed resources               (target)
+  ├── provision Valkey topology                 (implemented locally)
+  ├── probe capabilities
+  ├── run workloads/actions/faults/observers
+  ├── evaluate evidence and oracles
+  └── cleanup topology/resources in reverse order
+        │
+        ▼
+uniform outcome + reproducer metadata
+```
 
-There is not yet a continuous workload engine. The current data writes are
-validation traffic, not proof that a configured feature-specific path was used.
+A trustworthy feature run needs both:
+
+- **path evidence**, proving that the intended implementation ran; and
+- **correctness oracles**, proving that externally visible invariants held.
+
+For example, matching data on a primary and replica does not prove replication
+compression was negotiated. A protocol field, trace, or counter delta must
+provide that evidence.
 
 ## Installation
 
-### Prerequisites
+Requirements:
 
 - Python 3.9+
-
-### Setup
+- a Valkey build when executing a topology
 
 ```bash
-# Clone the repository
 git clone <repository-url>
 cd valkey-fuzzer
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Verify Valkey installation
-valkey-server --version
-```
-
-## Usage
-
-### CLI Help
-
-View all available commands and options:
-
-```bash
-# Show all commands and options
+python -m pip install -e .
 valkey-fuzzer --help
-
-# Show cluster command options
-valkey-fuzzer cluster --help
-
-# Show topology-neutral DSL command options
-valkey-fuzzer run --help
-
-# Show validate command options
-valkey-fuzzer validate --help
 ```
 
-### Topology-aware DSL execution
-
-Version 1 `cluster:` scenarios continue to work unchanged. Version 2 uses a
-`topology:` block:
+For development:
 
 ```bash
-# Standalone topology/configuration and data-consistency smoke test
-valkey-fuzzer run examples/standalone_scenario.yaml \
-  --valkey-binary /tmp/valkey/src/valkey-server
-
-# Primary–replica topology/configuration smoke with compression settings
-valkey-fuzzer run examples/replication_compression.yaml \
-  --valkey-binary /tmp/valkey/src/valkey-server
+python -m pip install -e '.[dev]'
+pytest
 ```
 
-```yaml
-api_version: v2
-scenario_id: replication-feature-smoke
+## Scenario format
 
-topology:
-  type: replication
-  replicas_per_shard: 2
-  server_config:
-    repl-compression: lz4
-  node_configs:
-    primary:
-      repl-diskless-sync: yes
-    node-2:
-      repl-compression: no
-
-operations: []
-
-state_validation:
-  check_replication: true
-  check_data_consistency: true
-```
-
-Configuration is merged from `server_config`, then a role entry such as
-`node_configs.primary`, then an exact entry such as `node_configs.node-2`.
-The example only verifies that the topology starts and that generic replication
-and data checks pass. It does **not** prove that compression was negotiated or
-used; that requires a feature-specific observer or protocol counter. The option
-names and supported values also depend on the Valkey build under test.
-
-See [the generic feature fuzzer design](docs/generic-feature-fuzzer-design.md)
-for the stable extension boundary, v3 feature envelope, example test
-matrices, path-evidence rules, and implementation sequence.
-
-### V3 feature-pack execution
-
-A v3 scenario selects an exact feature-pack ID and version. The pack may come
-from a repeatable `--feature-pack-dir` or from a trusted installed Python
-plugin in the `valkey_fuzzer.plugins` entry-point group:
+There is no `api_version` selector. A scenario has one strict shape:
 
 ```yaml
-api_version: v3
-scenario_id: candidate-feature
-seed: 123
+scenario_id: standalone-topology-smoke
+seed: 101
 
 feature:
-  use: example.candidate-feature
+  use: example.topology-smoke
   version: "1"
-  with:
-    key_count: 10000
+  with: {}
 
 topology:
   type: standalone
   base_port: 7400
+  enable_cleanup: true
 ```
 
-```bash
-# Strictly compile the scenario and run structural topology preflight only.
-valkey-fuzzer validate scenario.yaml \
-  --feature-pack-dir ./feature-packs \
-  --valkey-binary /tmp/valkey/src/valkey-server
+The accepted top-level fields are `scenario_id`, `seed`, `feature`, and
+`topology`. Unknown fields and duplicate YAML keys are rejected.
 
-# Execute the same compiled plan and write a generic result bundle.
-valkey-fuzzer run scenario.yaml \
-  --feature-pack-dir ./feature-packs \
-  --valkey-binary /tmp/valkey/src/valkey-server \
+`feature.version` is a feature-pack release identity, not a scenario-schema
+generation. It may be omitted only when exactly one version of the selected
+pack is registered. Pin it for repeatable campaigns. Reports currently record
+the resolved pack version; content digests for manifests, plugins, and tested
+binaries are still pending.
+
+The local topology provider accepts:
+
+- `type`: `standalone`, `replication`, or `cluster`
+- `num_shards` and `replicas_per_shard`
+- `base_port`, `base_data_dir`, `valkey_binary`, and `enable_cleanup`
+- topology-wide `server_config`
+- role or exact-node `node_configs`
+
+Configuration precedence is topology-wide, then role, then exact node. Feature
+packs can add ordered startup overlays on top of the scenario topology.
+
+## Feature-pack format
+
+A feature pack is data. It composes generic registered behavior:
+
+```yaml
+pack_id: example.command-feature
+version: "1"
+mode: feature
+supported_topologies: [standalone, replication]
+
+input_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    key_count:
+      type: integer
+      minimum: 1
+      default: 1000
+
+startup_overlays:
+  - overlay_id: enable-feature
+    selector:
+      roles: [primary]
+    server_config:
+      example-feature-enabled: "yes"
+
+components:
+  - kind: capability
+    component_id: core.valkey.config-capability
+    instance_id: capability
+    config:
+      option: example-feature-enabled
+
+  - kind: workload
+    component_id: core.valkey.keyspace-workload
+    instance_id: traffic
+    depends_on: [capability]
+    config:
+      key_count: {$ref: inputs.key_count}
+
+  - kind: action
+    component_id: example.feature.activate
+    instance_id: activate
+    depends_on: [traffic]
+
+  - kind: observer
+    component_id: example.feature.path-observer
+    instance_id: path
+    depends_on: [capability]
+
+  - kind: oracle
+    component_id: core.valkey.data-oracle
+    instance_id: correctness
+    depends_on: [activate]
+
+required_events:
+  - action.completed
+
+required_evidence:
+  - evidence_id: example.feature.path-entered
+    source: path
+```
+
+The IDs above illustrate the intended built-in/plugin boundary; those
+components are not shipped yet. A manifest is executable only when every
+referenced component is registered.
+
+`mode: feature` requires at least one required oracle and one required evidence
+declaration. `mode: topology_smoke` is reserved for infrastructure checks and
+must not be reported as feature coverage.
+
+Use a data-only manifest when existing components are sufficient. A separately
+installed Python package may register genuinely new behavior—such as a protocol
+decoder or platform-specific fault injector—through the
+`valkey_fuzzer.plugins` entry-point group. Plugins are trusted executable code;
+use `--no-plugins` when only explicit manifests should be considered.
+
+## CLI
+
+Validate a scenario and its resolved plan without provisioning:
+
+```bash
+valkey-fuzzer validate examples/standalone_scenario.yaml \
+  --feature-pack-dir examples/feature-packs \
+  --no-plugins
+```
+
+Validation checks the scenario, selected pack, component registrations,
+component validators, dependency graph, startup overlays, and pure topology
+preflight. It does not instantiate component factories, resolve or execute the
+Valkey binary, create directories, open sockets, or prove environment
+readiness.
+
+Run the example topology smoke:
+
+```bash
+valkey-fuzzer run examples/standalone_scenario.yaml \
+  --feature-pack-dir examples/feature-packs \
+  --no-plugins \
+  --valkey-binary /absolute/path/to/valkey-server \
   --artifact-dir ./artifacts \
   --output result.json
 ```
 
-Installed plugins are enabled by default and are trusted executable code;
-`--no-plugins` disables their discovery. `--timeout` supplies a cooperative
-deadline, so a component that ignores the run context can still block.
-`--artifact-dir` exposes a path string to components; it is not yet a managed
-artifact store and the runtime does not create or clean it.
+Other examples use the same path:
 
-Validation checks the scenario, pack, component registrations, validation
-hooks, and topology structure. It deliberately does not instantiate component
-factories, resolve or execute the Valkey binary, or prove environment
-readiness.
+```bash
+valkey-fuzzer validate examples/replication_scenario.yaml \
+  --feature-pack-dir examples/feature-packs --no-plugins
 
-V3 exit codes distinguish the terminal outcome:
+valkey-fuzzer validate examples/cluster_scenario.yaml \
+  --feature-pack-dir examples/feature-packs --no-plugins
+```
 
-- `0`: passed
-- `1`: the declared feature contract failed
+Important options:
+
+- `--feature-pack-dir DIR`: add an explicit manifest directory; repeatable
+- `--no-plugins`: disable installed plugin discovery
+- `--valkey-binary PATH`: override the binary in the topology document
+- `--timeout SECONDS`: cooperative execution deadline
+- `--artifact-dir DIR`: expose a path to components; not yet a managed store
+- `--output PATH --format json|yaml`: save the complete outcome
+- `--allow-unsupported`: treat `SKIP_UNSUPPORTED` as a successful matrix cell
+
+Exit codes:
+
+- `0`: pass, or an allowed unsupported target
+- `1`: the feature contract failed
 - `2`: compiler, provider, runner, or reporting error
 - `3`: required capability unsupported
 - `130`: interrupted
 
-Use `--allow-unsupported` when an unsupported target should be successful in a
-heterogeneous test matrix. JSON and YAML outputs contain the complete generic
-`RunOutcome`, including the resolved plan, component results, evidence, and
-diagnostics. They are not yet a complete reproducer because plugin distribution
-versions, manifest digests, and tested-binary digests are not recorded.
+## Programmatic use
 
-There are no reusable built-in component registrations or complete feature
-packs yet. Therefore the usable v3 path currently requires an installed plugin
-for non-empty feature behavior. A successful result means that the selected
-pack's declared contract passed; it does not add safety checks that the pack
-failed to declare.
-
-### Random Test Execution
-
-Generate and execute randomized test scenarios:
+`examples/run_fuzzer.py` demonstrates the same runtime used by the CLI:
 
 ```bash
-# Run with random seed
-valkey-fuzzer cluster --random
-
-# Run with specific seed for reproducibility
-valkey-fuzzer cluster --seed 12345
-
-# Run multiple iterations
-valkey-fuzzer cluster --random --iterations 10
-
-# Verbose output
-valkey-fuzzer cluster --seed 42 --verbose
-valkey-fuzzer cluster --random --verbose
-
-# Run with iterations 
-valkey-fuzzer cluster --seed 42 --iterations 2 --verbose
-
-# Run against a specific Valkey binary
-valkey-fuzzer cluster --random --valkey-binary /tmp/valkey/src/valkey-server
-
-# Run a DSL scenario against a specific Valkey binary
-valkey-fuzzer cluster --dsl examples/simple_failover.yaml --valkey-binary /tmp/valkey/src/valkey-server
-
+python examples/run_fuzzer.py validate examples/standalone_scenario.yaml
+python examples/run_fuzzer.py run examples/standalone_scenario.yaml \
+  --valkey-binary /absolute/path/to/valkey-server
 ```
 
-### PR-Triggered Fuzzer Runs
+## Adding a feature
 
-This repo includes a reusable GitHub Actions workflow at `.github/workflows/valkey-pr-fuzzer.yml` that can:
+1. Define the feature’s supported topologies and capability probes.
+2. Identify activation, path evidence, stress dimensions, faults, and
+   independent invariants.
+3. Reuse generic components wherever possible.
+4. Add only irreducible behavior as namespaced plugin registrations.
+5. Compose the behavior in a manifest and define a strict input schema.
+6. Add focused acceptance tests that prove unsupported targets skip before
+   mutation, the path evidence is real, and safety oracles catch violations.
+7. Record enough provenance to replay the exact pack, plugin, binary, inputs,
+   seed, topology, and fault placement.
 
-- build Valkey from a specific ref, including a PR merge ref such as `refs/pull/123/merge`
-- fan out a configurable number of random fuzzer runs, defaulting to `10`
-- upload per-run artifacts with the console log, node logs, and JSON result payload
-- fail the overall workflow if any run fails, while still letting all matrix runs complete
-- treat a run as failed if any operation fails, any chaos injection fails, any post-operation validation wave fails, or the final validation fails
+The engine, parser, CLI, topology providers, and result serializer should not
+change during normal feature onboarding.
 
-#### Manual Trigger
+## Durability and data tiering
 
-You can manually trigger the fuzzer workflow from the GitHub Actions UI:
+The component model can express their actions, observers, and oracles, but the
+resource and correctness foundations are not complete.
 
-1. Navigate to **Actions** -> **Valkey Cluster PR Fuzzer**
-2. Click **Run workflow**
-3. Fill in the required inputs:
-   - `valkey_repository`: Repository containing the Valkey code (e.g., `valkey-io/valkey` or `username/valkey`)
-   - `valkey_ref`: Git ref to test (e.g., `refs/pull/123/merge`, `main`, or a commit SHA)
-   - `pr_number`: (Optional) PR number for summary display
-   - `pr_url`: (Optional) PR URL for summary display
-   - `run_count`: Number of random fuzzer runs (default: 10)
-   - `fuzzer_repository`: (Optional) Override fuzzer repo to use
-   - `fuzzer_ref`: (Optional) Override fuzzer ref to use
+Durability needs an acknowledged-operation ledger, an explicit loss/ambiguity
+policy, crash and storage faults, recovery checkpoints, and post-restart
+oracles. Data tiering additionally needs managed capacity-limited backends,
+latency/failure injection, residency and migration evidence, and correctness
+checks spanning hot and cold tiers.
 
-Example manual trigger inputs:
-```
-valkey_repository: valkey-io/valkey
-valkey_ref: refs/pull/456/merge
-pr_number: 456
-pr_url: https://github.com/valkey-io/valkey/pull/456
-run_count: 5
-```
-
-Each fuzzer run uploads artifacts containing:
-- `console.log` - Full fuzzer execution output
-- `result.json` - Structured test results
-- `metadata.json` - Run metadata (status, seed, duration, failures)
-- `node-logs/` - Individual Valkey node logs from `/tmp/valkey-fuzzer/logs`
-
-To access these:
-1. Navigate to the workflow run in **Actions**
-2. Scroll to the **Artifacts** section at the bottom
-3. Download `valkey-pr-fuzzer-run-N` for each run
-4. Extract and examine the logs to debug failures
-
-You can also see the full Fuzzer Run and other information in the `Execute Fuzzer Run` job
-
-#### Label-Triggered Workflow
-
-If you want this to run when a label is applied in the Valkey repo, the Valkey repo needs a small caller workflow. Example:
-
-```yaml
-name: Label-triggered Valkey Cluster Fuzzer
-
-on:
-  pull_request_target:
-    types: [labeled]
-
-permissions:
-  contents: read
-
-jobs:
-  pr-fuzzer:
-    permissions:
-      contents: read
-      issues: write
-      pull-requests: write
-    if: github.event.label.name == 'run-cluster-fuzzer'
-    uses: valkey-io/valkey-fuzzer/.github/workflows/valkey-pr-fuzzer.yml@main
-    with:
-      fuzzer_repository: valkey-io/valkey-fuzzer
-      fuzzer_ref: main
-      valkey_repository: ${{ github.repository }}
-      valkey_ref: refs/pull/${{ github.event.pull_request.number }}/merge
-      pr_number: ${{ github.event.pull_request.number }}
-      pr_url: ${{ github.event.pull_request.html_url }}
-      label_name: ${{ github.event.label.name }}
-      run_count: 10
-```
-
-For the simplest setup, point both the reusable workflow ref and `fuzzer_ref` at `main`, along with the matching `fuzzer_repository`, so the caller executes the current upstream workflow and fuzzer code. If you want tighter reproducibility, switch both references to the same tag or commit SHA instead.
-
-This keeps the status visible on the Valkey PR as a normal workflow check, and the reusable workflow updates a sticky PR comment with the latest run summary. If the PR cannot produce a merge ref, for example due to merge conflicts, the workflow will fail during the Valkey checkout/build stage.
-
-You can also add a small cleanup job in the caller workflow to remove `run-cluster-fuzzer` after the run finishes, so maintainers can rerun by simply reapplying the label.
-
-### DSL-Based Test Execution
-
-Execute predefined test scenarios using DSL configuration:
-
-```bash
-# Run DSL-based test
-valkey-fuzzer cluster --dsl test_scenario.yaml
-
-# Validate DSL configuration
-valkey-fuzzer validate test_scenario.yaml
-```
-
-### Exporting Random Scenarios
-
-Capture randomly generated test scenarios as DSL files for reproducibility and sharing:
-
-```bash
-# Export a random scenario
-valkey-fuzzer cluster --random --export-dsl captured_scenario.yaml
-
-# Export with specific seed
-valkey-fuzzer cluster --seed 12345 --export-dsl seed_12345_scenario.yaml
-
-# Replay the captured scenario
-valkey-fuzzer cluster --dsl captured_scenario.yaml
-```
-
-### DSL Configuration Examples
-
-#### Basic Failover Test
-
-```yaml
-# simple_failover.yaml
-scenario_id: "basic_failover_test"
-seed: 42
-
-cluster:
-  num_shards: 3
-  replicas_per_shard: 1
-
-operations:
-  - type: "failover"
-    target_node: "shard-0-primary"
-    parameters:
-      force: false
-    timing:
-      delay_before: 0.0
-      timeout: 30.0
-      delay_after: 0.0
-
-chaos:
-  type: "process_kill"
-  process_chaos_type: "sigkill"
-  target_selection:
-    strategy: "replica_only"
-  timing:
-    delay_before_operation: 0.0
-    delay_after_operation: 0.0
-    chaos_duration: 5.0
-  coordination:
-    chaos_before_operation: true
-    chaos_during_operation: false
-    chaos_after_operation: false
-
-state_validation:
-  check_slot_coverage: true
-  check_cluster_status: true
-  check_replication: true
-  check_data_consistency: true
-  validation_timeout: 30.0
-```
-
-The current DSL supports failover operations and one process-chaos policy that
-is applied around those operations. Continuous `workload:` blocks and
-feature-specific actions are part of the feature-pack roadmap, not the current
-parser. See `examples/simple_failover.yaml` for the complete legacy cluster
-form and the v2 examples above for topology/configuration smokes.
-
-### Expected Output Formats
-
-#### Test Execution Summary
-
-```
-=== valkey-fuzzer Test Results ===
-Scenario: simple-failover-test
-Status: PASSED
-Duration: 30.88s
-Operations: 1
-Chaos Events: 0
-Seed: 12345 (use to reproduce)
-
-Final Validation: PASSED
-
-Final Validation Details:
-  Replication: PASS
-  Cluster Status: PASS
-  Slot Coverage: PASS
-  Topology: PASS
-  View Consistency: PASS
-```
-
-#### Failure Report
-
-```
-=== Test Failure Report ===
-Scenario: 4226257627
-Status: FAILED
-Duration: 211.85s
-Operations: 2
-Chaos Events: 2
-Seed: 4226257627 (use to reproduce)
-
-Final Validation: FAILED
-Failed Checks: slot_coverage, topology, data_consistency
-Validation Errors: 3
-
-Chaos Events:
-  [PASS] process_kill on node-0 (8.40s)
-  [PASS] process_kill on node-1 (5.43s)
-
-Final Validation Details:
-  Replication: PASS
-  Cluster Status: PASS
-  Slot Coverage: FAIL
-    → CRITICAL: 5461 slots still assigned to killed nodes. Killed nodes: {'127.0.0.1:7623', '127.0.0.1:7622'}. This indicates failover did not complete or slots were not reassigned. Affected slots: 0-5460
-  Topology: FAIL
-    → Topology validation failed in strict mode: 2 mismatch(es) found
-  View Consistency: PASS
-  Data Consistency: FAIL
-    → 35 test key(s) unreachable (threshold: 10)
-
-  Validation Error Messages:
-    • Slot Coverage: CRITICAL: 5461 slots still assigned to killed nodes. Killed nodes: {'127.0.0.1:7623', '127.0.0.1:7622'}. This indicates failover did not complete or slots were not reassigned. Affected slots: 0-5460
-    • Topology: Topology validation failed in strict mode: 2 mismatch(es) found
-    • Data Consistency: 35 test key(s) unreachable (threshold: 10)
-
-Reproduction Command:
-valkey-fuzzer cluster --seed 4226257627
-```
-
-## Current Scope
-
-The current implementation focuses on:
-
-### Supported Operations
-- **Failover Operations**: Primary node failover with replica promotion
-- **Process Chaos**: Random process termination (SIGKILL, SIGTERM)
-
-### Supported Configurations
-- **Standalone**: One writable node
-- **Primary–Replica**: One primary with 1-5 replicas
-- **Cluster Sizes**: 3-16 shards with 0-5 replicas per shard
-- **Server Configuration**: Global, per-role, and exact-node startup settings
-- **Deployment**: Single metal instance with multiple processes
-
-### Validation Capabilities
-- Slot coverage and assignment validation
-- Replica synchronization monitoring
-- Data consistency verification
-- Convergence time and replication lag tracking
-- Actual Valkey node log validation
-
-## Feature-pack roadmap
-
-The topology foundation is the first layer. Feature packs should add an
-activation action, continuous workload, path-evidence observer, faults, and
-independent correctness oracles.
-
-The forkless and replication-compression YAML files in `examples/` are therefore
-configuration/topology smokes. They are not yet complete feature packs.
-
-The isolated contracts in `src/extensibility.py` define the six stable
-component roles, immutable feature packs and run plans, lifecycle events,
-uniform outcomes, typed registries, and `valkey_fuzzer.plugins` entry-point
-discovery. `src/feature_packs.py`, `src/feature_runner.py`, and
-`src/local_topology_provider.py` provide the manifest compiler, generic
-executor, and real local topology adapter. `src/feature_runtime.py` bootstraps
-all six registries, configured manifests, trusted plugins, and topology
-providers for v3 `run` and `validate` commands. No built-in feature pack
-currently provides a complete activation, path-evidence, and correctness
-contract.
-
-Durability and data-tiering features also require a generic resource layer for
-filesystems, object stores, proxies, capacity controls, and storage faults.
-Those dependencies should be lifecycle-managed providers rather than
-feature-specific setup hidden inside actions.
-
-### Additional Operations
-- `add_replica`: Add new replica nodes to existing shards
-- `remove_replica`: Remove replica nodes from shards
-- `reshard`: Redistribute slots across shards
-- `scale_out`: Add new shards to the cluster
-- `scale_in`: Remove shards and redistribute data
-- `configuration_change`: Modify cluster configuration parameters
-
-### Enhanced Chaos Engineering
-- **Network Chaos**: Packet filtering, latency simulation, selective packet drops
-- **Resource Chaos**: Memory pressure, CPU throttling, disk I/O limitations
-- **Time Chaos**: Clock skew simulation, network time protocol disruption
-
-### Extended Validation
-- **Performance Regression**: Benchmark comparison across test runs
-- **Memory Leak Detection**: Long-running test memory profiling
-- **Security Validation**: Authentication and authorization testing
-
-### Mixed Clusters
-- Test the fuzzer on different versions of Valkey
-- Create chaos while the cluster is upgrading from an older branch to unstable
+These are framework concerns, not pack-local shell setup. The target design
+introduces lifecycle-managed resource providers whose outputs feed topology
+provisioning and components, with rollback on partial setup and reverse-order
+cleanup. See
+[`docs/generic-feature-fuzzer-design.md`](docs/generic-feature-fuzzer-design.md)
+for the full architecture and implementation sequence.
 
 ## Contributing
 
-1. Fork the repository
-2. Create a feature branch
-3. Implement changes with comprehensive tests
-4. Submit a pull request with detailed description
-
-## Daily Test Runs
-- We run a randomly generated scenario every 4 hours and the results are listed here: https://github.com/valkey-io/valkey-fuzzer/actions/workflows/fuzzer-run.yml
-- Each scheduled run uploads a `fuzzer-run-artifacts-*` bundle containing the structured `results.json`, the exported scenario DSL, and the collected node/test logs from `/tmp/valkey-fuzzer/logs`
-- These results can be analyzed to find potential bugs in Valkey
+1. Fork the repository.
+2. Create a feature branch.
+3. Add implementation and acceptance coverage.
+4. Run `pytest` and `ruff check .`.
+5. Submit a pull request describing the exercised path, oracles, and
+   reproduction contract.
 
 ## License
 
-This project is licensed under the BSD 3-Clause License.
+BSD 3-Clause License.

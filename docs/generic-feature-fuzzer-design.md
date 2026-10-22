@@ -1,609 +1,543 @@
 # Generic Valkey feature fuzzer design
 
-The fuzzer should treat cluster, primary–replica, and standalone as deployment
-topologies rather than as separate test frameworks. A feature test then combines
-one topology with configuration, workload, actions, faults, observations, and
-oracles.
+## Objective
 
-## Test contract
+valkey-fuzzer should test an open-ended set of Valkey features without becoming
+a collection of feature-specific harnesses. Standalone, primary–replica, and
+cluster are deployment topologies. Forkless save, replication compression,
+future cluster protocols, durability, and data tiering are feature packs
+composed on top of the same execution model.
 
-Every feature pack should answer the same questions:
+The project is greenfield. There is one strict scenario document, one compiler,
+one run plan, one lifecycle runner, and one result model. The public format has
+no schema-generation router and no alternate execution branch.
 
-1. **Where can it run?** Supported topologies, versions, roles, and build
-   capabilities.
-2. **How is it enabled?** Startup configuration, runtime configuration, and
-   per-node differences.
-3. **How is it activated?** The command or state transition that reaches the
-   feature's code path.
-4. **How do we prove it ran?** An `INFO` field, metric, trace, log message, or
-   protocol observation. Configuration alone is not sufficient evidence.
-5. **What stresses it?** Data shape, concurrency, timing boundaries, topology
-   changes, and resource pressure.
-6. **What can fail around it?** Process, network, disk, memory, and restart
-   faults placed before, during, and after activation.
-7. **What must remain true?** Data, availability, convergence, persistence, and
-   protocol invariants.
+The normal onboarding contract is:
 
-This makes a new feature mostly data and small plugins instead of another
-end-to-end test harness.
+1. write a data-only manifest using reusable components; or
+2. add a small trusted plugin for behavior that is genuinely new, then compose
+   it from the same manifest format.
 
-## Stable extension boundary
+Onboarding a feature must not require a feature enum, CLI subcommand, parser
+branch, topology special case, or result-format fork.
 
-The acceptance criterion is intentionally strict: after the one-time generic
-runner refactor, onboarding a feature must not require edits to the fuzzer
-engine, DSL envelope or parser, CLI, topology providers, result serializer, or
-reporter. It must not require adding a feature-specific enum member or switch
-branch either.
+## Feature test contract
 
-There are only two supported onboarding paths:
+Every pack must answer:
 
-1. **Manifest-only pack:** compose registered capability probes, workloads,
-   actions, faults, observers, and oracles.
-2. **Plugin-backed pack:** install a trusted Python package that registers only
-   the genuinely new component behavior, then reference those namespaced
-   components from the same manifest format.
+1. **Eligibility:** Which topologies, artifacts, platforms, roles, and build
+   capabilities can run it?
+2. **Enablement:** Which startup settings, runtime settings, resources, and
+   per-node differences are required?
+3. **Activation:** Which command or transition enters the feature path?
+4. **Path evidence:** What independent signal proves the path ran?
+5. **Stress:** Which data shapes, concurrency levels, timing boundaries,
+   topology changes, and resource limits matter?
+6. **Faults:** Which process, network, storage, memory, CPU, or dependency
+   failures should occur before, during, or after activation?
+7. **Oracles:** Which data, availability, convergence, durability, persistence,
+   and protocol invariants must hold?
 
-Most features should use the first path. For example, a generic command action,
-continuous key-value workload, `INFO` observer, log observer, counter-delta
-oracle, and data-consistency oracle should be enough to describe many new
-features without writing Python. A new protocol decoder or a platform-specific
-fault injector may justify a plugin, but it still must not require a core
-dispatch change.
+Configuration is not path evidence. Successful reads are not necessarily path
+evidence either. A compression pack, for example, must observe negotiation or
+counter changes in addition to verifying replica correctness.
 
-The stable flow is:
+## One execution graph
 
 ```text
-generic scenario envelope
-          |
-          v
- feature-pack catalog + opaque feature inputs
-          |
-          v
-       RunPlan
-          |
-          v
- generic lifecycle runner + component registries
-          |
-          v
- uniform component results, evidence, and reproducer
+scenario intent
+      │
+      ├── pack identity + inputs
+      ├── topology intent
+      ├── artifact bindings             target
+      ├── managed resource bindings     target
+      └── policy/coverage intent         target
+      │
+      ▼
+strict compiler + complete preflight
+      │
+      ▼
+immutable RunPlan
+      │
+      ├── resolve immutable artifacts
+      ├── provision resources
+      ├── provision topology from resource/artifact outputs
+      ├── probe capabilities before mutation
+      ├── start observers and workloads
+      ├── arm event-triggered faults
+      ├── run actions and transitions
+      ├── quiesce workloads and observers
+      ├── evaluate evidence and oracles
+      └── cleanup topology, resources, and artifacts in reverse order
+      │
+      ▼
+uniform outcome + evidence + complete reproducer
 ```
 
-The core recognizes only generic component roles, never individual Valkey
-features:
+The currently implemented runner covers strict compilation, component
+registries, dependency-ordered lifecycle phases, the local topology lifecycle,
+evidence requirements, uniform outcomes, rollback, and cleanup. Artifact
+resolution, managed resources, a full event-driven scheduler, policy/ledger
+services, and complete provenance remain target work.
 
-- capability probe
-- workload
-- action
-- fault
-- observer
-- oracle
+## Scenario and identity model
 
-Core liveness, crash/assertion detection, topology safety, cleanup, and
-reproduction metadata remain mandatory and cannot be disabled by a pack.
+The only authored scenario envelope is:
 
-## Scenario pipeline
+```yaml
+scenario_id: replication-compression-candidate
+seed: 202
 
-```text
-capability probe
-      |
-      v
-topology -> node configuration -> seed workload -> activate feature
-                                                  |
-                                      inject fault / transition
-                                                  |
-                                                  v
-                             path evidence + invariant oracles
-                                                  |
-                                                  v
-                                  result bundle + reproducer
+feature:
+  use: valkey.replication-compression
+  version: "2026.10"
+  with:
+    codec: lz4
+    value_shape: compressible
+
+topology:
+  type: replication
+  replicas_per_shard: 1
+  base_port: 7500
 ```
 
-The important distinction is between:
+The compiler rejects unknown top-level fields, missing required fields,
+duplicate YAML keys, invalid inputs, unavailable packs, incompatible
+topologies, missing components, and unresolved overlay resources before
+topology mutation.
 
-- **Path evidence:** proves the intended implementation was exercised.
-- **Correctness oracles:** prove it behaved correctly.
+There is deliberately no scenario `api_version`. These identities solve
+different problems:
 
-A run must have both. For example, matching data on a primary and replica is not
-evidence that replication compression was negotiated; a negotiated-link field
-or counter supplies that evidence.
+- **feature-pack version:** authored release identity used to select exact pack
+  behavior; implemented
+- **manifest content digest:** immutable hash of the loaded pack; pending
+- **plugin distribution version/digest:** executable extension provenance;
+  pending
+- **tested artifact digest/commit/build metadata:** system-under-test
+  provenance; pending
+- **internal plugin contract compatibility:** an implementation boundary, not
+  a user-selectable scenario language
 
-Every attempted scenario has one terminal outcome:
+The scenario may omit `feature.version` only when one version of that pack is
+registered. Reproducible campaigns should pin it. A complete reproducer should
+ultimately record both human-readable releases and immutable digests.
 
-- `PASS`: activation completed, all required path evidence was observed, and
-  every blocking oracle passed.
-- `FAIL`: the system under test violated an invariant, activation did not
-  complete as required, or required path evidence was missing.
-- `SKIP_UNSUPPORTED`: a capability probe established before execution that the
-  requested version, build, platform, or topology cannot run the scenario.
-- `ERROR`: the harness, environment, setup, observer, or fault injector failed
-  in a way that prevents a trustworthy verdict.
+## Feature-pack model
 
-Unsupported capability and failed evidence are deliberately different:
-unsupported scenarios are skipped before mutation, while a supposedly supported
-feature that does not produce required evidence fails.
+A pack declares:
 
-## Lifecycle and synchronization
+- namespaced `pack_id` and pack `version`
+- `feature` or `topology_smoke` trust mode
+- supported topologies
+- a strict input schema
+- ordered startup overlays
+- configured component instances and dependencies
+- required lifecycle events
+- required path evidence
+- metadata used by coverage and reporting
 
-The runner should publish named lifecycle events:
+The six core component roles are:
+
+- **capability:** determine support before mutation
+- **workload:** create seed state or sustained client activity
+- **action:** activate a feature or change topology state
+- **fault:** perturb the system at a deterministic phase
+- **observer:** collect path evidence and diagnostic state
+- **oracle:** evaluate invariants independently of feature implementation
+
+Component IDs are opaque and namespaced. The core never switches on individual
+feature IDs.
+
+`feature` mode cannot pass without a required oracle and required evidence.
+`topology_smoke` mode is useful for infrastructure acceptance but is not
+feature coverage.
+
+## Registries and plugins
+
+Built-in registrations and separately packaged plugins populate one registry
+per component role. Data-only manifests reference those registrations.
+External code is discovered through the `valkey_fuzzer.plugins` Python
+entry-point group and is trusted executable code.
+
+Discovery and compilation must:
+
+- be deterministic
+- reject duplicate component identities
+- reject duplicate pack ID/version pairs
+- prevent plugins from replacing built-ins
+- fail atomically if one plugin registration is invalid
+- reject incompatible internal contracts before topology mutation
+- pin the resolved registry environment for validation and execution
+- record pack, plugin, component, and artifact identities in results
+
+Explicit manifest directories are loaded in caller order and files within each
+directory are loaded deterministically.
+
+## Plans, dependencies, and scheduling
+
+Compilation resolves pack inputs and safe `{$ref: inputs.name}` substitutions
+into an immutable `RunPlan`. Templates are data-only; Python, Jinja, shell, and
+`eval` are forbidden.
+
+Component dependencies form a directed acyclic graph. Dependencies express
+semantic readiness, not timing by themselves. Every component receives an
+independent deterministic random stream derived from the scenario seed,
+component instance ID, and stream name so adding one component does not
+perturb another component’s randomness.
+
+The final scheduler should react to committed lifecycle events:
 
 ```text
 topology.ready
 workload.seeded
 workload.started
 action.started
-action.path_entered
+feature.path-entered
 fault.started
 action.completed
 workload.quiesced
 validation.completed
 ```
 
-Actions may publish more specific events such as
-`bgsave.forkless_copy_started` or `replication.full_sync_started`. Faults and
-observers bind to an event plus a bounded offset or deadline. This makes phase
-placement replayable and avoids using arbitrary sleeps as the synchronization
-contract. Missing required events are recorded explicitly and contribute to
-`FAIL` or `ERROR`, depending on whether the feature or harness was responsible.
+An action may publish feature-specific events such as
+`bgsave.copy-started` or `replication.full-sync-started`. Faults and observers
+should bind to an event, deterministic offset, and deadline. Arbitrary sleeps
+are not a synchronization contract.
 
-## Core extension points
+The current runner records named events and supports dependency-ordered
+lifecycle phases, but the general event-driven scheduler and concurrent
+placement semantics are pending.
 
-### Topology provider
+## Topology provider
 
-Owns node planning, process lifecycle, connection discovery, readiness, and
-cleanup. The initial providers are:
+A topology provider owns:
+
+- node planning and identity
+- process lifecycle
+- readiness and client discovery
+- restart behavior
+- rollback after partial provisioning
+- cleanup after a successful provision
+
+The local provider implements:
 
 - `standalone`: one writable node
 - `replication`: one primary and one or more replicas
 - `cluster`: multiple shards with optional replicas
 
-### Feature profile
-
-Declares capability requirements and configuration dimensions. Configuration
-has three layers:
+Configuration layers are:
 
 1. topology-wide `server_config`
-2. role configuration such as `node_configs.primary`
-3. exact-node configuration such as `node_configs.node-1`
+2. role-specific configuration
+3. exact-node configuration
+4. ordered feature-pack startup overlays
 
-Later layers override earlier layers. This permits homogeneous configurations
-and mixed capability tests without changing the orchestrator.
+Later layers override earlier ones unless an overlay declares conflict-as-error.
+This supports homogeneous and mixed settings without topology-specific feature
+logic.
 
-Configuration keys are passed to the Valkey binary under test. A feature pack
-must probe the selected build and reject or skip unsupported keys and values;
-the generic topology layer cannot infer feature availability from configuration
-alone.
+Structural validation is intentionally side-effect-free. It checks plans,
+component registrations, validators, provider shape, node dimensions, ports,
+selectors, and configuration without starting Valkey or creating external
+resources.
 
-### Artifact provider
+## Artifact provider target
 
-Mixed-version and new-protocol tests require selecting a binary per node, not
-only selecting server configuration. A proposed artifact layer names immutable
-binaries and then assigns them globally, by role, or by exact node:
+New protocols and mixed-version behavior require immutable per-node artifacts:
 
 ```yaml
-# Proposed artifact-provider extension; the current v3 envelope does not accept it yet.
 artifacts:
-  old:
-    binary: /opt/valkey-old/src/valkey-server
-    expected_sha: abc123
+  baseline:
+    source: /opt/valkey-baseline/src/valkey-server
+    expected_sha256: "..."
   candidate:
-    binary: /opt/valkey-candidate/src/valkey-server
-    expected_sha: def456
+    source: /opt/valkey-candidate/src/valkey-server
+    expected_sha256: "..."
 
 topology:
   type: cluster
   artifact: candidate
   node_artifacts:
-    node-0: old
+    node-0: baseline
 ```
 
-The resolved artifact record should include the binary digest or commit,
-reported version, build capabilities, platform, and relevant transport support.
-Restarts and rolling upgrades must preserve or intentionally transition both
-the artifact and resolved startup configuration.
+This is a target shape, not an accepted scenario field today.
 
-### Workload
+An artifact provider should resolve and attest binaries before resource or
+topology setup. Its immutable record should include digest, source commit,
+reported version, build flags/capabilities, platform, and relevant protocol
+support. Restarts and rolling upgrades must preserve or deliberately transition
+both artifact and resolved configuration.
 
-Runs continuously across the activation and fault window. Workloads should be
-selectable by semantic purpose, not only command rate:
+## Resource provider target
+
+Durability, data tiering, modules, and externally backed features need more than
+Valkey processes. They may require filesystems, object stores, proxies,
+sidecars, cgroups, capacity limits, or faultable dependencies.
+
+```text
+artifact resolver
+      │
+      ▼
+resource graph
+  ├── filesystem / block device
+  ├── object store / emulator
+  ├── network proxy
+  ├── sidecar / module dependency
+  └── CPU, memory, or I/O envelope
+      │ typed outputs
+      ▼
+topology provider ── component services
+```
+
+Resource declarations and typed outputs are also target work, not accepted
+scenario fields today.
+
+Each resource provider must own validation, provisioning, readiness, immutable
+provenance, fault hooks, rollback, and idempotent cleanup. A resource graph
+allows dependencies between resources and supports reverse-order release. Pack
+actions must not hide shell setup for storage or services.
+
+## Workload and operation ledger target
+
+Workloads should describe semantic purpose, not only request rate:
 
 - compressible and incompressible values
 - small and large objects
-- key churn and expiry
 - hot-key and uniform distributions
+- key churn and expiry
 - transactions, scripts, streams, pub/sub, and blocking commands
 - snapshot-sized datasets and replication backlog boundaries
+- tiering working sets larger than each storage tier
 
-The workload records an operation ledger, including operation ID, target or
-routing decision, argument digest, start/end time, reply, timeout, and
-acknowledgement semantics. Each scenario also declares its consistency policy:
+Every client operation should enter an append-only ledger with:
 
-- which acknowledged writes must survive
-- how ambiguous timeout or disconnect results are reconciled
-- whether expiry or asynchronous replication permits bounded loss
-- the convergence deadline and any explicit loss budget
+- operation and client ID
+- logical key/routing decision
+- argument digest and expected model transition
+- start/end monotonic time
+- reply, timeout, disconnect, or error
+- acknowledgement classification
+- topology epoch and relevant fault/event sequence
 
-The default correctness policy should require zero loss of unambiguously
-acknowledged, unexpired writes. This prevents an oracle from treating every
-missing value as either corruption or permitted asynchronous loss without
-knowing what the client observed.
+A correctness policy must define which acknowledged writes survive, how
+ambiguous outcomes are reconciled, which asynchronous-loss windows are allowed,
+expiry semantics, convergence deadlines, and explicit loss budgets.
 
-### Action
+The default should require zero loss of unambiguously acknowledged, unexpired
+writes. Without a ledger and policy, a durability verdict is not trustworthy.
+The current runtime has evidence aggregation but not this operation ledger.
 
-Triggers a feature or topology transition. Actions should be registered by
-name and have a deterministic parameter generator. Examples include:
+## Evidence and oracle model
 
-- `bgsave`
-- `config_set`
-- `disconnect_replica`
-- `reconnect_replica`
-- `restart_node`
-- `failover`
-- `reshard`
-- `rolling_upgrade`
+Observers may collect:
 
-An action may expose lifecycle hooks so a fault can be synchronized with a
-specific internal phase instead of relying only on sleeps.
-
-### Fault
-
-Perturbs the system at a deterministic point:
-
-- process kill, pause, and restart
-- one-way or two-way network partition
-- latency, packet loss, duplication, and reordering
-- disk full, slow I/O, and write errors
-- CPU and memory pressure
-
-The result must record the exact target, phase, start/end time, and whether the
-fault was successfully applied.
-
-### Observer
-
-Collects path evidence and diagnostic state:
-
-- `INFO` sections and selected fields
-- `CONFIG GET`
+- selected `INFO` and `CONFIG GET` values
 - cluster views from every reachable node
-- logs with required and forbidden patterns
-- process resource metrics
-- protocol counters or packet traces
+- required or forbidden log patterns
+- process and resource metrics
+- protocol counters, negotiated modes, or traces
+- file/object-store manifests and tier residency
 
-Observers should sample before, during, and after the action so transient paths
-are not missed.
+Evidence expectations should usually compare a baseline and a later sample.
+A counter being nonzero before the action does not prove the current run used
+the path.
 
-Evidence expectations should normally compare a baseline with later samples.
-For example, a counter must advance during the action rather than merely be
-nonzero from an earlier event. Each pack declares required and optional
-evidence; missing required evidence cannot produce `PASS`.
+Oracles may evaluate:
 
-### Oracle
-
-Evaluates invariants independently of the feature implementation:
-
-- read-after-write and dataset digest agreement
-- replication offsets and link convergence
-- cluster slot ownership and view convergence
+- read-after-write and dataset model agreement
+- replica offsets and convergence
+- cluster membership, slot ownership, and view convergence
 - restart/reload correctness
 - bounded unavailability and latency
-- absence of crashes, assertions, sanitizer findings, and unexpected errors
+- absence of crashes, assertions, sanitizer reports, and unexpected errors
+- persistence guarantees under the declared durability policy
+- hot/cold-tier correctness and backend failure behavior
 
-Feature packs should also support differential and metamorphic oracles. The same
-generated plan can run with a feature disabled and enabled, or against a
-baseline and candidate artifact, and compare normalized command results, final
-dataset digests, and topology state. Feature-specific evidence should differ in
-the expected way while externally visible correctness remains equivalent.
-Performance comparisons should be environment-calibrated and reported
-separately from deterministic correctness checks.
+Mandatory core safety oracles should run for every feature pack and must not be
+disableable by pack authors. That baseline set is still pending.
 
-## DSL foundation
+Differential and metamorphic execution should compare the same normalized plan
+with a feature disabled/enabled or a baseline/candidate artifact. Feature
+evidence should differ as expected while externally visible behavior remains
+equivalent.
 
-Version 1 cluster scenarios remain valid. Version 2 introduces a topology-neutral
-form:
+## Outcome semantics
 
-```yaml
-api_version: v2
-scenario_id: replication-feature-smoke
+Every attempted run has one terminal classification:
 
-topology:
-  type: replication
-  replicas_per_shard: 2
-  server_config:
-    repl-compression: lz4
-  node_configs:
-    primary:
-      repl-diskless-sync: yes
-    node-2:
-      repl-compression: no
+- `PASS`: activation and required components completed, required path evidence
+  exists, and every blocking oracle passed
+- `FAIL`: the system under test violated an invariant, required activation
+  failed, or expected evidence was absent
+- `SKIP_UNSUPPORTED`: a capability probe established before mutation that the
+  selected target cannot run the plan
+- `ERROR`: setup, environment, provider, component contract, observation, or
+  harness failure prevents a trustworthy verdict
 
-operations: []
+Unsupported capability is not missing evidence. Unsupported targets skip before
+mutation; a target that claims support but fails to produce evidence fails.
 
-state_validation:
-  check_replication: true
-  check_data_consistency: true
-```
+Cleanup failures must be retained in diagnostics and can upgrade an otherwise
+successful run to an error. Results should include attempted and committed
+events, all component results, evidence, cleanup diagnostics, and the resolved
+plan.
 
-The current foundation creates all three topologies, applies layered server
-configuration, writes validation data, and runs topology-appropriate validation.
-The repository also contains the isolated extension contracts, component
-registries, lifecycle event journal, uniform outcomes, and trusted Python
-entry-point discovery in `src/extensibility.py`. They deliberately do not yet
-alter the v1/v2 execution path.
+## Feature sketches
 
-The generic pack compiler, runner, and local topology provider now have a
-CLI-facing runtime. The `run` and `validate` commands dispatch v3 scenarios to
-that runtime while v1/v2 remain on the legacy engine. This completes the basic
-CLI slice only. Reusable built-ins, mandatory baseline safety oracles,
-provenance, managed artifact/resource providers, per-node binaries, and
-complete feature packs remain pending. The core v3 envelope is intentionally
-small and versioned; future resources and artifacts may require an additive
-extension or a later scenario API rather than feature-specific top-level
-branches:
-
-```yaml
-api_version: v3
-scenario_id: forkless-standalone
-seed: 123
-
-feature:
-  use: valkey.forkless-save
-  version: "1"
-  with:
-    key_count: 100000
-    mutation_rate: 500
-
-topology:
-  type: standalone
-  base_port: 7400
-```
-
-Explicit manifests are loaded from repeatable `--feature-pack-dir` options,
-then trusted installed code is discovered from the `valkey_fuzzer.plugins`
-entry-point group. Plugin discovery can be disabled:
-
-```bash
-valkey-fuzzer validate scenario.yaml \
-  --feature-pack-dir ./feature-packs \
-  --no-plugins
-
-valkey-fuzzer run scenario.yaml \
-  --feature-pack-dir ./feature-packs \
-  --output result.json
-```
-
-Validation compiles the complete plan, runs component validation hooks, and
-calls the selected topology provider's pure `validate` contract. It does not
-construct component instances, provision a topology, resolve the Valkey binary,
-or prove environment readiness. Provider factories, component factories, and
-validators are contractually side-effect-free; validators are also
-deterministic, idempotent, and re-entrant because compilation and execution
-preflight may both invoke them. Execution returns the uniform `PASS`, `FAIL`,
-`SKIP_UNSUPPORTED`, or `ERROR` outcome and serializes the complete plan,
-component results, evidence, and diagnostics through the same generic reporter.
-Plugin distribution versions, manifest digests, and tested-binary digests are
-not yet included, so the report is not a complete reproducer.
-
-The v3 parser validates only this envelope. The selected feature pack validates
-the opaque `feature.with` values and compiles them into a `RunPlan`; registered
-components validate their own configuration. Safe, type-preserving references
-such as `{$ref: inputs.key_count}` may be used by manifests. Templates must not
-execute Python, Jinja, shell, or `eval`.
-
-This example is a configuration/topology smoke only. It does not prove that
-compression was negotiated or used.
-
-## Registry and discovery contract
-
-Component IDs are opaque and namespaced, for example
-`core.valkey.command`, `core.valkey.info`, or
-`example.cluster_protocol.trace`. Feature packs are keyed by namespaced pack ID
-and version.
-
-Built-in and explicitly configured data-only manifests should be loaded into a
-feature-pack catalog. External component code is discovered through the
-`valkey_fuzzer.plugins` Python entry-point group. Entry-point plugins are
-trusted installed code, whereas manifests remain data-only.
-
-Discovery must:
-
-- be deterministic
-- reject duplicate component IDs and duplicate pack ID/version pairs
-- reject incompatible extension API versions before topology mutation
-- prevent external plugins from replacing built-in registrations
-- report a broken provider without silently changing the selected test
-- record pack, plugin, component, and tested-binary versions or digests in the
-  reproducer
-
-The current narrow run context exposes the immutable plan, lifecycle event bus,
-deterministic per-component randomness, named topology services, a raw artifact
-directory path, and a cooperative deadline. Structured node selection and
-client access are currently provided through topology services. A managed
-evidence/artifact store, workload ledger, cancellation token, cleanup
-registration, and structured logging remain target additions. Plugins do not
-import the current engine internals.
-
-## Resources beyond Valkey nodes
-
-Node communication is only one feature domain. Durability, data tiering,
-search, modules, and externally backed features may depend on filesystems,
-object stores, proxies, sidecars, resource limits, or other services.
-
-The execution plan should therefore support lifecycle-managed resource
-providers in addition to topology providers:
-
-```text
-resolve artifacts
-      |
-provision resources (filesystem, object store, proxy, resource envelope)
-      |
-provision Valkey topology using resource outputs
-      |
-workload, actions, faults, observers, and oracles
-      |
-cleanup topology, then resources in reverse order
-```
-
-Resource outputs are referenced as typed values in topology configuration and
-components. Resource providers own readiness, rollback, cleanup, and immutable
-reproduction metadata. This keeps storage setup out of feature-specific actions.
-
-For durability, the generic contracts additionally need an acknowledged-write
-ledger, explicit durability/loss policy, crash and storage faults, recovery
-checkpoints, and post-restart oracles. For data tiering, they need tier-capacity
-controls, backend latency/failure injection, residency/migration evidence, and
-data/availability oracles across hot and cold tiers.
-
-## Feature examples
-
-The configuration names, `INFO` fields, counters, log patterns, and protocol
-signals below are illustrative and version-dependent. A real pack must discover
-or declare the exact evidence contract for the tested artifact and return
-`SKIP_UNSUPPORTED` when that contract is unavailable.
+The names below are illustrative and build-dependent. A real pack must probe
+the exact target and skip unsupported combinations before mutation.
 
 ### Forkless save
 
-Configuration dimensions:
+Matrix:
 
-- `forkless-infrastructure-enabled`: `yes` and `no`
-- `bgsave-default-method`: `forkless` and `fork`
 - standalone, replication primary, and cluster primary
+- fork and forkless methods
 - dataset size, object count, mutation rate, and memory headroom
 
-Activation:
+Activation and evidence:
 
-- preload data
-- start continuous mutations
+- preload and continuously mutate data
 - issue `BGSAVE`
+- observe the selected save path, progress, and completion
 
-Path evidence:
+Faults and oracles:
 
-- persistence `INFO` shows the current or last background-save type as forkless
-- forkless progress counters advance
-- required start/completion log messages appear
-
-Faults and transitions:
-
-- kill or restart during the save
-- cancel a save
-- disconnect/reconnect replicas during a replication-triggered save
-- run with memory pressure and slow disk
-
-Oracles:
-
-- the server remains responsive within a bound
-- acknowledged data remains readable
-- the generated RDB reloads successfully
-- replicas converge
-- no crash, assertion, or leaked in-progress state remains
+- kill/restart or cancel during the save
+- slow/full storage and memory pressure
+- maintain responsiveness and acknowledged data
+- reload the generated RDB and converge replicas
+- detect crashes, assertions, leaks, and stuck save state
 
 ### Replication compression
 
-Configuration matrix:
+Matrix:
 
-- primary and replica modes: `no`, `lz4`, and supported optional codecs
-- matching and mixed capabilities
-- diskless and disk-based full synchronization
-- dual-channel replication on and off
+- supported codecs and plaintext
+- compressible and incompressible streams
+- diskless and disk-based full sync
+- full and partial sync
 - fork and forkless snapshot methods
-- same-version and mixed-version nodes
+- matching and mixed artifacts/capabilities
 
-Activation:
+Evidence and oracles:
 
-- stream compressible and incompressible writes
-- force full and partial synchronization
-- change compression configuration while links are active
-
-Path evidence:
-
-- the negotiated link mode is the expected codec or plaintext fallback
-- compressed/uncompressed byte counters move in the expected direction
-- the full-sync path reports the selected transport
-
-Oracles:
-
-- primary and replicas converge byte-for-byte
-- reconnect and renegotiation complete
-- unsupported combinations fall back or fail in the documented way
-- latency, CPU, and memory stay within campaign thresholds
+- observe negotiated transport and counter deltas
+- verify exact replica convergence
+- reconnect and renegotiate
+- test documented fallback/rejection for incompatible peers
+- record performance separately from deterministic correctness
 
 ### New cluster protocol
 
-Configuration matrix:
+Matrix and transitions:
 
 - old-only, new-only, and mixed protocol nodes
-- rolling enablement by role and shard
-- same-version and mixed-version binaries
+- meet/handshake, gossip, failover, restart, reshard, rolling upgrade
+- loss, delay, duplication, partition, and reconnect
 
-Activation and stress:
+Evidence and oracles:
 
-- cluster meet/handshake
-- gossip under key traffic
-- failover, node restart, resharding, and rolling upgrade
-- message loss, delay, duplication, partition, and reconnect
+- observe negotiation and message-type counters/traces
+- verify every healthy node’s peer-mode view
+- converge membership and slot ownership
+- prevent split brain and duplicate ownership
+- reject incompatible peers cleanly
 
-Path evidence:
+### Durability
 
-- protocol negotiation/version counters
-- message-type counters or trace classification
-- every reachable node reports the intended peer mode
+Required framework services:
 
-Oracles:
+- acknowledged-operation ledger and explicit loss policy
+- fsync/persistence configuration matrix
+- process, storage, and power-like failure models
+- crash-consistent checkpoints and restart sequencing
+- recovery-time, data-survival, and file-integrity oracles
 
-- all healthy nodes converge on membership and slot ownership
-- no split brain or duplicate ownership appears
-- failover remains safe
-- an incompatible peer is rejected cleanly
+The current framework can host durability components, but without the ledger,
+managed storage resources, and policy-aware recovery oracle it cannot make a
+complete durability claim.
 
-## Coverage model
+### Data tiering
 
-Count tested semantic tuples, not only run count:
+Required framework services:
+
+- managed capacity-limited local and remote tiers
+- controllable backend latency, errors, outages, and corruption signals
+- hot/cold working-set generation and access-distribution changes
+- residency, migration, eviction, and recall evidence
+- correctness and availability oracles across both tiers
+
+The generic component roles are sufficient, but the resource graph and these
+providers/oracles are pending.
+
+## Coverage and campaigns
+
+Coverage should count semantic tuples rather than raw run totals:
 
 ```text
-(feature, topology, artifact/version/build-capability mix,
- platform, transport, storage mode, resource envelope, config mix,
- workload and data shape, action, fault, fault phase,
- observer evidence, oracle)
+(feature pack + digest,
+ topology and node-role layout,
+ artifact/build/capability mix,
+ platform and transport,
+ resource envelope and storage mode,
+ configuration mix,
+ workload/data shape,
+ action/transition,
+ fault and event placement,
+ observed path evidence,
+ oracle set and policy)
 ```
 
-The scheduler should prioritize uncovered tuples and boundary values, then use
-seeded randomness inside each tuple. Failures should be minimized by removing
+A campaign scheduler should prioritize uncovered tuples and boundary values,
+then use seeded randomness within a tuple. Failure minimization should remove
 operations, nodes, configuration dimensions, and workload intensity while
-preserving both path evidence and the violated invariant.
+preserving both the path evidence and violated invariant.
+
+Campaign scheduling, semantic coverage persistence, and minimization are
+pending.
 
 ## Implementation sequence
 
-1. Finish topology-neutral lifecycle and configuration. **Implemented.**
-2. Define the isolated feature-pack plan, terminal outcomes, component
-   protocols, registries, named events, and result bundle. **Implemented.**
-3. Add the manifest catalog/compiler and generic v3 envelope. **Implemented as
-   a programmatic API.**
-4. Add the generic lifecycle runner and local standalone/replication/cluster
-   provider. **Implemented and unit tested.**
-5. Wire v3 compilation/execution/result reporting into the CLI and add a legacy
-   compatibility adapter. **Implemented and unit tested.**
-6. Wrap current failover, process kill, and state validations as built-in
-   components.
-7. Build a vertical forkless-save pack for standalone: managed mutation
-   workload, `BGSAVE` action, required evidence, data/RDB oracles, and one
-   event-triggered process fault.
-8. Generalize the working primitives and extend the forkless pack to
-   replication and cluster.
-9. Add resource providers and durability policies for durability and
-   data-tiering packs.
-10. Add per-node immutable artifacts, then implement
-   replication-compression and mixed-version cluster-protocol packs.
-11. Add differential execution, semantic coverage accounting,
-   and scenario minimization.
+1. **Single-path foundation — implemented.** Strict scenario compiler,
+   feature-pack catalog, component contracts/registries, immutable plans,
+   deterministic seeds, lifecycle events, uniform outcomes, generic reporter,
+   and local topology provider.
+2. **Public cutover — implemented in the greenfield branch.** `run` and
+   `validate` use only the generic runtime; examples and CI no longer expose a
+   separate compatibility command.
+3. **Built-in vertical slice.** Wrap reusable command, keyspace workload,
+   process-fault, observation, crash detection, and data-validation primitives.
+   Deliver a complete standalone forkless-save pack.
+4. **Event-driven lifecycle.** Add bounded event subscriptions, deterministic
+   offsets, cancellation, concurrent long-lived components, and cleanup
+   registration. Extend forkless coverage to replication and cluster.
+5. **Provenance and artifacts.** Add managed result artifacts, manifest/plugin
+   digests, tested-binary attestations, and per-node artifact assignment.
+6. **Resources and policies.** Add the resource graph, operation ledger,
+   durability/loss policies, storage faults, and recovery checkpoints.
+7. **Feature expansion.** Build replication-compression, mixed-version cluster
+   protocol, durability, and data-tiering packs using the same engine.
+8. **Campaign intelligence.** Add differential execution, semantic coverage,
+   corpus persistence, and failure minimization.
 
-The extensibility milestone is complete only when two tests pass:
+## Extensibility gates
 
-1. A new data-only manifest is dropped into a configured pack directory and
-   runs without modifying or branching in the engine, parser, CLI, topology
-   code, or reporter.
-2. A separately packaged wheel contributes a new entry-point component, a
-   manifest uses it, and the same unmodified execution path runs and reports
-   the scenario.
+The architecture is credible only when these end-to-end tests pass:
 
-These final gates remain pending. Current in-process acceptance coverage proves
-the unchanged CLI-to-plugin-to-provider-to-report path, but there are no
-reusable built-in components for a manifest-only feature and no isolated
-installed-wheel subprocess test yet.
+1. A new data-only manifest dropped into a configured directory runs using only
+   reusable built-ins, without core code changes.
+2. A separately packaged wheel registers a new component, and an unchanged
+   CLI/compiler/runner executes and reports it.
+3. A mixed-artifact scenario assigns immutable binaries per node and survives a
+   rolling transition without provider special cases.
+4. A durability pack uses the generic ledger, policy, resource, and recovery
+   services without pack-local infrastructure code.
+5. A data-tiering pack provisions and faults an external tier through resource
+   providers without core feature dispatch.
+
+The repository currently has in-process coverage for the generic
+CLI-to-plugin-to-provider-to-report path. Reusable built-ins, an isolated-wheel
+acceptance test, and gates 3–5 remain pending.

@@ -366,14 +366,13 @@ def _validate_run_mode(
 
 @dataclass(frozen=True)
 class FeaturePackSpec:
-    """Declarative, versioned description of a feature test."""
+    """Declarative description of a feature test."""
 
     pack_id: str
     version: str
     supported_topologies: tuple[str, ...]
     components: tuple[ComponentSpec, ...]
     mode: RunMode = RunMode.FEATURE
-    api_version: str = EXTENSION_API_VERSION
     input_schema: Mapping[str, Any] = field(default_factory=dict)
     startup_overlays: tuple[StartupOverlay, ...] = ()
     required_events: tuple[str, ...] = ()
@@ -383,7 +382,6 @@ class FeaturePackSpec:
     def __post_init__(self) -> None:
         _require_qualified_id(self.pack_id, "pack_id")
         _require_text(self.version, "version")
-        _require_text(self.api_version, "api_version")
         if isinstance(self.mode, str):
             object.__setattr__(self, "mode", RunMode(self.mode))
         if not isinstance(self.mode, RunMode):
@@ -426,7 +424,6 @@ class RunPlan:
     scenario_id: str
     pack_id: str
     pack_version: str
-    api_version: str
     seed: int
     topology: str
     components: tuple[ComponentSpec, ...]
@@ -436,14 +433,12 @@ class RunPlan:
     required_events: tuple[str, ...] = ()
     required_evidence: tuple[EvidenceRequirement, ...] = ()
     topology_document: Mapping[str, Any] = field(default_factory=dict)
-    scenario_api_version: Optional[str] = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         _require_name(self.scenario_id, "scenario_id")
         _require_qualified_id(self.pack_id, "pack_id")
         _require_text(self.pack_version, "pack_version")
-        _require_text(self.api_version, "api_version")
         if isinstance(self.seed, bool) or not isinstance(self.seed, int):
             raise TypeError("seed must be an integer")
         _require_name(self.topology, "topology")
@@ -473,8 +468,6 @@ class RunPlan:
         if topology_document.get("type") != self.topology:
             raise ValueError("topology_document.type must match topology")
         object.__setattr__(self, "topology_document", _freeze_mapping(topology_document))
-        if self.scenario_api_version is not None:
-            _require_text(self.scenario_api_version, "scenario_api_version")
         object.__setattr__(self, "metadata", _freeze_mapping(self.metadata))
 
     @classmethod
@@ -487,7 +480,6 @@ class RunPlan:
         topology: str,
         inputs: Optional[Mapping[str, Any]] = None,
         topology_document: Optional[Mapping[str, Any]] = None,
-        scenario_api_version: Optional[str] = None,
     ) -> "RunPlan":
         if not isinstance(spec, FeaturePackSpec):
             raise TypeError("spec must be a FeaturePackSpec")
@@ -498,7 +490,6 @@ class RunPlan:
             scenario_id=scenario_id,
             pack_id=spec.pack_id,
             pack_version=spec.version,
-            api_version=spec.api_version,
             seed=seed,
             topology=topology,
             components=spec.components,
@@ -508,7 +499,6 @@ class RunPlan:
             required_events=spec.required_events,
             required_evidence=spec.required_evidence,
             topology_document={"type": topology} if topology_document is None else topology_document,
-            scenario_api_version=scenario_api_version,
             metadata=spec.metadata,
         )
 
@@ -797,7 +787,6 @@ def run_plan_from_data(value: Mapping[str, Any]) -> RunPlan:
             "scenario_id",
             "pack_id",
             "pack_version",
-            "api_version",
             "seed",
             "topology",
             "components",
@@ -807,14 +796,12 @@ def run_plan_from_data(value: Mapping[str, Any]) -> RunPlan:
             "required_events",
             "required_evidence",
             "topology_document",
-            "scenario_api_version",
             "metadata",
         ),
         required=(
             "scenario_id",
             "pack_id",
             "pack_version",
-            "api_version",
             "seed",
             "topology",
             "components",
@@ -836,7 +823,6 @@ def run_plan_from_data(value: Mapping[str, Any]) -> RunPlan:
         scenario_id=mapping["scenario_id"],
         pack_id=mapping["pack_id"],
         pack_version=mapping["pack_version"],
-        api_version=mapping["api_version"],
         seed=mapping["seed"],
         topology=mapping["topology"],
         components=components,
@@ -846,7 +832,6 @@ def run_plan_from_data(value: Mapping[str, Any]) -> RunPlan:
         required_events=mapping.get("required_events", ()),
         required_evidence=required_evidence,
         topology_document=mapping.get("topology_document", {}),
-        scenario_api_version=mapping.get("scenario_api_version"),
         metadata=mapping.get("metadata", {}),
     )
 
@@ -1473,11 +1458,6 @@ class PluginManifest:
         for feature_pack in feature_packs:
             if not isinstance(feature_pack, FeaturePackSpec):
                 raise TypeError("feature_packs must contain FeaturePackSpec values")
-            if feature_pack.api_version != self.api_version:
-                raise ValueError(
-                    f"feature pack {feature_pack.pack_id!r} uses API {feature_pack.api_version!r}, "
-                    f"expected {self.api_version!r}"
-                )
             key = (feature_pack.pack_id, feature_pack.version)
             if key in pack_keys:
                 raise ValueError(f"duplicate feature pack version: {feature_pack.pack_id}@{feature_pack.version}")
@@ -1577,17 +1557,11 @@ def discover_plugins(
         if not all(
             callable(getattr(feature_pack_catalog, method, None))
             for method in ("validate_many", "register_many", "snapshot", "restore_snapshot")
-        ) or not all(hasattr(feature_pack_catalog, attribute) for attribute in ("api_version", "registration_lock")):
+        ) or not hasattr(feature_pack_catalog, "registration_lock"):
             raise PluginDiscoveryError(
                 "feature-pack-catalog",
                 "",
                 "catalog must implement the atomic feature-pack catalog contract",
-            )
-        if feature_pack_catalog.api_version != api_version:
-            raise PluginDiscoveryError(
-                "feature-pack-catalog",
-                "",
-                f"catalog API {feature_pack_catalog.api_version!r} does not match extension API {api_version!r}",
             )
 
     manifests = []

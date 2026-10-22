@@ -1,4 +1,4 @@
-"""CLI-friendly bootstrap for the generic v3 feature-pack runtime.
+"""CLI-friendly bootstrap for the generic feature-pack runtime.
 
 The runtime owns one complete extension environment: all component
 registries, the exact-version feature-pack catalog, plugin discovery,
@@ -28,13 +28,12 @@ from .extensibility import (
     discover_plugins,
 )
 from .feature_packs import (
-    SCENARIO_API_VERSION,
     FeaturePackCatalog,
     FeaturePackCompiler,
     FeaturePackDocumentError,
     ReferenceInventory,
     load_feature_pack_directory,
-    load_v3_scenario_yaml,
+    load_scenario_yaml,
 )
 from .feature_runner import FeatureRunner, TopologyProviderEntry
 from .fuzzer_engine.cluster_coordinator import ClusterCoordinator
@@ -97,7 +96,7 @@ def _with_topology_overrides(
 
 
 class FeatureRuntime:
-    """One isolated, generic extension environment for v3 scenarios."""
+    """One isolated, generic extension environment for feature scenarios."""
 
     def __init__(
         self,
@@ -113,20 +112,18 @@ class FeatureRuntime:
         coordinator_factory=ClusterCoordinator,
         artifact_dir: str = "",
         extension_api_version: str = EXTENSION_API_VERSION,
-        scenario_api_version: str = SCENARIO_API_VERSION,
     ):
         if not isinstance(discover_entry_points, bool):
             raise TypeError("discover_entry_points must be a boolean")
 
         self._extension_api_version = extension_api_version
-        self._scenario_api_version = scenario_api_version
         self._lifecycle_lock = threading.RLock()
         self._lifecycle_owner: Optional[int] = None
         self._registry_pin: Optional[Mapping[ComponentKind, Mapping[str, Any]]] = None
 
         registries = {kind: Registry[Any](kind, api_version=extension_api_version) for kind in ComponentKind}
         self._registries: Mapping[ComponentKind, Registry[Any]] = MappingProxyType(registries)
-        self._catalog = FeaturePackCatalog(api_version=extension_api_version)
+        self._catalog = FeaturePackCatalog()
         self._manifest_feature_packs: tuple[FeaturePackSpec, ...] = ()
         self.load_feature_pack_directories(feature_pack_directories)
 
@@ -135,7 +132,6 @@ class FeatureRuntime:
             self._registries,
             reference_inventory=reference_inventory,
             extension_api_version=extension_api_version,
-            scenario_api_version=scenario_api_version,
         )
 
         if topology_providers is None:
@@ -221,18 +217,10 @@ class FeatureRuntime:
         if self._registry_pin is None:
             self._registry_pin = expected
 
-    def _validate_plan_api(self, plan: RunPlan) -> None:
+    @staticmethod
+    def _require_plan(plan: RunPlan) -> None:
         if not isinstance(plan, RunPlan):
             raise TypeError("plan must be a RunPlan")
-        if plan.api_version != self._extension_api_version:
-            raise FeatureRuntimeError(
-                f"plan extension API {plan.api_version!r} does not match runtime API {self._extension_api_version!r}"
-            )
-        if plan.scenario_api_version != self._scenario_api_version:
-            raise FeatureRuntimeError(
-                f"plan scenario API {plan.scenario_api_version!r} does not match runtime API "
-                f"{self._scenario_api_version!r}"
-            )
 
     @contextmanager
     def _lifecycle_operation(self):
@@ -262,7 +250,7 @@ class FeatureRuntime:
         within each directory use the deterministic loader order.
         """
 
-        staging_catalog = FeaturePackCatalog(api_version=self._catalog.api_version)
+        staging_catalog = FeaturePackCatalog()
         packs = []
         for directory in _ordered_directories(directories):
             packs.extend(
@@ -283,7 +271,7 @@ class FeatureRuntime:
         *,
         topology_overrides: Optional[Mapping[str, Any]] = None,
     ) -> RunPlan:
-        """Compile a v3 scenario after applying detached topology overrides."""
+        """Compile a scenario after applying detached topology overrides."""
 
         if not isinstance(scenario, Mapping):
             raise TypeError("scenario must be a mapping")
@@ -302,15 +290,15 @@ class FeatureRuntime:
         source_name: str = "<yaml>",
         topology_overrides: Optional[Mapping[str, Any]] = None,
     ) -> RunPlan:
-        """Strict-load and compile one duplicate-free v3 YAML scenario."""
+        """Strict-load and compile one duplicate-free YAML scenario."""
 
-        scenario = load_v3_scenario_yaml(source, source_name=source_name)
+        scenario = load_scenario_yaml(source, source_name=source_name)
         return self.compile(scenario, topology_overrides=topology_overrides)
 
     def validate_plan(self, plan: RunPlan) -> None:
         """Structurally validate a compiled plan without provisioning."""
 
-        self._validate_plan_api(plan)
+        self._require_plan(plan)
         with self._lifecycle_operation(), ExitStack() as locks:
             for registry in self._ordered_registries():
                 locks.enter_context(registry.registration_lock)
@@ -324,7 +312,7 @@ class FeatureRuntime:
         *,
         deadline: Optional[float] = None,
     ) -> RunOutcome:
-        self._validate_plan_api(plan)
+        self._require_plan(plan)
         with self._lifecycle_operation(), ExitStack() as locks:
             for registry in self._ordered_registries():
                 locks.enter_context(registry.registration_lock)

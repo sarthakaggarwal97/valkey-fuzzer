@@ -1,0 +1,18 @@
+pack_id: example.topology-smoke
+version: "1"
+mode: topology_smoke
+supported_topologies:
+  - standalone
+  - replication
+  - cluster
+
+input_schema:
+  type: object
+  additionalProperties: false
+  properties: {}
+
+components: []
+
+metadata:
+  purpose: framework-example
+  coverage_claim: topology-lifecycle-only

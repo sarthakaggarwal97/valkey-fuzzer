@@ -1,7 +1,6 @@
-# Simple Failover Test - Minimal DSL Configuration
-# This demonstrates a basic failover test without chaos injection
-
-scenario_id: "simple-failover-test"
+# Legacy-engine fixture retained while useful failover code is extracted into
+# generic components. This is not a public scenario example.
+scenario_id: simple-failover-test
 seed: 12345
 
 cluster:
@@ -10,8 +9,8 @@ cluster:
   base_port: 7000
 
 operations:
-  - type: "failover"
-    target_node: "shard-0-primary"
+  - type: failover
+    target_node: shard-0-primary
     parameters:
       force: false
     timing:
@@ -19,11 +18,10 @@ operations:
       timeout: 30.0
       delay_after: 0.0
 
-# Minimal chaos configuration (no chaos injection)
 chaos:
-  type: "process_kill"
+  type: process_kill
   target_selection:
-    strategy: "random"
+    strategy: random
   timing:
     delay_before_operation: 0.0
     delay_after_operation: 0.0
@@ -43,6 +41,6 @@ state_validation:
   stabilization_wait: 5.0
   validation_timeout: 30.0
   cluster_status_config:
-    acceptable_states: ['ok', 'unknown']
+    acceptable_states: [ok, unknown]
   replication_config:
     max_acceptable_lag: 15.0

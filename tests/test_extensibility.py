@@ -130,6 +130,27 @@ def test_specs_and_plans_take_deep_immutable_snapshots():
         plan.seed = 7
 
 
+def test_pack_and_plan_contracts_have_no_public_schema_generation_fields():
+    pack = _feature_pack()
+    plan = RunPlan.from_feature_pack(
+        pack,
+        scenario_id="scenario-1",
+        seed=1,
+        topology="standalone",
+    )
+
+    assert "api_version" not in FeaturePackSpec.__dataclass_fields__
+    assert "api_version" not in RunPlan.__dataclass_fields__
+    assert "scenario_api_version" not in RunPlan.__dataclass_fields__
+    assert "api_version" not in plan.to_data()
+    assert "scenario_api_version" not in plan.to_data()
+
+    serialized = dict(plan.to_data())
+    serialized["api_version"] = "legacy"
+    with pytest.raises(ValueError, match="unknown fields"):
+        RunPlan.from_data(serialized)
+
+
 @pytest.mark.parametrize(
     "value_factory",
     (
@@ -629,8 +650,6 @@ class _SelectableEntryPoints:
 
 
 class _FeaturePackCatalog:
-    api_version = "v1"
-
     def __init__(self):
         self.registration_lock = threading.RLock()
         self._packs = []

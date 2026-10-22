@@ -1,0 +1,16 @@
+scenario_id: replication-topology-smoke
+seed: 202
+
+feature:
+  use: example.topology-smoke
+  version: "1"
+  with: {}
+
+topology:
+  type: replication
+  replicas_per_shard: 1
+  base_port: 7500
+  enable_cleanup: true
+
+# A real replication-compression pack would add capability probes, activation,
+# negotiated-codec evidence, continuous traffic, and convergence oracles.

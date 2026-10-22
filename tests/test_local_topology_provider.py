@@ -32,13 +32,11 @@ def make_plan(
         scenario_id="local-provider-test",
         pack_id="tests.local-provider",
         pack_version="1",
-        api_version="v1",
         seed=17,
         topology=topology,
         components=(),
         startup_overlays=tuple(overlays),
         topology_document=topology_document or {"type": topology},
-        scenario_api_version="v3",
         mode=RunMode.TOPOLOGY_SMOKE,
     )
 

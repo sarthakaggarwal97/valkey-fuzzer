@@ -1,27 +1,15 @@
-api_version: v2
 scenario_id: standalone-topology-smoke
 seed: 101
+
+feature:
+  use: example.topology-smoke
+  version: "1"
+  with: {}
 
 topology:
   type: standalone
   base_port: 7400
   enable_cleanup: true
-  server_config:
-    forkless-infrastructure-enabled: yes
-    bgsave-default-method: forkless
 
-# Empty operations are valid for v2 topology scenarios.
-# This topology/configuration smoke verifies startup, direct writes, reads, and
-# cleanup; it does not prove that the forkless save path was entered.
-# A forkless feature pack should additionally issue BGSAVE and assert path
-# evidence as described in docs/generic-feature-fuzzer-design.md.
-operations: []
-
-state_validation:
-  check_data_consistency: true
-  stabilization_wait: 0.5
-  validation_timeout: 30.0
-  data_consistency_config:
-    check_test_keys: true
-    num_test_keys: 100
-    key_prefix: "standalone_smoke_"
+# This intentionally runs a topology-only example pack. It proves lifecycle
+# wiring, not a Valkey feature or data-safety property.

@@ -1,9 +1,9 @@
-"""Data-only feature-pack catalog and generic v3 scenario compiler.
+"""Data-only feature-pack catalog and generic scenario compiler.
 
-The compiler is deliberately independent of the current v1/v2 parser and
-execution engine.  It turns a stable scenario envelope plus an installed
-feature-pack manifest into the immutable :class:`~src.extensibility.RunPlan`
-consumed by a generic runner.
+The compiler turns one strict scenario intent plus an installed feature-pack
+manifest into the immutable :class:`~src.extensibility.RunPlan` consumed by
+the generic runner. The authored format intentionally has no public schema
+generation selector: there is one execution model and one validation path.
 """
 
 import inspect
@@ -31,8 +31,6 @@ from .extensibility import (
     StartupOverlay,
 )
 
-SCENARIO_API_VERSION = "v3"
-
 _NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
 _INPUT_SEGMENT = r"[A-Za-z0-9][A-Za-z0-9_-]*"
 _INPUT_SEGMENT_PATTERN = re.compile(rf"^{_INPUT_SEGMENT}$")
@@ -44,7 +42,7 @@ class FeaturePackError(ValueError):
 
 
 class ScenarioCompileError(FeaturePackError):
-    """The v3 scenario cannot be compiled safely."""
+    """The scenario cannot be compiled safely."""
 
 
 class FeaturePackDocumentError(ScenarioCompileError):
@@ -59,10 +57,24 @@ class DuplicateFeaturePackError(FeaturePackError):
 
 
 class UnknownFeaturePackError(FeaturePackError):
-    def __init__(self, pack_id: str, version: str):
+    def __init__(self, pack_id: str, version: Optional[str] = None):
         self.pack_id = pack_id
         self.version = version
-        super().__init__(f"feature pack {pack_id!r} version {version!r} is not registered")
+        if version is None:
+            message = f"feature pack {pack_id!r} is not registered"
+        else:
+            message = f"feature pack {pack_id!r} version {version!r} is not registered"
+        super().__init__(message)
+
+
+class AmbiguousFeaturePackError(FeaturePackError):
+    def __init__(self, pack_id: str, versions: Sequence[str]):
+        self.pack_id = pack_id
+        self.versions = tuple(versions)
+        super().__init__(
+            f"feature pack {pack_id!r} has multiple registered versions "
+            f"{list(self.versions)!r}; select one with feature.version"
+        )
 
 
 class IncompatibleFeaturePackError(FeaturePackError):
@@ -246,7 +258,6 @@ def parse_feature_pack_document(value: Mapping[str, Any]) -> FeaturePackSpec:
         value,
         "feature pack",
         allowed=(
-            "api_version",
             "pack_id",
             "version",
             "mode",
@@ -279,7 +290,6 @@ def parse_feature_pack_document(value: Mapping[str, Any]) -> FeaturePackSpec:
             mode=mapping.get("mode", RunMode.FEATURE),
             supported_topologies=mapping["supported_topologies"],
             components=components,
-            api_version=mapping.get("api_version", EXTENSION_API_VERSION),
             input_schema=mapping.get("input_schema", {}),
             startup_overlays=overlays,
             required_events=mapping.get("required_events", ()),
@@ -367,12 +377,12 @@ def load_feature_pack_yaml(
         raise FeaturePackDocumentError(f"{source_name}: {exc}") from exc
 
 
-def load_v3_scenario_yaml(
+def load_scenario_yaml(
     source: Union[str, bytes, TextIO],
     *,
     source_name: str = "<yaml>",
 ) -> Mapping[str, Any]:
-    """Safely load one duplicate-free v3 scenario mapping.
+    """Safely load one duplicate-free scenario mapping.
 
     This function only handles YAML safety and document shape.  Pass the
     returned mapping to :meth:`FeaturePackCompiler.compile` for the same
@@ -382,22 +392,17 @@ def load_v3_scenario_yaml(
 
     value = _load_unique_yaml(source, source_name=source_name)
     try:
-        return _mapping(value, "v3 scenario")
+        return _mapping(value, "scenario")
     except FeaturePackDocumentError as exc:
         raise FeaturePackDocumentError(f"{source_name}: {exc}") from exc
 
 
 class FeaturePackCatalog:
-    """Thread-safe exact-version catalog with atomic batch registration."""
+    """Thread-safe feature-pack catalog with atomic batch registration."""
 
-    def __init__(self, api_version: str = EXTENSION_API_VERSION):
-        self._api_version = _require_text(api_version, "api_version")
+    def __init__(self):
         self._packs: dict[tuple[str, str], FeaturePackSpec] = {}
         self._lock = threading.RLock()
-
-    @property
-    def api_version(self) -> str:
-        return self._api_version
 
     def _validate_many(self, packs: Sequence[FeaturePackSpec]) -> None:
         seen = set()
@@ -405,12 +410,6 @@ class FeaturePackCatalog:
             if not isinstance(pack, FeaturePackSpec):
                 raise TypeError("catalog entries must be FeaturePackSpec values")
             key = (pack.pack_id, pack.version)
-            if pack.api_version != self.api_version:
-                raise IncompatibleFeaturePackError(
-                    pack.pack_id,
-                    pack.version,
-                    f"API {pack.api_version!r} does not match catalog API {self.api_version!r}",
-                )
             if key in seen or key in self._packs:
                 raise DuplicateFeaturePackError(*key)
             seen.add(key)
@@ -430,15 +429,26 @@ class FeaturePackCatalog:
             for pack in entries:
                 self._packs[(pack.pack_id, pack.version)] = pack
 
-    def resolve(self, pack_id: str, version: str) -> FeaturePackSpec:
+    def resolve(self, pack_id: str, version: Optional[str] = None) -> FeaturePackSpec:
         _require_text(pack_id, "pack_id")
-        _require_text(version, "version")
-        key = (pack_id, version)
+        if version is not None:
+            _require_text(version, "version")
         with self._lock:
-            try:
-                return self._packs[key]
-            except KeyError as exc:
-                raise UnknownFeaturePackError(*key) from exc
+            if version is not None:
+                key = (pack_id, version)
+                try:
+                    return self._packs[key]
+                except KeyError as exc:
+                    raise UnknownFeaturePackError(*key) from exc
+
+            matches = tuple(
+                pack for (registered_id, _), pack in sorted(self._packs.items()) if registered_id == pack_id
+            )
+            if not matches:
+                raise UnknownFeaturePackError(pack_id)
+            if len(matches) > 1:
+                raise AmbiguousFeaturePackError(pack_id, tuple(pack.version for pack in matches))
+            return matches[0]
 
     @property
     def registered_keys(self) -> tuple[tuple[str, str], ...]:
@@ -786,7 +796,6 @@ def _resolve_pack_templates(spec: FeaturePackSpec, inputs: Mapping[str, Any]) ->
         mode=spec.mode,
         supported_topologies=spec.supported_topologies,
         components=components,
-        api_version=spec.api_version,
         input_schema=spec.input_schema,
         startup_overlays=overlays,
         required_events=spec.required_events,
@@ -910,7 +919,7 @@ def _validate_resources(
 
 
 class FeaturePackCompiler:
-    """Compile strict v3 envelopes after a complete read-only preflight."""
+    """Compile strict scenario intents after a complete read-only preflight."""
 
     def __init__(
         self,
@@ -919,7 +928,6 @@ class FeaturePackCompiler:
         *,
         reference_inventory: Optional[ReferenceInventory] = None,
         extension_api_version: str = EXTENSION_API_VERSION,
-        scenario_api_version: str = SCENARIO_API_VERSION,
     ):
         if not isinstance(catalog, FeaturePackCatalog):
             raise TypeError("catalog must be a FeaturePackCatalog")
@@ -927,16 +935,6 @@ class FeaturePackCompiler:
             extension_api_version,
             "extension_api_version",
         )
-        self.scenario_api_version = _require_text(
-            scenario_api_version,
-            "scenario_api_version",
-        )
-        if catalog.api_version != self.extension_api_version:
-            raise IncompatibleFeaturePackError(
-                "catalog.api",
-                catalog.api_version,
-                f"expected extension API {self.extension_api_version!r}",
-            )
         self.catalog = catalog
         self.registries = _normalize_registries(registries, self.extension_api_version)
         self.reference_inventory = reference_inventory or ReferenceInventory()
@@ -946,14 +944,10 @@ class FeaturePackCompiler:
     def compile(self, value: Mapping[str, Any]) -> RunPlan:
         envelope = _fields(
             value,
-            "v3 scenario",
-            allowed=("api_version", "scenario_id", "seed", "feature", "topology"),
-            required=("api_version", "scenario_id", "seed", "feature", "topology"),
+            "scenario",
+            allowed=("scenario_id", "seed", "feature", "topology"),
+            required=("scenario_id", "seed", "feature", "topology"),
         )
-        if envelope["api_version"] != self.scenario_api_version:
-            raise ScenarioCompileError(
-                f"scenario API {envelope['api_version']!r} is incompatible; expected {self.scenario_api_version!r}"
-            )
         scenario_id = _require_name(envelope["scenario_id"], "scenario_id")
         seed = envelope["seed"]
         if isinstance(seed, bool) or not isinstance(seed, int):
@@ -963,11 +957,13 @@ class FeaturePackCompiler:
             envelope["feature"],
             "feature",
             allowed=("use", "version", "with"),
-            required=("use", "version", "with"),
+            required=("use",),
         )
         pack_id = _require_text(feature["use"], "feature.use")
-        version = _require_text(feature["version"], "feature.version")
-        supplied_inputs = _mapping(feature["with"], "feature.with")
+        version = feature.get("version")
+        if version is not None:
+            version = _require_text(version, "feature.version")
+        supplied_inputs = _mapping(feature.get("with", {}), "feature.with")
 
         topology_document = _mapping(envelope["topology"], "topology")
         if "type" not in topology_document:
@@ -975,12 +971,6 @@ class FeaturePackCompiler:
         topology = _require_name(topology_document["type"], "topology.type")
 
         spec = self.catalog.resolve(pack_id, version)
-        if spec.api_version != self.extension_api_version:
-            raise IncompatibleFeaturePackError(
-                spec.pack_id,
-                spec.version,
-                f"API {spec.api_version!r} does not match compiler API {self.extension_api_version!r}",
-            )
         if topology not in spec.supported_topologies:
             raise ScenarioCompileError(f"topology {topology!r} is not supported by feature pack {pack_id!r}")
 
@@ -993,7 +983,6 @@ class FeaturePackCompiler:
             topology=topology,
             inputs=resolved_inputs,
             topology_document=topology_document,
-            scenario_api_version=self.scenario_api_version,
         )
         _validate_components(
             resolved_spec.components,
@@ -1011,12 +1000,12 @@ class FeaturePackCompiler:
         *,
         source_name: str = "<yaml>",
     ) -> RunPlan:
-        """Safely load and compile one duplicate-free v3 scenario document."""
+        """Safely load and compile one duplicate-free scenario document."""
 
-        return self.compile(load_v3_scenario_yaml(source, source_name=source_name))
+        return self.compile(load_scenario_yaml(source, source_name=source_name))
 
 
-def compile_v3_scenario(
+def compile_scenario(
     value: Mapping[str, Any],
     catalog: FeaturePackCatalog,
     registries: Mapping[ComponentKind, Registry[Any]],
@@ -1033,7 +1022,7 @@ def compile_v3_scenario(
 
 
 __all__ = [
-    "SCENARIO_API_VERSION",
+    "AmbiguousFeaturePackError",
     "ComponentCompatibilityError",
     "DuplicateFeaturePackError",
     "FeaturePackCatalog",
@@ -1046,10 +1035,10 @@ __all__ = [
     "UnknownFeaturePackError",
     "UnresolvedReferenceError",
     "UnsupportedResourceError",
-    "compile_v3_scenario",
+    "compile_scenario",
     "load_feature_pack_directory",
     "load_feature_pack_yaml",
-    "load_v3_scenario_yaml",
+    "load_scenario_yaml",
     "parse_feature_pack",
     "parse_feature_pack_document",
 ]

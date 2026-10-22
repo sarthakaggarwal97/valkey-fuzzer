@@ -124,8 +124,7 @@ class TestFuzzerEngineE2E:
 
     def test_dsl_scenario_from_file(self):
         """
-        Test execution of DSL scenario from example file.
-        Uses the simple_failover.yaml example.
+        Test the donor legacy engine with its private failover fixture.
         """
         logger.info("=" * 80)
         logger.info("E2E Test: DSL Scenario from File")
@@ -133,8 +132,7 @@ class TestFuzzerEngineE2E:
 
         fuzzer = ClusterBusFuzzer()
 
-        # Load DSL from example file
-        dsl_file = Path("examples/simple_failover.yaml")
+        dsl_file = Path("tests/fixtures/legacy/simple_failover.yaml")
 
         if not dsl_file.exists():
             pytest.skip(f"DSL file not found: {dsl_file}")
