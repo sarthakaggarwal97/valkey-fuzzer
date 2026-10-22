@@ -11,8 +11,16 @@ from typing import Any, Optional, Union
 
 from .bound_plan import BoundRunPlan, BoundStartupOverlay
 from .cluster_orchestrator.orchestrator import ConfigurationManager, PortManager
-from .extensibility import RunContext, RunPlan, StartupOverlay, to_plain_data
-from .feature_runner import ProvisionedTopology, TopologyProviderFactory
+from .extensibility import (
+    EXTENSION_API_VERSION,
+    ProvisionedTopology,
+    RunContext,
+    RunPlan,
+    StartupOverlay,
+    TopologyProviderRegistration,
+    to_plain_data,
+)
+from .feature_runner import TopologyProviderFactory
 from .fuzzer_engine.cluster_coordinator import ClusterCoordinator
 from .models import ClusterConfig, ClusterConnection, ClusterInstance, NodeInfo, NodePlan, TopologyType
 from .utils.server_config import (
@@ -24,6 +32,8 @@ from .utils.topology_config import cluster_config_from_topology_document
 logger = logging.getLogger(__name__)
 
 LOCAL_TOPOLOGY_SERVICE = "valkey.topology"
+LOCAL_TOPOLOGY_PROVIDER_ID = "valkey-fuzzer.local-topology"
+LOCAL_TOPOLOGY_PROVIDER_IMPLEMENTATION_VERSION = "1"
 _SUPPORTED_CONFLICT_POLICIES = frozenset({"override", "error"})
 
 
@@ -604,7 +614,28 @@ def local_topology_provider_factories(
     return {topology_type.value: factory for topology_type in TopologyType}
 
 
+def local_topology_provider_registrations(
+    coordinator_factory: Callable[[], ClusterCoordinator] = ClusterCoordinator,
+    *,
+    api_version: str = EXTENSION_API_VERSION,
+) -> dict[str, TopologyProviderRegistration]:
+    """Return replay-identifiable registrations for local Valkey topologies."""
+
+    return {
+        topology: TopologyProviderRegistration(
+            topology=topology,
+            provider_id=LOCAL_TOPOLOGY_PROVIDER_ID,
+            implementation_version=LOCAL_TOPOLOGY_PROVIDER_IMPLEMENTATION_VERSION,
+            api_version=api_version,
+            factory=factory,
+        )
+        for topology, factory in local_topology_provider_factories(coordinator_factory).items()
+    }
+
+
 __all__ = [
+    "LOCAL_TOPOLOGY_PROVIDER_ID",
+    "LOCAL_TOPOLOGY_PROVIDER_IMPLEMENTATION_VERSION",
     "LOCAL_TOPOLOGY_SERVICE",
     "LocalTopologyError",
     "LocalTopologyNode",
@@ -613,4 +644,5 @@ __all__ = [
     "LocalValkeyTopologyProvider",
     "apply_startup_overlays",
     "local_topology_provider_factories",
+    "local_topology_provider_registrations",
 ]

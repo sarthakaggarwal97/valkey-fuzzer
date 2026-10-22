@@ -7,11 +7,20 @@ from unittest.mock import Mock, call, patch
 import pytest
 
 from src.cluster_orchestrator.orchestrator import ConfigurationManager, PortManager
-from src.extensibility import NodeSelector, OutcomeStatus, RunMode, RunPlan, StartupOverlay
+from src.extensibility import (
+    NodeSelector,
+    OutcomeStatus,
+    RunMode,
+    RunPlan,
+    StartupOverlay,
+    TopologyProviderIdentity,
+)
 from src.feature_runner import FeatureRunner, ProvisionedTopology
 from src.fuzzer_engine.cluster_coordinator import ClusterCoordinator
 from src.fuzzer_engine.test_case_generator import ScenarioGenerator
 from src.local_topology_provider import (
+    LOCAL_TOPOLOGY_PROVIDER_ID,
+    LOCAL_TOPOLOGY_PROVIDER_IMPLEMENTATION_VERSION,
     LOCAL_TOPOLOGY_SERVICE,
     LocalTopologyError,
     LocalTopologyNode,
@@ -20,6 +29,7 @@ from src.local_topology_provider import (
     LocalValkeyTopologyProvider,
     apply_startup_overlays,
     local_topology_provider_factories,
+    local_topology_provider_registrations,
 )
 from src.models import ClusterConfig, ClusterInstance, NodeInfo, NodePlan, TopologyType
 from src.utils.topology_config import cluster_config_from_topology_document
@@ -38,6 +48,11 @@ def make_plan(
         seed=17,
         topology=topology,
         components=(),
+        topology_provider=TopologyProviderIdentity(
+            provider_id=LOCAL_TOPOLOGY_PROVIDER_ID,
+            implementation_version=LOCAL_TOPOLOGY_PROVIDER_IMPLEMENTATION_VERSION,
+            api_version="v1",
+        ),
         startup_overlays=tuple(overlays),
         topology_document=topology_document or {"type": topology},
         mode=RunMode.TOPOLOGY_SMOKE,
@@ -1334,7 +1349,7 @@ def test_generic_runner_uses_local_provider_and_cleans_up():
 
     outcome = FeatureRunner(
         {},
-        {"standalone": lambda: LocalValkeyTopologyProvider(lambda: coordinator)},
+        local_topology_provider_registrations(lambda: coordinator),
     ).run(plan)
 
     assert outcome.status is OutcomeStatus.PASS
@@ -1350,7 +1365,7 @@ def test_generic_runner_rolls_back_local_provider_after_post_create_validation_e
 
     outcome = FeatureRunner(
         {},
-        {"standalone": lambda: LocalValkeyTopologyProvider(lambda: coordinator)},
+        local_topology_provider_registrations(lambda: coordinator),
     ).run(make_plan())
 
     assert outcome.status is OutcomeStatus.ERROR

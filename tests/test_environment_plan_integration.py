@@ -36,6 +36,9 @@ from src.extensibility import (
     Registry,
     RunMode,
     RunPlan,
+    TopologyProviderIdentity,
+    TopologyProviderRegistration,
+    TopologyProviderRegistry,
     to_plain_data,
 )
 from src.feature_packs import (
@@ -146,6 +149,40 @@ def _component_registries() -> dict[ComponentKind, Registry[Any]]:
     return {ComponentKind.ACTION: registry}
 
 
+def _topology_identity() -> TopologyProviderIdentity:
+    return TopologyProviderIdentity(
+        provider_id="tests.environment-topology",
+        implementation_version="1",
+        api_version="v1",
+    )
+
+
+def _topology_registry(factory=object) -> TopologyProviderRegistry:
+    registry = TopologyProviderRegistry()
+    registry.register(
+        TopologyProviderRegistration(
+            topology="standalone",
+            provider_id="tests.environment-topology",
+            implementation_version="1",
+            api_version="v1",
+            factory=factory,
+        )
+    )
+    return registry
+
+
+def _topology_providers(provider):
+    return {
+        "standalone": TopologyProviderRegistration(
+            topology="standalone",
+            provider_id="tests.environment-topology",
+            implementation_version="1",
+            api_version="v1",
+            factory=lambda: provider,
+        )
+    }
+
+
 def _provider_registries() -> tuple[ArtifactProviderRegistry, ResourceProviderRegistry]:
     class ArtifactProvider:
         def check_support(self, context, spec, resolved_config):
@@ -214,6 +251,7 @@ def _consumer_preflight_plan() -> RunPlan:
         seed=1,
         topology="standalone",
         components=(),
+        topology_provider=_topology_identity(),
         mode=RunMode.TOPOLOGY_SMOKE,
         artifacts=(ArtifactSpec("candidate", "tests.artifact"),),
         topology_document={
@@ -230,6 +268,7 @@ def _compiler() -> FeaturePackCompiler:
     return FeaturePackCompiler(
         catalog,
         _component_registries(),
+        topology_provider_registry=_topology_registry(),
         reference_inventory=ReferenceInventory(labels={"zone": None}),
         artifact_registry=artifact_registry,
         resource_registry=resource_registry,
@@ -351,6 +390,7 @@ startup_overlays:
     compiler = FeaturePackCompiler(
         catalog,
         _component_registries(),
+        topology_provider_registry=_topology_registry(),
         reference_inventory=ReferenceInventory(
             labels={"placement": ({"resolved": "static"},)},
         ),
@@ -417,6 +457,7 @@ components:
     compiler = FeaturePackCompiler(
         catalog,
         _component_registries(),
+        topology_provider_registry=_topology_registry(),
         artifact_registry=artifact_registry,
         resource_registry=resource_registry,
     )
@@ -467,7 +508,11 @@ components:
     )
     catalog = FeaturePackCatalog()
     catalog.register(pack)
-    compiler = FeaturePackCompiler(catalog, _component_registries())
+    compiler = FeaturePackCompiler(
+        catalog,
+        _component_registries(),
+        topology_provider_registry=_topology_registry(),
+    )
     scenario = {
         "scenario_id": "literal-input",
         "seed": 1,
@@ -534,7 +579,11 @@ components:
     )
     catalog = FeaturePackCatalog()
     catalog.register(pack)
-    compiler = FeaturePackCompiler(catalog, _component_registries())
+    compiler = FeaturePackCompiler(
+        catalog,
+        _component_registries(),
+        topology_provider_registry=_topology_registry(),
+    )
 
     with pytest.raises(
         ScenarioCompileError,
@@ -599,6 +648,7 @@ startup_overlays:
     compiler = FeaturePackCompiler(
         catalog,
         _component_registries(),
+        topology_provider_registry=_topology_registry(),
         reference_inventory=ReferenceInventory(labels={"schema": (literal,)}),
         artifact_registry=artifact_registry,
         resource_registry=resource_registry,
@@ -853,6 +903,7 @@ def test_only_typed_selector_label_references_defer_value_comparison():
     compiler = FeaturePackCompiler(
         catalog,
         _component_registries(),
+        topology_provider_registry=_topology_registry(),
         reference_inventory=ReferenceInventory(labels={"zone": ("a",)}),
         artifact_registry=artifact_registry,
         resource_registry=resource_registry,
@@ -879,6 +930,7 @@ def test_component_validators_defer_only_for_typed_component_bindings():
     compiler = FeaturePackCompiler(
         catalog,
         {ComponentKind.ACTION: registry},
+        topology_provider_registry=_topology_registry(),
         reference_inventory=ReferenceInventory(labels={"zone": None}),
         artifact_registry=artifact_registry,
         resource_registry=resource_registry,
@@ -887,7 +939,7 @@ def test_component_validators_defer_only_for_typed_component_bindings():
     plan = compiler.compile(_scenario())
     FeatureRunner(
         {ComponentKind.ACTION: registry},
-        {"standalone": _TopologyProvider()},
+        _topology_providers(_TopologyProvider()),
     ).validate(plan)
 
     assert validations == []
@@ -910,6 +962,7 @@ components:
     static_plan = FeaturePackCompiler(
         static_catalog,
         {ComponentKind.ACTION: registry},
+        topology_provider_registry=_topology_registry(),
     ).compile(
         {
             "scenario_id": "static-component",
@@ -922,7 +975,7 @@ components:
     assert validations == [("exercise", "static-component")]
     FeatureRunner(
         {ComponentKind.ACTION: registry},
-        {"standalone": _TopologyProvider()},
+        _topology_providers(_TopologyProvider()),
     ).validate(static_plan)
     assert validations == [
         ("exercise", "static-component"),
@@ -984,7 +1037,7 @@ def _runtime() -> tuple[FeatureRuntime, _TopologyProvider]:
     topology_provider = _TopologyProvider()
     runtime = FeatureRuntime(
         discover_entry_points=False,
-        topology_providers={"standalone": topology_provider},
+        topology_providers=_topology_providers(topology_provider),
         reference_inventory=ReferenceInventory(labels={"zone": None}),
     )
     runtime.catalog.register(_pack())
@@ -1025,13 +1078,14 @@ def test_validation_uses_typed_references_instead_of_declarations_as_defer_signa
         seed=1,
         topology="standalone",
         components=(),
+        topology_provider=_topology_identity(),
         mode=RunMode.TOPOLOGY_SMOKE,
         artifacts=(_compiler().compile(_scenario()).artifacts[0],),
     )
 
     FeatureRunner(
         {},
-        {"standalone": topology_provider},
+        _topology_providers(topology_provider),
     ).validate(plan)
 
     assert topology_provider.validated is True
@@ -1059,6 +1113,7 @@ def test_component_only_environment_reference_does_not_defer_topology_validation
                 config={"binary": _ref("artifacts.candidate.path")},
             ),
         ),
+        topology_provider=_topology_identity(),
         mode=RunMode.TOPOLOGY_SMOKE,
         topology_document={"type": "standalone", "invalid": True},
     )
@@ -1066,7 +1121,7 @@ def test_component_only_environment_reference_does_not_defer_topology_validation
     with pytest.raises(ValueError, match="static topology is invalid"):
         FeatureRunner(
             _component_registries(),
-            {"standalone": topology_provider},
+            _topology_providers(topology_provider),
         ).validate(plan)
 
     assert topology_provider.validated is True
@@ -1082,6 +1137,7 @@ def test_policy_only_plan_is_bound_as_opaque_context_without_core_dispatch():
         seed=1,
         topology="standalone",
         components=(),
+        topology_provider=_topology_identity(),
         mode=RunMode.TOPOLOGY_SMOKE,
         policies=(
             PolicySpec(
@@ -1094,7 +1150,7 @@ def test_policy_only_plan_is_bound_as_opaque_context_without_core_dispatch():
 
     outcome = FeatureRunner(
         {},
-        {"standalone": topology_provider},
+        _topology_providers(topology_provider),
     ).run(plan)
 
     assert outcome.status is OutcomeStatus.PASS
@@ -1111,6 +1167,7 @@ def test_runner_returns_error_for_unresolved_reference_without_declaration():
         seed=1,
         topology="standalone",
         components=(),
+        topology_provider=_topology_identity(),
         mode=RunMode.TOPOLOGY_SMOKE,
         policies=(
             PolicySpec(
@@ -1123,11 +1180,11 @@ def test_runner_returns_error_for_unresolved_reference_without_declaration():
 
     outcome = FeatureRunner(
         {},
-        {"standalone": topology_provider},
+        _topology_providers(topology_provider),
     ).run(plan)
 
     assert outcome.status is OutcomeStatus.ERROR
-    assert topology_provider.validated is False
+    assert topology_provider.validated is True
     assert topology_provider.provisioned is False
 
 
@@ -1141,6 +1198,7 @@ def test_raw_dollar_ref_in_run_plan_data_remains_literal_policy_payload():
         seed=1,
         topology="standalone",
         components=(),
+        topology_provider=_topology_identity(),
         mode=RunMode.TOPOLOGY_SMOKE,
         policies=(
             PolicySpec(
@@ -1156,7 +1214,7 @@ def test_raw_dollar_ref_in_run_plan_data_remains_literal_policy_payload():
     assert restored.policies[0].config["target"] == raw_reference
     outcome = FeatureRunner(
         {},
-        {"standalone": topology_provider},
+        _topology_providers(topology_provider),
     ).run(restored)
 
     assert outcome.status is OutcomeStatus.PASS

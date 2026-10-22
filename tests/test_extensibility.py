@@ -35,6 +35,7 @@ from src.extensibility import (
     RunOutcome,
     RunPlan,
     StartupOverlay,
+    TopologyProviderIdentity,
     UnknownRegistrationError,
     discover_plugins,
     to_plain_data,
@@ -90,6 +91,19 @@ def _registration(
     )
 
 
+def _topology_identity(
+    *,
+    api_version: str = "v1",
+    implementation_digest: Optional[str] = None,
+) -> TopologyProviderIdentity:
+    return TopologyProviderIdentity(
+        provider_id="tests.topology-provider",
+        implementation_version="1",
+        api_version=api_version,
+        implementation_digest=implementation_digest,
+    )
+
+
 def test_specs_and_plans_take_deep_immutable_snapshots():
     mutable_config = {"nested": {"items": [1, 2]}}
     mutable_startup = {"feature-enabled": ["yes"]}
@@ -114,6 +128,7 @@ def test_specs_and_plans_take_deep_immutable_snapshots():
         scenario_id="scenario-1",
         seed=42,
         topology="standalone",
+        topology_provider=_topology_identity(),
         inputs={"sizes": [1, 2]},
     )
 
@@ -137,6 +152,7 @@ def test_pack_and_plan_contracts_have_no_public_schema_generation_fields():
         scenario_id="scenario-1",
         seed=1,
         topology="standalone",
+        topology_provider=_topology_identity(),
     )
 
     assert "api_version" not in FeaturePackSpec.__dataclass_fields__
@@ -148,6 +164,46 @@ def test_pack_and_plan_contracts_have_no_public_schema_generation_fields():
     serialized = dict(plan.to_data())
     serialized["api_version"] = "legacy"
     with pytest.raises(ValueError, match="unknown fields"):
+        RunPlan.from_data(serialized)
+
+
+def test_run_plan_requires_a_replay_locked_topology_provider_identity():
+    with pytest.raises(TypeError, match="topology_provider"):
+        RunPlan(
+            scenario_id="scenario-1",
+            pack_id="example.feature",
+            pack_version="1",
+            seed=1,
+            topology="standalone",
+            components=(),
+            mode=RunMode.TOPOLOGY_SMOKE,
+        )
+
+    with pytest.raises(TypeError, match="TopologyProviderIdentity"):
+        RunPlan(
+            scenario_id="scenario-1",
+            pack_id="example.feature",
+            pack_version="1",
+            seed=1,
+            topology="standalone",
+            components=(),
+            topology_provider=None,
+            mode=RunMode.TOPOLOGY_SMOKE,
+        )
+
+    plan = RunPlan.from_feature_pack(
+        _feature_pack(),
+        scenario_id="scenario-1",
+        seed=1,
+        topology="standalone",
+        topology_provider=_topology_identity(),
+    )
+    serialized = dict(plan.to_data())
+    del serialized["topology_provider"]
+    with pytest.raises(
+        ValueError,
+        match=r"missing required fields.*topology_provider",
+    ):
         RunPlan.from_data(serialized)
 
 
@@ -185,6 +241,7 @@ def test_model_deserialization_rejects_non_sequence_component_collections(value_
         scenario_id="scenario-1",
         seed=1,
         topology="standalone",
+        topology_provider=_topology_identity(),
     )
     serialized = dict(plan.to_data())
     serialized["components"] = value_factory()
@@ -210,6 +267,7 @@ def test_run_plan_rejects_unsupported_topology():
             scenario_id="scenario-1",
             seed=1,
             topology="cluster",
+            topology_provider=_topology_identity(),
         )
 
 
@@ -236,6 +294,7 @@ def test_evidence_results_and_outcome_are_immutable_and_aggregate_evidence():
             scenario_id="scenario-1",
             seed=1,
             topology="standalone",
+            topology_provider=_topology_identity(),
         ),
         status="PASS",
         summary="complete",
@@ -275,6 +334,7 @@ def test_run_plan_does_not_coerce_wrong_falsy_container_types():
             scenario_id="scenario-1",
             seed=1,
             topology="standalone",
+            topology_provider=_topology_identity(),
             inputs=[],
         )
     with pytest.raises(TypeError, match="topology_document"):
@@ -283,6 +343,7 @@ def test_run_plan_does_not_coerce_wrong_falsy_container_types():
             scenario_id="scenario-1",
             seed=1,
             topology="standalone",
+            topology_provider=_topology_identity(),
             topology_document=[],
         )
 
@@ -371,11 +432,14 @@ def test_evidence_requirements_validate_and_roundtrip_with_run_mode():
         scenario_id="feature-run",
         seed=1,
         topology="standalone",
+        topology_provider=_topology_identity(implementation_digest="sha256:topology-build"),
     )
 
     assert plan.mode is RunMode.FEATURE
     assert plan.required_evidence == (requirement,)
-    assert RunPlan.from_json(plan.to_json()) == plan
+    replayed = RunPlan.from_json(plan.to_json())
+    assert replayed == plan
+    assert replayed.topology_provider == _topology_identity(implementation_digest="sha256:topology-build")
 
     with pytest.raises(ValueError, match="greater than or equal"):
         EvidenceRequirement(evidence_id="example.path", min_count=0)

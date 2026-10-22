@@ -28,6 +28,7 @@ from .extensibility import (
     RunMode,
     RunPlan,
     StartupOverlay,
+    TopologyProviderIdentity,
 )
 
 
@@ -1138,6 +1139,10 @@ class BoundRunPlan(_RuntimeOnly):
     @property
     def topology(self) -> str:
         return self._source_plan.topology
+
+    @property
+    def topology_provider(self) -> TopologyProviderIdentity:
+        return self._source_plan.topology_provider
 
     @property
     def mode(self) -> RunMode:

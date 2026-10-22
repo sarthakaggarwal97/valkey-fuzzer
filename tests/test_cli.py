@@ -30,6 +30,8 @@ from src.extensibility import (
     RunMode,
     RunOutcome,
     RunPlan,
+    TopologyProviderIdentity,
+    TopologyProviderRegistration,
 )
 from src.feature_runner import ProvisionedTopology
 
@@ -42,6 +44,11 @@ def _plan() -> RunPlan:
         seed=123,
         topology="standalone",
         components=(),
+        topology_provider=TopologyProviderIdentity(
+            provider_id="tests.topology-provider",
+            implementation_version="1",
+            api_version=EXTENSION_API_VERSION,
+        ),
         mode=RunMode.TOPOLOGY_SMOKE,
         topology_document={"type": "standalone", "base_port": 7400},
     )
@@ -453,8 +460,16 @@ def test_cli_executes_plugin_manifest_provider_and_oracle_end_to_end(tmp_path, m
 
     monkeypatch.setattr("src.extensibility.importlib_metadata.entry_points", EntryPoints)
     monkeypatch.setattr(
-        "src.feature_runtime.local_topology_provider_factories",
-        lambda coordinator_factory: {"standalone": Provider},
+        "src.feature_runtime.local_topology_provider_registrations",
+        lambda coordinator_factory, *, api_version: {
+            "standalone": TopologyProviderRegistration(
+                topology="standalone",
+                provider_id="tests.cli-topology",
+                implementation_version="1",
+                api_version=api_version,
+                factory=Provider,
+            )
+        },
     )
 
     pack_dir = tmp_path / "packs"

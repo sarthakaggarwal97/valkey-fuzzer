@@ -22,6 +22,9 @@ from src.extensibility import (
     Registry,
     RunMode,
     RunPlan,
+    TopologyProviderIdentity,
+    TopologyProviderRegistration,
+    TopologyProviderRegistry,
     discover_plugins,
 )
 from src.feature_packs import FeaturePackCatalog, compile_scenario
@@ -260,6 +263,38 @@ def _registries(
     return registries
 
 
+def _topology_identity(
+    *,
+    api_version: str = "v1",
+    implementation_digest: Optional[str] = None,
+) -> TopologyProviderIdentity:
+    return TopologyProviderIdentity(
+        provider_id="tests.topology-provider",
+        implementation_version="1",
+        api_version=api_version,
+        implementation_digest=implementation_digest,
+    )
+
+
+def _topology_providers(
+    *,
+    api_version: str = "v1",
+    implementation_digest: Optional[str] = None,
+    **factories,
+) -> Mapping[str, TopologyProviderRegistration]:
+    return {
+        topology: TopologyProviderRegistration(
+            topology=topology,
+            provider_id="tests.topology-provider",
+            implementation_version="1",
+            api_version=api_version,
+            factory=factory,
+            implementation_digest=implementation_digest,
+        )
+        for topology, factory in factories.items()
+    }
+
+
 def _spec(
     kind: ComponentKind,
     instance_id: str,
@@ -300,6 +335,7 @@ def _plan(
         scenario_id="runner-test",
         seed=7,
         topology=topology,
+        topology_provider=_topology_identity(),
         topology_document={"type": topology, "provider_option": "valid"},
     )
 
@@ -322,17 +358,97 @@ def test_stable_topological_order_preserves_manifest_order_among_ready_component
     )
 
 
-def test_topology_mapping_accepts_a_provider_instance():
+def test_topology_mapping_rejects_a_singleton_provider_instance():
     calls: list[str] = []
     provider = _Provider(calls, "standalone")
 
-    outcome = FeatureRunner({}, {"standalone": provider}).run(_plan(()))
+    with pytest.raises(TypeError, match="TopologyProviderRegistration"):
+        FeatureRunner({}, {"standalone": provider})
+
+    assert calls == []
+
+
+def test_topology_only_mapping_infers_a_non_default_extension_api():
+    registrations = _topology_providers(
+        api_version="v2",
+        standalone=lambda: _Provider([], "standalone"),
+    )
+
+    runner = FeatureRunner({}, registrations)
+
+    assert runner.topology_provider_registry.api_version == "v2"
+    runner.validate(
+        RunPlan.from_feature_pack(
+            FeaturePackSpec(
+                pack_id="tests.topology-only",
+                version="1",
+                mode=RunMode.TOPOLOGY_SMOKE,
+                supported_topologies=("standalone",),
+                components=(),
+            ),
+            scenario_id="topology-only",
+            seed=1,
+            topology="standalone",
+            topology_provider=_topology_identity(api_version="v2"),
+        )
+    )
+
+
+def test_topology_mapping_rejects_mixed_extension_apis():
+    registrations = {
+        "standalone": TopologyProviderRegistration(
+            topology="standalone",
+            provider_id="tests.standalone-provider",
+            implementation_version="1",
+            api_version="v1",
+            factory=lambda: _Provider([], "standalone"),
+        ),
+        "cluster": TopologyProviderRegistration(
+            topology="cluster",
+            provider_id="tests.cluster-provider",
+            implementation_version="1",
+            api_version="v2",
+            factory=lambda: _Provider([], "cluster"),
+        ),
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="topology provider registrations must use one extension API version",
+    ):
+        FeatureRunner({}, registrations)
+
+
+def test_topology_factory_creates_fresh_lifecycle_owners_per_attempt():
+    instances = []
+    call_logs = []
+
+    def factory():
+        calls = []
+        provider = _Provider(calls, "standalone")
+        call_logs.append(calls)
+        instances.append(provider)
+        return provider
+
+    runner = FeatureRunner(
+        {},
+        _topology_providers(standalone=factory),
+    )
+    plan = _plan(())
+
+    runner.validate(plan)
+    outcome = runner.run(plan)
 
     assert outcome.status is OutcomeStatus.PASS
-    assert calls == [
-        "standalone.validate",
-        "standalone.provision",
-        "standalone.cleanup",
+    assert len(instances) == 2
+    assert instances[0] is not instances[1]
+    assert call_logs == [
+        ["standalone.validate"],
+        [
+            "standalone.validate",
+            "standalone.provision",
+            "standalone.cleanup",
+        ],
     ]
 
 
@@ -362,14 +478,13 @@ def test_generic_lifecycle_is_identical_across_registered_topology_providers(top
             ),
         )
     )
-    provider = _Provider(calls, topology)
     runner = FeatureRunner(
         registries,
-        {
-            "standalone": lambda: provider,
-            "replication": lambda: provider,
-            "cluster": lambda: provider,
-        },
+        _topology_providers(
+            standalone=lambda: _Provider(calls, "standalone"),
+            replication=lambda: _Provider(calls, "replication"),
+            cluster=lambda: _Provider(calls, "cluster"),
+        ),
     )
 
     outcome = runner.run(
@@ -464,7 +579,7 @@ def test_required_capability_skip_is_unsupported_without_provider_mutation():
                 ),
             )
         ),
-        {"standalone": lambda: provider},
+        _topology_providers(standalone=lambda: provider),
     )
 
     outcome = runner.run(_plan((_spec(ComponentKind.CAPABILITY, "supported"),)))
@@ -502,7 +617,7 @@ def test_every_component_factory_and_protocol_is_preflighted_before_provision():
                 (ComponentKind.ACTION, "tests.action", action_factory),
             )
         ),
-        {"standalone": lambda: CheckingProvider(calls, "standalone")},
+        _topology_providers(standalone=lambda: CheckingProvider(calls, "standalone")),
     ).run(
         _plan(
             (
@@ -530,7 +645,7 @@ def test_optional_failure_is_nonblocking_until_a_required_dependent_needs_it():
 
     independent = FeatureRunner(
         _registries(entries),
-        {"standalone": lambda: provider},
+        _topology_providers(standalone=lambda: provider),
     ).run(independent_plan)
 
     assert independent.status is OutcomeStatus.PASS
@@ -545,7 +660,7 @@ def test_optional_failure_is_nonblocking_until_a_required_dependent_needs_it():
     )
     blocked = FeatureRunner(
         _registries(entries),
-        {"standalone": lambda: provider},
+        _topology_providers(standalone=lambda: provider),
     ).run(_plan((dependent, optional)))
 
     assert blocked.status is OutcomeStatus.FAIL
@@ -567,7 +682,7 @@ def test_required_component_skip_is_fail_not_unsupported_after_provision():
                 ),
             )
         ),
-        {"standalone": lambda: _Provider(calls, "standalone")},
+        _topology_providers(standalone=lambda: _Provider(calls, "standalone")),
     ).run(_plan((_spec(ComponentKind.ACTION, "activate"),)))
 
     assert outcome.status is OutcomeStatus.FAIL
@@ -579,7 +694,7 @@ def test_missing_feature_event_fails_even_when_standard_action_event_exists():
     calls: list[str] = []
     outcome = FeatureRunner(
         _registries(((ComponentKind.ACTION, "tests.action", lambda: _Action(calls)),)),
-        {"standalone": lambda: _Provider(calls, "standalone")},
+        _topology_providers(standalone=lambda: _Provider(calls, "standalone")),
     ).run(
         _plan(
             (_spec(ComponentKind.ACTION, "activate"),),
@@ -609,7 +724,7 @@ def test_action_exception_unwinds_long_lived_components_and_provider():
                 ),
             )
         ),
-        {"standalone": lambda: _Provider(calls, "standalone")},
+        _topology_providers(standalone=lambda: _Provider(calls, "standalone")),
     ).run(_plan(components))
 
     assert outcome.status is OutcomeStatus.ERROR
@@ -641,7 +756,7 @@ def test_teardown_registered_before_start_is_attempted_when_start_raises():
                 ),
             )
         ),
-        {"standalone": lambda: _Provider(calls, "standalone")},
+        _topology_providers(standalone=lambda: _Provider(calls, "standalone")),
     ).run(_plan((_spec(ComponentKind.OBSERVER, "observe"),)))
 
     assert outcome.status is OutcomeStatus.ERROR
@@ -690,7 +805,7 @@ def test_all_cleanup_is_attempted_and_cleanup_error_does_not_mask_feature_fail()
                 ),
             )
         ),
-        {"standalone": lambda: provider},
+        _topology_providers(standalone=lambda: provider),
     ).run(_plan(components))
 
     assert outcome.status is OutcomeStatus.FAIL
@@ -720,7 +835,7 @@ def test_cleanup_failure_after_success_is_error():
                 ),
             )
         ),
-        {"standalone": lambda: _Provider(calls, "standalone")},
+        _topology_providers(standalone=lambda: _Provider(calls, "standalone")),
     ).run(_plan((_spec(ComponentKind.OBSERVER, "observe"),)))
 
     assert outcome.status is OutcomeStatus.ERROR
@@ -751,7 +866,7 @@ def test_keyboard_interrupt_runs_every_cleanup_then_reraises_original():
                 ),
             )
         ),
-        {"standalone": lambda: _Provider(calls, "standalone")},
+        _topology_providers(standalone=lambda: _Provider(calls, "standalone")),
     )
 
     with pytest.raises(KeyboardInterrupt) as caught:
@@ -778,7 +893,7 @@ def test_bad_plugin_protocol_or_result_becomes_error(factory, expected_phase):
     provider = _Provider(calls, "standalone")
     outcome = FeatureRunner(
         _registries(((ComponentKind.ACTION, "tests.action", factory(calls)),)),
-        {"standalone": lambda: provider},
+        _topology_providers(standalone=lambda: provider),
     ).run(_plan((_spec(ComponentKind.ACTION, "activate"),)))
 
     assert outcome.status is OutcomeStatus.ERROR
@@ -802,7 +917,7 @@ def test_provider_validation_rejects_topology_before_component_factory_or_mutati
     provider = _Provider(calls, "standalone", reject=True)
     outcome = FeatureRunner(
         _registries(((ComponentKind.ACTION, "tests.action", component_factory),)),
-        {"standalone": lambda: provider},
+        _topology_providers(standalone=lambda: provider),
     ).run(_plan((_spec(ComponentKind.ACTION, "activate"),)))
 
     assert outcome.status is OutcomeStatus.ERROR
@@ -835,7 +950,7 @@ def test_registry_drift_during_factory_is_error_before_provider_mutation():
     provider = _Provider(calls, "standalone")
     outcome = FeatureRunner(
         {ComponentKind.ACTION: registry},
-        {"standalone": lambda: provider},
+        _topology_providers(standalone=lambda: provider),
     ).run(_plan((_spec(ComponentKind.ACTION, "activate"),)))
 
     assert outcome.status is OutcomeStatus.ERROR
@@ -849,7 +964,7 @@ def test_expired_cooperative_deadline_is_error_without_provision():
     provider = _Provider(calls, "standalone")
     outcome = FeatureRunner(
         _registries(((ComponentKind.ACTION, "tests.action", lambda: _Action(calls)),)),
-        {"standalone": lambda: provider},
+        _topology_providers(standalone=lambda: provider),
     ).run(
         _plan((_spec(ComponentKind.ACTION, "activate"),)),
         deadline=time.monotonic() - 1,
@@ -893,7 +1008,7 @@ def test_evidence_must_be_owned_by_the_component_that_returned_it():
                 ),
             )
         ),
-        {"standalone": lambda: _Provider(calls, "standalone")},
+        _topology_providers(standalone=lambda: _Provider(calls, "standalone")),
     ).run(_plan((_spec(ComponentKind.ACTION, "activate"),)))
 
     assert outcome.status is OutcomeStatus.ERROR
@@ -945,7 +1060,7 @@ def test_evidence_cannot_reference_an_attempted_but_uncommitted_event():
                 ),
             )
         ),
-        {"standalone": lambda: _Provider(calls, "standalone")},
+        _topology_providers(standalone=lambda: _Provider(calls, "standalone")),
     ).run(_plan((_spec(ComponentKind.ACTION, "activate"),)))
 
     assert outcome.status is OutcomeStatus.ERROR
@@ -974,7 +1089,7 @@ def test_missing_required_evidence_count_fails_a_real_feature_run():
                 ),
             )
         ),
-        {"standalone": lambda: _Provider(calls, "standalone")},
+        _topology_providers(standalone=lambda: _Provider(calls, "standalone")),
     ).run(
         _plan(
             components,
@@ -1046,7 +1161,7 @@ def test_when_event_is_a_future_trigger_hint_owned_by_the_plugin():
                 (ComponentKind.ACTION, "tests.action", PublishingAction),
             )
         ),
-        {"standalone": lambda: _Provider(calls, "standalone")},
+        _topology_providers(standalone=lambda: _Provider(calls, "standalone")),
     ).run(_plan(components))
 
     assert outcome.status is OutcomeStatus.PASS
@@ -1077,13 +1192,13 @@ def test_runner_component_validator_rejects_before_factory_or_provision():
     )
     outcome = FeatureRunner(
         {ComponentKind.ACTION: registry},
-        {"standalone": lambda: _Provider(calls, "standalone")},
+        _topology_providers(standalone=lambda: _Provider(calls, "standalone")),
     ).run(_plan((_spec(ComponentKind.ACTION, "activate"),)))
 
     assert outcome.status is OutcomeStatus.ERROR
     assert outcome.diagnostics["error"] == {
         "type": "src.feature_runner.FeatureRunnerError",
-        "phase": "preflight",
+        "phase": "static preflight",
     }
     assert calls == [
         "standalone.validate",
@@ -1108,7 +1223,7 @@ def test_component_method_signature_is_checked_before_provision():
                 ),
             )
         ),
-        {"standalone": lambda: _Provider(calls, "standalone")},
+        _topology_providers(standalone=lambda: _Provider(calls, "standalone")),
     ).run(_plan((_spec(ComponentKind.ACTION, "activate"),)))
 
     assert outcome.status is OutcomeStatus.ERROR
@@ -1146,11 +1261,11 @@ def test_provider_method_signature_is_checked_before_validation_or_component_fac
                 ),
             )
         ),
-        {"standalone": BadSignatureProvider()},
+        _topology_providers(standalone=BadSignatureProvider),
     ).run(_plan((_spec(ComponentKind.ACTION, "activate"),)))
 
     assert outcome.status is OutcomeStatus.ERROR
-    assert outcome.diagnostics["error"]["phase"] == "preflight"
+    assert outcome.diagnostics["error"]["phase"] == "static preflight"
     assert calls == []
 
 
@@ -1182,7 +1297,7 @@ def test_effective_required_capability_dependency_blocks_before_provision(
                 (ComponentKind.ACTION, "tests.action", lambda: _Action(calls)),
             )
         ),
-        {"standalone": lambda: provider},
+        _topology_providers(standalone=lambda: provider),
     ).run(_plan(components))
 
     assert outcome.status is expected_outcome
@@ -1207,7 +1322,7 @@ def test_independent_optional_capability_skip_is_nonblocking():
                 (ComponentKind.ACTION, "tests.action", lambda: _Action(calls)),
             )
         ),
-        {"standalone": lambda: _Provider(calls, "standalone")},
+        _topology_providers(standalone=lambda: _Provider(calls, "standalone")),
     ).run(_plan(components))
 
     assert outcome.status is OutcomeStatus.PASS
@@ -1237,7 +1352,7 @@ def test_failed_or_invalid_provision_rolls_back_without_normal_cleanup(
     provider = BrokenProvisionProvider(calls, "standalone")
     outcome = FeatureRunner(
         _registries(((ComponentKind.ACTION, "tests.action", lambda: _Action(calls)),)),
-        {"standalone": provider},
+        _topology_providers(standalone=lambda: provider),
     ).run(_plan((_spec(ComponentKind.ACTION, "activate"),)))
 
     assert outcome.status is OutcomeStatus.ERROR
@@ -1266,7 +1381,7 @@ def test_rollback_failure_is_recorded_without_masking_the_provision_error():
 
     outcome = FeatureRunner(
         _registries(((ComponentKind.ACTION, "tests.action", lambda: _Action(calls)),)),
-        {"standalone": BrokenRollbackProvider(calls, "standalone")},
+        _topology_providers(standalone=lambda: BrokenRollbackProvider(calls, "standalone")),
     ).run(_plan((_spec(ComponentKind.ACTION, "activate"),)))
 
     assert outcome.status is OutcomeStatus.ERROR
@@ -1288,7 +1403,7 @@ def test_provision_keyboard_interrupt_rolls_back_then_reraises_original():
 
     runner = FeatureRunner(
         _registries(((ComponentKind.ACTION, "tests.action", lambda: _Action(calls)),)),
-        {"standalone": InterruptedProvider(calls, "standalone")},
+        _topology_providers(standalone=lambda: InterruptedProvider(calls, "standalone")),
     )
 
     with pytest.raises(KeyboardInterrupt) as caught:
@@ -1323,7 +1438,7 @@ def test_cleanup_error_overrides_required_skip_without_a_real_feature_failure():
                 ),
             )
         ),
-        {"standalone": lambda: _Provider(calls, "standalone")},
+        _topology_providers(standalone=lambda: _Provider(calls, "standalone")),
     ).run(_plan(components))
 
     assert outcome.status is OutcomeStatus.ERROR
@@ -1350,7 +1465,7 @@ def test_event_bus_is_quiesced_before_the_outcome_is_returned():
                 ),
             )
         ),
-        {"standalone": lambda: _Provider(calls, "standalone")},
+        _topology_providers(standalone=lambda: _Provider(calls, "standalone")),
     ).run(_plan((_spec(ComponentKind.ACTION, "activate"),)))
 
     assert outcome.status is OutcomeStatus.PASS
@@ -1392,7 +1507,7 @@ def test_required_capability_registry_drift_is_error_not_unsupported():
     )
     outcome = FeatureRunner(
         {ComponentKind.CAPABILITY: registry},
-        {"standalone": lambda: _Provider(calls, "standalone")},
+        _topology_providers(standalone=lambda: _Provider(calls, "standalone")),
     ).run(_plan((_spec(ComponentKind.CAPABILITY, "supported"),)))
 
     assert outcome.status is OutcomeStatus.ERROR
@@ -1498,6 +1613,9 @@ def test_external_plugin_compiles_and_executes_without_runner_changes(monkeypatc
         registries,
         feature_pack_catalog=catalog,
     )
+    topology_providers = _topology_providers(standalone=lambda: _Provider(calls, "standalone"))
+    topology_registry = TopologyProviderRegistry()
+    topology_registry.register_many(topology_providers.values())
     plan = compile_scenario(
         {
             "scenario_id": "external-run",
@@ -1511,11 +1629,12 @@ def test_external_plugin_compiles_and_executes_without_runner_changes(monkeypatc
         },
         catalog,
         registries,
+        topology_provider_registry=topology_registry,
     )
 
     outcome = FeatureRunner(
         registries,
-        {"standalone": lambda: _Provider(calls, "standalone")},
+        topology_registry,
     ).run(plan)
 
     assert outcome.status is OutcomeStatus.PASS

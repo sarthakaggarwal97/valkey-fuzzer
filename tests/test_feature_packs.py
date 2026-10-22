@@ -21,6 +21,8 @@ from src.extensibility import (
     RunMode,
     RunOutcome,
     RunPlan,
+    TopologyProviderRegistration,
+    TopologyProviderRegistry,
     discover_plugins,
 )
 from src.feature_packs import (
@@ -57,6 +59,24 @@ def _registration(
         factory=factory or (lambda: object()),
         validator=validator,
     )
+
+
+def _topology_registry(
+    *topologies: str,
+    api_version: str = "v1",
+) -> TopologyProviderRegistry:
+    registry = TopologyProviderRegistry(api_version=api_version)
+    registry.register_many(
+        TopologyProviderRegistration(
+            topology=topology,
+            provider_id="tests.topology-provider",
+            implementation_version="1",
+            api_version=api_version,
+            factory=object,
+        )
+        for topology in (topologies or ("standalone",))
+    )
+    return registry
 
 
 def _manifest(
@@ -128,6 +148,7 @@ def _compiler_for(
     return FeaturePackCompiler(
         catalog,
         {registered_kind: registry},
+        topology_provider_registry=_topology_registry(*manifest["supported_topologies"]),
         reference_inventory=reference_inventory,
     )
 
@@ -235,6 +256,7 @@ def test_feature_manifest_preserves_mode_and_required_evidence_through_compile()
             ComponentKind.OBSERVER: observer_registry,
             ComponentKind.ORACLE: oracle_registry,
         },
+        topology_provider_registry=_topology_registry(),
     )
 
     assert plan.mode is RunMode.FEATURE
@@ -265,7 +287,11 @@ def test_compiler_invokes_pure_component_validator_and_checks_signatures():
         )
     )
 
-    FeaturePackCompiler(catalog, {ComponentKind.ACTION: registry}).compile(_scenario())
+    FeaturePackCompiler(
+        catalog,
+        {ComponentKind.ACTION: registry},
+        topology_provider_registry=_topology_registry(),
+    ).compile(_scenario())
     assert calls == [("activate", "example-scenario")]
 
     rejecting_registry = Registry[Any](ComponentKind.ACTION)
@@ -280,6 +306,7 @@ def test_compiler_invokes_pure_component_validator_and_checks_signatures():
         FeaturePackCompiler(
             catalog,
             {ComponentKind.ACTION: rejecting_registry},
+            topology_provider_registry=_topology_registry(),
         ).compile(_scenario())
 
     bad_validator_registry = Registry[Any](ComponentKind.ACTION)
@@ -294,6 +321,7 @@ def test_compiler_invokes_pure_component_validator_and_checks_signatures():
         FeaturePackCompiler(
             catalog,
             {ComponentKind.ACTION: bad_validator_registry},
+            topology_provider_registry=_topology_registry(),
         ).compile(_scenario())
 
     bad_factory_registry = Registry[Any](ComponentKind.ACTION)
@@ -308,6 +336,7 @@ def test_compiler_invokes_pure_component_validator_and_checks_signatures():
         FeaturePackCompiler(
             catalog,
             {ComponentKind.ACTION: bad_factory_registry},
+            topology_provider_registry=_topology_registry(),
         ).compile(_scenario())
 
 
@@ -418,7 +447,11 @@ components:
     load_feature_pack_directory(tmp_path, catalog=catalog)
     registry = Registry[Any](ComponentKind.ACTION)
     registry.register(_registration("example.action", ComponentKind.ACTION))
-    compiler = FeaturePackCompiler(catalog, {ComponentKind.ACTION: registry})
+    compiler = FeaturePackCompiler(
+        catalog,
+        {ComponentKind.ACTION: registry},
+        topology_provider_registry=_topology_registry(),
+    )
 
     plan = compiler.compile_yaml(
         """
@@ -495,6 +528,7 @@ def test_compile_resolves_inputs_and_preserves_complete_topology_and_plan_contra
             ComponentKind.ACTION: action_registry,
             ComponentKind.WORKLOAD: workload_registry,
         },
+        topology_provider_registry=_topology_registry(),
         reference_inventory=ReferenceInventory(
             artifacts=("candidate",),
             labels={"zone": ("a", "b")},
@@ -555,7 +589,11 @@ def test_compile_defaults_optional_feature_fields_and_requires_version_only_when
     )
     registry = Registry[Any](ComponentKind.ACTION)
     registry.register(_registration("example.action", ComponentKind.ACTION))
-    ambiguous_compiler = FeaturePackCompiler(catalog, {ComponentKind.ACTION: registry})
+    ambiguous_compiler = FeaturePackCompiler(
+        catalog,
+        {ComponentKind.ACTION: registry},
+        topology_provider_registry=_topology_registry(),
+    )
 
     with pytest.raises(AmbiguousFeaturePackError, match=r"multiple registered versions.*feature\.version"):
         ambiguous_compiler.compile(scenario)
@@ -595,7 +633,11 @@ def test_compile_rejects_unsupported_topology_and_missing_or_wrong_kind_componen
     catalog = FeaturePackCatalog()
     catalog.register(parse_feature_pack_document(_manifest()))
     with pytest.raises(ComponentCompatibilityError, match="not registered"):
-        FeaturePackCompiler(catalog, {}).compile(_scenario())
+        FeaturePackCompiler(
+            catalog,
+            {},
+            topology_provider_registry=_topology_registry(),
+        ).compile(_scenario())
 
     observer_registry = Registry[Any](ComponentKind.OBSERVER)
     observer_registry.register(_registration("example.action", ComponentKind.OBSERVER))
@@ -603,6 +645,7 @@ def test_compile_rejects_unsupported_topology_and_missing_or_wrong_kind_componen
         FeaturePackCompiler(
             catalog,
             {ComponentKind.OBSERVER: observer_registry},
+            topology_provider_registry=_topology_registry(),
         ).compile(_scenario())
 
 
@@ -861,6 +904,7 @@ def test_external_entry_point_can_add_component_and_pack_then_compile(monkeypatc
         _scenario(pack_id="external.feature"),
         catalog,
         {ComponentKind.ACTION: registry},
+        topology_provider_registry=_topology_registry(),
     )
     assert plan.pack_id == "external.feature"
     assert plan.components[0].component_id == "external.action"

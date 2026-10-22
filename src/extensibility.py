@@ -6,6 +6,7 @@ plugins to import engine internals.
 """
 
 import hashlib
+import inspect
 import json
 import math
 import random
@@ -14,7 +15,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
 from importlib import metadata as importlib_metadata
@@ -161,6 +162,8 @@ def to_plain_data(value: Any) -> Any:
     one canonical serialization path.
     """
 
+    if isinstance(value, ProvisionedTopology):
+        raise TypeError("ProvisionedTopology is runtime-only and cannot be serialized")
     if isinstance(value, EnvironmentReference):
         return {ENVIRONMENT_REFERENCE_DATA_KEY: value.path}
     if isinstance(value, Enum):
@@ -526,6 +529,28 @@ class FeaturePackSpec:
 
 
 @dataclass(frozen=True)
+class TopologyProviderIdentity:
+    """Persisted replay lock for one topology-provider implementation.
+
+    ``provider_id`` identifies the logical provider. ``implementation_version``
+    must change whenever replay compatibility changes. Providers may also
+    publish an immutable build or content digest for stronger provenance.
+    """
+
+    provider_id: str
+    implementation_version: str
+    api_version: str
+    implementation_digest: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        _require_qualified_id(self.provider_id, "provider_id")
+        _require_text(self.implementation_version, "implementation_version")
+        _require_text(self.api_version, "api_version")
+        if self.implementation_digest is not None:
+            _require_text(self.implementation_digest, "implementation_digest")
+
+
+@dataclass(frozen=True)
 class RunPlan:
     """Fully resolved, replayable plan produced from a feature-pack spec."""
 
@@ -535,6 +560,7 @@ class RunPlan:
     seed: int
     topology: str
     components: tuple[ComponentSpec, ...]
+    topology_provider: TopologyProviderIdentity
     mode: RunMode = RunMode.FEATURE
     inputs: Mapping[str, Any] = field(default_factory=dict)
     artifacts: tuple[ArtifactSpec, ...] = ()
@@ -553,6 +579,8 @@ class RunPlan:
         if isinstance(self.seed, bool) or not isinstance(self.seed, int):
             raise TypeError("seed must be an integer")
         _require_name(self.topology, "topology")
+        if not isinstance(self.topology_provider, TopologyProviderIdentity):
+            raise TypeError("topology_provider must be a TopologyProviderIdentity")
         if isinstance(self.mode, str):
             object.__setattr__(self, "mode", RunMode(self.mode))
         if not isinstance(self.mode, RunMode):
@@ -625,6 +653,7 @@ class RunPlan:
         scenario_id: str,
         seed: int,
         topology: str,
+        topology_provider: TopologyProviderIdentity,
         inputs: Optional[Mapping[str, Any]] = None,
         topology_document: Optional[Mapping[str, Any]] = None,
         artifacts: Sequence[ArtifactSpec] = (),
@@ -643,6 +672,7 @@ class RunPlan:
             seed=seed,
             topology=topology,
             components=spec.components,
+            topology_provider=topology_provider,
             mode=spec.mode,
             inputs={} if inputs is None else inputs,
             artifacts=tuple(artifacts),
@@ -930,6 +960,26 @@ def _evidence_requirement_from_data(value: Any) -> EvidenceRequirement:
     )
 
 
+def _topology_provider_identity_from_data(value: Any) -> TopologyProviderIdentity:
+    mapping = _model_fields(
+        value,
+        "topology provider identity",
+        allowed=(
+            "provider_id",
+            "implementation_version",
+            "api_version",
+            "implementation_digest",
+        ),
+        required=("provider_id", "implementation_version", "api_version"),
+    )
+    return TopologyProviderIdentity(
+        provider_id=mapping["provider_id"],
+        implementation_version=mapping["implementation_version"],
+        api_version=mapping["api_version"],
+        implementation_digest=mapping.get("implementation_digest"),
+    )
+
+
 def run_plan_from_data(value: Mapping[str, Any]) -> RunPlan:
     """Rebuild a validated immutable plan from its canonical data form."""
 
@@ -943,6 +993,7 @@ def run_plan_from_data(value: Mapping[str, Any]) -> RunPlan:
             "pack_version",
             "seed",
             "topology",
+            "topology_provider",
             "components",
             "mode",
             "inputs",
@@ -961,6 +1012,7 @@ def run_plan_from_data(value: Mapping[str, Any]) -> RunPlan:
             "pack_version",
             "seed",
             "topology",
+            "topology_provider",
             "components",
         ),
     )
@@ -994,6 +1046,7 @@ def run_plan_from_data(value: Mapping[str, Any]) -> RunPlan:
         seed=mapping["seed"],
         topology=mapping["topology"],
         components=components,
+        topology_provider=_topology_provider_identity_from_data(mapping["topology_provider"]),
         mode=mapping.get("mode", RunMode.FEATURE),
         inputs=mapping.get("inputs", {}),
         artifacts=artifacts,
@@ -1451,6 +1504,9 @@ class ExecutableRunPlan(Protocol):
     def topology(self) -> str: ...
 
     @property
+    def topology_provider(self) -> TopologyProviderIdentity: ...
+
+    @property
     def mode(self) -> RunMode: ...
 
     @property
@@ -1500,6 +1556,58 @@ class RunContext(Protocol):
 
     @property
     def deadline(self) -> Optional[float]: ...
+
+
+@dataclass(frozen=True, eq=False)
+class ProvisionedTopology:
+    """Exact runtime handle and namespaced services returned by a provider."""
+
+    handle: Any = field(
+        default=None,
+        repr=False,
+        compare=False,
+        metadata={"serialize": False},
+    )
+    services: Mapping[str, Any] = field(
+        default_factory=dict,
+        repr=False,
+        compare=False,
+        metadata={"serialize": False},
+    )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.services, Mapping):
+            raise TypeError("provisioned topology services must be a mapping")
+        if any(not isinstance(key, str) for key in self.services):
+            raise TypeError("provisioned topology service names must be strings")
+        object.__setattr__(self, "services", MappingProxyType(dict(self.services)))
+
+    def __reduce_ex__(self, protocol: int) -> Any:
+        del protocol
+        raise TypeError("ProvisionedTopology is runtime-only and cannot be serialized")
+
+    def __repr__(self) -> str:
+        return f"ProvisionedTopology(handle=<redacted>, services={len(self.services)} value(s) <redacted>)"
+
+
+@runtime_checkable
+class TopologyProvider(Protocol):
+    """Feature-neutral topology lifecycle implemented by provider plugins.
+
+    Provider factories and constructors create only in-memory ownership state.
+    External acquisition belongs in ``provision``. ``validate`` is pure. If
+    provisioning fails, the runner invokes ``rollback``; after a successful
+    provision it makes one final ``cleanup`` attempt with the exact returned
+    object.
+    """
+
+    def validate(self, plan: ExecutableRunPlan) -> None: ...
+
+    def provision(self, context: RunContext) -> ProvisionedTopology: ...
+
+    def rollback(self, context: RunContext) -> None: ...
+
+    def cleanup(self, context: RunContext, topology: ProvisionedTopology) -> None: ...
 
 
 @runtime_checkable
@@ -1719,6 +1827,275 @@ class Registry(Generic[T]):
 
 
 @dataclass(frozen=True)
+class TopologyProviderRegistration:
+    """Fresh-provider factory registered for one declarative topology ID.
+
+    The factory is deliberately stored as extension data rather than a
+    provider instance.  Topology providers own mutable lifecycle state, so a
+    runtime must construct a provider for each validation or execution
+    attempt.  The runner validates the returned provider against its topology
+    lifecycle protocol before invoking it.
+    """
+
+    topology: str
+    provider_id: str
+    implementation_version: str
+    api_version: str
+    factory: Callable[[], TopologyProvider]
+    implementation_digest: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        _require_name(self.topology, "topology")
+        _require_qualified_id(self.provider_id, "provider_id")
+        _require_text(self.implementation_version, "implementation_version")
+        _require_text(self.api_version, "api_version")
+        if not callable(self.factory):
+            raise TypeError("topology provider factory must be callable")
+        callable_target = (
+            self.factory.__call__
+            if not (
+                inspect.isfunction(self.factory) or inspect.ismethod(self.factory) or isinstance(self.factory, type)
+            )
+            else self.factory
+        )
+        if (
+            inspect.iscoroutinefunction(callable_target)
+            or inspect.isasyncgenfunction(callable_target)
+            or inspect.isgeneratorfunction(callable_target)
+        ):
+            raise TypeError("topology provider factory must be a synchronous zero-argument callable")
+        try:
+            inspect.signature(self.factory).bind()
+        except (TypeError, ValueError) as exc:
+            raise TypeError("topology provider factory must be a synchronous zero-argument callable") from exc
+        if self.implementation_digest is not None:
+            _require_text(self.implementation_digest, "implementation_digest")
+
+    @property
+    def identity(self) -> TopologyProviderIdentity:
+        return TopologyProviderIdentity(
+            provider_id=self.provider_id,
+            implementation_version=self.implementation_version,
+            api_version=self.api_version,
+            implementation_digest=self.implementation_digest,
+        )
+
+
+class TopologyProviderRegistrationError(ValueError):
+    """Base class for topology-provider registry contract failures."""
+
+
+class DuplicateTopologyProviderRegistrationError(TopologyProviderRegistrationError):
+    def __init__(self, topology: str):
+        self.topology = topology
+        super().__init__(f"topology provider {topology!r} is already registered")
+
+
+class UnknownTopologyProviderError(TopologyProviderRegistrationError):
+    def __init__(self, topology: str):
+        self.topology = topology
+        super().__init__(f"topology provider {topology!r} is not registered")
+
+
+class IncompatibleTopologyProviderRegistrationError(TopologyProviderRegistrationError):
+    def __init__(self, topology: str, reason: str):
+        self.topology = topology
+        self.reason = reason
+        super().__init__(f"topology provider {topology!r} is incompatible: {reason}")
+
+
+class TopologyProviderRegistryPinnedError(TopologyProviderRegistrationError):
+    """A mutation was attempted while execution pinned a registry snapshot."""
+
+
+class TopologyProviderRegistry:
+    """Thread-safe topology registry participating in extension transactions."""
+
+    def __init__(self, api_version: str = EXTENSION_API_VERSION):
+        self._api_version = _require_text(api_version, "api_version")
+        self._registrations: dict[str, TopologyProviderRegistration] = {}
+        self._lock = threading.RLock()
+        self._pin_depth = 0
+        self._pinned_snapshot: Optional[Mapping[str, TopologyProviderRegistration]] = None
+
+    @property
+    def api_version(self) -> str:
+        return self._api_version
+
+    def _validate_many(
+        self,
+        registrations: Sequence[TopologyProviderRegistration],
+    ) -> None:
+        seen = set()
+        for registration in registrations:
+            if not isinstance(registration, TopologyProviderRegistration):
+                raise TypeError("topology provider registry entries must be TopologyProviderRegistration values")
+            if registration.api_version != self.api_version:
+                raise IncompatibleTopologyProviderRegistrationError(
+                    registration.topology,
+                    f"API {registration.api_version!r} does not match registry API {self.api_version!r}",
+                )
+            if registration.topology in seen or registration.topology in self._registrations:
+                raise DuplicateTopologyProviderRegistrationError(registration.topology)
+            seen.add(registration.topology)
+
+    def _reject_pinned_mutation(self) -> None:
+        if self._pin_depth:
+            raise TopologyProviderRegistryPinnedError(
+                "topology provider registry cannot be mutated during a pinned runtime operation"
+            )
+
+    def _normalized_snapshot(
+        self,
+        snapshot: Mapping[str, TopologyProviderRegistration],
+    ) -> dict[str, TopologyProviderRegistration]:
+        if not isinstance(snapshot, Mapping):
+            raise TypeError("topology provider registry snapshot must be a mapping")
+        normalized = {}
+        for topology, registration in snapshot.items():
+            _require_name(topology, "topology provider snapshot key")
+            if not isinstance(registration, TopologyProviderRegistration):
+                raise TypeError("topology provider registry snapshots must contain TopologyProviderRegistration values")
+            if registration.topology != topology:
+                raise ValueError(
+                    f"topology provider snapshot key {topology!r} does not "
+                    f"match registration topology {registration.topology!r}"
+                )
+            if registration.api_version != self.api_version:
+                raise IncompatibleTopologyProviderRegistrationError(
+                    topology,
+                    f"API {registration.api_version!r} does not match registry API {self.api_version!r}",
+                )
+            normalized[topology] = registration
+        return normalized
+
+    def validate_many(
+        self,
+        registrations: Iterable[TopologyProviderRegistration],
+    ) -> None:
+        entries = tuple(registrations)
+        with self._lock:
+            self._validate_many(entries)
+
+    def register(self, registration: TopologyProviderRegistration) -> None:
+        self.register_many((registration,))
+
+    def register_many(
+        self,
+        registrations: Iterable[TopologyProviderRegistration],
+    ) -> None:
+        entries = tuple(registrations)
+        with self._lock:
+            self._reject_pinned_mutation()
+            self._validate_many(entries)
+            for registration in entries:
+                self._registrations[registration.topology] = registration
+
+    def unregister(self, topology: str) -> TopologyProviderRegistration:
+        _require_name(topology, "topology")
+        with self._lock:
+            self._reject_pinned_mutation()
+            try:
+                return self._registrations.pop(topology)
+            except KeyError as exc:
+                raise UnknownTopologyProviderError(topology) from exc
+
+    def resolve(self, topology: str) -> TopologyProviderRegistration:
+        _require_name(topology, "topology")
+        with self._lock:
+            try:
+                return self._registrations[topology]
+            except KeyError as exc:
+                raise UnknownTopologyProviderError(topology) from exc
+
+    @property
+    def registered_ids(self) -> tuple[str, ...]:
+        with self._lock:
+            return tuple(sorted(self._registrations))
+
+    def snapshot(self) -> Mapping[str, TopologyProviderRegistration]:
+        with self._lock:
+            return MappingProxyType(
+                {topology: self._registrations[topology] for topology in sorted(self._registrations)}
+            )
+
+    @property
+    def registration_lock(self) -> threading.RLock:
+        return self._lock
+
+    def restore_snapshot(
+        self,
+        snapshot: Mapping[str, TopologyProviderRegistration],
+    ) -> None:
+        normalized = self._normalized_snapshot(snapshot)
+        with self._lock:
+            self._reject_pinned_mutation()
+            self._registrations = normalized
+
+    def restore_runtime_snapshot(
+        self,
+        snapshot: Mapping[str, TopologyProviderRegistration],
+    ) -> None:
+        """Restore runtime-owned state while an operation pin is active."""
+
+        normalized = self._normalized_snapshot(snapshot)
+        with self._lock:
+            if self._pin_depth and (
+                self._pinned_snapshot is None or self._snapshot_changed(self._pinned_snapshot, normalized)
+            ):
+                raise TopologyProviderRegistryPinnedError(
+                    "a runtime restore cannot replace the pinned topology provider snapshot"
+                )
+            self._registrations = normalized
+
+    @staticmethod
+    def _snapshot_changed(
+        expected: Mapping[str, TopologyProviderRegistration],
+        current: Mapping[str, TopologyProviderRegistration],
+    ) -> bool:
+        return set(current) != set(expected) or any(
+            current[topology] is not registration for topology, registration in expected.items()
+        )
+
+    @contextmanager
+    def pin_snapshot(
+        self,
+        snapshot: Mapping[str, TopologyProviderRegistration],
+    ):
+        """Reject mutations without holding the registry lock across callbacks."""
+
+        normalized = self._normalized_snapshot(snapshot)
+        with self._lock:
+            current = self.snapshot()
+            if self._snapshot_changed(normalized, current):
+                raise TopologyProviderRegistryPinnedError(
+                    "topology provider registry changed before its snapshot could be pinned"
+                )
+            if self._pinned_snapshot is not None and self._snapshot_changed(self._pinned_snapshot, normalized):
+                raise TopologyProviderRegistryPinnedError(
+                    "topology provider registry is already pinned to a different snapshot"
+                )
+            if self._pinned_snapshot is None:
+                self._pinned_snapshot = MappingProxyType(normalized)
+            self._pin_depth += 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._pin_depth -= 1
+                if self._pin_depth == 0:
+                    self._pinned_snapshot = None
+
+    def __contains__(self, topology: object) -> bool:
+        with self._lock:
+            return topology in self._registrations
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._registrations)
+
+
+@dataclass(frozen=True)
 class PluginManifest:
     """Value returned by an external ``valkey_fuzzer.plugins`` entry point."""
 
@@ -1729,6 +2106,7 @@ class PluginManifest:
     metadata: Mapping[str, Any] = field(default_factory=dict)
     artifact_providers: tuple[ArtifactProviderRegistration, ...] = ()
     resource_providers: tuple[ResourceProviderRegistration, ...] = ()
+    topology_providers: tuple[TopologyProviderRegistration, ...] = ()
 
     def __post_init__(self) -> None:
         _require_qualified_id(self.plugin_id, "plugin_id")
@@ -1788,6 +2166,21 @@ class PluginManifest:
                 raise DuplicateProviderRegistrationError(registration.provider_id)
             resource_provider_ids.add(registration.provider_id)
         object.__setattr__(self, "resource_providers", resource_providers)
+
+        topology_providers = _as_tuple(self.topology_providers)
+        topologies = set()
+        for registration in topology_providers:
+            if not isinstance(registration, TopologyProviderRegistration):
+                raise TypeError("topology_providers must contain TopologyProviderRegistration values")
+            if registration.api_version != self.api_version:
+                raise ValueError(
+                    f"topology provider {registration.topology!r} uses API "
+                    f"{registration.api_version!r}, expected {self.api_version!r}"
+                )
+            if registration.topology in topologies:
+                raise DuplicateTopologyProviderRegistrationError(registration.topology)
+            topologies.add(registration.topology)
+        object.__setattr__(self, "topology_providers", topology_providers)
         object.__setattr__(self, "metadata", _freeze_mapping(self.metadata))
 
 
@@ -1840,6 +2233,7 @@ def discover_plugins(
     feature_pack_catalog: Optional[Any] = None,
     artifact_provider_registry: Optional[ArtifactProviderRegistry] = None,
     resource_provider_registry: Optional[ResourceProviderRegistry] = None,
+    topology_provider_registry: Optional[TopologyProviderRegistry] = None,
     api_version: str = EXTENSION_API_VERSION,
 ) -> tuple[PluginManifest, ...]:
     """Load and register external plugins in deterministic distribution/name order.
@@ -1894,6 +2288,11 @@ def discover_plugins(
     for label, registry, registry_type in (
         ("artifact-provider-registry", artifact_provider_registry, ArtifactProviderRegistry),
         ("resource-provider-registry", resource_provider_registry, ResourceProviderRegistry),
+        (
+            "topology-provider-registry",
+            topology_provider_registry,
+            TopologyProviderRegistry,
+        ),
     ):
         if registry is None:
             continue
@@ -1930,8 +2329,10 @@ def discover_plugins(
     feature_packs = []
     artifact_providers = []
     resource_providers = []
+    topology_providers = []
     new_artifact_provider_ids = set()
     new_resource_provider_ids = set()
+    new_topologies = set()
     for manifest, source in zip(manifests, manifest_sources):
         if manifest.plugin_id in seen_plugins:
             raise PluginDiscoveryError(source[0], source[1], f"duplicate plugin ID {manifest.plugin_id!r}")
@@ -1958,6 +2359,11 @@ def discover_plugins(
                 raise DuplicateProviderRegistrationError(registration.provider_id)
             new_resource_provider_ids.add(registration.provider_id)
             resource_providers.append(registration)
+        for registration in manifest.topology_providers:
+            if registration.topology in new_topologies:
+                raise DuplicateTopologyProviderRegistrationError(registration.topology)
+            new_topologies.add(registration.topology)
+            topology_providers.append(registration)
 
     if feature_packs and feature_pack_catalog is None:
         manifest_index = next(index for index, manifest in enumerate(manifests) if manifest.feature_packs)
@@ -1986,6 +2392,15 @@ def discover_plugins(
             "plugin provides resource providers but no resource_provider_registry was provided",
         )
 
+    if topology_providers and topology_provider_registry is None:
+        manifest_index = next(index for index, manifest in enumerate(manifests) if manifest.topology_providers)
+        source = manifest_sources[manifest_index]
+        raise PluginDiscoveryError(
+            source[0],
+            source[1],
+            "plugin provides topology providers but no topology_provider_registry was provided",
+        )
+
     participants = [normalized_registries[kind] for kind in sorted(normalized_registries, key=lambda item: item.value)]
     if artifact_provider_registry is not None:
         participants.append(artifact_provider_registry)
@@ -1993,6 +2408,8 @@ def discover_plugins(
         participants.append(resource_provider_registry)
     if feature_pack_catalog is not None:
         participants.append(feature_pack_catalog)
+    if topology_provider_registry is not None:
+        participants.append(topology_provider_registry)
 
     with ExitStack() as transaction:
         for participant in participants:
@@ -2024,6 +2441,8 @@ def discover_plugins(
             artifact_provider_registry.validate_many(artifact_providers)
         if resource_provider_registry is not None:
             resource_provider_registry.validate_many(resource_providers)
+        if topology_provider_registry is not None:
+            topology_provider_registry.validate_many(topology_providers)
 
         registry_snapshots = {kind: registry.snapshot() for kind, registry in normalized_registries.items()}
         catalog_snapshot = feature_pack_catalog.snapshot() if feature_pack_catalog is not None else None
@@ -2033,6 +2452,9 @@ def discover_plugins(
         resource_provider_snapshot = (
             resource_provider_registry.snapshot() if resource_provider_registry is not None else None
         )
+        topology_provider_snapshot = (
+            topology_provider_registry.snapshot() if topology_provider_registry is not None else None
+        )
         try:
             for kind, registrations in registrations_by_kind.items():
                 normalized_registries[kind].register_many(registrations)
@@ -2040,17 +2462,58 @@ def discover_plugins(
                 artifact_provider_registry.register_many(artifact_providers)
             if resource_provider_registry is not None:
                 resource_provider_registry.register_many(resource_providers)
+            if topology_provider_registry is not None:
+                topology_provider_registry.register_many(topology_providers)
             if feature_pack_catalog is not None:
                 feature_pack_catalog.register_many(feature_packs)
-        except BaseException:
-            for kind, snapshot in registry_snapshots.items():
-                normalized_registries[kind].restore_snapshot(snapshot)
-            if artifact_provider_registry is not None:
-                artifact_provider_registry.restore_snapshot(artifact_provider_snapshot)
-            if resource_provider_registry is not None:
-                resource_provider_registry.restore_snapshot(resource_provider_snapshot)
+        except BaseException as operation_error:
+            restore_operations = []
             if feature_pack_catalog is not None:
-                feature_pack_catalog.restore_snapshot(catalog_snapshot)
+                restore_operations.append((feature_pack_catalog.restore_snapshot, catalog_snapshot))
+            if topology_provider_registry is not None:
+                restore_operations.append(
+                    (
+                        topology_provider_registry.restore_snapshot,
+                        topology_provider_snapshot,
+                    )
+                )
+            if resource_provider_registry is not None:
+                restore_operations.append(
+                    (
+                        resource_provider_registry.restore_snapshot,
+                        resource_provider_snapshot,
+                    )
+                )
+            if artifact_provider_registry is not None:
+                restore_operations.append(
+                    (
+                        artifact_provider_registry.restore_snapshot,
+                        artifact_provider_snapshot,
+                    )
+                )
+            restore_operations.extend(
+                (
+                    normalized_registries[kind].restore_snapshot,
+                    registry_snapshots[kind],
+                )
+                for kind in sorted(
+                    normalized_registries,
+                    key=lambda item: item.value,
+                    reverse=True,
+                )
+            )
+
+            restore_failures = []
+            for restore, snapshot in restore_operations:
+                try:
+                    restore(snapshot)
+                except BaseException as restore_error:
+                    restore_failures.append(restore_error)
+            if restore_failures:
+                try:
+                    operation_error.plugin_restore_failures = tuple(restore_failures)
+                except BaseException:
+                    pass
             raise
 
     return tuple(manifests)
@@ -2067,6 +2530,7 @@ __all__ = [
     "ComponentSpec",
     "ComponentStatus",
     "DuplicateRegistrationError",
+    "DuplicateTopologyProviderRegistrationError",
     "EventBusQuiescedError",
     "EventDispatchAbortedError",
     "EventDispatchError",
@@ -2082,6 +2546,7 @@ __all__ = [
     "FeaturePack",
     "FeaturePackSpec",
     "IncompatibleRegistrationError",
+    "IncompatibleTopologyProviderRegistrationError",
     "LifecycleEvent",
     "LifecycleEventBus",
     "NodeSelector",
@@ -2090,6 +2555,7 @@ __all__ = [
     "OutcomeStatus",
     "PluginDiscoveryError",
     "PluginManifest",
+    "ProvisionedTopology",
     "RegistrationError",
     "Registry",
     "RunContext",
@@ -2097,7 +2563,14 @@ __all__ = [
     "RunOutcome",
     "RunPlan",
     "StartupOverlay",
+    "TopologyProvider",
+    "TopologyProviderIdentity",
+    "TopologyProviderRegistration",
+    "TopologyProviderRegistrationError",
+    "TopologyProviderRegistry",
+    "TopologyProviderRegistryPinnedError",
     "UnknownRegistrationError",
+    "UnknownTopologyProviderError",
     "Workload",
     "canonical_json",
     "derive_component_seed",

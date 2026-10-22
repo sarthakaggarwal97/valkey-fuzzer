@@ -30,6 +30,8 @@ from .extensibility import (
     Registry,
     RunOutcome,
     RunPlan,
+    TopologyProviderRegistration,
+    TopologyProviderRegistry,
     discover_plugins,
 )
 from .feature_packs import (
@@ -43,16 +45,17 @@ from .feature_packs import (
 )
 from .feature_runner import (
     FeatureRunner,
-    TopologyProviderEntry,
+    TopologyProviderSource,
     normalize_artifact_root,
 )
 from .fuzzer_engine.cluster_coordinator import ClusterCoordinator
-from .local_topology_provider import local_topology_provider_factories
+from .local_topology_provider import local_topology_provider_registrations
 
 FeaturePackDirectory = Union[str, PathLike[str]]
 YamlSource = Union[str, bytes, TextIO]
 _ExtensionSnapshot = tuple[
     Mapping[ComponentKind, Mapping[str, Any]],
+    Mapping[str, Any],
     Mapping[str, Any],
     Mapping[str, Any],
     Mapping[tuple[str, str], FeaturePackSpec],
@@ -164,7 +167,7 @@ class FeatureRuntime:
         discover_entry_points: bool = True,
         plugin_group: str = PLUGIN_ENTRY_POINT_GROUP,
         reference_inventory: Optional[ReferenceInventory] = None,
-        topology_providers: Optional[Mapping[str, TopologyProviderEntry]] = None,
+        topology_providers: Optional[TopologyProviderSource] = None,
         coordinator_factory=ClusterCoordinator,
         artifact_dir: str = "",
         extension_api_version: str = EXTENSION_API_VERSION,
@@ -191,29 +194,41 @@ class FeatureRuntime:
             artifact_root=artifact_root,
         )
 
+        if topology_providers is None:
+            if not callable(coordinator_factory):
+                raise TypeError("coordinator_factory must be callable")
+            provider_entries = local_topology_provider_registrations(
+                coordinator_factory,
+                api_version=extension_api_version,
+            )
+        elif isinstance(topology_providers, TopologyProviderRegistry):
+            provider_entries = topology_providers
+        else:
+            if not isinstance(topology_providers, Mapping):
+                raise TypeError("topology_providers must be a mapping, TopologyProviderRegistry, or None")
+            provider_entries = dict(topology_providers)
+            for topology, registration in provider_entries.items():
+                if not isinstance(registration, TopologyProviderRegistration):
+                    raise TypeError(
+                        f"FeatureRuntime topology provider {topology!r} must be "
+                        "a TopologyProviderRegistration with explicit replay "
+                        "identity metadata"
+                    )
+        self._runner = FeatureRunner(
+            self._registries,
+            provider_entries,
+            artifact_dir=artifact_root,
+            environment_manager=self._environment_manager,
+        )
+        self._topology_providers = self._runner.topology_provider_registry
         self._compiler = FeaturePackCompiler(
             self._catalog,
             self._registries,
             reference_inventory=reference_inventory,
             artifact_registry=self._artifact_providers,
             resource_registry=self._resource_providers,
+            topology_provider_registry=self._topology_providers,
             extension_api_version=extension_api_version,
-        )
-
-        if topology_providers is None:
-            if not callable(coordinator_factory):
-                raise TypeError("coordinator_factory must be callable")
-            provider_entries = local_topology_provider_factories(coordinator_factory)
-        else:
-            if not isinstance(topology_providers, Mapping):
-                raise TypeError("topology_providers must be a mapping or None")
-            provider_entries = dict(topology_providers)
-        self._topology_providers: Mapping[str, TopologyProviderEntry] = MappingProxyType(dict(provider_entries))
-        self._runner = FeatureRunner(
-            self._registries,
-            self._topology_providers,
-            artifact_dir=artifact_root,
-            environment_manager=self._environment_manager,
         )
         self._plugins = (
             discover_plugins(
@@ -222,6 +237,7 @@ class FeatureRuntime:
                 feature_pack_catalog=self._catalog,
                 artifact_provider_registry=self._artifact_providers,
                 resource_provider_registry=self._resource_providers,
+                topology_provider_registry=self._topology_providers,
                 api_version=extension_api_version,
             )
             if discover_entry_points
@@ -253,7 +269,7 @@ class FeatureRuntime:
         return self._manifest_feature_packs
 
     @property
-    def topology_providers(self) -> Mapping[str, TopologyProviderEntry]:
+    def topology_providers(self) -> TopologyProviderRegistry:
         return self._topology_providers
 
     def _ordered_extension_participants(self) -> tuple[Any, ...]:
@@ -272,6 +288,7 @@ class FeatureRuntime:
             MappingProxyType({kind: registry.snapshot() for kind, registry in self._registries.items()}),
             self._artifact_providers.snapshot(),
             self._resource_providers.snapshot(),
+            self._topology_providers.snapshot(),
             self._catalog.snapshot(),
         )
 
@@ -282,7 +299,13 @@ class FeatureRuntime:
         )
 
     def _extension_drift(self, expected: _ExtensionSnapshot) -> tuple[str, ...]:
-        expected_components, expected_artifacts, expected_resources, expected_catalog = expected
+        (
+            expected_components,
+            expected_artifacts,
+            expected_resources,
+            expected_topologies,
+            expected_catalog,
+        ) = expected
         changed = []
         for kind, registry in self._registries.items():
             if registry.kind is not kind or registry.api_version != self._extension_api_version:
@@ -296,6 +319,7 @@ class FeatureRuntime:
         for label, registry, pinned in (
             ("artifact provider", self._artifact_providers, expected_artifacts),
             ("resource provider", self._resource_providers, expected_resources),
+            ("topology provider", self._topology_providers, expected_topologies),
         ):
             if registry.api_version != self._extension_api_version:
                 raise FeatureRuntimeError(f"{label} registry metadata changed after runtime construction")
@@ -307,9 +331,10 @@ class FeatureRuntime:
         return tuple(changed)
 
     def _restore_extension_snapshot(self, snapshot: _ExtensionSnapshot) -> tuple[BaseException, ...]:
-        components, artifacts, resources, catalog = snapshot
+        components, artifacts, resources, topologies, catalog = snapshot
         restore_operations = [
             (self._catalog.restore_runtime_snapshot, catalog),
+            (self._topology_providers.restore_runtime_snapshot, topologies),
             (self._resource_providers.restore_snapshot, resources),
             (self._artifact_providers.restore_snapshot, artifacts),
         ]
@@ -354,6 +379,19 @@ class FeatureRuntime:
                     raise error
 
             try:
+                locks.enter_context(self._topology_providers.pin_snapshot(expected[3]))
+            except BaseException as exc:
+                restore_failures = self._restore_extension_snapshot(expected)
+                if restore_failures:
+                    raise FeatureRuntimeError(
+                        "topology provider registry could not be pinned and "
+                        "restoring the extension environment also failed"
+                    ) from restore_failures[0]
+                raise FeatureRuntimeError(
+                    "topology provider registry changed while the runtime operation was starting"
+                ) from exc
+
+            try:
                 yield
             except BaseException:
                 self._restore_extension_snapshot(expected)
@@ -371,10 +409,11 @@ class FeatureRuntime:
             if self._extension_pin is None:
                 self._extension_pin = expected
 
-    @staticmethod
-    def _require_plan(plan: RunPlan) -> None:
+    def _require_plan(self, plan: RunPlan) -> None:
         if not isinstance(plan, RunPlan):
             raise TypeError("plan must be a RunPlan")
+        if plan.topology_provider.api_version != self._extension_api_version:
+            raise FeatureRuntimeError("run plan topology provider API does not match the runtime extension API")
 
     @contextmanager
     def _lifecycle_operation(self):
@@ -480,7 +519,11 @@ class FeatureRuntime:
                 artifact_registry=self._artifact_providers,
                 resource_registry=self._resource_providers,
             )
-            outcome = self._runner.run(plan, deadline=deadline)
+            outcome = self._runner.run(
+                plan,
+                deadline=deadline,
+                _raise_preflight_errors=True,
+            )
             return outcome
 
     def run_yaml(

@@ -36,6 +36,7 @@ from src.extensibility import (
     RunMode,
     RunPlan,
     StartupOverlay,
+    TopologyProviderIdentity,
     to_plain_data,
 )
 
@@ -125,6 +126,11 @@ def _plan():
         pack_version="1",
         seed=41,
         topology="standalone",
+        topology_provider=TopologyProviderIdentity(
+            provider_id="tests.topology-provider",
+            implementation_version="1",
+            api_version="v1",
+        ),
         mode=RunMode.FEATURE,
         inputs={
             "candidate_path": _ref("artifacts.candidate.path"),
@@ -256,6 +262,7 @@ def test_bound_plan_delegates_only_stable_identity_and_evidence_metadata():
     assert bound.pack_version == source.pack_version
     assert bound.seed == source.seed
     assert bound.topology == source.topology
+    assert bound.topology_provider is source.topology_provider
     assert bound.mode is source.mode
     assert bound.required_events is source.required_events
     assert bound.required_evidence is source.required_evidence

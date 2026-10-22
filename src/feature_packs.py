@@ -46,6 +46,8 @@ from .extensibility import (
     RunMode,
     RunPlan,
     StartupOverlay,
+    TopologyProviderRegistry,
+    UnknownTopologyProviderError,
 )
 
 _NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
@@ -1242,6 +1244,7 @@ class FeaturePackCompiler:
         catalog: FeaturePackCatalog,
         registries: Mapping[ComponentKind, Registry[Any]],
         *,
+        topology_provider_registry: TopologyProviderRegistry,
         reference_inventory: Optional[ReferenceInventory] = None,
         artifact_registry: Optional[ArtifactProviderRegistry] = None,
         resource_registry: Optional[ResourceProviderRegistry] = None,
@@ -1276,6 +1279,14 @@ class FeaturePackCompiler:
             raise TypeError("resource_registry must be a ResourceProviderRegistry")
         if self.resource_registry.api_version != self.extension_api_version:
             raise TypeError("resource_registry API version must match extension_api_version")
+        if not isinstance(
+            topology_provider_registry,
+            TopologyProviderRegistry,
+        ):
+            raise TypeError("topology_provider_registry must be a TopologyProviderRegistry")
+        if topology_provider_registry.api_version != self.extension_api_version:
+            raise TypeError("topology_provider_registry API version must match extension_api_version")
+        self.topology_provider_registry = topology_provider_registry
 
     def compile(self, value: Mapping[str, Any]) -> RunPlan:
         envelope = _fields(
@@ -1318,6 +1329,10 @@ class FeaturePackCompiler:
         topology = _require_name(topology_document["type"], "topology.type")
         if topology not in spec.supported_topologies:
             raise ScenarioCompileError(f"topology {topology!r} is not supported by feature pack {pack_id!r}")
+        try:
+            topology_provider = self.topology_provider_registry.resolve(topology).identity
+        except UnknownTopologyProviderError as exc:
+            raise ScenarioCompileError(f"topology {topology!r} has no registered topology provider") from exc
         artifacts = _parse_artifacts(_resolve_template(envelope.get("artifacts", {}), resolved_inputs, "artifacts"))
         resources = _parse_resources(_resolve_template(envelope.get("resources", {}), resolved_inputs, "resources"))
         policies = _parse_policies(_resolve_template(envelope.get("policies", {}), resolved_inputs, "policies"))
@@ -1326,6 +1341,7 @@ class FeaturePackCompiler:
             scenario_id=scenario_id,
             seed=seed,
             topology=topology,
+            topology_provider=topology_provider,
             inputs=resolved_inputs,
             topology_document=topology_document,
             artifacts=artifacts,
@@ -1363,6 +1379,7 @@ def compile_scenario(
     catalog: FeaturePackCatalog,
     registries: Mapping[ComponentKind, Registry[Any]],
     *,
+    topology_provider_registry: TopologyProviderRegistry,
     reference_inventory: Optional[ReferenceInventory] = None,
     artifact_registry: Optional[ArtifactProviderRegistry] = None,
     resource_registry: Optional[ResourceProviderRegistry] = None,
@@ -1375,6 +1392,7 @@ def compile_scenario(
         reference_inventory=reference_inventory,
         artifact_registry=artifact_registry,
         resource_registry=resource_registry,
+        topology_provider_registry=topology_provider_registry,
     ).compile(value)
 
 

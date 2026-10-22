@@ -32,9 +32,11 @@ from src.extensibility import (
     RunMode,
     RunPlan,
     StartupOverlay,
+    TopologyProviderRegistration,
+    discover_plugins,
 )
 from src.feature_packs import FeaturePackCatalog
-from src.feature_runner import ProvisionedTopology
+from src.feature_runner import FeatureRunnerError, ProvisionedTopology
 from src.feature_runtime import FeatureRuntime, FeatureRuntimeError
 
 
@@ -106,6 +108,18 @@ def _resource_registration(provider_id: str = "example.resource") -> ResourcePro
     )
 
 
+def _topology_registration(
+    topology: str = "example-topology",
+) -> TopologyProviderRegistration:
+    return TopologyProviderRegistration(
+        topology=topology,
+        provider_id="example.topology-provider",
+        implementation_version="1",
+        api_version="v1",
+        factory=_TopologyProvider,
+    )
+
+
 def _runtime(
     *,
     action_validator=None,
@@ -113,7 +127,7 @@ def _runtime(
 ) -> FeatureRuntime:
     runtime = FeatureRuntime(
         discover_entry_points=False,
-        topology_providers={"standalone": _TopologyProvider()},
+        topology_providers={"standalone": _topology_registration("standalone")},
     )
     runtime.catalog.register(_pack())
     runtime.registries[ComponentKind.ACTION].register(
@@ -149,12 +163,25 @@ def _plan(runtime: FeatureRuntime) -> RunPlan:
         scenario_id="transaction-test",
         seed=7,
         topology="standalone",
+        topology_provider=runtime.topology_providers.resolve("standalone").identity,
     )
 
 
 def _assert_same_snapshot(before, after) -> None:
-    before_components, before_artifacts, before_resources, before_catalog = before
-    after_components, after_artifacts, after_resources, after_catalog = after
+    (
+        before_components,
+        before_artifacts,
+        before_resources,
+        before_topologies,
+        before_catalog,
+    ) = before
+    (
+        after_components,
+        after_artifacts,
+        after_resources,
+        after_topologies,
+        after_catalog,
+    ) = after
     assert set(after_components) == set(before_components)
     for kind, registrations in before_components.items():
         assert set(after_components[kind]) == set(registrations)
@@ -165,6 +192,7 @@ def _assert_same_snapshot(before, after) -> None:
     for expected, actual in (
         (before_artifacts, after_artifacts),
         (before_resources, after_resources),
+        (before_topologies, after_topologies),
         (before_catalog, after_catalog),
     ):
         assert set(actual) == set(expected)
@@ -175,6 +203,7 @@ def _mutate_complete_environment(
     runtime: FeatureRuntime,
     *,
     bypass_catalog_guard: bool = False,
+    mutate_topology: bool = True,
 ) -> None:
     runtime.registries[ComponentKind.ACTION].register(
         ComponentRegistration[Any](
@@ -186,6 +215,8 @@ def _mutate_complete_environment(
     )
     runtime.artifact_providers.register(_artifact_registration("example.injected-artifact"))
     runtime.resource_providers.register(_resource_registration("example.injected-resource"))
+    if mutate_topology:
+        runtime.topology_providers.register(_topology_registration("example-injected-topology"))
     injected_pack = _pack("example.injected-feature", components=())
     if bypass_catalog_guard:
         FeaturePackCatalog.register_many(runtime.catalog, (injected_pack,))
@@ -198,7 +229,7 @@ def test_compile_restores_complete_environment_and_preserves_base_exception_iden
     runtime: FeatureRuntime
 
     def mutate_and_abort(spec, plan):
-        _mutate_complete_environment(runtime)
+        _mutate_complete_environment(runtime, mutate_topology=False)
         raise sentinel
 
     runtime = _runtime(action_validator=mutate_and_abort)
@@ -220,7 +251,7 @@ def test_validate_restores_detected_drift_and_runtime_remains_usable():
         nonlocal first_call
         if first_call:
             first_call = False
-            _mutate_complete_environment(runtime)
+            _mutate_complete_environment(runtime, mutate_topology=False)
 
     runtime = _runtime(action_validator=mutate_once)
     plan = _plan(runtime)
@@ -240,7 +271,7 @@ def test_run_restores_complete_environment_and_preserves_base_exception_identity
     runtime: FeatureRuntime
 
     def mutate_and_abort():
-        _mutate_complete_environment(runtime)
+        _mutate_complete_environment(runtime, mutate_topology=False)
         raise sentinel
 
     runtime = _runtime(action_callback=mutate_and_abort)
@@ -306,7 +337,7 @@ def test_worker_thread_can_read_bound_values_while_runtime_registries_are_pinned
 
     runtime = FeatureRuntime(
         discover_entry_points=False,
-        topology_providers={"standalone": _TopologyProvider()},
+        topology_providers={"standalone": _topology_registration("standalone")},
         artifact_dir=str(tmp_path),
     )
     runtime.registries[ComponentKind.ACTION].register(
@@ -344,6 +375,7 @@ def test_worker_thread_can_read_bound_values_while_runtime_registries_are_pinned
                 },
             ),
         ),
+        topology_provider=_topology_registration("standalone").identity,
         mode=RunMode.TOPOLOGY_SMOKE,
         artifacts=(
             ArtifactSpec(
@@ -364,6 +396,133 @@ def test_worker_thread_can_read_bound_values_while_runtime_registries_are_pinned
     assert all(not worker.is_alive() for worker in worker_threads)
 
 
+def test_worker_thread_can_read_topology_registry_while_runtime_snapshot_is_pinned():
+    worker_values = []
+    worker_errors = []
+    worker_threads = []
+    runtime: FeatureRuntime
+
+    def read_topology_registry():
+        try:
+            registration = runtime.topology_providers.resolve("standalone")
+            snapshot = runtime.topology_providers.snapshot()
+            worker_values.append(
+                (
+                    registration.identity,
+                    snapshot["standalone"].identity,
+                )
+            )
+        except BaseException as exc:
+            worker_errors.append(exc)
+
+    def action_callback():
+        worker = threading.Thread(
+            target=read_topology_registry,
+            name="topology-registry-reader",
+            daemon=True,
+        )
+        worker_threads.append(worker)
+        worker.start()
+        worker.join(timeout=1)
+        if worker.is_alive():
+            raise RuntimeError("worker could not read the topology registry while the runtime snapshot was pinned")
+        if worker_errors:
+            raise worker_errors[0]
+
+    runtime = _runtime(action_callback=action_callback)
+    registration = runtime.topology_providers.resolve("standalone")
+
+    outcome = runtime.run_plan(_plan(runtime))
+    for worker in worker_threads:
+        worker.join(timeout=1)
+
+    assert outcome.status is OutcomeStatus.PASS
+    assert worker_values == [(registration.identity, registration.identity)]
+    assert worker_errors == []
+    assert all(not worker.is_alive() for worker in worker_threads)
+
+
+def test_runtime_and_plugin_discovery_lock_order_both_make_progress():
+    validator_entered = threading.Event()
+    release_validator = threading.Event()
+    discovery_lock_attempted = threading.Event()
+    runtime_errors = []
+    discovery_errors = []
+    runtime: FeatureRuntime
+
+    def blocking_validator(spec, plan):
+        del spec, plan
+        validator_entered.set()
+        if not release_validator.wait(timeout=2):
+            raise RuntimeError("test did not release the validator")
+
+    runtime = _runtime(action_validator=blocking_validator)
+    plan = _plan(runtime)
+    first_kind = min(runtime.registries, key=lambda kind: kind.value)
+    first_registry = runtime.registries[first_kind]
+    original_lock = first_registry._lock
+
+    class ObservedLock:
+        def acquire(self, *args, **kwargs):
+            if threading.current_thread().name == "plugin-discovery":
+                discovery_lock_attempted.set()
+            return original_lock.acquire(*args, **kwargs)
+
+        def release(self):
+            return original_lock.release()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            del exc_type, exc, traceback
+            self.release()
+
+    first_registry._lock = ObservedLock()
+
+    def validate_runtime():
+        try:
+            runtime.validate_plan(plan)
+        except BaseException as exc:
+            runtime_errors.append(exc)
+
+    def run_discovery():
+        try:
+            discover_plugins(
+                runtime.registries,
+                artifact_provider_registry=runtime.artifact_providers,
+                resource_provider_registry=runtime.resource_providers,
+                topology_provider_registry=runtime.topology_providers,
+            )
+        except BaseException as exc:
+            discovery_errors.append(exc)
+
+    runtime_thread = threading.Thread(
+        target=validate_runtime,
+        name="runtime-validation",
+        daemon=True,
+    )
+    discovery_thread = threading.Thread(
+        target=run_discovery,
+        name="plugin-discovery",
+        daemon=True,
+    )
+    runtime_thread.start()
+    assert validator_entered.wait(timeout=1)
+    discovery_thread.start()
+    assert discovery_lock_attempted.wait(timeout=1)
+
+    release_validator.set()
+    runtime_thread.join(timeout=2)
+    discovery_thread.join(timeout=2)
+
+    assert not runtime_thread.is_alive()
+    assert not discovery_thread.is_alive()
+    assert runtime_errors == []
+    assert discovery_errors == []
+
+
 def test_entry_drift_is_repaired_rejected_once_and_does_not_poison_runtime():
     runtime = _runtime()
     plan = runtime.compile(_scenario())
@@ -377,11 +536,68 @@ def test_entry_drift_is_repaired_rejected_once_and_does_not_poison_runtime():
     assert "action component registry" in message
     assert "artifact provider registry" in message
     assert "resource provider registry" in message
+    assert "topology provider registry" in message
     assert "feature-pack catalog" in message
     assert "changed after the extension environment was pinned" in message
     _assert_same_snapshot(pinned, runtime._extension_snapshot())
 
     runtime.validate_plan(plan)
+
+
+def test_replayed_plan_uses_the_pinned_topology_registration_identity():
+    runtime = _runtime()
+    plan = runtime.compile(_scenario())
+    original = runtime.topology_providers.resolve("standalone")
+    runtime.topology_providers.unregister("standalone")
+    runtime.topology_providers.register(_topology_registration("standalone"))
+
+    with pytest.raises(
+        FeatureRuntimeError,
+        match=r"topology provider registry.*changed after",
+    ):
+        runtime.run_plan(plan)
+
+    assert runtime.topology_providers.resolve("standalone") is original
+    assert runtime.run_plan(plan).status is OutcomeStatus.PASS
+
+
+def test_cross_runtime_replay_rejects_different_provider_before_factory_or_environment(
+    monkeypatch,
+):
+    source_runtime = _runtime()
+    replayed = RunPlan.from_json(source_runtime.compile(_scenario()).to_json())
+    calls = []
+    target_registration = TopologyProviderRegistration(
+        topology="standalone",
+        provider_id="example.different-topology-provider",
+        implementation_version="2",
+        api_version="v1",
+        factory=lambda: calls.append("factory") or _TopologyProvider(),
+    )
+    target_runtime = FeatureRuntime(
+        discover_entry_points=False,
+        topology_providers={"standalone": target_registration},
+    )
+    target_runtime.catalog.register(_pack())
+    target_runtime.registries[ComponentKind.ACTION].register(
+        ComponentRegistration[Any](
+            component_id="example.action",
+            kind=ComponentKind.ACTION,
+            api_version="v1",
+            factory=_Action,
+        )
+    )
+    monkeypatch.setattr(
+        target_runtime._environment_manager,
+        "acquire",
+        lambda *args, **kwargs: pytest.fail("environment acquisition must not run for a provider mismatch"),
+    )
+
+    with pytest.raises(FeatureRunnerError, match="does not match"):
+        target_runtime.run_plan(replayed)
+
+    assert calls == []
+    assert target_runtime._extension_pin is None
 
 
 def test_public_catalog_mutation_is_rejected_immediately_after_pinning():
@@ -448,6 +664,7 @@ def _replayed_plan(case: str) -> RunPlan:
         seed=11,
         topology="standalone",
         components=(),
+        topology_provider=_topology_registration("standalone").identity,
         mode=RunMode.TOPOLOGY_SMOKE,
         artifacts=artifacts,
         resources=resources,
@@ -583,6 +800,7 @@ def _invalid_consumer_replayed_plan(case: str) -> tuple[RunPlan, str]:
         seed=11,
         topology="standalone",
         components=tuple(components),
+        topology_provider=_topology_registration("standalone").identity,
         mode=RunMode.TOPOLOGY_SMOKE,
         artifacts=tuple(artifacts),
         resources=tuple(resources),

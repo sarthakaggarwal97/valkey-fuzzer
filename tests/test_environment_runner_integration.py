@@ -36,6 +36,8 @@ from src.extensibility import (
     Registry,
     RunMode,
     RunPlan,
+    TopologyProviderIdentity,
+    TopologyProviderRegistration,
 )
 from src.feature_runner import (
     FeatureRunner,
@@ -81,9 +83,16 @@ def _runner(
             Registry[Any](registration.kind),
         )
         registry.register(registration)
+    topology_registration = TopologyProviderRegistration(
+        topology="standalone",
+        provider_id="tests.environment-topology",
+        implementation_version="1",
+        api_version="v1",
+        factory=lambda: topology_provider,
+    )
     return FeatureRunner(
         registries,
-        {"standalone": topology_provider},
+        {"standalone": topology_registration},
         artifact_dir=str(tmp_path),
         environment_manager=environment_manager,
         run_id_factory=lambda: "integration-run",
@@ -105,6 +114,11 @@ def _plan(
         seed=17,
         topology="standalone",
         components=tuple(components),
+        topology_provider=TopologyProviderIdentity(
+            provider_id="tests.environment-topology",
+            implementation_version="1",
+            api_version="v1",
+        ),
         mode=RunMode.TOPOLOGY_SMOKE,
         artifacts=tuple(artifacts),
         resources=tuple(resources),
@@ -395,12 +409,13 @@ def test_environment_support_denial_skips_only_after_clean_unwind(
 
     assert outcome.status is expected_status
     assert calls == [
+        "topology.validate",
         "artifact.support",
         "artifact.acquire",
         "resource.support",
         "artifact.cleanup",
     ]
-    assert "topology.validate" not in calls
+    assert "topology.provision" not in calls
     assert outcome.diagnostics["environment_report"]["status"] == (
         "unsupported" if cleanup_error is None else "cleanup_failed"
     )
@@ -485,7 +500,7 @@ def test_environment_exception_messages_and_runtime_values_never_enter_outcome(t
 
     class TopologyProvider:
         def validate(self, plan):
-            pytest.fail("topology must not be reached")
+            return None
 
         def provision(self, context):
             pytest.fail("topology must not be reached")
@@ -768,8 +783,8 @@ def test_policy_only_plan_is_transport_not_core_policy_dispatch(tmp_path):
 
     class TopologyProvider:
         def validate(self, plan):
-            assert isinstance(plan, BoundRunPlan)
-            assert isinstance(plan.policies[0], BoundPolicy)
+            assert isinstance(plan, RunPlan)
+            assert isinstance(plan.policies[0], PolicySpec)
             seen.append(
                 (
                     plan.policies[0].policy_id,
@@ -978,9 +993,9 @@ def test_component_keyboard_interrupt_unwinds_topology_then_environment(tmp_path
 
     assert raised.value is interrupt
     assert calls == [
+        "topology.validate",
         "artifact.support",
         "artifact.acquire",
-        "topology.validate",
         "topology.provision",
         "action.run",
         "topology.cleanup",
@@ -1031,7 +1046,7 @@ def test_environment_keyboard_interrupt_unwinds_prior_acquisitions_and_keeps_ide
 
     class TopologyProvider:
         def validate(self, plan):
-            pytest.fail("topology must not be reached")
+            calls.append("topology.validate")
 
         def provision(self, context):
             pytest.fail("topology must not be reached")
@@ -1074,6 +1089,7 @@ def test_environment_keyboard_interrupt_unwinds_prior_acquisitions_and_keeps_ide
 
     assert raised.value is interrupt
     assert calls == [
+        "topology.validate",
         "artifact.support",
         "artifact.acquire",
         "resource.support",
@@ -1103,7 +1119,7 @@ def test_environment_rollback_interrupt_preempts_ordinary_acquisition_error(
 
     class TopologyProvider:
         def validate(self, plan):
-            pytest.fail("topology must not be reached")
+            return None
 
         def provision(self, context):
             pytest.fail("topology must not be reached")

@@ -17,6 +17,7 @@ from src.extensibility import (
     PluginManifest,
     RunMode,
     RunPlan,
+    TopologyProviderRegistration,
 )
 from src.feature_packs import (
     DuplicateFeaturePackError,
@@ -87,6 +88,22 @@ class _Provider:
         self._calls.append("provider.cleanup")
 
 
+def _topology_providers(
+    factory,
+    *,
+    topology: str = "standalone",
+    api_version: str = "v1",
+):
+    registration = TopologyProviderRegistration(
+        topology=topology,
+        provider_id="tests.topology-provider",
+        implementation_version="1",
+        api_version=api_version,
+        factory=factory,
+    )
+    return {topology: registration}
+
+
 class _EntryPoint:
     def __init__(self, manifest: PluginManifest):
         self.name = manifest.plugin_id
@@ -126,13 +143,14 @@ def test_runtime_constructs_all_registries_and_uses_local_provider_factories(mon
     provider = _Provider([])
     observed = {}
 
-    def local_factories(received_factory):
+    def local_registrations(received_factory, *, api_version):
         observed["coordinator_factory"] = received_factory
-        return {"standalone": provider}
+        observed["api_version"] = api_version
+        return _topology_providers(lambda: provider)
 
     monkeypatch.setattr(
-        "src.feature_runtime.local_topology_provider_factories",
-        local_factories,
+        "src.feature_runtime.local_topology_provider_registrations",
+        local_registrations,
     )
     monkeypatch.setattr(
         "src.extensibility.importlib_metadata.entry_points",
@@ -147,7 +165,9 @@ def test_runtime_constructs_all_registries_and_uses_local_provider_factories(mon
     assert set(runtime.registries) == set(ComponentKind)
     assert all(registry.kind is kind and registry.api_version == "v1" for kind, registry in runtime.registries.items())
     assert observed["coordinator_factory"] is coordinator_factory
-    assert runtime.topology_providers == {"standalone": provider}
+    assert observed["api_version"] == "v1"
+    assert runtime.topology_providers.registered_ids == ("standalone",)
+    assert runtime.topology_providers.resolve("standalone").factory() is provider
     assert runtime.plugins == ()
     assert runtime.manifest_feature_packs == ()
     with pytest.raises(AttributeError):
@@ -183,7 +203,7 @@ def test_runtime_discovers_plugin_components_before_compiling_directory_manifest
 
     runtime = FeatureRuntime(
         tmp_path,
-        topology_providers={"standalone": _Provider([])},
+        topology_providers=_topology_providers(lambda: _Provider([])),
     )
     plan = runtime.compile_yaml(_scenario(), source_name="scenario.yaml")
 
@@ -205,7 +225,7 @@ def test_multi_directory_manifest_load_is_atomic_and_ordered(tmp_path):
     (second / "duplicate.yaml").write_text(_manifest("example.a"), encoding="utf-8")
     runtime = FeatureRuntime(
         discover_entry_points=False,
-        topology_providers={"standalone": _Provider([])},
+        topology_providers=_topology_providers(lambda: _Provider([])),
     )
 
     with pytest.raises(DuplicateFeaturePackError):
@@ -235,7 +255,10 @@ def test_manifest_staging_is_independent_of_runtime_extension_api(tmp_path):
     runtime = FeatureRuntime(
         tmp_path,
         discover_entry_points=False,
-        topology_providers={"standalone": _Provider([])},
+        topology_providers=_topology_providers(
+            lambda: _Provider([]),
+            api_version="v2",
+        ),
         extension_api_version="v2",
     )
 
@@ -265,7 +288,7 @@ pack_id: example.second
     with pytest.raises(FeaturePackDocumentError, match="duplicate key"):
         FeatureRuntime(
             (valid, invalid),
-            topology_providers={"standalone": _Provider([])},
+            topology_providers=_topology_providers(lambda: _Provider([])),
         )
 
 
@@ -289,9 +312,7 @@ def test_validate_plan_applies_overrides_without_provisioning_or_component_creat
     runtime = FeatureRuntime(
         tmp_path,
         discover_entry_points=False,
-        topology_providers={
-            "standalone": provider_factory,
-        },
+        topology_providers=_topology_providers(provider_factory),
     )
     runtime.registries[ComponentKind.ACTION].register(
         ComponentRegistration[Any](
@@ -350,7 +371,7 @@ def test_run_yaml_compiles_and_executes_through_generic_runner(tmp_path):
     runtime = FeatureRuntime(
         tmp_path,
         discover_entry_points=False,
-        topology_providers={"standalone": lambda: _Provider(calls)},
+        topology_providers=_topology_providers(lambda: _Provider(calls)),
     )
     _register_action(runtime, calls)
 
@@ -376,7 +397,7 @@ def test_runtime_rejects_registration_replacement_after_compile(tmp_path):
     runtime = FeatureRuntime(
         tmp_path,
         discover_entry_points=False,
-        topology_providers={"standalone": lambda: _Provider(provider_calls)},
+        topology_providers=_topology_providers(lambda: _Provider(provider_calls)),
     )
     _register_action(runtime, [])
     plan = runtime.compile_yaml(_scenario())
@@ -398,9 +419,13 @@ def test_runtime_rejects_registration_replacement_after_compile(tmp_path):
 
 
 def test_componentless_plan_is_independent_of_runtime_extension_api():
+    topology_providers = _topology_providers(
+        lambda: _Provider([]),
+        api_version="v999",
+    )
     runtime = FeatureRuntime(
         discover_entry_points=False,
-        topology_providers={"standalone": _Provider([])},
+        topology_providers=topology_providers,
         extension_api_version="v999",
     )
     plan = RunPlan(
@@ -410,6 +435,7 @@ def test_componentless_plan_is_independent_of_runtime_extension_api():
         seed=1,
         topology="standalone",
         components=(),
+        topology_provider=topology_providers["standalone"].identity,
         mode=RunMode.TOPOLOGY_SMOKE,
         topology_document={"type": "standalone"},
     )
@@ -441,7 +467,7 @@ def test_runtime_serializes_provider_lifecycle_across_concurrent_runs(tmp_path):
     runtime = FeatureRuntime(
         tmp_path,
         discover_entry_points=False,
-        topology_providers={"standalone": SharedProvider([])},
+        topology_providers=_topology_providers(lambda: SharedProvider([])),
     )
     _register_action(runtime, [])
     plan = runtime.compile_yaml(_scenario())
@@ -463,7 +489,7 @@ def test_runtime_rejects_recursive_execution_from_component(tmp_path):
     runtime = FeatureRuntime(
         tmp_path,
         discover_entry_points=False,
-        topology_providers={"standalone": lambda: _Provider([])},
+        topology_providers=_topology_providers(lambda: _Provider([])),
     )
 
     class ReentrantAction:
@@ -522,7 +548,7 @@ def test_explicit_manifest_identity_preempts_plugin_pack(
     with pytest.raises(DuplicateFeaturePackError):
         FeatureRuntime(
             tmp_path,
-            topology_providers={"standalone": _Provider([])},
+            topology_providers=_topology_providers(lambda: _Provider([])),
         )
 
     assert entry_points.selected_group == "valkey_fuzzer.plugins"

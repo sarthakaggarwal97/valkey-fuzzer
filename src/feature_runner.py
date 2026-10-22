@@ -11,9 +11,9 @@ import tempfile
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Optional, Protocol, Union, runtime_checkable
+from typing import Any, Optional, Union
 
 from .bound_plan import BoundComponentSpec, BoundRunPlan, RunServices
 from .environment import (
@@ -30,6 +30,7 @@ from .environment_lifecycle import (
     UnsupportedEnvironmentError,
 )
 from .extensibility import (
+    EXTENSION_API_VERSION,
     Action,
     CapabilityProbe,
     ComponentKind,
@@ -39,64 +40,31 @@ from .extensibility import (
     ComponentStatus,
     Evidence,
     EvidenceRequirement,
-    ExecutableRunPlan,
     Fault,
     LifecycleEvent,
     LifecycleEventBus,
     Observer,
     Oracle,
     OutcomeStatus,
+    ProvisionedTopology,
     Registry,
-    RunContext,
     RunMode,
     RunOutcome,
     RunPlan,
+    TopologyProvider,
+    TopologyProviderRegistration,
+    TopologyProviderRegistry,
+    UnknownTopologyProviderError,
     Workload,
     to_plain_data,
 )
 
-
-@dataclass(frozen=True)
-class ProvisionedTopology:
-    """Exact runtime handle and services returned by a topology provider."""
-
-    handle: Any = None
-    services: Mapping[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.services, Mapping):
-            raise TypeError("provisioned topology services must be a mapping")
-        if any(not isinstance(key, str) for key in self.services):
-            raise TypeError("provisioned topology service names must be strings")
-        object.__setattr__(self, "services", MappingProxyType(dict(self.services)))
-
-
-@runtime_checkable
-class TopologyProvider(Protocol):
-    """Topology lifecycle contract used by the generic runner.
-
-    Provider factories and provider constructors MUST only create in-memory
-    ownership state. External acquisition belongs in ``provision`` so failed
-    validation never needs lifecycle cleanup.
-
-    ``validate`` is pure and must not create processes, files, sockets, or
-    other externally visible state.  If ``provision`` fails or returns an
-    invalid value, the runner invokes ``rollback``.  Once a valid topology is
-    returned, the runner guarantees one final cleanup attempt with that exact
-    object.
-    """
-
-    def validate(self, plan: ExecutableRunPlan) -> None: ...
-
-    def provision(self, context: RunContext) -> ProvisionedTopology: ...
-
-    def rollback(self, context: RunContext) -> None: ...
-
-    def cleanup(self, context: RunContext, topology: ProvisionedTopology) -> None: ...
-
-
 TopologyProviderFactory = Callable[[], TopologyProvider]
-TopologyProviderEntry = Union[TopologyProvider, TopologyProviderFactory]
+TopologyProviderEntry = TopologyProviderRegistration
+TopologyProviderSource = Union[
+    Mapping[str, TopologyProviderEntry],
+    TopologyProviderRegistry,
+]
 
 
 class FeatureRunnerError(RuntimeError):
@@ -140,6 +108,7 @@ class _ValidatedComponent:
 class _PreparedPlan:
     ordered: tuple[Union[ComponentSpec, BoundComponentSpec], ...]
     effective_required: frozenset[str]
+    registration: TopologyProviderRegistration
     provider: TopologyProvider
 
 
@@ -273,6 +242,19 @@ _COMPONENT_METHODS = {
 def _require_signature(callable_value: Any, args: Sequence[Any], label: str) -> None:
     if not callable(callable_value):
         raise FeatureRunnerError(f"{label} must be callable")
+    callable_target = (
+        callable_value.__call__
+        if not (
+            inspect.isfunction(callable_value) or inspect.ismethod(callable_value) or isinstance(callable_value, type)
+        )
+        else callable_value
+    )
+    if (
+        inspect.iscoroutinefunction(callable_target)
+        or inspect.isasyncgenfunction(callable_target)
+        or inspect.isgeneratorfunction(callable_target)
+    ):
+        raise FeatureRunnerError(f"{label} must be synchronous")
     try:
         inspect.signature(callable_value).bind(*args)
     except (TypeError, ValueError) as exc:
@@ -528,7 +510,7 @@ class FeatureRunner:
     def __init__(
         self,
         registries: Mapping[ComponentKind, Registry[Any]],
-        topology_providers: Mapping[str, TopologyProviderEntry],
+        topology_providers: TopologyProviderSource,
         *,
         artifact_dir: str = "",
         environment_manager: Optional[EnvironmentManager] = None,
@@ -547,19 +529,51 @@ class FeatureRunner:
             if registry.kind is not kind:
                 raise ValueError(f"registry key {kind.value!r} does not match registry kind {registry.kind.value!r}")
             normalized_registries[kind] = registry
-        if not isinstance(topology_providers, Mapping):
-            raise TypeError("topology_providers must be a mapping")
-        normalized_providers = {}
-        for topology, provider_entry in topology_providers.items():
-            if not isinstance(topology, str) or not topology or topology != topology.strip():
-                raise ValueError("topology provider names must be non-empty strings without surrounding whitespace")
-            if topology in normalized_providers:
-                raise ValueError(f"duplicate topology provider {topology!r}")
-            if not isinstance(provider_entry, TopologyProvider) and not callable(provider_entry):
-                raise TypeError(
-                    f"topology provider entry for {topology!r} must implement TopologyProvider or be a factory"
+        if isinstance(topology_providers, TopologyProviderRegistry):
+            api_versions = {registry.api_version for registry in normalized_registries.values()}
+            if len(api_versions) > 1:
+                raise ValueError("component registries must use one extension API version")
+            if api_versions and topology_providers.api_version not in api_versions:
+                raise ValueError("topology provider registry API must match the component registry API")
+            topology_provider_registry = TopologyProviderRegistry(api_version=topology_providers.api_version)
+            topology_provider_registry.register_many(topology_providers.snapshot().values())
+        elif isinstance(topology_providers, Mapping):
+            component_api_versions = {registry.api_version for registry in normalized_registries.values()}
+            if len(component_api_versions) > 1:
+                raise ValueError("component registries must use one extension API version")
+            registrations = []
+            for topology, registration in topology_providers.items():
+                if not isinstance(registration, TopologyProviderRegistration):
+                    raise TypeError(
+                        f"topology provider entry for {topology!r} must be a "
+                        "TopologyProviderRegistration with explicit replay "
+                        "identity metadata"
+                    )
+                if registration.topology != topology:
+                    raise ValueError(
+                        f"topology provider mapping key {topology!r} does not "
+                        f"match registration topology {registration.topology!r}"
+                    )
+                registrations.append(registration)
+            topology_api_versions = {registration.api_version for registration in registrations}
+            if len(topology_api_versions) > 1:
+                raise ValueError("topology provider registrations must use one extension API version")
+            if component_api_versions and topology_api_versions and component_api_versions != topology_api_versions:
+                component_api_version = next(iter(component_api_versions))
+                topology_api_version = next(iter(topology_api_versions))
+                raise ValueError(
+                    "topology provider API "
+                    f"{topology_api_version!r} must match the component registry "
+                    f"API {component_api_version!r}"
                 )
-            normalized_providers[topology] = provider_entry
+            api_version = next(
+                iter(component_api_versions or topology_api_versions),
+                EXTENSION_API_VERSION,
+            )
+            topology_provider_registry = TopologyProviderRegistry(api_version=api_version)
+            topology_provider_registry.register_many(registrations)
+        else:
+            raise TypeError("topology_providers must be a mapping or TopologyProviderRegistry")
         normalized_artifact_dir = normalize_artifact_root(artifact_dir)
         if environment_manager is not None and not isinstance(environment_manager, EnvironmentManager):
             raise TypeError("environment_manager must be an EnvironmentManager or None")
@@ -569,7 +583,7 @@ class FeatureRunner:
             raise TypeError("clock must be callable")
 
         self._registries = MappingProxyType(normalized_registries)
-        self._topology_providers = MappingProxyType(normalized_providers)
+        self._topology_provider_registry = topology_provider_registry
         self._artifact_dir = normalized_artifact_dir
         self._environment_manager = (
             EnvironmentManager(
@@ -582,6 +596,10 @@ class FeatureRunner:
         )
         self._run_id_factory = run_id_factory
         self._clock = clock
+
+    @property
+    def topology_provider_registry(self) -> TopologyProviderRegistry:
+        return self._topology_provider_registry
 
     def _new_outcome(
         self,
@@ -742,22 +760,25 @@ class FeatureRunner:
         ordered = stable_topological_order(plan.components)
         _validate_phase_dependencies(ordered)
         effective_required = _effective_required_instances(plan)
-        provider_entry = self._topology_providers.get(plan.topology)
-        if provider_entry is None:
-            raise FeatureRunnerError(f"no topology provider is registered for {plan.topology!r}")
-
-        if not isinstance(provider_entry, type) and isinstance(provider_entry, TopologyProvider):
-            provider = provider_entry
-        else:
-            _require_signature(
-                provider_entry,
-                (),
-                f"topology provider factory for {plan.topology!r}",
+        try:
+            registration = self._topology_provider_registry.resolve(plan.topology)
+        except UnknownTopologyProviderError as exc:
+            raise FeatureRunnerError(f"no topology provider is registered for {plan.topology!r}") from exc
+        if plan.topology_provider != registration.identity:
+            raise FeatureRunnerError(
+                f"topology provider identity for {plan.topology!r} does not match the replay-locked run plan"
             )
-            try:
-                provider = provider_entry()
-            except Exception as exc:
-                raise FeatureRunnerError(f"topology provider factory for {plan.topology!r} failed: {exc}") from exc
+        self._check_topology_registry_drift(registration)
+        _require_signature(
+            registration.factory,
+            (),
+            f"topology provider factory for {plan.topology!r}",
+        )
+        try:
+            provider = registration.factory()
+        except Exception as exc:
+            raise FeatureRunnerError(f"topology provider factory for {plan.topology!r} failed: {exc}") from exc
+        self._check_topology_registry_drift(registration)
         if isinstance(provider, type) or not isinstance(provider, TopologyProvider):
             raise FeatureRunnerError(
                 f"topology provider factory for {plan.topology!r} returned "
@@ -787,12 +808,27 @@ class FeatureRunner:
             validation_return = provider.validate(plan)
             if validation_return is not None:
                 raise FeatureRunnerError("topology provider validation must return None")
+        self._check_topology_registry_drift(registration)
 
         return _PreparedPlan(
             ordered=ordered,
             effective_required=effective_required,
+            registration=registration,
             provider=provider,
         )
+
+    def _check_topology_registry_drift(
+        self,
+        registration: TopologyProviderRegistration,
+    ) -> None:
+        if registration.api_version != self._topology_provider_registry.api_version:
+            raise FeatureRunnerError(f"topology provider registry drift detected for {registration.topology!r}")
+        try:
+            current = self._topology_provider_registry.resolve(registration.topology)
+        except UnknownTopologyProviderError as exc:
+            raise FeatureRunnerError(f"topology provider registry drift removed {registration.topology!r}") from exc
+        if current is not registration:
+            raise FeatureRunnerError(f"topology provider registry drift replaced {registration.topology!r}")
 
     def validate(self, plan: RunPlan) -> None:
         """Preflight a plan without provisioning a topology or running components.
@@ -1091,7 +1127,9 @@ class FeatureRunner:
         plan: BoundRunPlan,
         session: EnvironmentSession,
         context: _RunnerContext,
+        static_prepared: _PreparedPlan,
         *,
+        validate_bound_topology: bool,
         started_at: float,
         deadline: Optional[float],
     ) -> _ExecutionResult:
@@ -1106,6 +1144,7 @@ class FeatureRunner:
         terminal: Optional[_EarlyTerminalError] = None
         topology: Optional[ProvisionedTopology] = None
         provider: Optional[TopologyProvider] = None
+        topology_registration: Optional[TopologyProviderRegistration] = None
         cleanups: list[_CleanupEntry] = []
         current_spec: Optional[Union[ComponentSpec, BoundComponentSpec]] = None
         effective_required: frozenset[str] = frozenset()
@@ -1113,9 +1152,25 @@ class FeatureRunner:
         resolved: tuple[_ResolvedComponent, ...] = ()
 
         try:
-            prepared = self._prepare_plan(plan, context)
+            _validate_feature_mode(plan)
+            ordered = stable_topological_order(plan.components)
+            _validate_phase_dependencies(ordered)
+            effective_required = _effective_required_instances(plan)
+            prepared = _PreparedPlan(
+                ordered=ordered,
+                effective_required=effective_required,
+                registration=static_prepared.registration,
+                provider=static_prepared.provider,
+            )
+            self._check_topology_registry_drift(prepared.registration)
+            if validate_bound_topology:
+                validation_return = prepared.provider.validate(plan)
+                if validation_return is not None:
+                    raise FeatureRunnerError("topology provider validation must return None")
+                self._check_topology_registry_drift(prepared.registration)
             ordered = prepared.ordered
             effective_required = prepared.effective_required
+            topology_registration = prepared.registration
             provider = prepared.provider
             resolved = self._preflight_components(plan, ordered, context)
             by_instance = {item.spec.instance_id: item for item in resolved}
@@ -1178,6 +1233,7 @@ class FeatureRunner:
 
             error_phase = "registry"
             self._check_registry_drift(resolved)
+            self._check_topology_registry_drift(topology_registration)
             error_phase = "topology.provision"
             now = self._clock()
             if deadline is not None and now >= deadline:
@@ -1210,6 +1266,7 @@ class FeatureRunner:
                     raise rollback_base_exception
                 raise invalid_provision
             topology = provisioned
+            self._check_topology_registry_drift(topology_registration)
             topology_bound_plan = BoundRunPlan.materialize(
                 context.source_plan,
                 session.binding,
@@ -1446,6 +1503,13 @@ class FeatureRunner:
                 if error is None:
                     error = exc
                     error_phase = "registry"
+        if primary_base_exception is None and topology_registration is not None:
+            try:
+                self._check_topology_registry_drift(topology_registration)
+            except Exception as exc:
+                if error is None:
+                    error = exc
+                    error_phase = "topology registry"
 
         if primary_base_exception is not None:
             raise primary_base_exception
@@ -1559,7 +1623,13 @@ class FeatureRunner:
             ended_at=self._clock(),
         )
 
-    def run(self, plan: RunPlan, *, deadline: Optional[float] = None) -> RunOutcome:
+    def run(
+        self,
+        plan: RunPlan,
+        *,
+        deadline: Optional[float] = None,
+        _raise_preflight_errors: bool = False,
+    ) -> RunOutcome:
         """Acquire, bind, execute, and fully tear down one declarative plan.
 
         Deadlines are absolute values from the configured monotonic clock.
@@ -1570,6 +1640,8 @@ class FeatureRunner:
 
         if not isinstance(plan, RunPlan):
             raise TypeError("plan must be a RunPlan")
+        if not isinstance(_raise_preflight_errors, bool):
+            raise TypeError("_raise_preflight_errors must be a boolean")
         if deadline is not None and (
             isinstance(deadline, bool) or not isinstance(deadline, (int, float)) or not math.isfinite(deadline)
         ):
@@ -1585,6 +1657,29 @@ class FeatureRunner:
             deadline,
         )
         event_bus.publish("run.started", source="runner", payload={"scenario_id": plan.scenario_id})
+
+        validate_bound_topology = _topology_contains_environment_reference(plan)
+        try:
+            static_prepared = self._prepare_plan(
+                plan,
+                context,
+                validate_topology=not validate_bound_topology,
+            )
+            self._validate_component_registrations(
+                plan,
+                static_prepared.ordered,
+            )
+        except Exception as exc:
+            if _raise_preflight_errors:
+                raise
+            return self._finish_without_topology(
+                context=context,
+                status=OutcomeStatus.ERROR,
+                summary="static runner preflight failed",
+                component_results=(),
+                started_at=started_at,
+                diagnostics={"error": _exception_data(exc, phase="static preflight")},
+            )
 
         try:
             run_id = self._run_id_factory()
@@ -1624,6 +1719,8 @@ class FeatureRunner:
                     bound_plan,
                     session,
                     context,
+                    static_prepared,
+                    validate_bound_topology=validate_bound_topology,
                     started_at=started_at,
                     deadline=deadline,
                 )
@@ -1675,7 +1772,7 @@ class FeatureRunner:
 def run_feature_plan(
     plan: RunPlan,
     registries: Mapping[ComponentKind, Registry[Any]],
-    topology_providers: Mapping[str, TopologyProviderEntry],
+    topology_providers: TopologyProviderSource,
     *,
     artifact_dir: str = "",
     environment_manager: Optional[EnvironmentManager] = None,
@@ -1701,6 +1798,7 @@ __all__ = [
     "TopologyProvider",
     "TopologyProviderEntry",
     "TopologyProviderFactory",
+    "TopologyProviderSource",
     "normalize_artifact_root",
     "run_feature_plan",
     "stable_topological_order",
