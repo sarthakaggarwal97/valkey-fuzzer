@@ -2045,6 +2045,10 @@ class TopologyProviderRegistry:
         registrations: Iterable[TopologyProviderRegistration],
     ) -> None:
         entries = tuple(registrations)
+        if not entries:
+            # Registering nothing is not a mutation, e.g. plugin discovery with
+            # no topology providers while a runtime operation is pinned.
+            return
         with self._lock:
             self._reject_pinned_mutation()
             self._validate_many(entries)

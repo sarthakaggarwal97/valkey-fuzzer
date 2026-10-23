@@ -552,3 +552,84 @@ def test_explicit_manifest_identity_preempts_plugin_pack(
         )
 
     assert entry_points.selected_group == "valkey_fuzzer.plugins"
+
+
+def test_components_can_resolve_registrations_from_their_own_threads(tmp_path):
+    """Registration locks must not be held while a plan runs (worker threads would deadlock)."""
+    (tmp_path / "feature.yaml").write_text(_manifest(), encoding="utf-8")
+    runtime = FeatureRuntime(
+        tmp_path,
+        discover_entry_points=False,
+        topology_providers=_topology_providers(lambda: _Provider([])),
+    )
+    resolved = []
+
+    def resolve_from_worker():
+        resolved.append(runtime.registries[ComponentKind.ACTION].resolve("example.action").component_id)
+        resolved.append(runtime.topology_providers.resolve("standalone").topology)
+
+    class ThreadedAction:
+        def run(self, context, spec):
+            worker = threading.Thread(target=resolve_from_worker, daemon=True)
+            worker.start()
+            worker.join(timeout=2)
+            return ComponentResult(
+                component_instance_id=spec.instance_id,
+                status=ComponentStatus.ERROR if worker.is_alive() else ComponentStatus.PASS,
+                summary="worker blocked on a registration lock" if worker.is_alive() else "worker resolved",
+            )
+
+    runtime.registries[ComponentKind.ACTION].register(
+        ComponentRegistration[Any](
+            component_id="example.action",
+            kind=ComponentKind.ACTION,
+            api_version="v1",
+            factory=ThreadedAction,
+        )
+    )
+
+    outcome = runtime.run_plan(runtime.compile_yaml(_scenario()))
+
+    assert outcome.status is OutcomeStatus.PASS, outcome.summary
+    assert resolved == ["example.action", "standalone"]
+
+
+def test_registration_changed_by_another_thread_during_a_run_is_rolled_back(tmp_path):
+    (tmp_path / "feature.yaml").write_text(_manifest(), encoding="utf-8")
+    runtime = FeatureRuntime(
+        tmp_path,
+        discover_entry_points=False,
+        topology_providers=_topology_providers(lambda: _Provider([])),
+    )
+    action_registry = runtime.registries[ComponentKind.ACTION]
+
+    def register_intruder():
+        action_registry.register(
+            ComponentRegistration[Any](
+                component_id="example.intruder",
+                kind=ComponentKind.ACTION,
+                api_version="v1",
+                factory=lambda: _PassingAction([]),
+            )
+        )
+
+    class MutatingAction:
+        def run(self, context, spec):
+            worker = threading.Thread(target=register_intruder, daemon=True)
+            worker.start()
+            worker.join(timeout=2)
+            return ComponentResult(spec.instance_id, ComponentStatus.PASS, "done")
+
+    action_registry.register(
+        ComponentRegistration[Any](
+            component_id="example.action",
+            kind=ComponentKind.ACTION,
+            api_version="v1",
+            factory=MutatingAction,
+        )
+    )
+    plan = runtime.compile_yaml(_scenario())
+
+    with pytest.raises(FeatureRuntimeError, match="during the runtime operation"):
+        runtime.run_plan(plan)
+    assert "example.intruder" not in action_registry

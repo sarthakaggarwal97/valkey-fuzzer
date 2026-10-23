@@ -359,55 +359,69 @@ class FeatureRuntime:
         )
 
     @contextmanager
-    def _extension_operation(self):
-        with self._lifecycle_operation(), ExitStack() as locks:
+    def _extension_locks(self):
+        with ExitStack() as locks:
             for participant in self._ordered_extension_participants():
                 locks.enter_context(participant.registration_lock)
+            yield
 
-            if self._extension_pin is None:
-                expected = self._extension_snapshot()
-            else:
-                expected = self._extension_pin
-                changed = self._extension_drift(expected)
-                if changed:
-                    error = self._drift_error(changed, when="after the extension environment was pinned")
+    @contextmanager
+    def _extension_operation(self):
+        """Run one operation against a pinned snapshot of the extension environment.
+
+        Registration locks are held only while the snapshot is captured or
+        checked, never while compiling, validating, or running: components and
+        providers may resolve registrations from their own threads. Changes made
+        during the operation are detected afterwards, rolled back, and reported.
+        """
+        with self._lifecycle_operation(), ExitStack() as pins:
+            with self._extension_locks():
+                if self._extension_pin is None:
+                    expected = self._extension_snapshot()
+                else:
+                    expected = self._extension_pin
+                    changed = self._extension_drift(expected)
+                    if changed:
+                        error = self._drift_error(changed, when="after the extension environment was pinned")
+                        restore_failures = self._restore_extension_snapshot(expected)
+                        if restore_failures:
+                            raise FeatureRuntimeError(
+                                f"{error}; restoring the pinned extension environment also failed"
+                            ) from restore_failures[0]
+                        raise error
+
+                try:
+                    pins.enter_context(self._topology_providers.pin_snapshot(expected[3]))
+                except BaseException as exc:
                     restore_failures = self._restore_extension_snapshot(expected)
                     if restore_failures:
                         raise FeatureRuntimeError(
-                            f"{error}; restoring the pinned extension environment also failed"
+                            "topology provider registry could not be pinned and "
+                            "restoring the extension environment also failed"
                         ) from restore_failures[0]
-                    raise error
-
-            try:
-                locks.enter_context(self._topology_providers.pin_snapshot(expected[3]))
-            except BaseException as exc:
-                restore_failures = self._restore_extension_snapshot(expected)
-                if restore_failures:
                     raise FeatureRuntimeError(
-                        "topology provider registry could not be pinned and "
-                        "restoring the extension environment also failed"
-                    ) from restore_failures[0]
-                raise FeatureRuntimeError(
-                    "topology provider registry changed while the runtime operation was starting"
-                ) from exc
+                        "topology provider registry changed while the runtime operation was starting"
+                    ) from exc
 
             try:
                 yield
             except BaseException:
-                self._restore_extension_snapshot(expected)
+                with self._extension_locks():
+                    self._restore_extension_snapshot(expected)
                 raise
 
-            changed = self._extension_drift(expected)
-            if changed:
-                error = self._drift_error(changed, when="during the runtime operation")
-                restore_failures = self._restore_extension_snapshot(expected)
-                if restore_failures:
-                    raise FeatureRuntimeError(
-                        f"{error}; restoring the extension environment also failed"
-                    ) from restore_failures[0]
-                raise error
-            if self._extension_pin is None:
-                self._extension_pin = expected
+            with self._extension_locks():
+                changed = self._extension_drift(expected)
+                if changed:
+                    error = self._drift_error(changed, when="during the runtime operation")
+                    restore_failures = self._restore_extension_snapshot(expected)
+                    if restore_failures:
+                        raise FeatureRuntimeError(
+                            f"{error}; restoring the extension environment also failed"
+                        ) from restore_failures[0]
+                    raise error
+                if self._extension_pin is None:
+                    self._extension_pin = expected
 
     def _require_plan(self, plan: RunPlan) -> None:
         if not isinstance(plan, RunPlan):
