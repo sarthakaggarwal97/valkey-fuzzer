@@ -478,6 +478,34 @@ Exit codes:
 - `3`: required capability unsupported
 - `130`: interrupted
 
+### Random cluster fuzzing
+
+The `cluster` command runs the randomized cluster fuzzer (failovers plus
+process chaos, followed by replication, slot, topology, view, data, and log
+validation). The scheduled and PR fuzzer workflows use it, and a seed
+reproduces the same scenario:
+
+```bash
+valkey-fuzzer cluster --random --valkey-binary /absolute/path/to/valkey-server
+valkey-fuzzer cluster --seed 42 --iterations 10
+valkey-fuzzer cluster --random --export-dsl scenario.yaml --output results.json
+valkey-fuzzer cluster --dsl examples/simple_failover.yaml
+valkey-fuzzer validate examples/simple_failover.yaml
+```
+
+Cluster DSL files use the `cluster`, `operations`, `chaos`, and
+`state_validation` sections shown in `examples/simple_failover.yaml` and
+`examples/example_scenario.yaml`; `validate` routes any file without a
+top-level `feature` to this format. The command exits `0` when every iteration
+passes and `1` otherwise. Node logs (`<seed>-<node>.log`) and captured
+process output (`<seed>-<node>.stdio.log`) are written under
+`/tmp/valkey-fuzzer/logs`.
+
+Before starting a node, the orchestrator checks that its client port (and, for
+cluster topologies, its bus port) is free and refuses to run against a server
+it did not start. Nodes run with a `maxmemory` cap of 500mb and Valkey's default
+`noeviction` policy; override either through `server_config`.
+
 ## Programmatic use
 
 `examples/run_fuzzer.py` demonstrates the same runtime used by the CLI:
