@@ -705,7 +705,12 @@ class RunPlan:
         )
 
     def rng(self, component_instance_id: str, stream: str = "default") -> random.Random:
-        """Return an independent deterministic RNG for one component stream."""
+        """Return a new deterministic RNG positioned at the start of one component stream.
+
+        Every call starts the stream over. Components should draw from
+        ``RunContext.rng``, which keeps one continuing generator per stream
+        for the duration of a run.
+        """
 
         known_instances = {component.instance_id for component in self.components}
         if component_instance_id not in known_instances:
@@ -2281,13 +2286,27 @@ def _entry_point_sort_key(entry_point: Any) -> tuple[str, str, str]:
     )
 
 
+def _entry_point_identity(entry_point: Any) -> tuple[str, str, str]:
+    distribution = re.sub(r"[-_.]+", "-", _distribution_name(entry_point)).lower()
+    return (distribution, str(entry_point.name), str(getattr(entry_point, "value", "")))
+
+
 def _selected_entry_points(group: str) -> tuple[Any, ...]:
     entry_points = importlib_metadata.entry_points()
     if hasattr(entry_points, "select"):
         selected = entry_points.select(group=group)
     else:  # Python 3.9 and older importlib-metadata compatibility
         selected = entry_points.get(group, ())
-    return tuple(sorted(selected, key=_entry_point_sort_key))
+
+    # Python 3.9 reports a distribution once per sys.path entry that contains
+    # it (for example an editable install also visible in site-packages), so
+    # the same entry point can appear twice. Keep the first occurrence of each
+    # distribution/name/value; Python 3.9 entry points carry no distribution,
+    # so the value keeps genuinely different plugins with one name distinct.
+    unique: dict[tuple[str, str, str], Any] = {}
+    for entry_point in selected:
+        unique.setdefault(_entry_point_identity(entry_point), entry_point)
+    return tuple(sorted(unique.values(), key=_entry_point_sort_key))
 
 
 def discover_plugins(

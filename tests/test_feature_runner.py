@@ -1596,3 +1596,29 @@ def test_external_plugin_compiles_and_executes_without_runner_changes(monkeypatc
     assert outcome.status is OutcomeStatus.PASS
     assert "activate.run" in calls
     assert "oracle.evaluate" in calls
+
+
+def test_run_context_rng_streams_continue_within_a_run_and_replay_across_runs():
+    draws: list[tuple[float, float, float]] = []
+
+    class DrawingAction:
+        def run(self, context, spec):
+            first = context.rng(spec.instance_id).random()
+            second = context.rng(spec.instance_id).random()
+            other_stream = context.rng(spec.instance_id, "faults").random()
+            draws.append((first, second, other_stream))
+            return ComponentResult(spec.instance_id, ComponentStatus.PASS, "drew")
+
+    plan = _plan((_spec(ComponentKind.ACTION, "activate"),))
+    for _ in range(2):
+        outcome = FeatureRunner(
+            _registries(((ComponentKind.ACTION, "tests.action", DrawingAction),)),
+            _topology_providers(standalone=lambda: _Provider([], "standalone")),
+        ).run(plan)
+        assert outcome.status is OutcomeStatus.PASS
+
+    (first, second, other_stream), replay = draws
+    assert first != second, "a stream must advance between calls within one run"
+    assert first == plan.rng("activate").random()
+    assert other_stream == plan.rng("activate", "faults").random()
+    assert replay == draws[0], "the same plan must replay the same draws"

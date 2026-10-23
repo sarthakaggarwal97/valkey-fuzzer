@@ -916,6 +916,80 @@ def test_plugin_discovery_supports_python_39_mapping_entry_points(monkeypatch):
     assert "example.action" in registry
 
 
+class _Python39EntryPoint:
+    """Python 3.9 entry points have no ``dist`` attribute."""
+
+    def __init__(self, name: str, value: str, loaded: Any):
+        self.name = name
+        self.value = value
+        self._loaded = loaded
+
+    def load(self):
+        return self._loaded
+
+
+def test_plugin_discovery_dedupes_entry_points_seen_through_two_path_entries(monkeypatch):
+    plugin = PluginManifest(
+        plugin_id="example.plugin",
+        api_version="v1",
+        registrations=(_registration(),),
+    )
+    # A distribution visible through two sys.path entries is reported twice.
+    monkeypatch.setattr(
+        "valkey_fuzzer.extensibility.importlib_metadata.entry_points",
+        lambda: {
+            "valkey_fuzzer.plugins": [
+                _Python39EntryPoint("example.plugin", "example_plugin:manifest", plugin),
+                _Python39EntryPoint("example.plugin", "example_plugin:manifest", plugin),
+            ]
+        },
+    )
+    registry = Registry[Any](ComponentKind.ACTION)
+
+    assert discover_plugins({ComponentKind.ACTION: registry}) == (plugin,)
+    assert registry.registered_ids == ("example.action",)
+
+
+def test_plugin_discovery_dedupes_by_distribution_and_entry_point_name(monkeypatch):
+    plugin = PluginManifest(
+        plugin_id="example.plugin",
+        api_version="v1",
+        registrations=(_registration(),),
+    )
+    monkeypatch.setattr(
+        "valkey_fuzzer.extensibility.importlib_metadata.entry_points",
+        lambda: _SelectableEntryPoints(
+            [
+                _EntryPoint("example.plugin", "Example_Plugin", plugin),
+                _EntryPoint("example.plugin", "example-plugin", plugin),
+            ]
+        ),
+    )
+    registry = Registry[Any](ComponentKind.ACTION)
+
+    assert discover_plugins({ComponentKind.ACTION: registry}) == (plugin,)
+
+
+def test_plugin_discovery_still_rejects_one_name_from_two_distributions(monkeypatch):
+    plugin = PluginManifest(
+        plugin_id="example.plugin",
+        api_version="v1",
+        registrations=(_registration(),),
+    )
+    monkeypatch.setattr(
+        "valkey_fuzzer.extensibility.importlib_metadata.entry_points",
+        lambda: _SelectableEntryPoints(
+            [
+                _EntryPoint("example.plugin", "first-distribution", plugin),
+                _EntryPoint("example.plugin", "second-distribution", plugin),
+            ]
+        ),
+    )
+
+    with pytest.raises(PluginDiscoveryError, match="duplicate plugin ID"):
+        discover_plugins({ComponentKind.ACTION: Registry[Any](ComponentKind.ACTION)})
+
+
 def test_action_protocol_is_runtime_checkable():
     class ExampleAction:
         def run(self, context, spec):

@@ -7,7 +7,9 @@ registries; the runner never dispatches on individual Valkey features.
 import inspect
 import math
 import os
+import random
 import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -142,6 +144,8 @@ class _RunnerContext:
         self._cleanup_depth = 0
         self._services: RunServices = plan.services if isinstance(plan, BoundRunPlan) else RunServices()
         self._topology: Optional[ProvisionedTopology] = None
+        self._rngs: dict[tuple[str, str], random.Random] = {}
+        self._rng_lock = threading.Lock()
 
     @property
     def plan(self) -> Union[RunPlan, BoundRunPlan]:
@@ -155,8 +159,19 @@ class _RunnerContext:
     def event_bus(self) -> LifecycleEventBus:
         return self._event_bus
 
-    def rng(self, component_instance_id: str, stream: str = "default"):
-        return self._plan.rng(component_instance_id, stream)
+    def rng(self, component_instance_id: str, stream: str = "default") -> random.Random:
+        """Return this run's continuing generator for one component stream.
+
+        Repeated calls return the same generator, so successive draws advance
+        the stream instead of replaying its first values.
+        """
+        key = (component_instance_id, stream)
+        with self._rng_lock:
+            generator = self._rngs.get(key)
+            if generator is None:
+                generator = self._plan.rng(component_instance_id, stream)
+                self._rngs[key] = generator
+            return generator
 
     @property
     def services(self) -> Mapping[str, Any]:
