@@ -259,9 +259,10 @@ class FuzzerEngine(IFuzzerEngine):
                         successful_operations.append(op)
                         break
 
-            operation_context = (
-                LogValidationContext(operations=successful_operations) if successful_operations else None
-            )
+            # Always pass a context, even with no successful operations: log
+            # validation still has to check failure detection and failover for
+            # nodes killed by chaos.
+            operation_context = LogValidationContext(operations=successful_operations)
 
             final_validation_result = state_validator.validate_with_retry(
                 cluster_connection, expected_topology, operation_context

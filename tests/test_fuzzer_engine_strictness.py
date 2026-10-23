@@ -19,6 +19,7 @@ from valkey_fuzzer.models import (
     ClusterConfig,
     ClusterStatusValidation,
     ExpectedTopology,
+    LogValidationContext,
     Operation,
     OperationTiming,
     OperationType,
@@ -454,7 +455,7 @@ def test_zero_operation_standalone_skips_slot_preload_and_runs_final_validation(
     mock_validator.validate_with_retry.assert_called_once_with(
         mock_connection,
         engine._build_expected_topology(scenario),
-        None,
+        LogValidationContext(operations=[]),
     )
 
 
@@ -514,3 +515,63 @@ def test_parallel_executor_runs_validation_after_each_wave():
 
     assert [result[0] for result in first_wave_results] == [0, 1]
     assert [result[0] for result in second_wave_results] == [2]
+
+
+@patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.load_all_slots")
+@patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.StateValidator")
+@patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.ClusterConnection")
+@patch("valkey_fuzzer.fuzzer_engine.fuzzer_engine.ParallelExecutor")
+def test_final_validation_gets_a_log_context_when_no_operation_succeeded(
+    mock_executor_class,
+    mock_connection_class,
+    mock_validator_class,
+    mock_load_all_slots,
+):
+    """Chaos-only failures must still reach failure-detection/failover log checks."""
+    engine = FuzzerEngine()
+    scenario = build_scenario()
+    cluster_instance = build_cluster_instance()
+
+    engine._create_cluster_with_retry = Mock(return_value=cluster_instance)
+    engine._validate_cluster_readiness_with_retry = Mock(return_value=True)
+    engine._cleanup_resources = Mock()
+    mock_connection_class.return_value = Mock()
+
+    mock_validator = Mock()
+    mock_validator.write_test_data.return_value = True
+    mock_validator.validate_with_retry.return_value = build_validation_result(True)
+    mock_validator_class.return_value = mock_validator
+
+    mock_executor = Mock()
+    mock_executor.execute_operations_parallel.return_value = (0, [], [])
+    mock_executor_class.return_value = mock_executor
+
+    engine.execute_test(scenario)
+
+    operation_context = mock_validator.validate_with_retry.call_args.args[2]
+    assert operation_context == LogValidationContext(operations=[])
+
+
+def test_state_validator_runs_log_checks_with_an_empty_operation_context():
+    config = StateValidationConfig(
+        check_replication=False,
+        check_cluster_status=False,
+        check_slot_coverage=False,
+        check_topology=False,
+        check_view_consistency=False,
+        check_data_consistency=False,
+        check_logs=True,
+        stabilization_wait=0,
+    )
+    validator = StateValidator(config)
+    validator.killed_nodes = {"127.0.0.1:7000"}
+    connection = Mock(initial_nodes=[])
+    connection.get_current_nodes.return_value = []
+
+    with patch("valkey_fuzzer.fuzzer_engine.state_validator.ShardLogValidator") as log_validator_class:
+        log_validator_class.return_value.validate_affected_shards.return_value = Mock(success=True, findings=[])
+        validator.validate_state(connection, None, LogValidationContext(operations=[]))
+
+    log_validator_class.return_value.validate_affected_shards.assert_called_once_with(
+        [], [], {"127.0.0.1:7000"}, validator.shards_with_primary_killed
+    )
