@@ -1655,8 +1655,8 @@ class FeatureRunner:
         elif terminal is None and untrusted_failures:
             status = OutcomeStatus.ERROR
             summary = (
-                "required non-verdict components did not pass, so no trustworthy verdict is possible: "
-                f"{', '.join(untrusted_failures)}"
+                "no trustworthy verdict is possible; required components failed outside an oracle "
+                f"or action, or were skipped: {', '.join(untrusted_failures)}"
             )
         elif cleanup_errors and not trustworthy_feature_failure:
             status = OutcomeStatus.ERROR
