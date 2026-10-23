@@ -1,69 +1,373 @@
-name: Valkey Fuzzer Framework Acceptance (Interim)
+name: Valkey Cluster PR Fuzzer
 
 on:
   workflow_call:
     inputs:
       fuzzer_repository:
-        description: Exact repository containing the fuzzer code
-        required: true
+        description: Repository containing the fuzzer workflow and code to check out when called from another repo
+        required: false
         type: string
+        default: ""
       fuzzer_ref:
-        description: Exact branch, tag, or commit of the fuzzer code
-        required: true
+        description: Branch, tag, or commit SHA of the fuzzer repo to check out when called from another repo
+        required: false
         type: string
+        default: ""
       valkey_repository:
-        description: Repository containing the Valkey ref to build
+        description: Repository containing the Valkey PR to test
         required: false
         type: string
         default: valkey-io/valkey
       valkey_ref:
-        description: Exact Valkey branch, tag, commit, or pull-request merge ref
+        description: Ref to build and test, for example refs/pull/123/merge
         required: true
         type: string
+      pr_number:
+        description: Pull request number, used only for summaries
+        required: false
+        type: string
+        default: ""
+      pr_url:
+        description: Pull request URL, used only for summaries
+        required: false
+        type: string
+        default: ""
+      label_name:
+        description: Trigger label, used only for summaries
+        required: false
+        type: string
+        default: run-cluster-fuzzer
+      run_count:
+        description: Positive integer number of random fuzzer runs to queue
+        required: false
+        type: number
+        default: 10
   workflow_dispatch:
     inputs:
+      pr_link:
+        description: "GitHub PR URL (e.g. https://github.com/valkey-io/valkey/pull/123). Fills in repository, ref, pr_number, and pr_url automatically."
+        required: false
+        type: string
+        default: ""
       fuzzer_repository:
-        description: Optional alternate fuzzer repository; defaults to this repository
+        description: "Advanced: alternate fuzzer repository to check out for manual testing. Defaults to the current repository/commit."
         required: false
         type: string
         default: ""
       fuzzer_ref:
-        description: Optional alternate fuzzer ref; defaults to this workflow commit
+        description: "Advanced: alternate fuzzer branch, tag, or commit SHA to check out for manual testing. Defaults to the current commit."
         required: false
         type: string
         default: ""
       valkey_repository:
-        description: Repository containing the Valkey ref to build
+        description: "Repository containing the Valkey commit to test when not using pr_link"
         required: false
         type: string
-        default: valkey-io/valkey
+        default: ""
       valkey_ref:
-        description: Exact Valkey branch, tag, commit, or pull-request merge ref
-        required: true
+        description: "Ref to build and test when not using pr_link (e.g. refs/pull/123/merge)"
+        required: false
         type: string
+        default: ""
+      pr_number:
+        description: "Optional PR number for summary/comment metadata when not using pr_link"
+        required: false
+        type: string
+        default: ""
+      pr_url:
+        description: "Optional PR URL for summary/comment metadata when not using pr_link"
+        required: false
+        type: string
+        default: ""
+      label_name:
+        description: Trigger label, used only for summaries
+        required: false
+        type: string
+        default: run-cluster-fuzzer
+      run_count:
+        description: Positive integer number of random fuzzer runs to queue
+        required: false
+        type: number
+        default: 10
 
 permissions:
   contents: read
+  issues: write
+  pull-requests: write
 
 concurrency:
-  group: valkey-fuzzer-framework-acceptance-${{ inputs.valkey_repository || 'valkey-io/valkey' }}-${{ inputs.valkey_ref }}
+  # Lightweight guard keyed off the resolved target. The resolve-inputs
+  # job is cheap (no build); once it finishes, the expensive build and
+  # final summarize path carry their own concurrency group derived from the
+  # canonical repository + ref so that different URL variants for the
+  # same PR always serialize correctly.
+  group: valkey-pr-fuzzer-${{ inputs.pr_link || format('{0}-{1}', inputs.valkey_repository || 'valkey-io/valkey', inputs.pr_number != '' && format('pr-{0}', inputs.pr_number) || inputs.valkey_ref || 'pending') }}
   cancel-in-progress: false
 
 jobs:
+  resolve-inputs:
+    name: Resolve inputs
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    outputs:
+      valkey_repository: ${{ steps.resolve.outputs.valkey_repository }}
+      valkey_ref: ${{ steps.resolve.outputs.valkey_ref }}
+      pr_number: ${{ steps.resolve.outputs.pr_number }}
+      pr_url: ${{ steps.resolve.outputs.pr_url }}
+      concurrency_key: ${{ steps.resolve.outputs.concurrency_key }}
+    steps:
+      - name: Resolve PR link and inputs
+        id: resolve
+        env:
+          INPUT_PR_LINK: ${{ inputs.pr_link }}
+          INPUT_VALKEY_REPOSITORY: ${{ inputs.valkey_repository }}
+          INPUT_VALKEY_REF: ${{ inputs.valkey_ref }}
+          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+          INPUT_PR_URL: ${{ inputs.pr_url }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import os
+          from urllib.parse import urlparse
+
+          event_name = os.environ["EVENT_NAME"]
+          pr_link = os.environ.get("INPUT_PR_LINK", "").strip()
+          valkey_repository = os.environ.get("INPUT_VALKEY_REPOSITORY", "").strip()
+          valkey_ref = os.environ.get("INPUT_VALKEY_REF", "").strip()
+          pr_number = os.environ.get("INPUT_PR_NUMBER", "").strip()
+          pr_url = os.environ.get("INPUT_PR_URL", "").strip()
+
+          def parse_pr_url(url):
+              """Extract (owner/repo, number) from a GitHub PR URL.
+
+              Accepts common variants such as:
+                https://github.com/owner/repo/pull/123
+                https://github.com/owner/repo/pull/123/files
+                https://github.com/owner/repo/pull/123/commits
+                https://github.com/owner/repo/pull/123?w=1
+                https://github.com/owner/repo/pull/123#discussion_r...
+              """
+              parsed = urlparse(url)
+              if parsed.hostname != "github.com":
+                  return None
+              parts = parsed.path.strip("/").split("/")
+              # Expect at least owner/repo/pull/number
+              if len(parts) < 4 or parts[2] != "pull" or not parts[3].isdigit():
+                  return None
+              return f"{parts[0]}/{parts[1]}", parts[3]
+
+          # Recover a full PR URL pasted into pr_number before any
+          # validation so that the extracted values are available to the
+          # pr_link / valkey_ref branches below.
+          if pr_number and not pr_number.isdigit():
+              parsed = parse_pr_url(pr_number)
+              if parsed:
+                  # Treat the URL as if it were pr_link — pr_link is
+                  # authoritative, so it overwrites the target fields.
+                  pr_link = pr_link or pr_number
+                  pr_number = parsed[1]
+              else:
+                  raise SystemExit(
+                      f"inputs.pr_number must be a numeric PR number, got {pr_number!r}. "
+                      "Use the pr_link input for full URLs."
+                  )
+
+          if event_name == "workflow_call":
+              # workflow_call does not have pr_link; pass inputs through as-is
+              valkey_repository = valkey_repository or "valkey-io/valkey"
+              if not valkey_ref:
+                  raise SystemExit("workflow_call requires inputs.valkey_ref")
+          elif pr_link:
+              parsed = parse_pr_url(pr_link)
+              if not parsed:
+                  raise SystemExit(
+                      f"Invalid PR link format: {pr_link!r}. "
+                      "Expected: https://github.com/OWNER/REPO/pull/NUMBER"
+                  )
+              parsed_repo, parsed_number = parsed
+              parsed_ref = f"refs/pull/{parsed_number}/merge"
+
+              # pr_link is authoritative: reject any explicit overrides that
+              # disagree so we never mix metadata from different PRs.
+              conflicts = []
+              if valkey_repository and valkey_repository != parsed_repo:
+                  conflicts.append(
+                      f"valkey_repository={valkey_repository!r} vs pr_link repo {parsed_repo!r}"
+                  )
+              if valkey_ref and valkey_ref != parsed_ref:
+                  conflicts.append(
+                      f"valkey_ref={valkey_ref!r} vs pr_link ref {parsed_ref!r}"
+                  )
+              if pr_number and pr_number != parsed_number:
+                  conflicts.append(
+                      f"pr_number={pr_number!r} vs pr_link number {parsed_number!r}"
+                  )
+              if conflicts:
+                  raise SystemExit(
+                      "Conflicting inputs: "
+                      + "; ".join(conflicts)
+                      + ". Remove the conflicting overrides or adjust pr_link."
+                  )
+
+              # Overwrite target fields from the link (authoritative).
+              valkey_repository = parsed_repo
+              valkey_ref = parsed_ref
+              pr_number = parsed_number
+          else:
+              # No pr_link provided — fall back to explicit inputs
+              valkey_repository = valkey_repository or "valkey-io/valkey"
+              if not valkey_ref:
+                  raise SystemExit(
+                      "Either pr_link or valkey_ref must be provided"
+                  )
+
+          # Always publish a canonical PR URL once the repository and PR
+          # number are known so summaries and comments cannot drift from
+          # the actual target.
+          if pr_number:
+              pr_url = f"https://github.com/{valkey_repository}/pull/{pr_number}"
+
+          print(f"valkey_repository={valkey_repository}")
+          print(f"valkey_ref={valkey_ref}")
+          print(f"pr_number={pr_number}")
+          print(f"pr_url={pr_url}")
+          # Canonical concurrency key derived from the resolved target so
+          # that different URL variants for the same PR always serialize.
+          # When pr_number is set, key off repository + pr_number so that
+          # runs targeting the same PR (even with different refs) serialize
+          # and don't overwrite each other's PR comment.
+          if pr_number:
+              print(f"concurrency_key=valkey-pr-fuzzer-{valkey_repository}-pr-{pr_number}")
+          else:
+              print(f"concurrency_key=valkey-pr-fuzzer-{valkey_repository}-{valkey_ref}")
+          PY
+
+  prepare-matrix:
+    needs:
+      - resolve-inputs
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    outputs:
+      fuzzer_repository: ${{ steps.resolve_fuzzer_source.outputs.repository }}
+      fuzzer_ref: ${{ steps.resolve_fuzzer_source.outputs.ref }}
+      runs: ${{ steps.matrix.outputs.runs }}
+    steps:
+      - name: Resolve fuzzer source
+        id: resolve_fuzzer_source
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_FUZZER_REPOSITORY: ${{ inputs.fuzzer_repository }}
+          INPUT_FUZZER_REF: ${{ inputs.fuzzer_ref }}
+          DEFAULT_FUZZER_REPOSITORY: ${{ github.repository }}
+          DEFAULT_FUZZER_REF: ${{ github.sha }}
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import os
+          import subprocess
+
+          event_name = os.environ["EVENT_NAME"]
+          input_repository = os.environ["INPUT_FUZZER_REPOSITORY"].strip()
+          input_ref = os.environ["INPUT_FUZZER_REF"].strip()
+          default_repository = os.environ["DEFAULT_FUZZER_REPOSITORY"]
+          default_ref = os.environ["DEFAULT_FUZZER_REF"]
+
+          def resolve_default_branch(repository):
+              remote = f"https://github.com/{repository}.git"
+              try:
+                  output = subprocess.check_output(
+                      ["git", "ls-remote", "--symref", remote, "HEAD"],
+                      text=True,
+                      stderr=subprocess.STDOUT,
+                  )
+              except subprocess.CalledProcessError as exc:
+                  error_output = exc.output.strip() or str(exc)
+                  raise SystemExit(
+                      f"Could not determine the default branch for {repository!r}: {error_output}"
+                  ) from exc
+              for line in output.splitlines():
+                  if line.startswith("ref: refs/heads/") and line.endswith("\tHEAD"):
+                      return line[len("ref: refs/heads/"):-len("\tHEAD")]
+              raise SystemExit(
+                  f"Could not determine the default branch for {repository!r} from {remote}"
+              )
+
+          if event_name == "workflow_call":
+              missing_inputs = []
+              if not input_repository:
+                  missing_inputs.append("fuzzer_repository")
+              if not input_ref:
+                  missing_inputs.append("fuzzer_ref")
+              if missing_inputs:
+                  missing_list = ", ".join(f"inputs.{name}" for name in missing_inputs)
+                  raise SystemExit(
+                      "workflow_call requires "
+                      f"{missing_list} so the reusable workflow checks out the intended fuzzer repo and ref"
+                  )
+              resolved_repository = input_repository
+              resolved_ref = input_ref
+          else:
+              resolved_repository = input_repository or default_repository
+              if input_ref:
+                  resolved_ref = input_ref
+              elif input_repository and input_repository != default_repository:
+                  resolved_ref = resolve_default_branch(resolved_repository)
+              else:
+                  resolved_ref = default_ref
+
+          print(f"repository={resolved_repository}")
+          print(f"ref={resolved_ref}")
+          PY
+
+      - name: Build matrix
+        id: matrix
+        env:
+          RUN_COUNT: ${{ inputs.run_count }}
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+
+          raw_run_count = os.environ["RUN_COUNT"]
+          parsed_run_count = float(raw_run_count)
+          if not parsed_run_count.is_integer():
+              raise SystemExit(
+                  f"inputs.run_count must be a positive integer, got {raw_run_count!r}"
+              )
+
+          run_count = int(parsed_run_count)
+          if run_count < 1:
+              raise SystemExit(
+                  f"inputs.run_count must be at least 1, got {raw_run_count!r}"
+              )
+
+          runs = [{"run_id": run_id} for run_id in range(1, run_count + 1)]
+          print(f"runs={json.dumps(runs)}")
+          PY
+
   build-valkey:
-    name: Build requested Valkey ref
+    name: Build Valkey
+    needs:
+      - resolve-inputs
+      - prepare-matrix
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    concurrency:
+      group: ${{ needs.resolve-inputs.outputs.concurrency_key }}
+      cancel-in-progress: false
     outputs:
       resolved_sha: ${{ steps.commit.outputs.sha }}
-
     steps:
       - name: Checkout Valkey
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: ${{ inputs.valkey_repository || 'valkey-io/valkey' }}
-          ref: ${{ inputs.valkey_ref }}
+          repository: ${{ needs.resolve-inputs.outputs.valkey_repository }}
+          ref: ${{ needs.resolve-inputs.outputs.valkey_ref }}
           fetch-depth: 1
+          path: valkey-src
           persist-credentials: false
 
       - name: Install build dependencies
@@ -72,26 +376,48 @@ jobs:
           sudo apt-get install -y build-essential pkg-config libssl-dev tcl
 
       - name: Build Valkey
+        working-directory: valkey-src
         run: |
           make -j"$(nproc)"
           src/valkey-server --version
 
       - name: Capture resolved SHA
         id: commit
+        working-directory: valkey-src
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Package Valkey binaries
+        run: |
+          mkdir -p valkey-binaries
+          cp valkey-src/src/valkey-server valkey-binaries/
+          cp valkey-src/src/valkey-cli valkey-binaries/
+          cp valkey-src/src/valkey-benchmark valkey-binaries/
+          
+          if [ -f valkey-src/src/modules/lua/libvalkeylua.so ]; then
+            cp valkey-src/src/modules/lua/libvalkeylua.so valkey-binaries/
+          fi
+
+      - name: Upload Valkey binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: valkey-pr-binaries
+          if-no-files-found: error
+          path: valkey-binaries/
 
   framework-acceptance:
     name: Validate generic fuzzer framework
-    needs: build-valkey
+    needs:
+      - prepare-matrix
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 30
-
     steps:
       - name: Checkout valkey-fuzzer
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: ${{ inputs.fuzzer_repository || github.repository }}
-          ref: ${{ inputs.fuzzer_ref || github.sha }}
+          repository: ${{ needs.prepare-matrix.outputs.fuzzer_repository }}
+          ref: ${{ needs.prepare-matrix.outputs.fuzzer_ref }}
           persist-credentials: false
 
       - name: Set up Python
@@ -128,28 +454,6 @@ jobs:
               --no-plugins
           done
 
-      - name: Explain current gate
-        env:
-          VALKEY_REPOSITORY: ${{ inputs.valkey_repository || 'valkey-io/valkey' }}
-          VALKEY_REF: ${{ inputs.valkey_ref }}
-          RESOLVED_SHA: ${{ needs.build-valkey.outputs.resolved_sha }}
-          FUZZER_REPOSITORY: ${{ inputs.fuzzer_repository || github.repository }}
-          FUZZER_REF: ${{ inputs.fuzzer_ref || github.sha }}
-        run: |
-          {
-            echo "## Valkey Fuzzer Framework Acceptance"
-            echo
-            echo "- Valkey target: \`${VALKEY_REPOSITORY}@${VALKEY_REF}\`"
-            echo "- Resolved Valkey SHA: \`${RESOLVED_SHA}\`"
-            echo "- Fuzzer source: \`${FUZZER_REPOSITORY}@${FUZZER_REF}\`"
-            echo "- Framework unit and structural acceptance: \`PASS\`"
-            echo
-            echo "> This is an interim framework gate. It verifies that the requested"
-            echo "> Valkey ref builds and that the generic fuzzer compiler/runtime"
-            echo "> passes acceptance checks. No Valkey feature-fuzzing verdict is"
-            echo "> produced until complete built-in feature packs are available."
-          } >> "$GITHUB_STEP_SUMMARY"
-
       - name: Upload acceptance log
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -158,3 +462,488 @@ jobs:
           path: framework-acceptance.log
           if-no-files-found: warn
           retention-days: 30
+
+  random-fuzzer:
+    name: Random fuzzer run ${{ matrix.run_id }}
+    needs:
+      - resolve-inputs
+      - prepare-matrix
+      - build-valkey
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    concurrency:
+      group: ${{ needs.resolve-inputs.outputs.concurrency_key }}-run-${{ matrix.run_id }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.prepare-matrix.outputs.runs) }}
+    steps:
+      - name: Checkout valkey-fuzzer
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ needs.prepare-matrix.outputs.fuzzer_repository }}
+          ref: ${{ needs.prepare-matrix.outputs.fuzzer_ref }}
+          persist-credentials: false
+
+      - name: Download Valkey binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: valkey-pr-binaries
+          path: ${{ runner.temp }}/valkey-binaries
+
+      - name: Install Valkey binaries
+        run: chmod +x "${{ runner.temp }}/valkey-binaries/"*
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.11'
+
+      - name: Execute fuzzer run
+        id: execute
+        continue-on-error: true
+        env:
+          RUN_ID: ${{ matrix.run_id }}
+          RUN_ROOT: ${{ runner.temp }}/valkey-pr-fuzzer
+          VALKEY_BINARY: ${{ runner.temp }}/valkey-binaries/valkey-server
+          LD_LIBRARY_PATH: ${{ runner.temp }}/valkey-binaries
+        run: |
+          set +e
+
+          artifact_dir="${RUN_ROOT}/run-${RUN_ID}"
+          mkdir -p "${artifact_dir}"
+          exit_code=0
+          status=success
+          stage=setup
+
+          python -m pip install --upgrade pip
+          pip_exit=$?
+          if [ "${pip_exit}" -ne 0 ]; then
+            exit_code="${pip_exit}"
+            status=failure
+            stage=pip-upgrade
+          fi
+
+          if [ "${status}" = "success" ]; then
+            pip install pytest pytest-asyncio
+            pip_deps_exit=$?
+            if [ "${pip_deps_exit}" -ne 0 ]; then
+              exit_code="${pip_deps_exit}"
+              status=failure
+              stage=python-dependencies
+            fi
+          fi
+
+          if [ "${status}" = "success" ] && [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+            requirements_exit=$?
+            if [ "${requirements_exit}" -ne 0 ]; then
+              exit_code="${requirements_exit}"
+              status=failure
+              stage=requirements
+            fi
+          fi
+
+          if [ "${status}" = "success" ]; then
+            pip install -e .
+            editable_exit=$?
+            if [ "${editable_exit}" -ne 0 ]; then
+              exit_code="${editable_exit}"
+              status=failure
+              stage=package-install
+            fi
+          fi
+
+          if [ "${status}" = "success" ]; then
+            stage=fuzzer
+            valkey-fuzzer cluster \
+              --random \
+              --verbose \
+              --valkey-binary "${VALKEY_BINARY}" \
+              --output "${artifact_dir}/result.json" \
+              --format json \
+              2>&1 | tee "${artifact_dir}/console.log"
+            fuzzer_exit=${PIPESTATUS[0]}
+            if [ "${fuzzer_exit}" -ne 0 ]; then
+              exit_code="${fuzzer_exit}"
+              status=failure
+            fi
+          fi
+
+          if [ -d "/tmp/valkey-fuzzer/logs" ]; then
+            cp -R /tmp/valkey-fuzzer/logs "${artifact_dir}/node-logs"
+          fi
+
+          export EXIT_CODE="${exit_code}"
+          export STATUS="${status}"
+          export STAGE="${stage}"
+
+          python - <<'PY'
+          import json
+          import os
+
+          artifact_dir = os.path.join(os.environ["RUN_ROOT"], f"run-{os.environ['RUN_ID']}")
+          result_path = os.path.join(artifact_dir, "result.json")
+
+          metadata = {
+              "run_id": int(os.environ["RUN_ID"]),
+              "status": os.environ["STATUS"],
+              "stage": os.environ["STAGE"],
+              "exit_code": int(os.environ["EXIT_CODE"]),
+              "scenario_id": None,
+              "seed": None,
+              "result_success": None,
+              "duration": None,
+              "post_operation_validation_failures": 0,
+              "final_failed_checks": [],
+              "error_message": None,
+          }
+
+          if os.path.exists(result_path):
+              with open(result_path, "r", encoding="utf-8") as handle:
+                  result_payload = json.load(handle)
+
+              results = result_payload.get("results", [])
+              if results:
+                  first_result = results[0]
+                  metadata["scenario_id"] = first_result.get("scenario_id")
+                  metadata["seed"] = first_result.get("seed")
+                  metadata["result_success"] = first_result.get("success")
+                  metadata["duration"] = first_result.get("duration")
+                  metadata["post_operation_validation_failures"] = sum(
+                      1
+                      for validation in first_result.get("per_operation_validations", [])
+                      if not validation.get("overall_success", False)
+                  )
+                  metadata["final_failed_checks"] = (
+                      first_result.get("final_validation", {}).get("failed_checks", [])
+                  )
+                  metadata["error_message"] = first_result.get("error_message")
+
+          with open(os.path.join(artifact_dir, "metadata.json"), "w", encoding="utf-8") as handle:
+              json.dump(metadata, handle, indent=2)
+          PY
+
+          echo "EXIT_CODE=${exit_code}" >> "$GITHUB_ENV"
+          echo "STATUS=${status}" >> "$GITHUB_ENV"
+          echo "STAGE=${stage}" >> "$GITHUB_ENV"
+          echo "exit_code=${exit_code}" >> "$GITHUB_OUTPUT"
+          echo "status=${status}" >> "$GITHUB_OUTPUT"
+          echo "stage=${stage}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload run artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: valkey-pr-fuzzer-run-${{ matrix.run_id }}
+          if-no-files-found: error
+          path: ${{ runner.temp }}/valkey-pr-fuzzer/run-${{ matrix.run_id }}
+
+      - name: Mark job as failed when the fuzzer run fails
+        if: steps.execute.outputs.exit_code != '0'
+        run: exit 1
+
+  summarize:
+    name: Summarize cluster fuzzer results
+    if: ${{ always() }}
+    needs:
+      - resolve-inputs
+      - prepare-matrix
+      - build-valkey
+      - random-fuzzer
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ needs.resolve-inputs.outputs.concurrency_key }}
+      cancel-in-progress: false
+    steps:
+      - name: Download run artifacts
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: valkey-pr-fuzzer-run-*
+          path: collected-results
+
+      - name: Write workflow summary
+        id: summary
+        env:
+          PREPARE_MATRIX_RESULT: ${{ needs.prepare-matrix.result }}
+          BUILD_RESULT: ${{ needs.build-valkey.result }}
+          RESOLVED_SHA: ${{ needs.build-valkey.outputs.resolved_sha }}
+          FUZZER_REPOSITORY: ${{ needs.prepare-matrix.outputs.fuzzer_repository }}
+          FUZZER_REF: ${{ needs.prepare-matrix.outputs.fuzzer_ref }}
+          RUN_COUNT: ${{ inputs.run_count }}
+          VALKEY_REPOSITORY: ${{ needs.resolve-inputs.outputs.valkey_repository }}
+          VALKEY_REF: ${{ needs.resolve-inputs.outputs.valkey_ref }}
+          PR_NUMBER: ${{ needs.resolve-inputs.outputs.pr_number }}
+          PR_URL: ${{ needs.resolve-inputs.outputs.pr_url }}
+          LABEL_NAME: ${{ inputs.label_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python - <<'PY'
+          import glob
+          import json
+          import os
+
+          raw_run_count = os.environ["RUN_COUNT"]
+          run_count_error = None
+
+          try:
+              parsed_run_count = float(raw_run_count)
+          except ValueError:
+              run_count_error = (
+                  f"inputs.run_count must be a positive integer, got {raw_run_count!r}"
+              )
+              run_count = 0
+          else:
+              if not parsed_run_count.is_integer():
+                  run_count_error = (
+                      f"inputs.run_count must be a positive integer, got {raw_run_count!r}"
+                  )
+                  run_count = 0
+              else:
+                  run_count = int(parsed_run_count)
+                  if run_count < 1:
+                      run_count_error = (
+                          f"inputs.run_count must be at least 1, got {raw_run_count!r}"
+                      )
+                      run_count = 0
+
+          prepare_matrix_result = os.environ["PREPARE_MATRIX_RESULT"]
+          build_result = os.environ["BUILD_RESULT"]
+          summary_path = os.environ["GITHUB_STEP_SUMMARY"]
+          output_path = os.environ["GITHUB_OUTPUT"]
+          comment_path = "pr-comment.md"
+
+          metadata_paths = sorted(
+              glob.glob("collected-results/**/metadata.json", recursive=True)
+          )
+
+          run_results = {}
+          for metadata_path in metadata_paths:
+              with open(metadata_path, "r", encoding="utf-8") as handle:
+                  metadata = json.load(handle)
+              run_results[int(metadata["run_id"])] = metadata
+
+          missing_runs = [
+              run_id for run_id in range(1, run_count + 1)
+              if run_id not in run_results
+          ]
+
+          passed_runs = sum(1 for result in run_results.values() if result["status"] == "success")
+          failed_runs = sum(1 for result in run_results.values() if result["status"] != "success")
+          overall_failed = (
+              prepare_matrix_result != "success"
+              or build_result != "success"
+              or failed_runs > 0
+              or bool(missing_runs)
+              or run_count_error is not None
+          )
+
+          pr_line = ""
+          if os.environ["PR_NUMBER"]:
+              if os.environ["PR_URL"]:
+                  pr_line = f"- PR: [#{os.environ['PR_NUMBER']}]({os.environ['PR_URL']})\n"
+              else:
+                  pr_line = f"- PR: #{os.environ['PR_NUMBER']}\n"
+
+          overall_status = "FAIL" if overall_failed else "PASS"
+
+          lines = [
+              "## Valkey Cluster Fuzzer",
+              "",
+              f"- Valkey repository: `{os.environ['VALKEY_REPOSITORY']}`",
+              f"- Requested ref: `{os.environ['VALKEY_REF']}`",
+              f"- Resolved SHA: `{os.environ['RESOLVED_SHA'] or 'unavailable'}`",
+              f"- Fuzzer repository: `{os.environ['FUZZER_REPOSITORY'] or 'unavailable'}`",
+              f"- Fuzzer ref: `{os.environ['FUZZER_REF'] or 'unavailable'}`",
+              f"- Trigger label: `{os.environ['LABEL_NAME']}`",
+              f"- Overall result: `{overall_status}`",
+              f"- Matrix preparation: `{prepare_matrix_result}`",
+              f"- Build stage: `{build_result}`",
+          ]
+
+          if pr_line:
+              lines.append(pr_line.rstrip())
+
+          if run_count_error is not None:
+              lines.extend([
+                  f"- Requested runs: `{raw_run_count}`",
+                  f"- Invalid `run_count`: {run_count_error}",
+              ])
+          else:
+              lines.extend([
+                  f"- Passed runs: {passed_runs}/{run_count}",
+                  f"- Failed runs: {failed_runs}",
+                  f"- Missing run artifacts: {len(missing_runs)}",
+                  "",
+                  "| Run | Status | Seed | Stage | Duration (s) | Post-op Failures | Final Checks | Error |",
+                  "| --- | --- | --- | --- | --- | --- | --- | --- |",
+              ])
+
+              for run_id in range(1, run_count + 1):
+                  result = run_results.get(run_id)
+                  if result is None:
+                      lines.append(
+                          f"| {run_id} | missing | - | artifact | - | - | - | artifact not uploaded |"
+                      )
+                      continue
+
+                  error = result.get("error_message") or "-"
+                  error = str(error).replace("\n", " ").replace("|", "/")
+                  seed = result.get("seed") if result.get("seed") is not None else "-"
+                  duration = result.get("duration") if result.get("duration") is not None else "-"
+                  post_op_failures = result.get("post_operation_validation_failures", 0)
+                  final_checks = ", ".join(result.get("final_failed_checks", [])) or "-"
+                  final_checks = final_checks.replace("|", "/")
+                  lines.append(
+                      f"| {run_id} | {result['status']} | {seed} | {result.get('stage', '-')} | {duration} | {post_op_failures} | {final_checks} | {error} |"
+                  )
+
+          if missing_runs:
+              lines.extend([
+                  "",
+                  f"Missing artifacts for runs: {', '.join(str(run_id) for run_id in missing_runs)}",
+              ])
+
+          with open(summary_path, "a", encoding="utf-8") as handle:
+              handle.write("\n".join(lines) + "\n")
+
+          if os.environ["PR_NUMBER"]:
+              def format_comment_value(value, limit=120):
+                  text = str(value).replace("\n", " ").replace("|", "/")
+                  return text if len(text) <= limit else text[: limit - 3] + "..."
+
+              comment_lines = [
+                  "<!-- valkey-cluster-fuzzer-results -->",
+                  "## Valkey Cluster Fuzzer Results",
+                  "",
+                  f"- Overall result: `{overall_status}`",
+                  f"- Workflow run: [View run]({os.environ['RUN_URL']})",
+                  f"- Resolved SHA: `{os.environ['RESOLVED_SHA'] or 'unavailable'}`",
+              ]
+
+              if run_count_error is not None:
+                  comment_lines.extend([
+                      f"- Requested runs: `{raw_run_count}`",
+                      f"- Invalid `run_count`: {run_count_error}",
+                  ])
+              else:
+                  comment_lines.extend([
+                      f"- Passed runs: {passed_runs}/{run_count}",
+                      f"- Failed runs: {failed_runs}",
+                      f"- Missing run artifacts: {len(missing_runs)}",
+                  ])
+
+                  if overall_failed:
+                      comment_lines.extend([
+                          "",
+                          "<details>",
+                          "<summary>Failure details</summary>",
+                          "",
+                          "| Run | Status | Seed | Stage | Final Checks | Error |",
+                          "| --- | --- | --- | --- | --- | --- |",
+                      ])
+
+                      for run_id in range(1, run_count + 1):
+                          result = run_results.get(run_id)
+                          if result is None:
+                              comment_lines.append(
+                                  f"| {run_id} | missing | - | artifact | - | artifact not uploaded |"
+                              )
+                              continue
+
+                          if result["status"] == "success":
+                              continue
+
+                          error = format_comment_value(result.get("error_message") or "-")
+                          seed = result.get("seed") if result.get("seed") is not None else "-"
+                          final_checks = ", ".join(result.get("final_failed_checks", [])) or "-"
+                          final_checks = format_comment_value(final_checks, limit=80)
+                          comment_lines.append(
+                              f"| {run_id} | {result['status']} | {seed} | {result.get('stage', '-')} | {final_checks} | {error} |"
+                          )
+
+                      comment_lines.extend([
+                          "",
+                          "</details>",
+                      ])
+
+              if missing_runs:
+                  comment_lines.extend([
+                      "",
+                      f"Missing artifacts for runs: {', '.join(str(run_id) for run_id in missing_runs)}",
+                  ])
+
+              with open(comment_path, "w", encoding="utf-8") as handle:
+                  handle.write("\n".join(comment_lines) + "\n")
+
+          with open(output_path, "a", encoding="utf-8") as handle:
+              handle.write(f"overall_failed={'true' if overall_failed else 'false'}\n")
+          PY
+
+      - name: Comment on PR with fuzzer results
+        if: ${{ needs.resolve-inputs.outputs.pr_number != '' }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          PR_NUMBER: ${{ needs.resolve-inputs.outputs.pr_number }}
+          VALKEY_REPOSITORY: ${{ needs.resolve-inputs.outputs.valkey_repository }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('pr-comment.md', 'utf8');
+            const marker = '<!-- valkey-cluster-fuzzer-results -->';
+            const issue_number = Number(process.env.PR_NUMBER);
+            const valkey_repository = process.env.VALKEY_REPOSITORY;
+            const [target_owner, target_repo] = valkey_repository.split('/');
+            const {owner: workflow_owner, repo: workflow_repo} = context.repo;
+
+            // The GITHUB_TOKEN only has permissions on the workflow repo.
+            // When the PR lives in a different repository (e.g. valkey-io/valkey
+            // while the workflow runs in valkey-io/valkey-fuzzer), skip commenting
+            // because the token cannot access the target repo.
+            if (target_owner !== workflow_owner || target_repo !== workflow_repo) {
+              core.info(
+                `Skipping PR comment: PR is in ${valkey_repository} but workflow ` +
+                `is running in ${workflow_owner}/${workflow_repo}`
+              );
+              return;
+            }
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: target_owner,
+              repo: target_repo,
+              issue_number,
+              per_page: 100,
+            });
+
+            const existing = comments.find(comment =>
+              comment.user?.type === 'Bot' && comment.body?.includes(marker)
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: target_owner,
+                repo: target_repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: target_owner,
+                repo: target_repo,
+                issue_number,
+                body,
+              });
+            }
+
+      - name: Mark summary job as failed when any run fails
+        if: always() && steps.summary.outputs.overall_failed == 'true'
+        run: exit 1
