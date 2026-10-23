@@ -251,6 +251,11 @@ Every attempted run has one terminal classification:
 Unsupported capability is not missing evidence. A target that claims support
 but does not exercise the required path fails.
 
+Only oracles and actions can produce a trustworthy `FAIL`. A `FAIL` or `SKIP`
+from a required capability probe, workload or observer start, or fault arm
+means the harness never established the conditions for a verdict, so the run
+is `ERROR` even when an oracle also failed.
+
 Cleanup failures remain visible and can upgrade an otherwise successful run to
 `ERROR`.
 

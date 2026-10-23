@@ -315,6 +315,12 @@ def _spec(
     )
 
 
+def _error_identity(error):
+    """Exception diagnostics minus the free-form message, which must be present."""
+    assert error.get("message"), error
+    return {key: value for key, value in error.items() if key != "message"}
+
+
 def _plan(
     components: Sequence[ComponentSpec],
     *,
@@ -672,7 +678,7 @@ def test_optional_failure_is_nonblocking_until_a_required_dependent_needs_it():
     assert results["required"].diagnostics["blocked_by"] == ("dependency 'optional' is FAIL",)
 
 
-def test_required_component_skip_is_fail_not_unsupported_after_provision():
+def test_required_component_skip_is_error_not_unsupported_after_provision():
     calls: list[str] = []
     outcome = FeatureRunner(
         _registries(
@@ -687,7 +693,9 @@ def test_required_component_skip_is_fail_not_unsupported_after_provision():
         _topology_providers(standalone=lambda: _Provider(calls, "standalone")),
     ).run(_plan((_spec(ComponentKind.ACTION, "activate"),)))
 
-    assert outcome.status is OutcomeStatus.FAIL
+    # A skipped action never exercised the transition, so there is no verdict.
+    assert outcome.status is OutcomeStatus.ERROR
+    assert outcome.diagnostics["untrusted_component_failures"] == ("activate",)
     assert "standalone.provision" in calls
     assert calls[-1] == "standalone.cleanup"
 
@@ -899,7 +907,7 @@ def test_bad_plugin_protocol_or_result_becomes_error(factory, expected_phase):
     ).run(_plan((_spec(ComponentKind.ACTION, "activate"),)))
 
     assert outcome.status is OutcomeStatus.ERROR
-    assert outcome.diagnostics["error"] == {
+    assert _error_identity(outcome.diagnostics["error"]) == {
         "type": "valkey_fuzzer.feature_runner.FeatureRunnerError",
         "phase": expected_phase,
     }
@@ -973,7 +981,7 @@ def test_expired_cooperative_deadline_is_error_without_provision():
     )
 
     assert outcome.status is OutcomeStatus.ERROR
-    assert outcome.diagnostics["error"] == {
+    assert _error_identity(outcome.diagnostics["error"]) == {
         "type": "valkey_fuzzer.feature_runner.CooperativeDeadlineError",
         "phase": "topology.provision",
     }
@@ -1144,7 +1152,7 @@ def test_runner_component_validator_rejects_before_factory_or_provision():
     ).run(_plan((_spec(ComponentKind.ACTION, "activate"),)))
 
     assert outcome.status is OutcomeStatus.ERROR
-    assert outcome.diagnostics["error"] == {
+    assert _error_identity(outcome.diagnostics["error"]) == {
         "type": "valkey_fuzzer.feature_runner.FeatureRunnerError",
         "phase": "static preflight",
     }
@@ -1221,7 +1229,7 @@ def test_provider_method_signature_is_checked_before_validation_or_component_fac
     ("capability_status", "expected_outcome"),
     (
         (ComponentStatus.SKIP, OutcomeStatus.SKIP_UNSUPPORTED),
-        (ComponentStatus.FAIL, OutcomeStatus.FAIL),
+        (ComponentStatus.FAIL, OutcomeStatus.ERROR),
     ),
 )
 def test_effective_required_capability_dependency_blocks_before_provision(
@@ -1333,7 +1341,7 @@ def test_rollback_failure_is_recorded_without_masking_the_provision_error():
     ).run(_plan((_spec(ComponentKind.ACTION, "activate"),)))
 
     assert outcome.status is OutcomeStatus.ERROR
-    assert outcome.diagnostics["error"] == {
+    assert _error_identity(outcome.diagnostics["error"]) == {
         "type": "RuntimeError",
         "phase": "topology.provision",
     }

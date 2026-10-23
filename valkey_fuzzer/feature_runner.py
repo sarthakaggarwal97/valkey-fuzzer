@@ -11,7 +11,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Any, Optional, Union
 
@@ -222,6 +222,11 @@ _START_METHODS = {
     ComponentKind.ACTION: ("run", "action.started", "action.completed", "action.failed"),
 }
 
+# Only these roles judge the system under test. A FAIL from any other role
+# (a capability probe, a workload or observer start, a fault arm) means the
+# harness could not establish the conditions for a verdict, so it is an ERROR.
+_VERDICT_KINDS = frozenset({ComponentKind.ORACLE, ComponentKind.ACTION})
+
 _CLEANUP_METHODS = {
     ComponentKind.OBSERVER: ("stop", "observer.stopping", "observer.stopped", "observer.stop_failed"),
     ComponentKind.WORKLOAD: ("stop", "workload.quiescing", "workload.quiesced", "workload.stop_failed"),
@@ -302,6 +307,9 @@ def stable_topological_order(
     return tuple(ordered)
 
 
+_MAX_EXCEPTION_MESSAGE = 2000
+
+
 def _exception_data(
     exc: BaseException,
     *,
@@ -312,9 +320,62 @@ def _exception_data(
     if error_type.__module__ != "builtins":
         qualified_name = f"{error_type.__module__}.{qualified_name}"
     result = {"type": qualified_name}
+    message = str(exc)
+    if message:
+        result["message"] = (
+            message if len(message) <= _MAX_EXCEPTION_MESSAGE else message[:_MAX_EXCEPTION_MESSAGE] + "..."
+        )
     if phase is not None:
         result["phase"] = phase
     return result
+
+
+_REDACTED = "<redacted>"
+
+
+def _sensitive_values(binding: Any) -> tuple[str, ...]:
+    """Collect resolved environment outputs, which must never appear in reports."""
+    values: set[str] = set()
+
+    def collect(value: Any) -> None:
+        if isinstance(value, Mapping):
+            for nested in value.values():
+                collect(nested)
+        elif isinstance(value, (list, tuple)):
+            for nested in value:
+                collect(nested)
+        elif value is not None and not isinstance(value, bool):
+            text = str(value)
+            if text:
+                values.add(text)
+
+    for artifact in binding.artifacts.values():
+        collect(artifact.outputs)
+    for resource in binding.resources.values():
+        collect(resource.outputs)
+    # Replace longer values first so a value containing another is fully hidden.
+    return tuple(sorted(values, key=lambda item: (-len(item), item)))
+
+
+def _redact(value: Any, sensitive_values: Sequence[str]) -> Any:
+    if isinstance(value, str):
+        for sensitive in sensitive_values:
+            if sensitive in value:
+                value = value.replace(sensitive, _REDACTED)
+        return value
+    if isinstance(value, Mapping):
+        return {key: _redact(nested, sensitive_values) for key, nested in value.items()}
+    if isinstance(value, (list, tuple)):
+        return tuple(_redact(nested, sensitive_values) for nested in value)
+    return value
+
+
+def _redact_component_result(result: ComponentResult, sensitive_values: Sequence[str]) -> ComponentResult:
+    return replace(
+        result,
+        summary=_redact(result.summary, sensitive_values),
+        diagnostics=_redact(to_plain_data(result.diagnostics), sensitive_values),
+    )
 
 
 def _event_data(event: LifecycleEvent) -> Mapping[str, Any]:
@@ -1205,9 +1266,9 @@ class FeatureRunner:
                     )
                 if spec.instance_id in effective_required and result.status is ComponentStatus.FAIL:
                     raise _EarlyTerminalError(
-                        OutcomeStatus.FAIL,
-                        f"required capability {spec.instance_id!r} failed",
-                        trustworthy_feature_failure=True,
+                        OutcomeStatus.ERROR,
+                        f"required capability {spec.instance_id!r} failed; a capability probe establishes "
+                        "support, not feature behavior, so no trustworthy verdict is possible",
                     )
             current_spec = None
 
@@ -1223,12 +1284,11 @@ class FeatureRunner:
                     execution_results[instance_id].status for instance_id in blocked_required_capabilities
                 }
                 outcome_status = (
-                    OutcomeStatus.SKIP_UNSUPPORTED if ComponentStatus.SKIP in blocked_statuses else OutcomeStatus.FAIL
+                    OutcomeStatus.SKIP_UNSUPPORTED if ComponentStatus.SKIP in blocked_statuses else OutcomeStatus.ERROR
                 )
                 raise _EarlyTerminalError(
                     outcome_status,
                     f"required capabilities were blocked: {', '.join(blocked_required_capabilities)}",
-                    trustworthy_feature_failure=outcome_status is OutcomeStatus.FAIL,
                 )
 
             error_phase = "registry"
@@ -1522,6 +1582,24 @@ class FeatureRunner:
             and spec.instance_id in execution_results
             and execution_results[spec.instance_id].status in (ComponentStatus.FAIL, ComponentStatus.SKIP)
         )
+        # Root causes are required components that ran and did not pass; blocked
+        # components are consequences of those. Only a FAIL from a verdict role
+        # is evidence about the system under test.
+        verdict_failures = tuple(
+            spec.instance_id
+            for spec in ordered
+            if spec.instance_id in required_failures
+            and spec.instance_id in invoked_results
+            and spec.kind in _VERDICT_KINDS
+            and execution_results[spec.instance_id].status is ComponentStatus.FAIL
+        )
+        untrusted_failures = tuple(
+            spec.instance_id
+            for spec in ordered
+            if spec.instance_id in required_failures
+            and spec.instance_id in invoked_results
+            and spec.instance_id not in verdict_failures
+        )
         missing_events = tuple(
             event_name for event_name in plan.required_events if not event_bus.committed_history(event_name)
         )
@@ -1529,16 +1607,10 @@ class FeatureRunner:
             plan.required_evidence,
             evidence_ledger,
         )
-        real_required_failure = any(
-            spec.instance_id in effective_required
-            and spec.instance_id in invoked_results
-            and execution_results[spec.instance_id].status is ComponentStatus.FAIL
-            for spec in ordered
-            if spec.instance_id in execution_results
-        )
-        trustworthy_feature_failure = real_required_failure or (
-            terminal is not None and terminal.trustworthy_feature_failure
-        )
+        if terminal is not None:
+            trustworthy_feature_failure = terminal.trustworthy_feature_failure
+        else:
+            trustworthy_feature_failure = bool(verdict_failures) and not untrusted_failures
 
         diagnostics: dict[str, Any] = {}
         if cleanup_errors:
@@ -1550,12 +1622,23 @@ class FeatureRunner:
                 diagnostics["missing_required_evidence"] = missing_evidence
             if required_failures:
                 diagnostics["required_component_failures"] = required_failures
+            if untrusted_failures:
+                diagnostics["untrusted_component_failures"] = untrusted_failures
         if error is not None:
             diagnostics["error"] = _exception_data(error, phase=error_phase)
 
         if error is not None:
             status = OutcomeStatus.ERROR
             summary = f"runner execution failed during {error_phase}"
+        elif terminal is not None and terminal.status is OutcomeStatus.ERROR:
+            status = OutcomeStatus.ERROR
+            summary = terminal.summary
+        elif terminal is None and untrusted_failures:
+            status = OutcomeStatus.ERROR
+            summary = (
+                "required non-verdict components did not pass, so no trustworthy verdict is possible: "
+                f"{', '.join(untrusted_failures)}"
+            )
         elif cleanup_errors and not trustworthy_feature_failure:
             status = OutcomeStatus.ERROR
             summary = "cleanup failed before a trustworthy feature failure was established"
@@ -1597,6 +1680,7 @@ class FeatureRunner:
         report: EnvironmentReport,
         *,
         teardown_error: Optional[BaseException] = None,
+        sensitive_values: Sequence[str] = (),
     ) -> RunOutcome:
         outcome = execution.outcome
         diagnostics = dict(to_plain_data(outcome.diagnostics))
@@ -1612,13 +1696,17 @@ class FeatureRunner:
             status = OutcomeStatus.ERROR
             summary = "environment cleanup failed before a trustworthy feature failure was established"
 
+        # Exception messages are kept for debugging, but resolved environment
+        # outputs (credentials, endpoints, tokens) are scrubbed from them.
         return RunOutcome(
             plan=outcome.plan,
             status=status,
-            summary=summary,
-            component_results=outcome.component_results,
+            summary=_redact(summary, sensitive_values),
+            component_results=tuple(
+                _redact_component_result(result, sensitive_values) for result in outcome.component_results
+            ),
             evidence=outcome.evidence,
-            diagnostics=diagnostics,
+            diagnostics=_redact(diagnostics, sensitive_values),
             started_at=outcome.started_at,
             ended_at=self._clock(),
         )
@@ -1711,8 +1799,10 @@ class FeatureRunner:
             )
 
         execution: Optional[_ExecutionResult] = None
+        sensitive_values: tuple[str, ...] = ()
         try:
             try:
+                sensitive_values = _sensitive_values(session.binding)
                 bound_plan = BoundRunPlan.materialize(plan, session.binding)
                 context.bind_plan(bound_plan)
                 execution = self._execute_bound(
@@ -1732,15 +1822,7 @@ class FeatureRunner:
                         summary="environment binding or runner setup failed",
                         component_results=(),
                         started_at=started_at,
-                        diagnostics={
-                            "error": {
-                                "type": (
-                                    type(exc).__qualname__
-                                    if type(exc).__module__ == "builtins"
-                                    else f"{type(exc).__module__}.{type(exc).__qualname__}"
-                                )
-                            }
-                        },
+                        diagnostics={"error": _exception_data(exc, phase="environment binding")},
                     )
                 )
         except BaseException as primary_error:
@@ -1765,8 +1847,9 @@ class FeatureRunner:
                 execution,
                 report,
                 teardown_error=teardown_error,
+                sensitive_values=sensitive_values,
             )
-        return self._with_environment_report(execution, report)
+        return self._with_environment_report(execution, report, sensitive_values=sensitive_values)
 
 
 def run_feature_plan(

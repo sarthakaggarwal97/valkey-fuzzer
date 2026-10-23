@@ -667,7 +667,8 @@ def test_post_bind_exception_messages_never_echo_resolved_values(
     assert outcome.status is OutcomeStatus.ERROR
     assert sentinel not in serialized
     assert sentinel not in outcome.summary
-    assert '"message"' not in serialized
+    # Messages are kept for debugging, with resolved environment values scrubbed.
+    assert "echoed <redacted>" in serialized
 
 
 def test_retained_bound_views_expire_after_environment_cleanup(tmp_path):
