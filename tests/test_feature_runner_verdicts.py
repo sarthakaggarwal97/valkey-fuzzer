@@ -204,3 +204,28 @@ def test_environment_binding_failure_keeps_the_exception_message():
         "message": "binding exploded",
         "phase": "environment binding",
     }
+
+
+def test_outcome_records_the_valkey_sha_reported_by_the_topology():
+    from valkey_fuzzer.extensibility import RunOutcome
+    from valkey_fuzzer.feature_runner import ProvisionedTopology
+
+    class ShaProvider(_Provider):
+        def provision(self, context):
+            provisioned = super().provision(context)
+            self.provisioned = ProvisionedTopology(
+                handle=provisioned.handle,
+                services=provisioned.services,
+                valkey_sha="0123abcd",
+            )
+            return self.provisioned
+
+    outcome = FeatureRunner(
+        _registries([(ComponentKind.ACTION, "tests.action", lambda: _Component(PASS))]),
+        _topology_providers(standalone=lambda: ShaProvider([], "standalone")),
+    ).run(_plan((_spec(ComponentKind.ACTION, "activate"),)))
+
+    assert outcome.status is OutcomeStatus.PASS
+    assert outcome.valkey_sha == "0123abcd"
+    assert outcome.to_data()["valkey_sha"] == "0123abcd"
+    assert RunOutcome.from_json(outcome.to_json()).valkey_sha == "0123abcd"

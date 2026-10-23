@@ -683,6 +683,7 @@ def test_provider_provisions_handle_services_clients_restarts_and_exact_cleanup(
     assert not hasattr(handle.nodes[0], "process")
     assert handle.topology_type is TopologyType.STANDALONE
     assert handle.valkey_sha == "abc1234"
+    assert topology.valkey_sha == "abc1234"
     assert not hasattr(handle, "connection")
     assert not hasattr(handle, "client")
     execute_command = handle.execute_command

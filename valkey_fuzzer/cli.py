@@ -221,6 +221,8 @@ class FuzzerCLI:
             f"{counts[ComponentStatus.ERROR]} errors"
         )
         print(f"Evidence: {len(outcome.all_evidence)}")
+        if outcome.valkey_sha:
+            print(f"Valkey SHA: {outcome.valkey_sha}")
         print(f"Summary: {outcome.summary}")
 
     def _print_detailed_result(self, outcome: RunOutcome) -> None:

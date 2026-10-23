@@ -686,6 +686,7 @@ class FeatureRunner:
         component_results: Sequence[ComponentResult],
         started_at: float,
         diagnostics: Optional[Mapping[str, Any]] = None,
+        valkey_sha: Optional[str] = None,
     ) -> RunOutcome:
         combined_diagnostics = dict(diagnostics or {})
         combined_diagnostics["events"] = tuple(_event_data(event) for event in context.event_bus.attempted_history())
@@ -700,6 +701,7 @@ class FeatureRunner:
             diagnostics=combined_diagnostics,
             started_at=started_at,
             ended_at=self._clock(),
+            valkey_sha=valkey_sha,
         )
 
     def _validate_component_registration(
@@ -1219,6 +1221,7 @@ class FeatureRunner:
         primary_base_exception: Optional[BaseException] = None
         terminal: Optional[_EarlyTerminalError] = None
         topology: Optional[ProvisionedTopology] = None
+        valkey_sha: Optional[str] = None
         provider: Optional[TopologyProvider] = None
         topology_registration: Optional[TopologyProviderRegistration] = None
         cleanups: list[_CleanupEntry] = []
@@ -1341,6 +1344,7 @@ class FeatureRunner:
                     raise rollback_base_exception
                 raise invalid_provision
             topology = provisioned
+            valkey_sha = topology.valkey_sha
             self._check_topology_registry_drift(topology_registration)
             topology_bound_plan = BoundRunPlan.materialize(
                 context.source_plan,
@@ -1685,6 +1689,7 @@ class FeatureRunner:
                 component_results=component_results,
                 started_at=started_at,
                 diagnostics=diagnostics,
+                valkey_sha=valkey_sha,
             ),
             trustworthy_feature_failure=trustworthy_feature_failure,
         )
@@ -1724,6 +1729,7 @@ class FeatureRunner:
             diagnostics=_redact(diagnostics, sensitive_values),
             started_at=outcome.started_at,
             ended_at=self._clock(),
+            valkey_sha=outcome.valkey_sha,
         )
 
     def run(

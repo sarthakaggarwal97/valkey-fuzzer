@@ -518,6 +518,7 @@ class LocalValkeyTopologyProvider:
         topology = ProvisionedTopology(
             handle=handle,
             services={LOCAL_TOPOLOGY_SERVICE: handle},
+            valkey_sha=instance.valkey_sha,
         )
 
         self._active_coordinator = coordinator

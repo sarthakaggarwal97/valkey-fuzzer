@@ -312,6 +312,20 @@ def test_report_round_trips_the_complete_outcome_without_dsl_version(output_form
     assert RunOutcome.from_data(report["results"][0]) == outcome
 
 
+def test_report_records_the_valkey_sha(tmp_path, capsys):
+    from dataclasses import replace
+
+    outcome = replace(_outcome(), valkey_sha="0123abcd")
+    output = tmp_path / "result.json"
+
+    FuzzerCLI()._save_outcomes((outcome,), str(output), "json")
+    FuzzerCLI()._print_summary_result(outcome)
+
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["results"][0]["valkey_sha"] == "0123abcd"
+    assert "Valkey SHA: 0123abcd" in capsys.readouterr().out
+
+
 @patch("valkey_fuzzer.cli.FeatureRuntime")
 def test_report_write_failure_is_a_harness_error_and_removes_temporary_file(runtime_class, tmp_path):
     scenario = tmp_path / "scenario.yaml"

@@ -814,10 +814,14 @@ class RunOutcome:
     diagnostics: Mapping[str, Any] = field(default_factory=dict)
     started_at: Optional[float] = None
     ended_at: Optional[float] = None
+    # Git SHA of the valkey-server under test, when the topology provider knows it.
+    valkey_sha: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.plan, RunPlan):
             raise TypeError("plan must be a RunPlan")
+        if self.valkey_sha is not None and not isinstance(self.valkey_sha, str):
+            raise TypeError("valkey_sha must be a string or None")
         if isinstance(self.status, str):
             object.__setattr__(self, "status", OutcomeStatus(self.status))
         if not isinstance(self.status, OutcomeStatus):
@@ -1154,6 +1158,7 @@ def run_outcome_from_data(value: Mapping[str, Any]) -> RunOutcome:
             "diagnostics",
             "started_at",
             "ended_at",
+            "valkey_sha",
         ),
         required=("plan", "status", "summary"),
     )
@@ -1173,6 +1178,7 @@ def run_outcome_from_data(value: Mapping[str, Any]) -> RunOutcome:
         diagnostics=mapping.get("diagnostics", {}),
         started_at=mapping.get("started_at"),
         ended_at=mapping.get("ended_at"),
+        valkey_sha=mapping.get("valkey_sha"),
     )
 
 
@@ -1639,8 +1645,12 @@ class ProvisionedTopology:
         compare=False,
         metadata={"serialize": False},
     )
+    # Report-safe identity of the valkey-server build, recorded on the outcome.
+    valkey_sha: Optional[str] = None
 
     def __post_init__(self) -> None:
+        if self.valkey_sha is not None and not isinstance(self.valkey_sha, str):
+            raise TypeError("provisioned topology valkey_sha must be a string or None")
         if not isinstance(self.services, Mapping):
             raise TypeError("provisioned topology services must be a mapping")
         if any(not isinstance(key, str) for key in self.services):
