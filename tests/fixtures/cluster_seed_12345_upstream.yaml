@@ -1,0 +1,50 @@
+scenario_id: '12345'
+seed: 12345
+cluster:
+  num_shards: 9
+  replicas_per_shard: 1
+  base_port: 7839
+  base_data_dir: /tmp/valkey-fuzzer
+  valkey_binary: ''
+  enable_cleanup: true
+operations:
+- type: failover
+  target_node: shard-5-primary
+  parameters:
+    force: false
+  timing:
+    delay_before: 4.658923454346558
+    timeout: 30.809793640973616
+    delay_after: 2.181142053070956
+- type: failover
+  target_node: shard-1-primary
+  parameters:
+    force: true
+  timing:
+    delay_before: 4.37087168667228
+    timeout: 30.443599987649463
+    delay_after: 3.1360736554243998
+- type: failover
+  target_node: shard-5-primary
+  parameters:
+    force: false
+  timing:
+    delay_before: 3.6907426997298294
+    timeout: 49.31478711703244
+    delay_after: 2.6552137724548572
+chaos:
+  type: process_kill
+  process_chaos_type: sigterm
+  randomize_per_operation: false
+  target_selection:
+    strategy: replica_only
+    specific_nodes: null
+  timing:
+    delay_before_operation: 1.007870736220075
+    delay_after_operation: 0.29629233786037834
+    chaos_duration: 12.18967140300885
+  coordination:
+    chaos_before_operation: true
+    chaos_during_operation: false
+    chaos_after_operation: false
+state_validation: null

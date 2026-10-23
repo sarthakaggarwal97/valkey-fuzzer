@@ -107,13 +107,14 @@ topology:
 """
 
 
-def test_cli_exposes_no_legacy_engine_or_version_router():
-    assert not hasattr(cli_module, "ClusterBusFuzzer")
-    assert not hasattr(cli_module, "DSLLoader")
-    assert not hasattr(cli_module, "ScenarioGenerator")
-    assert not hasattr(cli_module, "ScenarioRoutingError")
-    assert not hasattr(FuzzerCLI, "run_random_test")
-    assert not hasattr(FuzzerCLI, "run_dsl_test")
+def test_cli_keeps_the_random_cluster_fuzzer_path():
+    # The scheduled and PR fuzzer workflows depend on `valkey-fuzzer cluster`.
+    assert hasattr(cli_module, "ClusterFuzzerCLI")
+    assert hasattr(FuzzerCLI, "run_cluster")
+    args = create_parser().parse_args(["cluster", "--random", "--export-dsl", "scenario.yaml"])
+    assert args.command == "cluster"
+    assert args.random is True
+    assert args.export_dsl == "scenario.yaml"
 
 
 @pytest.mark.parametrize(
@@ -536,13 +537,14 @@ topology:
 
 
 class TestParser:
-    def test_public_commands_are_only_run_validate_and_cleanup(self):
+    def test_public_commands(self):
         parser = create_parser()
         assert parser.parse_args(["run", "scenario.yaml"]).command == "run"
         assert parser.parse_args(["validate", "scenario.yaml"]).command == "validate"
         assert parser.parse_args(["cleanup-logs", "42", "--force"]).command == "cleanup-logs"
+        assert parser.parse_args(["cluster", "--random"]).command == "cluster"
         with pytest.raises(SystemExit):
-            parser.parse_args(["cluster", "--random"])
+            parser.parse_args(["unknown"])
 
     def test_run_runtime_and_report_options(self):
         args = create_parser().parse_args(
@@ -604,12 +606,11 @@ class TestParser:
         with pytest.raises(SystemExit):
             create_parser().parse_args(["run", "scenario.yaml", "--timeout", value])
 
-    def test_help_describes_the_generic_model_only(self):
+    def test_help_describes_feature_and_cluster_fuzzing(self):
         help_text = create_parser().format_help()
         assert "standalone, replication, and cluster" in help_text
         assert "feature scenario" in help_text
-        assert "legacy" not in help_text.lower()
-        assert "cluster --" not in help_text
+        assert "valkey-fuzzer cluster --random" in help_text
 
 
 class TestMain:

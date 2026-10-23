@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Command-line interface for generic, feature-pack-driven Valkey fuzzing."""
+"""Command-line interface for feature-pack-driven and random cluster Valkey fuzzing."""
 
 import argparse
 import json
@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 import yaml
 
+from .cluster_cli import ClusterFuzzerCLI, is_cluster_dsl_document
 from .extensibility import ComponentStatus, OutcomeStatus, RunOutcome, RunPlan, to_plain_data
 from .feature_runtime import FeatureRuntime
 from .utils.cluster_utils import cleanup_logs
@@ -27,7 +28,34 @@ EXIT_UNSUPPORTED = 3
 
 
 class FuzzerCLI:
-    """Small public facade over the generic compiler, runtime, and runner."""
+    """Small public facade over the generic runtime and the random cluster fuzzer."""
+
+    @staticmethod
+    def _cluster_cli() -> ClusterFuzzerCLI:
+        return ClusterFuzzerCLI()
+
+    def run_cluster(self, args: argparse.Namespace) -> int:
+        """Run the random or DSL-driven cluster fuzzer (``valkey-fuzzer cluster``)."""
+
+        cluster_cli = self._cluster_cli()
+        if args.dsl:
+            dsl_args = argparse.Namespace(
+                file=args.dsl,
+                valkey_binary=args.valkey_binary,
+                output=args.output,
+                format=args.format,
+                verbose=args.verbose,
+            )
+            return cluster_cli.run_dsl_test(dsl_args)
+        return cluster_cli.run_random_test(args)
+
+    @staticmethod
+    def _is_cluster_dsl_file(path: Path) -> bool:
+        try:
+            document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, yaml.YAMLError):
+            return False
+        return is_cluster_dsl_document(document)
 
     @staticmethod
     def _runtime(args: argparse.Namespace) -> FeatureRuntime:
@@ -99,10 +127,13 @@ class FuzzerCLI:
             return EXIT_HARNESS_ERROR
 
     def validate_scenario(self, args: argparse.Namespace) -> int:
-        """Compile and structurally validate one generic scenario."""
+        """Validate a generic feature scenario or a cluster fuzzer DSL file."""
+
+        path = Path(args.file)
+        if self._is_cluster_dsl_file(path):
+            return self._cluster_cli().validate_dsl(args)
 
         self._print_header(f"Validating scenario: {args.file}")
-        path = Path(args.file)
 
         try:
             source = self._read_scenario(path)
@@ -358,9 +389,18 @@ def create_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Feature scenarios
   valkey-fuzzer run scenario.yaml --feature-pack-dir ./feature-packs
   valkey-fuzzer run scenario.yaml --timeout 120 --output results.json
   valkey-fuzzer validate scenario.yaml --feature-pack-dir ./feature-packs
+
+  # Random cluster fuzzing
+  valkey-fuzzer cluster --random
+  valkey-fuzzer cluster --seed 42 --iterations 10
+  valkey-fuzzer cluster --random --export-dsl scenario.yaml --output results.json
+  valkey-fuzzer cluster --dsl examples/simple_failover.yaml
+  valkey-fuzzer validate examples/simple_failover.yaml
+
   valkey-fuzzer cleanup-logs 12345 --force
         """,
     )
@@ -379,7 +419,25 @@ Examples:
     )
     run_parser.add_argument("--verbose", action="store_true", help="Show component-level details")
 
-    validate_parser = subparsers.add_parser("validate", help="Compile and structurally validate a scenario")
+    cluster_parser = subparsers.add_parser("cluster", help="Run random or DSL-driven cluster fuzzer tests")
+    cluster_parser.add_argument("--random", action="store_true", help="Run with random scenario")
+    cluster_parser.add_argument("--seed", type=int, help="Seed for reproducibility")
+    cluster_parser.add_argument("--dsl", type=str, metavar="FILE", help="Path to cluster fuzzer DSL YAML file")
+    cluster_parser.add_argument(
+        "--iterations", type=int, default=1, help="Number of test iterations to run (default: 1)"
+    )
+    cluster_parser.add_argument("--config", type=str, help="Path to configuration file (YAML or JSON)")
+    cluster_parser.add_argument("--valkey-binary", type=str, help="Path to the valkey-server binary to run")
+    cluster_parser.add_argument("--output", type=str, help="Path to save test results")
+    cluster_parser.add_argument(
+        "--format", choices=["json", "yaml"], default="json", help="Output format for results (default: json)"
+    )
+    cluster_parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
+    cluster_parser.add_argument(
+        "--export-dsl", type=str, metavar="FILE", help="Export the generated scenario to a DSL YAML file"
+    )
+
+    validate_parser = subparsers.add_parser("validate", help="Validate a feature scenario or cluster fuzzer DSL file")
     validate_parser.add_argument("file", help="Path to the scenario YAML file")
     _add_runtime_options(validate_parser, execution=False)
     validate_parser.add_argument("--verbose", action="store_true", help="Show the resolved component plan")
@@ -404,8 +462,18 @@ def main() -> int:
         parser.print_help()
         return EXIT_FEATURE_FAILURE
 
+    if args.command == "cluster" and not args.dsl and args.seed is None and not args.random:
+        print("Error: cluster command requires either --dsl, --seed, or --random\n")
+        print("Examples:")
+        print("  valkey-fuzzer cluster --random")
+        print("  valkey-fuzzer cluster --seed 42")
+        print("  valkey-fuzzer cluster --dsl test.yaml")
+        return EXIT_FEATURE_FAILURE
+
     cli = FuzzerCLI()
     try:
+        if args.command == "cluster":
+            return cli.run_cluster(args)
         if args.command == "run":
             return cli.run_scenario(args)
         if args.command == "validate":
