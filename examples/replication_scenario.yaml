@@ -12,5 +12,5 @@ topology:
   base_port: 7500
   enable_cleanup: true
 
-# A real replication-compression pack would add capability probes, activation,
+# A real replication-compression pack would add capability probes, actions,
 # negotiated-codec evidence, continuous traffic, and convergence oracles.

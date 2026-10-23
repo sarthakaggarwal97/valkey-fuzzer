@@ -6,8 +6,6 @@ from typing import Any, Optional
 
 import pytest
 
-from valkey_fuzzer import feature_runner as feature_runner_module
-from valkey_fuzzer.bound_plan import BoundRunPlan
 from valkey_fuzzer.extensibility import (
     ComponentKind,
     ComponentRegistration,
@@ -32,11 +30,9 @@ from valkey_fuzzer.extensibility import (
 from valkey_fuzzer.feature_packs import FeaturePackCatalog, compile_scenario
 from valkey_fuzzer.feature_runner import (
     FeatureRunner,
-    FeatureRunnerError,
     ProvisionedTopology,
     stable_topological_order,
 )
-from valkey_fuzzer.scheduling import ActivationMode, ActivationSpec, EventSelector, TriggerKind, TriggerSpec
 
 
 def _result(
@@ -309,7 +305,6 @@ def _spec(
     *,
     required: bool = True,
     depends_on: tuple[str, ...] = (),
-    activation: Optional[ActivationSpec] = None,
 ) -> ComponentSpec:
     return ComponentSpec(
         kind=kind,
@@ -317,7 +312,6 @@ def _spec(
         instance_id=instance_id,
         required=required,
         depends_on=depends_on,
-        activation=ActivationSpec() if activation is None else activation,
     )
 
 
@@ -1122,135 +1116,6 @@ def test_missing_required_evidence_count_fails_a_real_feature_run():
         },
     )
     assert seen_evidence == [("tests.activate",)]
-
-
-@pytest.mark.parametrize(
-    "activation",
-    (
-        ActivationSpec(mode=ActivationMode.CONCURRENT),
-        ActivationSpec(trigger=TriggerSpec(offset_s=0.25)),
-        ActivationSpec(
-            trigger=TriggerSpec(
-                kind=TriggerKind.EVENT,
-                event=EventSelector("feature.trigger"),
-                timeout_s=1,
-            ),
-        ),
-    ),
-    ids=("concurrent", "ready-offset", "event-trigger"),
-)
-def test_nondefault_activation_fails_closed_before_any_extension_or_environment_callback(
-    monkeypatch,
-    activation,
-):
-    calls: list[str] = []
-
-    def component_factory():
-        calls.append("component.factory")
-        return _Action(calls)
-
-    def component_validator(_spec, _plan):
-        calls.append("component.validator")
-
-    registry = Registry[Any](ComponentKind.ACTION)
-    registry.register(
-        _registration(
-            ComponentKind.ACTION,
-            "tests.action",
-            component_factory,
-            validator=component_validator,
-        )
-    )
-    runner = FeatureRunner(
-        {ComponentKind.ACTION: registry},
-        _topology_providers(standalone=lambda: _Provider(calls, "standalone")),
-    )
-    original_resolve = runner.topology_provider_registry.resolve
-
-    def resolve_topology(topology):
-        calls.append("topology.resolve")
-        return original_resolve(topology)
-
-    def acquire_environment(*_args, **_kwargs):
-        calls.append("environment.acquire")
-        raise AssertionError("environment acquisition must not run")
-
-    monkeypatch.setattr(runner.topology_provider_registry, "resolve", resolve_topology)
-    monkeypatch.setattr(runner._environment_manager, "acquire", acquire_environment)
-    plan = _plan((_spec(ComponentKind.ACTION, "activate", activation=activation),))
-
-    with pytest.raises(FeatureRunnerError, match="activation coordinator is not implemented"):
-        runner.validate(plan)
-    assert calls == []
-
-    outcome = runner.run(plan)
-
-    assert outcome.status is OutcomeStatus.ERROR
-    assert outcome.summary == "static runner preflight failed"
-    assert outcome.diagnostics["error"]["phase"] == "static preflight"
-    assert calls == []
-
-
-def test_activation_subclass_equality_cannot_bypass_fail_closed_preflight():
-    class LyingActivation(ActivationSpec):
-        def __eq__(self, _other):
-            return True
-
-        def __ne__(self, _other):
-            return False
-
-    hostile = LyingActivation(mode=ActivationMode.CONCURRENT)
-    with pytest.raises(TypeError, match="activation must be an ActivationSpec"):
-        _spec(
-            ComponentKind.ACTION,
-            "activate",
-            activation=hostile,
-        )
-
-    calls: list[str] = []
-
-    def component_factory():
-        calls.append("component.factory")
-        return _Action(calls)
-
-    def topology_factory():
-        calls.append("topology.factory")
-        return _Provider(calls, "standalone")
-
-    runner = FeatureRunner(
-        _registries(((ComponentKind.ACTION, "tests.action", component_factory),)),
-        _topology_providers(standalone=topology_factory),
-    )
-    plan = _plan((_spec(ComponentKind.ACTION, "activate"),))
-    object.__setattr__(plan.components[0], "activation", hostile)
-
-    with pytest.raises(FeatureRunnerError, match="activation coordinator is not implemented"):
-        runner.validate(plan)
-    assert calls == []
-
-    outcome = runner.run(plan)
-
-    assert outcome.status is OutcomeStatus.ERROR
-    assert outcome.summary == "static runner preflight failed"
-    assert calls == []
-
-
-def test_runner_rechecks_activation_after_environment_binding(monkeypatch):
-    checked_plan_types = []
-    original_validate = feature_runner_module._validate_supported_activations
-
-    def record_validation(plan):
-        checked_plan_types.append(type(plan))
-        original_validate(plan)
-
-    monkeypatch.setattr(feature_runner_module, "_validate_supported_activations", record_validation)
-    outcome = FeatureRunner(
-        _registries(((ComponentKind.ACTION, "tests.action", lambda: _Action([])),)),
-        _topology_providers(standalone=lambda: _Provider([], "standalone")),
-    ).run(_plan((_spec(ComponentKind.ACTION, "activate"),)))
-
-    assert outcome.status is OutcomeStatus.PASS
-    assert checked_plan_types == [RunPlan, BoundRunPlan]
 
 
 def test_runner_component_validator_rejects_before_factory_or_provision():

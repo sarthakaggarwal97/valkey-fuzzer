@@ -1,0 +1,11 @@
+scenario_id: neutral-plugin-example
+seed: 17
+
+feature:
+  use: example.neutral
+  version: "1"
+  with:
+    message: configuration-reached-the-plugin
+
+topology:
+  type: example-neutral

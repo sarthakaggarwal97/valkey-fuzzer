@@ -47,7 +47,6 @@ from valkey_fuzzer.environment import (
 )
 from valkey_fuzzer.extensibility import to_plain_data
 from valkey_fuzzer.extension_contract import EXTENSION_API_VERSION
-from valkey_fuzzer.run_state import canonical_snapshot
 
 
 def _ref(path: str) -> EnvironmentReference:
@@ -388,11 +387,10 @@ def test_provider_results_separate_replayable_data_from_runtime_state():
     assert json.loads(artifact.to_json()) == artifact.to_data()
     assert json.loads(resource.to_json()) == resource.to_data()
     nested = {"artifact": artifact, "resource": resource}
-    for serialized in (to_plain_data(nested), canonical_snapshot(nested)):
-        assert serialized == {
-            "artifact": artifact.to_data(),
-            "resource": resource.to_data(),
-        }
+    assert to_plain_data(nested) == {
+        "artifact": artifact.to_data(),
+        "resource": resource.to_data(),
+    }
 
     same_public_record = ResolvedArtifact(
         artifact_id="candidate",

@@ -37,7 +37,6 @@ from .environment import (
     environment_references_from_data,
 )
 from .extension_contract import EXTENSION_API_VERSION
-from .scheduling import ActivationSpec, is_default_activation
 
 PLUGIN_ENTRY_POINT_GROUP = "valkey_fuzzer.plugins"
 
@@ -296,7 +295,6 @@ class ComponentSpec:
     config: Mapping[str, Any] = field(default_factory=dict)
     required: bool = True
     depends_on: tuple[str, ...] = ()
-    activation: ActivationSpec = field(default_factory=ActivationSpec)
     timeout_s: Optional[float] = None
 
     def __post_init__(self) -> None:
@@ -321,10 +319,6 @@ class ComponentSpec:
             raise ValueError(f"component {self.instance_id!r} contains duplicate dependencies")
         if self.instance_id in self.depends_on:
             raise ValueError(f"component {self.instance_id!r} cannot depend on itself")
-        if type(self.activation) is not ActivationSpec:
-            raise TypeError("activation must be an ActivationSpec")
-        if self.kind is ComponentKind.CAPABILITY and not is_default_activation(self.activation):
-            raise ValueError("capability probes require the default ready/serial activation")
         if self.timeout_s is not None:
             if (
                 isinstance(self.timeout_s, bool)
@@ -925,10 +919,9 @@ def _component_spec_from_data(value: Any) -> ComponentSpec:
             "config",
             "required",
             "depends_on",
-            "activation",
             "timeout_s",
         ),
-        required=("kind", "component_id", "instance_id", "activation"),
+        required=("kind", "component_id", "instance_id"),
     )
     return ComponentSpec(
         kind=mapping["kind"],
@@ -937,7 +930,6 @@ def _component_spec_from_data(value: Any) -> ComponentSpec:
         config=mapping.get("config", {}),
         required=mapping.get("required", True),
         depends_on=mapping.get("depends_on", ()),
-        activation=ActivationSpec.from_data(mapping["activation"]),
         timeout_s=mapping.get("timeout_s"),
     )
 
@@ -1205,79 +1197,6 @@ class LifecycleEvent:
         object.__setattr__(self, "payload", _freeze_mapping(self.payload))
 
 
-@dataclass(frozen=True)
-class CommittedLifecycleEvent:
-    """A lifecycle event whose complete subscriber dispatch succeeded.
-
-    ``commit_index`` is a contiguous, one-based cursor over successful
-    dispatches. It is deliberately separate from the raw event sequence,
-    which also counts failed and aborted publish attempts. ``committed_at`` is
-    sampled only after every subscriber returns successfully.
-    """
-
-    event: LifecycleEvent
-    commit_index: int
-    committed_at: float
-
-    def __post_init__(self) -> None:
-        if type(self.event) is not LifecycleEvent:
-            raise TypeError("committed lifecycle event must wrap a LifecycleEvent")
-        object.__setattr__(
-            self,
-            "commit_index",
-            _require_positive_event_int(self.commit_index, "commit_index"),
-        )
-        object.__setattr__(
-            self,
-            "committed_at",
-            _require_event_timestamp(self.committed_at, "committed_at"),
-        )
-        if self.committed_at < self.event.timestamp:
-            raise ValueError("committed_at cannot precede occurred_at")
-
-    @property
-    def raw_event(self) -> LifecycleEvent:
-        """Return the exact immutable event accepted by subscriber dispatch."""
-
-        return self.event
-
-    @property
-    def event_sequence(self) -> int:
-        """Return the attempted-event journal sequence."""
-
-        return self.event.sequence
-
-    @property
-    def occurred_at(self) -> float:
-        """Return the time at which the publish attempt was journaled."""
-
-        return self.event.timestamp
-
-    @property
-    def name(self) -> str:
-        return self.event.name
-
-    @property
-    def source(self) -> str:
-        return self.event.source
-
-    @property
-    def payload(self) -> Mapping[str, Any]:
-        return self.event.payload
-
-    @property
-    def sequence(self) -> int:
-        """Backward-compatible alias for :attr:`event_sequence`."""
-
-        return self.event_sequence
-
-    @property
-    def timestamp(self) -> float:
-        """Backward-compatible alias for :attr:`occurred_at`."""
-
-        return self.occurred_at
-
-
 EventHandler = Callable[[LifecycleEvent], None]
 
 
@@ -1385,7 +1304,7 @@ class LifecycleEventBus:
         self._next_subscription_token = 1
         self._subscribers: dict[int, _Subscriber] = {}
         self._history: list[LifecycleEvent] = []
-        self._committed_events: list[CommittedLifecycleEvent] = []
+        self._committed_history: list[LifecycleEvent] = []
         self._pending: deque[_PendingEvent] = deque()
         self._dispatching = False
         self._dispatch_thread_id: Optional[int] = None
@@ -1468,17 +1387,7 @@ class LifecycleEventBus:
                     except Exception as exc:
                         raise EventDispatchError(current.event, subscriber.subscription, exc) from exc
                 with self._condition:
-                    committed_event = CommittedLifecycleEvent(
-                        event=current.event,
-                        commit_index=len(self._committed_events) + 1,
-                        committed_at=self._clock(),
-                    )
-                    if (
-                        self._committed_events
-                        and committed_event.committed_at < self._committed_events[-1].committed_at
-                    ):
-                        raise ValueError("committed_at must be non-decreasing across committed lifecycle events")
-                    self._committed_events.append(committed_event)
+                    self._committed_history.append(current.event)
                     current.completed = True
                     self._condition.notify_all()
                 current = None
@@ -1510,92 +1419,14 @@ class LifecycleEventBus:
             return tuple(event for event in self._history if event.name == event_name)
 
     def committed_history(self, event_name: Optional[str] = None) -> tuple[LifecycleEvent, ...]:
-        """Return raw events whose complete subscriber dispatch succeeded.
-
-        This preserves the original component-facing history contract. Host
-        coordinators that need commit cursors and commit timestamps should use
-        :meth:`read_committed` or :meth:`wait_committed`.
-        """
+        """Return only events whose complete subscriber dispatch succeeded."""
 
         if event_name is not None:
             event_name = _require_name(event_name, "event_name")
         with self._lock:
             if event_name is None:
-                return tuple(committed.event for committed in self._committed_events)
-            return tuple(committed.event for committed in self._committed_events if committed.event.name == event_name)
-
-    @staticmethod
-    def _validate_commit_cursor(after_commit_index: int, current_commit_index: int) -> int:
-        if isinstance(after_commit_index, bool) or not isinstance(after_commit_index, int):
-            raise ValueError("after_commit_index must be a non-negative integer")
-        cursor = int.__int__(after_commit_index)
-        if cursor < 0:
-            raise ValueError("after_commit_index must be a non-negative integer")
-        if cursor > current_commit_index:
-            raise ValueError("after_commit_index cannot exceed the latest committed event index")
-        return cursor
-
-    def read_committed(self, after_commit_index: int = 0) -> tuple[CommittedLifecycleEvent, ...]:
-        """Return the immutable committed envelopes after a known cursor.
-
-        The cursor is a ``commit_index`` previously returned by this bus, or
-        zero for the beginning of the stream. The method never invokes
-        extension callbacks and returns an empty tuple when no newer commit is
-        currently available.
-        """
-
-        with self._lock:
-            after_commit_index = self._validate_commit_cursor(
-                after_commit_index,
-                len(self._committed_events),
-            )
-            return tuple(self._committed_events[after_commit_index:])
-
-    def wait_committed(
-        self,
-        after_commit_index: int = 0,
-        *,
-        timeout: Optional[float] = None,
-    ) -> tuple[CommittedLifecycleEvent, ...]:
-        """Wait for and return committed envelopes after a known cursor.
-
-        ``timeout=None`` waits indefinitely until at least one newer event
-        commits or the bus is quiesced. A finite non-negative timeout is in
-        seconds; expiration returns an empty tuple. Quiescing wakes all
-        waiters. A waiter then returns every newer committed envelope, or an
-        empty tuple when quiescence occurred without a newer commit. A
-        subscriber running on the dispatch thread may perform an immediate
-        read or zero-timeout poll, but cannot block waiting for the event whose
-        dispatch it is currently preventing from committing.
-        """
-
-        if timeout is not None:
-            try:
-                timeout = _require_event_timestamp(timeout, "timeout")
-            except TypeError as exc:
-                raise TypeError("timeout must be None or a finite non-negative number") from exc
-            except ValueError as exc:
-                raise ValueError("timeout must be None or a finite non-negative number") from exc
-            if timeout < 0:
-                raise ValueError("timeout must be None or a finite non-negative number")
-        with self._condition:
-            after_commit_index = self._validate_commit_cursor(
-                after_commit_index,
-                len(self._committed_events),
-            )
-            if (
-                self._dispatching
-                and self._dispatch_thread_id == threading.get_ident()
-                and len(self._committed_events) == after_commit_index
-                and not self._quiesced
-                and (timeout is None or timeout > 0)
-            ):
-                raise RuntimeError("cannot block waiting for committed events from the event dispatch thread")
-            self._condition.wait_for(
-                lambda: len(self._committed_events) > after_commit_index or self._quiesced,
-                timeout=timeout,
-            )
-            return tuple(self._committed_events[after_commit_index:])
+                return tuple(self._committed_history)
+            return tuple(event for event in self._committed_history if event.name == event_name)
 
     def history(self, event_name: Optional[str] = None) -> tuple[LifecycleEvent, ...]:
         """Backward-compatible alias for :meth:`attempted_history`."""
@@ -1668,9 +1499,6 @@ class ExecutableComponentSpec(Protocol):
 
     @property
     def depends_on(self) -> Sequence[str]: ...
-
-    @property
-    def activation(self) -> ActivationSpec: ...
 
     @property
     def timeout_s(self) -> Optional[float]: ...
@@ -2755,9 +2583,7 @@ __all__ = [
     "EXTENSION_API_VERSION",
     "PLUGIN_ENTRY_POINT_GROUP",
     "Action",
-    "ActivationSpec",
     "CapabilityProbe",
-    "CommittedLifecycleEvent",
     "ComponentKind",
     "ComponentRegistration",
     "ComponentResult",

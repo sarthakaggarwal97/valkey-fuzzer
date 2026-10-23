@@ -12,7 +12,6 @@ import yaml
 
 from valkey_fuzzer.extensibility import (
     Action,
-    CommittedLifecycleEvent,
     ComponentKind,
     ComponentRegistration,
     ComponentResult,
@@ -26,7 +25,6 @@ from valkey_fuzzer.extensibility import (
     EvidenceRequirement,
     FeaturePackSpec,
     IncompatibleRegistrationError,
-    LifecycleEvent,
     LifecycleEventBus,
     NodeSelector,
     OutcomeStatus,
@@ -42,7 +40,6 @@ from valkey_fuzzer.extensibility import (
     discover_plugins,
     to_plain_data,
 )
-from valkey_fuzzer.scheduling import ActivationMode, ActivationSpec, EventSelector, TriggerKind, TriggerSpec
 
 
 def _component(
@@ -210,7 +207,14 @@ def test_run_plan_requires_a_replay_locked_topology_provider_identity():
         RunPlan.from_data(serialized)
 
 
-def test_durable_component_data_requires_an_explicit_activation_document():
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    (
+        ("activation", {"mode": "concurrent"}),
+        ("when_event", "action.started"),
+    ),
+)
+def test_durable_component_data_rejects_removed_scheduler_fields(field_name, value):
     plan = RunPlan.from_feature_pack(
         _feature_pack(),
         scenario_id="scenario-1",
@@ -221,26 +225,15 @@ def test_durable_component_data_requires_an_explicit_activation_document():
     serialized = plan.to_data()
     component = serialized["components"][0]
 
-    assert component["activation"] == ActivationSpec().to_data()
+    assert "activation" not in component
+    assert "when_event" not in component
     assert RunPlan.from_data(serialized) == plan
 
-    missing = dict(serialized)
-    missing["components"] = [dict(component)]
-    del missing["components"][0]["activation"]
-    with pytest.raises(ValueError, match=r"component.*missing required fields.*activation"):
-        RunPlan.from_data(missing)
-
-    explicit_null = dict(serialized)
-    explicit_null["components"] = [dict(component)]
-    explicit_null["components"][0]["activation"] = None
-    with pytest.raises(TypeError, match="activation must be a mapping"):
-        RunPlan.from_data(explicit_null)
-
-    unknown_nested_field = dict(serialized)
-    unknown_nested_field["components"] = [dict(component)]
-    unknown_nested_field["components"][0]["activation"] = {"unknown": True}
-    with pytest.raises(ValueError, match="activation contains unknown fields"):
-        RunPlan.from_data(unknown_nested_field)
+    invalid = dict(serialized)
+    invalid["components"] = [dict(component)]
+    invalid["components"][0][field_name] = value
+    with pytest.raises(ValueError, match=r"component.*unknown fields"):
+        RunPlan.from_data(invalid)
 
 
 @pytest.mark.parametrize(
@@ -489,39 +482,8 @@ def test_evidence_requirements_validate_and_roundtrip_with_run_mode():
         )
 
 
-def test_component_activation_defaults_to_ready_serial_and_capabilities_require_that_exact_default():
-    action = ComponentSpec(
-        kind=ComponentKind.ACTION,
-        component_id="example.action",
-        instance_id="activate",
-    )
-    capability = ComponentSpec(
-        kind=ComponentKind.CAPABILITY,
-        component_id="example.capability",
-        instance_id="supported",
-        activation=ActivationSpec(),
-    )
-
-    assert action.activation == ActivationSpec()
-    assert capability.activation == ActivationSpec()
-
-    with pytest.raises(ValueError, match="capability probes require the default ready/serial activation"):
-        ComponentSpec(
-            kind=ComponentKind.CAPABILITY,
-            component_id="example.capability",
-            instance_id="supported",
-            activation=ActivationSpec(
-                trigger=TriggerSpec(
-                    kind=TriggerKind.EVENT,
-                    event=EventSelector("action.started"),
-                ),
-                mode=ActivationMode.CONCURRENT,
-            ),
-        )
-
-
 def test_event_bus_orders_events_and_subscribers_and_snapshots_payloads():
-    times = iter((10.0, 11.0, 12.0, 13.0))
+    times = iter((10.0, 11.0))
     bus = LifecycleEventBus(clock=lambda: next(times))
     calls = []
 
@@ -548,11 +510,6 @@ def test_event_bus_orders_events_and_subscribers_and_snapshots_payloads():
     assert [event.sequence for event in bus.history()] == [1, 2]
     assert [event.sequence for event in bus.committed_history()] == [1, 2]
     assert bus.history("action.completed")[0].timestamp == 11.0
-    committed = bus.read_committed()
-    assert [event.commit_index for event in committed] == [1, 2]
-    assert [event.name for event in committed] == ["action.started", "action.completed"]
-    assert [event.event_sequence for event in committed] == [1, 2]
-    assert [event.committed_at for event in committed] == [12.0, 13.0]
 
 
 def test_event_bus_normalizes_hostile_names_before_subscription_routing():
@@ -592,281 +549,7 @@ def test_event_bus_normalizes_hostile_names_before_subscription_routing():
     assert evil.name == "evil"
     assert evil.source == "producer"
     assert bus.attempted_history(ForgedName("evil", "target")) == (evil,)
-    assert tuple(event.event for event in bus.read_committed()) == (evil, actual)
-
-
-def test_committed_event_wraps_the_exact_raw_event_only_after_dispatch():
-    phase = "publishing"
-    clock_phases = []
-
-    def clock():
-        clock_phases.append(phase)
-        return 10.0 if phase == "publishing" else 12.0
-
-    bus = LifecycleEventBus(clock=clock)
-
-    def observe_before_commit(event):
-        nonlocal phase
-        assert event.sequence == 1
-        assert bus.read_committed() == ()
-        phase = "dispatched"
-
-    bus.subscribe("action.completed", observe_before_commit)
-    raw = bus.publish(
-        "action.completed",
-        source="action",
-        payload={"result": ["ok"]},
-    )
-    committed = bus.read_committed()[0]
-
-    assert clock_phases == ["publishing", "dispatched"]
-    assert committed.event is raw
-    assert committed.raw_event is raw
-    assert bus.committed_history()[0] is raw
-    assert committed.commit_index == 1
-    assert committed.event_sequence == raw.sequence == committed.sequence == 1
-    assert committed.occurred_at == raw.timestamp == committed.timestamp == 10.0
-    assert committed.committed_at == 12.0
-    assert committed.name == raw.name == "action.completed"
-    assert committed.source == raw.source == "action"
-    assert committed.payload is raw.payload
-    assert committed.payload["result"] == ("ok",)
-    assert all(
-        not hasattr(raw, attribute) for attribute in ("commit_index", "event_sequence", "occurred_at", "committed_at")
-    )
-    with pytest.raises(FrozenInstanceError):
-        committed.commit_index = 2
-
-
-def test_committed_event_cursor_reads_are_contiguous_and_non_callback():
-    times = iter((1.0, 2.0, 3.0, 4.0))
-    bus = LifecycleEventBus(clock=lambda: next(times))
-    first = bus.publish("first", source="runner")
-    second = bus.publish("second", source="runner")
-
-    committed = bus.read_committed()
-    assert [event.commit_index for event in committed] == [1, 2]
-    assert [event.event_sequence for event in committed] == [1, 2]
-    assert [event.event for event in committed] == [first, second]
-    assert bus.read_committed(1) == (committed[1],)
-    assert bus.read_committed(2) == ()
-    assert bus.wait_committed(0, timeout=0) == committed
-    assert bus.wait_committed(2, timeout=0) == ()
-
-    for invalid_cursor in (-1, True, 3):
-        with pytest.raises(ValueError, match="after_commit_index"):
-            bus.read_committed(invalid_cursor)
-    with pytest.raises(TypeError, match="timeout"):
-        bus.wait_committed(2, timeout=True)
-    for invalid_timeout in (-1, float("nan"), float("inf")):
-        with pytest.raises(ValueError, match="timeout"):
-            bus.wait_committed(2, timeout=invalid_timeout)
-
-
-def test_wait_committed_returns_only_after_delayed_dispatch_commits():
-    times = iter((10.0, 20.0))
-    bus = LifecycleEventBus(clock=lambda: next(times))
-    handler_entered = threading.Event()
-    release_handler = threading.Event()
-    waiter_entered = threading.Event()
-    waiter_returned = threading.Event()
-    results = {}
-
-    def delay_commit(_event):
-        handler_entered.set()
-        assert release_handler.wait(timeout=5)
-
-    def publish():
-        results["raw"] = bus.publish("delayed", source="runner")
-
-    def wait_for_commit():
-        waiter_entered.set()
-        results["committed"] = bus.wait_committed(timeout=None)
-        waiter_returned.set()
-
-    bus.subscribe("delayed", delay_commit)
-    publisher = threading.Thread(target=publish)
-    publisher.start()
-    assert handler_entered.wait(timeout=5)
-
-    with bus._condition:
-        waiter = threading.Thread(target=wait_for_commit)
-        waiter.start()
-        assert waiter_entered.wait(timeout=5)
-        assert not waiter_returned.is_set()
-        release_handler.set()
-
-    publisher.join(timeout=5)
-    waiter.join(timeout=5)
-    assert not publisher.is_alive()
-    assert not waiter.is_alive()
-    assert waiter_returned.is_set()
-    assert results["committed"][0].event is results["raw"]
-    assert results["committed"][0].occurred_at == 10.0
-    assert results["committed"][0].committed_at == 20.0
-
-
-def test_dispatch_callback_can_poll_but_cannot_block_for_its_own_commit():
-    times = iter((1.0, 2.0, 3.0, 4.0))
-    bus = LifecycleEventBus(clock=lambda: next(times))
-    first = bus.publish("first", source="runner")
-    observed = {}
-
-    def inspect_commits(_event):
-        observed["read"] = bus.read_committed(0)
-        observed["immediate"] = bus.wait_committed(0, timeout=None)
-        observed["poll"] = bus.wait_committed(1, timeout=0)
-        with pytest.raises(RuntimeError, match="event dispatch thread"):
-            bus.wait_committed(1, timeout=None)
-        with pytest.raises(RuntimeError, match="event dispatch thread"):
-            bus.wait_committed(1, timeout=0.01)
-
-    bus.subscribe("second", inspect_commits)
-    second = bus.publish("second", source="runner")
-
-    assert tuple(event.event for event in observed["read"]) == (first,)
-    assert tuple(event.event for event in observed["immediate"]) == (first,)
-    assert observed["poll"] == ()
-    assert tuple(event.event for event in bus.read_committed()) == (first, second)
-
-
-def test_quiesce_wakes_an_indefinite_committed_event_waiter_cleanly():
-    bus = LifecycleEventBus(clock=lambda: 1.0)
-    wait_entered = threading.Event()
-    waiter_returned = threading.Event()
-    results = {}
-    original_wait = bus._condition.wait
-
-    def observed_wait(timeout=None):
-        wait_entered.set()
-        return original_wait(timeout)
-
-    bus._condition.wait = observed_wait
-
-    def wait_for_commit():
-        results["committed"] = bus.wait_committed(timeout=None)
-        waiter_returned.set()
-
-    waiter = threading.Thread(target=wait_for_commit)
-    waiter.start()
-    assert wait_entered.wait(timeout=5)
-    assert not waiter_returned.is_set()
-
-    bus.quiesce()
-
-    waiter.join(timeout=5)
-    assert not waiter.is_alive()
-    assert waiter_returned.is_set()
-    assert results["committed"] == ()
-    assert bus.wait_committed(timeout=None) == ()
-
-
-def test_failed_and_aborted_reentrant_events_never_receive_commit_envelopes():
-    times = iter((1.0, 2.0, 3.0, 4.0))
-    bus = LifecycleEventBus(clock=lambda: next(times))
-    nested_events = []
-
-    def enqueue_nested(_event):
-        nested_events.append(bus.publish("nested", source="subscriber"))
-
-    def fail_outer(_event):
-        raise RuntimeError("outer dispatch failed")
-
-    bus.subscribe("outer", enqueue_nested)
-    failing = bus.subscribe("outer", fail_outer)
-
-    with pytest.raises(EventDispatchError, match="outer dispatch failed"):
-        bus.publish("outer", source="runner")
-
-    assert [event.name for event in bus.attempted_history()] == ["outer", "nested"]
-    assert len(nested_events) == 1
-    assert bus.committed_history() == ()
-    assert bus.read_committed() == ()
-
-    assert bus.unsubscribe(failing)
-    recovered = bus.publish("recovered", source="runner")
-    committed = bus.read_committed()
-    assert len(committed) == 1
-    assert committed[0].event is recovered
-    assert committed[0].commit_index == 1
-    assert committed[0].event_sequence == 3
-    assert all(envelope.event is not nested_events[0] for envelope in committed)
-
-
-def test_failed_dispatch_does_not_return_from_a_committed_event_wait():
-    times = iter((1.0, 2.0, 3.0))
-    bus = LifecycleEventBus(clock=lambda: next(times))
-    first_wait = threading.Event()
-    resumed_wait = threading.Event()
-    waiter_returned = threading.Event()
-    results = {}
-    wait_count = 0
-    original_wait = bus._condition.wait
-
-    def observed_wait(timeout=None):
-        nonlocal wait_count
-        wait_count += 1
-        (first_wait if wait_count == 1 else resumed_wait).set()
-        return original_wait(timeout)
-
-    bus._condition.wait = observed_wait
-
-    def fail(_event):
-        raise RuntimeError("dispatch failed")
-
-    failing = bus.subscribe("failed", fail)
-
-    def wait_for_commit():
-        results["committed"] = bus.wait_committed(timeout=None)
-        waiter_returned.set()
-
-    waiter = threading.Thread(target=wait_for_commit)
-    waiter.start()
-    assert first_wait.wait(timeout=5)
-
-    with pytest.raises(EventDispatchError, match="dispatch failed"):
-        bus.publish("failed", source="runner")
-
-    assert resumed_wait.wait(timeout=5)
-    assert not waiter_returned.is_set()
-    assert bus.unsubscribe(failing)
-    recovered = bus.publish("recovered", source="runner")
-
-    waiter.join(timeout=5)
-    assert not waiter.is_alive()
-    assert waiter_returned.is_set()
-    assert len(results["committed"]) == 1
-    assert results["committed"][0].event is recovered
-    assert results["committed"][0].commit_index == 1
-    assert results["committed"][0].event_sequence == 2
-
-
-def test_committed_event_rejects_invalid_and_regressing_commit_times():
-    raw = LifecycleEvent(
-        name="ready",
-        sequence=1,
-        timestamp=10.0,
-        source="runner",
-    )
-
-    with pytest.raises(ValueError, match="positive integer"):
-        CommittedLifecycleEvent(event=raw, commit_index=0, committed_at=10.0)
-    with pytest.raises(TypeError, match="finite number"):
-        CommittedLifecycleEvent(event=raw, commit_index=1, committed_at=True)
-    with pytest.raises(ValueError, match="finite number"):
-        CommittedLifecycleEvent(event=raw, commit_index=1, committed_at=float("nan"))
-    with pytest.raises(ValueError, match="cannot precede"):
-        CommittedLifecycleEvent(event=raw, commit_index=1, committed_at=9.0)
-
-    times = iter((10.0, 20.0, 11.0, 19.0))
-    bus = LifecycleEventBus(clock=lambda: next(times))
-    first = bus.publish("first", source="runner")
-    with pytest.raises(ValueError, match="non-decreasing"):
-        bus.publish("second", source="runner")
-
-    assert bus.committed_history() == (first,)
-    assert [event.commit_index for event in bus.read_committed()] == [1]
-    assert [event.name for event in bus.attempted_history()] == ["first", "second"]
+    assert bus.committed_history() == (evil, actual)
 
 
 def test_event_bus_unsubscribe_replay_and_dispatch_error():

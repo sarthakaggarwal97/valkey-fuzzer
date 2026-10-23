@@ -1,8 +1,8 @@
 """Supported, feature-neutral authoring API for external plugins.
 
 Only names explicitly listed here are compatibility promises. Framework
-registries, discovery, serialization, execution outcomes, and scheduler
-internals intentionally remain host implementation details.
+registries, discovery, serialization, and execution outcomes intentionally
+remain host implementation details.
 """
 
 from .environment import (
@@ -58,21 +58,11 @@ from .extensibility import (
     TopologyProviderRegistration,
     Workload,
 )
-from .scheduling import (
-    ActivationMode,
-    ActivationSpec,
-    EventScope,
-    EventSelector,
-    TriggerKind,
-    TriggerSpec,
-)
 
 __all__ = [
     "EXTENSION_API_VERSION",
     "PLUGIN_ENTRY_POINT_GROUP",
     "Action",
-    "ActivationMode",
-    "ActivationSpec",
     "ArtifactProvider",
     "ArtifactProviderRegistration",
     "ArtifactProviderResolvedConfigValidator",
@@ -88,8 +78,6 @@ __all__ = [
     "EnvironmentProviderContext",
     "EnvironmentReference",
     "EventBus",
-    "EventScope",
-    "EventSelector",
     "EventSubscription",
     "Evidence",
     "EvidenceRequirement",
@@ -120,7 +108,5 @@ __all__ = [
     "TopologyProvider",
     "TopologyProviderIdentity",
     "TopologyProviderRegistration",
-    "TriggerKind",
-    "TriggerSpec",
     "Workload",
 ]

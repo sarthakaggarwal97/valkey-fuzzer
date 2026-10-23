@@ -18,7 +18,7 @@ onboarding contracts and reusable, feature-neutral services.
 
 ## Project status
 
-The generic foundation is usable for extension development:
+The lean generic foundation is complete for extension development:
 
 - strict, duplicate-free YAML scenarios and feature-pack manifests
 - exact feature-pack selection and input validation
@@ -39,9 +39,9 @@ The generic foundation is usable for extension development:
   namespaced artifact/resource/topology services
 - uniform `PASS`, `FAIL`, `SKIP_UNSUPPORTED`, and `ERROR` outcomes
 - component evidence, lifecycle events, structural validation, and cleanup
-- committed lifecycle-event cursors plus a deterministic activation planner,
-  exact schedule journal, and replay verifier
-- append-only operation-ledger and recovery-checkpoint primitives
+- an installable, feature-neutral contributor extension that registers a
+  configured component, feature pack, and topology provider and runs through
+  the unchanged CLI
 - JSON or YAML result bundles
 
 The repository deliberately does **not** ship a core-owned Valkey feature pack.
@@ -51,25 +51,12 @@ does not claim to exercise a Valkey feature. Feature implementations belong in
 extension-owned manifests or plugins; adding a core-owned pack is not a
 framework milestone.
 
-The following major pieces remain:
-
-- reusable feature-neutral components and onboarding acceptance fixtures
-- runner coordination for event-driven/concurrent activation, cancellation,
-  worker shutdown, and schedule-journal reporting
-- mandatory baseline crash, liveness, and data-safety oracles
-- a managed artifact store and complete binary/plugin/manifest provenance
-- per-node immutable binaries for mixed-version tests
-- reusable policy-consuming components and lifecycle-managed filesystem, object
-  store, proxy, and sidecar providers
-- runner integration for the operation ledger and checkpoints, plus
-  configurable consistency/loss policies
-- storage and resource faults, differential execution, coverage accounting,
-  and failure minimization
-
-Until those exist, CI runs structural and unit acceptance checks rather than
-presenting a configuration smoke as feature fuzzing. Framework acceptance
-should use neutral fixtures that prove onboarding behavior, not make claims
-about a particular Valkey feature.
+The foundation intentionally stops here. Event-driven concurrency, mixed
+binaries, common durability ledgers, managed object stores, reusable Valkey
+components, differential execution, semantic coverage, and minimization are
+optional libraries or future framework capabilities. Add one only when a real
+extension needs it and the resulting abstraction is reusable; none is required
+to onboard a feature today.
 
 ## The model
 
@@ -114,7 +101,7 @@ illustration of the evidence contract, not a planned built-in compression pack.
 Requirements:
 
 - Python 3.9+
-- a Valkey build when executing a topology
+- a Valkey build when executing a built-in Valkey-backed topology
 
 ```bash
 git clone <repository-url>
@@ -279,8 +266,8 @@ consume them.
 `feature.version` is a feature-pack release identity, not a scenario-schema
 generation. It may be omitted only when exactly one version of the selected
 pack is registered. Pin it for repeatable campaigns. Reports currently record
-the resolved pack version; content digests for manifests, plugins, and tested
-binaries are still pending.
+the resolved pack version. Extensions that need stronger supply-chain
+reproducibility may also add manifest, plugin, and tested-binary attestations.
 
 The local topology provider accepts:
 
@@ -356,33 +343,11 @@ required_evidence:
     source: path
 ```
 
-The IDs above illustrate the intended built-in/plugin boundary; those
-components are not shipped yet. A manifest is executable only when every
-referenced component is registered.
-
-Every component has one feature-neutral `activation` declaration. Omitting it
-means serial invocation as soon as dependencies are ready:
-
-```yaml
-components:
-  - kind: action
-    component_id: example.feature.activate
-    instance_id: activate
-    activation:
-      mode: serial
-      trigger:
-        kind: ready
-```
-
-The declaration model also represents committed-event triggers, occurrence and
-source selection, offsets, trigger timeouts, and concurrent invocation. Those
-non-default declarations already parse, compile, bind, and persist in canonical
-`RunPlan` data. The current runner deliberately rejects them during static
-preflight, before topology/provider/component callbacks or environment
-acquisition, until the scheduler coordinator owns their execution semantics.
-`activation.trigger.timeout_s` limits how long an event trigger may wait after
-dependency readiness; the component-level `timeout_s` is a separate cooperative
-limit on the component invocation itself.
+The IDs above are illustrative rather than promised built-ins. A manifest is
+executable only when every referenced component is registered. Dependencies
+determine the stable execution order. Components may publish and consume domain
+events, but the core does not impose a speculative concurrency or
+event-scheduling model.
 
 `mode: feature` requires at least one required oracle and one required evidence
 declaration. `mode: topology_smoke` is reserved for infrastructure checks and
@@ -400,100 +365,27 @@ trusted plugin; plugin discovery commits component, pack, and every provider
 registration atomically. A plugin-defined topology is selected through the
 same `topology.type` field and does not require a CLI or runner branch.
 
-### Minimal trusted plugin
+### Contributor extension template
 
-A separately packaged extension declares one entry point. Its entry-point name
-must exactly match `PluginManifest.plugin_id`; the target may be a manifest
-object or a zero-argument callable returning one:
+[`examples/extensions/neutral-plugin/`](examples/extensions/neutral-plugin/)
+is the canonical starting point for an extension. It is a real installable
+wheel, imports only the stable `valkey_fuzzer.extensions` facade, and registers
+a no-op topology provider, a configured action, an oracle, and a feature pack.
+Its scenario passes an input into the action and exercises the unchanged
+`validate` and `run` commands without requiring a Valkey binary.
 
-```toml
-[project.entry-points."valkey_fuzzer.plugins"]
-"example.neutral" = "neutral_extension:plugin"
+```bash
+python -m pip install -e examples/extensions/neutral-plugin
+valkey-fuzzer validate examples/extensions/neutral-plugin/scenario.yaml
+valkey-fuzzer run examples/extensions/neutral-plugin/scenario.yaml
 ```
 
-This neutral example registers one action and one artifact provider without
-adding a feature-specific core path. External packages import only the stable
-`valkey_fuzzer.extensions` boundary:
-
-```python
-from valkey_fuzzer.extensions import (
-    EXTENSION_API_VERSION,
-    ArtifactProviderRegistration,
-    ComponentKind,
-    ComponentRegistration,
-    ComponentResult,
-    ComponentStatus,
-    PluginManifest,
-    ResolvedArtifact,
-    SupportDecision,
-)
-
-
-class MarkerAction:
-    def run(self, context, spec):
-        return ComponentResult(
-            component_instance_id=spec.instance_id,
-            status=ComponentStatus.PASS,
-            summary="neutral action completed",
-        )
-
-
-class ConfiguredArtifact:
-    def check_support(self, context, spec, resolved_config):
-        return SupportDecision.allow()
-
-    def resolve(self, context, spec, resolved_config):
-        return ResolvedArtifact(
-            artifact_id=spec.artifact_id,
-            provider_id=spec.provider_id,
-            outputs={"path": resolved_config["path"]},
-            provenance={"source": "configured-path"},
-        )
-
-    def rollback(self, context, spec):
-        pass
-
-    def cleanup(self, context, spec, artifact):
-        pass
-
-
-def validate_artifact_config(spec, resolved_config):
-    path = resolved_config.get("path")
-    if not isinstance(path, str) or not path:
-        raise ValueError("path must resolve to a non-empty string")
-
-
-def plugin():
-    return PluginManifest(
-        plugin_id="example.neutral",
-        api_version=EXTENSION_API_VERSION,
-        registrations=(
-            ComponentRegistration(
-                component_id="example.marker-action",
-                kind=ComponentKind.ACTION,
-                api_version=EXTENSION_API_VERSION,
-                factory=MarkerAction,
-            ),
-        ),
-        artifact_providers=(
-            ArtifactProviderRegistration(
-                provider_id="example.configured-artifact",
-                api_version=EXTENSION_API_VERSION,
-                factory=ConfiguredArtifact,
-                outputs=("path",),
-                resolved_config_validator=validate_artifact_config,
-            ),
-        ),
-    )
-```
-
-A data-only pack can reference `example.marker-action`, and a scenario can
-select `example.configured-artifact`; neither requires a core-code change.
-
-The public plugin facade also exports the six declarative scheduling types:
-`ActivationSpec`, `ActivationMode`, `TriggerSpec`, `TriggerKind`,
-`EventSelector`, and `EventScope`. Planner state, journals, replay machinery,
-and coordinator internals remain framework-private.
+A separately packaged extension declares an entry point in the
+`valkey_fuzzer.plugins` group. Its entry-point name must exactly match
+`PluginManifest.plugin_id`; the target may be a manifest object or a
+zero-argument callable returning one. Copy the template, rename its identities,
+replace its neutral action and oracle, and keep feature-specific behavior out of
+the core package.
 
 Component factories are zero-argument and construct in-memory state; the
 returned object implements the selected role (`run` for an action, for example).
@@ -574,7 +466,7 @@ Important options:
 - `--valkey-binary PATH`: override the binary in the topology document
 - `--timeout SECONDS`: cooperative execution deadline
 - `--artifact-dir DIR`: root for component artifacts and provider-scoped
-  lifecycle directories; not yet a managed store
+  lifecycle directories; intentionally not a managed artifact store
 - `--output PATH --format json|yaml`: save the complete outcome
 - `--allow-unsupported`: treat `SKIP_UNSUPPORTED` as a successful matrix cell
 
@@ -599,8 +491,8 @@ python examples/run_fuzzer.py run examples/standalone_scenario.yaml \
 ## Adding a feature
 
 1. Define the feature’s supported topologies and capability probes.
-2. Identify activation, path evidence, stress dimensions, faults, and
-   independent invariants.
+2. Identify the action or transition, path evidence, stress dimensions, faults,
+   and independent invariants.
 3. Reuse generic components wherever possible.
 4. Add only irreducible behavior as namespaced component or provider
    registrations.
@@ -616,24 +508,20 @@ change during normal feature onboarding.
 
 ## Stateful recovery and external resources
 
-Some extensions need stronger generic services than command execution and
-process topology. Stateful recovery tests need an operation ledger, explicit
-consistency/loss policy, crash and storage faults, recovery checkpoints, and
-post-restart oracle hooks. Extensions backed by another storage or network
-service need lifecycle-managed, capacity-limited resources, fault injection,
-and evidence spanning Valkey and the dependency.
+Stateful recovery, durability, and data-tiering extensions can already declare
+policies, provision external resources, bind provider outputs, run faults and
+oracles, and retain evidence. An extension may initially own its operation
+history, checkpoints, storage emulator, or consistency model. If several real
+extensions need the same contract, that proven implementation can graduate
+into a reusable feature-neutral library.
 
-The core should provide those contracts without encoding durability, data
-tiering, or any other feature. A feature extension supplies its own
-configuration, resources, evidence interpretation, and domain oracle.
-Declaration models, provider contracts, provider registries, symbolic
-references, static graph validation, transactional acquisition, `BoundRunPlan`
-materialization, namespaced topology/component services, rollback after partial
-acquisition, and reverse-order cleanup now exist. Reusable providers and
-components that apply particular policy semantics remain extension or future
-generic-library work. See
+The core supplies the lifecycle seams: declarations, providers, symbolic
+references, static graph validation, transactional acquisition,
+`BoundRunPlan` materialization, namespaced services, rollback, and reverse
+cleanup. It does not prescribe a durability model or tiering backend. See
 [`docs/generic-feature-fuzzer-design.md`](docs/generic-feature-fuzzer-design.md)
-for the full architecture and implementation sequence.
+for the architecture and the boundary between foundation and optional
+capabilities.
 
 ## Contributing
 

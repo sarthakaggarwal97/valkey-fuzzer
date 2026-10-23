@@ -39,7 +39,6 @@ from valkey_fuzzer.extensibility import (
     TopologyProviderIdentity,
     to_plain_data,
 )
-from valkey_fuzzer.scheduling import ActivationMode, ActivationSpec, EventSelector, TriggerKind, TriggerSpec
 
 
 def _ref(path):
@@ -246,7 +245,6 @@ def test_materialize_resolves_every_executable_surface_and_preserves_source_plan
         "endpoint": "secret://store",
     }
     assert bound.components[1].config == {"zone": "test-zone"}
-    assert bound.components[0].activation is source.components[0].activation
     assert bound.startup_overlays[0].selector.labels == {"zone": "test-zone"}
     assert bound.startup_overlays[0].server_config == {"module": "/private/candidate"}
     assert bound.services.artifact("candidate")["launcher"] is launcher
@@ -354,28 +352,6 @@ def test_distinct_bound_models_cannot_be_confused_with_declarative_models():
     assert isinstance(bound.startup_overlays[0].selector, BoundNodeSelector)
     assert not isinstance(bound.startup_overlays[0].selector, NodeSelector)
     assert isinstance(bound.services, RunServices)
-
-
-def test_bound_component_preserves_nondefault_activation_as_execution_metadata():
-    source = ComponentSpec(
-        kind=ComponentKind.ACTION,
-        component_id="tests.action",
-        instance_id="activate",
-        activation=ActivationSpec(
-            trigger=TriggerSpec(
-                kind=TriggerKind.EVENT,
-                event=EventSelector("feature.ready", source="observer"),
-                timeout_s=5,
-            ),
-            mode=ActivationMode.CONCURRENT,
-        ),
-    )
-    binding = EnvironmentBinding(_BindingSession({}, {}))
-
-    bound = BoundComponentSpec.materialize(source, binding)
-
-    assert bound.activation is source.activation
-    assert bound.timeout_s is source.timeout_s
 
 
 def test_binding_must_exactly_match_source_environment_declarations():
