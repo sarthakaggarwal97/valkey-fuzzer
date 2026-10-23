@@ -328,6 +328,8 @@ def test_replication_replica_restart_reapplies_upstream(tmp_path):
             "valkey_fuzzer.cluster_orchestrator.orchestrator.valkey_client",
             return_value=_client_context(ping_client),
         ),
+        patch("valkey_fuzzer.cluster_orchestrator.orchestrator.verify_node_process_identity"),
+        patch("valkey_fuzzer.cluster_orchestrator.orchestrator._port_unavailable_reason", return_value=None),
     ):
         nodes = manager.spawn_all_nodes(plans)
         replica = next(node for node in nodes if node.role == "replica")
@@ -362,6 +364,7 @@ def test_spawn_failure_releases_ports_processes_and_data(tmp_path):
             "valkey_fuzzer.cluster_orchestrator.orchestrator.subprocess.Popen",
             side_effect=[first_process, OSError("spawn failed")],
         ),
+        patch("valkey_fuzzer.cluster_orchestrator.orchestrator._port_unavailable_reason", return_value=None),
         pytest.raises(OSError, match="spawn failed"),
     ):
         manager.spawn_all_nodes(plans)

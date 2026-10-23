@@ -38,6 +38,13 @@ def client_context(client: Mock) -> Mock:
     return context
 
 
+@pytest.fixture(autouse=True)
+def _planned_ports_are_free():
+    """These tests mock process creation; keep them independent of real local ports."""
+    with patch("valkey_fuzzer.cluster_orchestrator.orchestrator._port_unavailable_reason", return_value=None):
+        yield
+
+
 def test_spawn_keyboard_interrupt_cleans_partial_nodes(tmp_path):
     config = ClusterConfig(
         num_shards=1,
@@ -290,6 +297,7 @@ def test_replication_replica_restart_waits_for_role_upstream_and_link(tmp_path):
     client = Mock()
     client.ping.return_value = True
     client.info.return_value = {
+        "process_id": 999,
         "role": "slave",
         "master_link_status": "up",
         "master_host": primary.host,
@@ -306,7 +314,8 @@ def test_replication_replica_restart_waits_for_role_upstream_and_link(tmp_path):
         result = manager.restart_node(replica, wait_ready=True, ready_timeout=1.0)
 
     assert result.pid == 999
-    client.info.assert_called_once_with("replication")
+    client.info.assert_any_call("server")
+    client.info.assert_any_call("replication")
 
 
 def test_replication_replica_restart_rejects_wrong_upstream(tmp_path):
@@ -326,6 +335,7 @@ def test_replication_replica_restart_rejects_wrong_upstream(tmp_path):
     client = Mock()
     client.ping.return_value = True
     client.info.return_value = {
+        "process_id": 999,
         "role": "slave",
         "master_link_status": "up",
         "master_host": primary.host,
@@ -387,14 +397,14 @@ def test_restart_topology_checks_standalone_role_and_cluster_membership():
     standalone_node = make_node("node-0", "primary", 7000)
     standalone_client = Mock()
     standalone_client.ping.return_value = True
-    standalone_client.info.return_value = {"role": "master"}
+    standalone_client.info.return_value = {"process_id": 7000, "role": "master"}
 
     assert standalone._restart_topology_is_ready(
         standalone_node,
         standalone_client,
         TopologyType.STANDALONE,
     )
-    standalone_client.info.return_value = {"role": "slave"}
+    standalone_client.info.return_value = {"process_id": 7000, "role": "slave"}
     assert not standalone._restart_topology_is_ready(
         standalone_node,
         standalone_client,
@@ -409,7 +419,7 @@ def test_restart_topology_checks_standalone_role_and_cluster_membership():
     cluster._spawned_nodes = {cluster_node.node_id: cluster_node}
     cluster_client = Mock()
     cluster_client.ping.return_value = True
-    cluster_client.info.return_value = {"cluster_enabled": 1}
+    cluster_client.info.return_value = {"process_id": 7000, "cluster_enabled": 1}
     cluster_client.execute_command.side_effect = [
         "cluster_state:ok\r\ncluster_known_nodes:1\r\n",
         "abc123",
@@ -444,7 +454,7 @@ def test_restart_topology_rejects_isolated_cluster_node():
     manager._spawned_nodes = {node.node_id: node, peer.node_id: peer}
     client = Mock()
     client.ping.return_value = True
-    client.info.return_value = {"cluster_enabled": 1}
+    client.info.return_value = {"process_id": 7000, "cluster_enabled": 1}
     client.execute_command.side_effect = [
         "cluster_state:fail\r\ncluster_known_nodes:2\r\n",
         "cluster_state:ok\r\ncluster_known_nodes:2\r\n",
@@ -474,9 +484,9 @@ def test_restart_topology_replication_primary_waits_for_expected_replicas():
     manager._spawned_nodes = {primary.node_id: primary, replica.node_id: replica}
     client = Mock()
     client.ping.return_value = True
-    client.info.return_value = {"role": "master", "connected_slaves": 0}
+    client.info.return_value = {"process_id": 7000, "role": "master", "connected_slaves": 0}
 
     assert not manager._restart_topology_is_ready(primary, client, TopologyType.REPLICATION)
 
-    client.info.return_value = {"role": "master", "connected_slaves": 1}
+    client.info.return_value = {"process_id": 7000, "role": "master", "connected_slaves": 1}
     assert manager._restart_topology_is_ready(primary, client, TopologyType.REPLICATION)

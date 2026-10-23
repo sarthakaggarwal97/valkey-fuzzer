@@ -38,6 +38,13 @@ def command_value(command: list[str], option: str) -> str:
     return command[command.index(option) + 1]
 
 
+@pytest.fixture(autouse=True)
+def _planned_ports_are_free():
+    """These tests mock process creation; keep them independent of real local ports."""
+    with patch("valkey_fuzzer.cluster_orchestrator.orchestrator._port_unavailable_reason", return_value=None):
+        yield
+
+
 def test_plan_standalone_topology_resolves_global_role_and_node_config():
     config = ClusterConfig(
         num_shards=9,
@@ -149,6 +156,7 @@ def test_spawn_and_restart_preserve_resolved_server_config(tmp_path):
     process.poll.return_value = None
     ping_client = Mock()
     ping_client.ping.return_value = True
+    ping_client.info.return_value = {"process_id": 1234}
     client_context = Mock()
     client_context.__enter__ = Mock(return_value=ping_client)
     client_context.__exit__ = Mock(return_value=False)

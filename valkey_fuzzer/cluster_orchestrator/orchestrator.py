@@ -1,7 +1,9 @@
+import errno
 import logging
 import os
 import re
 import shutil
+import socket
 import subprocess
 import time
 import traceback
@@ -25,6 +27,89 @@ logger = logging.getLogger()
 # Matches the `sha=<hex>:<dirty>` field from `valkey-server --version`.
 # Example output: "Valkey server v=8.1.0 sha=abc1234:0 malloc=jemalloc-5.3.0 ..."
 _VERSION_SHA_RE = re.compile(r"sha=([0-9a-f]{7,40}):", re.IGNORECASE)
+
+
+# Hard cap that keeps a fuzzing run from exhausting the host. It is deliberately
+# paired with Valkey's default ``noeviction`` policy so that hitting the cap
+# surfaces as write errors instead of silently evicting the data the
+# validators check. Scenarios may override it through ``server_config``.
+DEFAULT_MAXMEMORY = "500mb"
+
+
+class PortUnavailableError(RuntimeError):
+    """A planned node port is already in use by a process we did not start."""
+
+
+class NodeIdentityError(RuntimeError):
+    """A node port answered, but not from the Valkey process this orchestrator owns."""
+
+
+def _port_unavailable_reason(host: str, port: int) -> Optional[str]:
+    """Return why ``host:port`` cannot be used for a new server, or None if it is free.
+
+    A connect probe catches listeners on any local address (including wildcard
+    binds). A bind probe with SO_REUSEADDR, which Valkey itself uses, catches
+    sockets bound to the exact address while ignoring TIME_WAIT leftovers.
+    """
+    try:
+        with socket.create_connection((host, port), timeout=0.25):
+            return "a server is already accepting connections"
+    except OSError:
+        pass
+
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        probe.bind((host, port))
+    except OSError as exc:
+        return errno.errorcode.get(exc.errno, str(exc)) if exc.errno else str(exc)
+    finally:
+        probe.close()
+    return None
+
+
+def verify_node_process_identity(node: NodeInfo, client: valkey.Valkey) -> None:
+    """Raise NodeIdentityError unless the server behind ``client`` is ``node``'s own process."""
+    expected_pid = node.pid
+    if node.process is not None:
+        expected_pid = node.process.pid
+        if node.process.poll() is not None:
+            raise NodeIdentityError(
+                f"{node.node_id}: port {node.port} answered, but the process this orchestrator started "
+                f"(pid {expected_pid}) has exited"
+            )
+
+    server_info = client.info("server")
+    reported_pid = server_info.get("process_id") if isinstance(server_info, Mapping) else None
+    try:
+        reported_pid = int(reported_pid)
+    except (TypeError, ValueError):
+        raise NodeIdentityError(
+            f"{node.node_id}: server on port {node.port} did not report a usable process_id ({reported_pid!r})"
+        ) from None
+
+    if reported_pid != expected_pid:
+        raise NodeIdentityError(
+            f"{node.node_id}: port {node.port} is served by pid {reported_pid}, not by the process this "
+            f"orchestrator started (pid {expected_pid}); refusing to use a foreign server"
+        )
+
+
+def _decode(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def verify_cluster_node_identity(node: NodeInfo, client: valkey.Valkey) -> str:
+    """Return CLUSTER MYID, raising NodeIdentityError if it differs from the saved node ID."""
+    cluster_node_id = _decode(client.execute_command("CLUSTER", "MYID"))
+    if node.cluster_node_id and cluster_node_id != node.cluster_node_id:
+        raise NodeIdentityError(
+            f"{node.node_id}: restarted server reports cluster node ID {cluster_node_id}, "
+            f"expected {node.cluster_node_id}"
+        )
+    return cluster_node_id
 
 
 def _coerce_topology_type(topology_type: Any) -> TopologyType:
@@ -330,9 +415,7 @@ class ConfigurationManager:
                 "--save",
                 "",
                 "--maxmemory",
-                "500mb",
-                "--maxmemory-policy",
-                "allkeys-lru",
+                DEFAULT_MAXMEMORY,
             ]
         )
         command.extend(self._build_server_config_arguments(server_config))
@@ -343,6 +426,12 @@ class ConfigurationManager:
         logger.info("")
         logger.info(f"Spawning {len(node_plans)} nodes")
         node_info_list = []
+
+        # Refuse to start anything if a planned port is already taken: a server
+        # we did not start would otherwise answer readiness checks and receive
+        # topology commands such as CLUSTER RESET HARD.
+        for plan in node_plans:
+            self.ensure_ports_available(plan.node_id, plan.port, plan.bus_port)
 
         try:
             for plan in node_plans:
@@ -357,7 +446,7 @@ class ConfigurationManager:
                 )
                 process = None
                 try:
-                    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    process = self._start_process(cmd, log_file)
 
                     # Note: host defaults to 127.0.0.1 in NodeInfo
                     node_info = NodeInfo(
@@ -397,6 +486,7 @@ class ConfigurationManager:
                     try:
                         with valkey_client(node.host, node.port, timeout=3.0, decode_responses=True) as client:
                             if client.ping():
+                                verify_node_process_identity(node, client)
                                 logger.debug(f"Node {node.node_id} is active")
                                 ready = True
                                 break
@@ -406,7 +496,7 @@ class ConfigurationManager:
                     time.sleep(0.5)
 
                 if not ready:
-                    raise Exception(f"Node {node.node_id} failed to start")
+                    raise Exception(f"Node {node.node_id} failed to start{self._process_output_tail(node.log_file)}")
 
         except BaseException as exc:
             logger.error("Failed while spawning or waiting for nodes: %s", exc)
@@ -415,6 +505,56 @@ class ConfigurationManager:
 
         logger.info(f"All {len(node_info_list)} nodes are active")
         return node_info_list
+
+    def ensure_ports_available(self, node_id: str, port: int, bus_port: int, host: str = "127.0.0.1") -> None:
+        """Fail clearly when a node's client (or cluster bus) port is already in use."""
+        ports = [("client", port)]
+        if _coerce_topology_type(self.clusterConfig.topology_type) == TopologyType.CLUSTER:
+            ports.append(("cluster bus", bus_port))
+
+        for label, candidate in ports:
+            reason = _port_unavailable_reason(host, candidate)
+            if reason is not None:
+                raise PortUnavailableError(
+                    f"Cannot start {node_id}: {label} port {candidate} on {host} is unavailable ({reason}). "
+                    "Stop the process using it or choose a different base_port."
+                )
+
+    @staticmethod
+    def _process_output_path(log_file: str) -> Optional[str]:
+        """Per-node file that captures valkey-server stdout/stderr."""
+        if not log_file:
+            return None
+        root, _ = os.path.splitext(log_file)
+        return f"{root}.stdio.log"
+
+    def _start_process(self, cmd: list[str], log_file: str) -> subprocess.Popen:
+        """Start valkey-server with stdout/stderr appended to a per-node file.
+
+        Output is never left in an unread pipe, which could block the server
+        once the pipe buffer fills.
+        """
+        output_path = self._process_output_path(log_file)
+        if output_path is None:
+            return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        with open(output_path, "ab") as output:
+            return subprocess.Popen(cmd, stdout=output, stderr=subprocess.STDOUT)
+
+    def _process_output_tail(self, log_file: str, lines: int = 20) -> str:
+        """Return a short suffix with the last process output lines, for error messages."""
+        output_path = self._process_output_path(log_file)
+        if output_path is None:
+            return ""
+        try:
+            with open(output_path, encoding="utf-8", errors="replace") as output:
+                tail = output.read().splitlines()[-lines:]
+        except OSError:
+            return ""
+        if not tail:
+            return ""
+        return f" (process output from {output_path}: " + " | ".join(line.strip() for line in tail) + ")"
 
     @staticmethod
     def _terminate_untracked_process(process: subprocess.Popen, node_id: str) -> None:
@@ -449,7 +589,7 @@ class ConfigurationManager:
 
     def terminate_node(self, node: NodeInfo) -> None:
         """Terminate a Valkey node process"""
-        if node.process.poll() is not None:
+        if node.process is None or node.process.poll() is not None:
             return
 
         logger.debug(f"Terminating {node.node_id} (PID {node.pid})")
@@ -491,10 +631,17 @@ class ConfigurationManager:
             # writable primary.
             cmd.extend(["--replicaof", primary.host, str(primary.port)])
 
+        # A restart replaces the node's process. Stop a still-running one first
+        # so two servers never compete for the same port and data directory.
+        if node.process is not None and node.process.poll() is None:
+            logger.info(f"Stopping running {node.node_id} (PID {node.pid}) before restart")
+            self.terminate_node(node)
+        self.ensure_ports_available(node.node_id, node.port, node.bus_port, host=node.host)
+
         process = None
         try:
             # Start new process
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            process = self._start_process(cmd, node.log_file)
 
             # Update node info with new process
             node.process = process
@@ -529,6 +676,8 @@ class ConfigurationManager:
                                 logger.info(f"Node {node.node_id} is ready after restart")
                                 ready = True
                                 break
+                    except NodeIdentityError:
+                        raise
                     except Exception as exc:
                         logger.debug("Node %s is not topology-ready after restart: %s", node.node_id, exc)
 
@@ -539,7 +688,10 @@ class ConfigurationManager:
                 if not ready:
                     self.terminate_node(node)
                     process = None
-                    raise Exception(f"Node {node.node_id} failed to become ready within {ready_timeout:.2f}s")
+                    raise Exception(
+                        f"Node {node.node_id} failed to become ready within {ready_timeout:.2f}s"
+                        f"{self._process_output_tail(node.log_file)}"
+                    )
 
             return node
 
@@ -564,9 +716,14 @@ class ConfigurationManager:
         client: valkey.Valkey,
         topology_type: TopologyType,
     ) -> bool:
-        """Return whether a restarted node has rejoined its expected topology."""
+        """Return whether a restarted node has rejoined its expected topology.
+
+        Raises NodeIdentityError if the answering server is not the restarted
+        process or, for cluster nodes, does not carry the node's saved ID.
+        """
         if not client.ping():
             return False
+        verify_node_process_identity(node, client)
 
         if topology_type == TopologyType.CLUSTER:
             server_info = client.info("cluster")
@@ -582,10 +739,8 @@ class ConfigurationManager:
             if cluster_enabled not in {"1", "yes", "true"} or cluster_state != "ok" or known_nodes < expected_nodes:
                 return False
 
-            cluster_node_id = client.execute_command("CLUSTER", "MYID")
+            cluster_node_id = verify_cluster_node_identity(node, client)
             cluster_nodes = client.execute_command("CLUSTER", "NODES")
-            if isinstance(cluster_node_id, bytes):
-                cluster_node_id = cluster_node_id.decode("utf-8", errors="replace")
             if isinstance(cluster_nodes, bytes):
                 cluster_nodes = cluster_nodes.decode("utf-8", errors="replace")
 
@@ -784,6 +939,9 @@ class ClusterManager:
         logger.debug("Resetting cluster state")
         for node in nodes_in_cluster:
             client = self.get_client(node)
+            # CLUSTER RESET HARD wipes a node's identity and data. Only ever send
+            # it to a process this orchestrator started.
+            verify_node_process_identity(node, client)
             client.execute_command("CLUSTER", "RESET", "HARD")
         time.sleep(1)
 
