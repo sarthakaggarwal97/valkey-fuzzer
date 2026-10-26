@@ -3,6 +3,18 @@
 Found by `valkey.forkless-save-crash` (live test
 `test_forkless_save_crash_recovers[standalone]`), whose `valkey.liveness` oracle reported a `VALKEY BUG REPORT` in the node log.
 
+## Status upstream
+
+- Known class of bug: item 3 of
+  [valkey-io/valkey#4604](https://github.com/valkey-io/valkey/issues/4604)
+  (dangling pointers in `early_iterate_entries`), reported for `RENAME`,
+  `PEXPIRE`, and collection-emptying commands.
+- Fix in review: [valkey-io/valkey#4996](https://github.com/valkey-io/valkey/pull/4996)
+  removes the entry in `bgIteration_keyDelete()`.
+- **That fix does not cover this trigger.** It still asserts at `50751f43`;
+  see [Remaining gap after #4996](#remaining-gap-after-4996) and the comment
+  draft in [`forkless-pr-4996-comment-draft.md`](forkless-pr-4996-comment-draft.md).
+
 - **Build:** valkey `unstable` at `cf5efa70` (`valkey-server v=255.255.255`)
 - **Configuration:** `forkless-infrastructure-enabled yes`,
   `bgsave-default-method forkless`, `rdb-key-save-delay 500`, `appendonly yes`
@@ -39,13 +51,22 @@ python3 docs/findings/forkless_del_during_save_repro.py \
   /path/to/valkey-server 40 fresh del
 ```
 
-## Likely mechanism (unconfirmed)
+## Remaining gap after #4996
 
-`bgIteration_updateDbEntryPtr()` moves an entry from `old` to `new` in the
-iterator's `early_iterate_entries` set and asserts that `new` was not already
-present. `DEL` adds the deleted entry to that set (`bgIteration_keyDelete`).
-The set is pruned later, and line 2609 says the entry "might not be here".
-If a deleted entry's pointer stays in the set after the entry is freed, a
-later allocation at the same address makes the `hashtableAdd(new)` fail. That
-fits a stale-pointer (ABA) pattern: it needs `DEL`, and it appears only after
-some allocator reuse.
+`bgIteration_keyDelete()` skips completed and terminated iterators before it
+removes the entry from `early_iterate_entries`. A completed iterator stays in
+`allIterators` until `bgIteratorRelease()` while the background thread drains
+its queue, and `bgIteration_updateDbEntryPtr()` still walks it. A `DEL` in
+that window leaves a dangling pointer; a later `SET` that reallocates an
+early-iterated key onto the freed address makes `hashtableAdd(new)` fail.
+
+| Build | Trials with the assertion |
+| --- | --- |
+| `8b9019c9` (#4996 base) | 2/30 |
+| `50751f43` (#4996 head) | 2/120 |
+| `50751f43` + also delete for completed/terminated iterators | 0/90 |
+
+Logging added at that `continue` on `50751f43` showed a deleted entry left in
+a completed iterator's set in 4 of 20 trials, and `updateDbEntryPtr()`
+updating a completed iterator's set in 13 of 20. The crash itself also needs
+the allocator to reuse the address, which is why it is rarer.
