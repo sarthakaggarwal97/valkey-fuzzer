@@ -1,0 +1,130 @@
+# SIGKILL a primary while a forkless BGSAVE is in progress, restart it, and
+# require that it recovers: acknowledged writes survive within the fsync loss
+# window, a follow-up forkless save succeeds, and the topology converges.
+pack_id: valkey.forkless-save-crash
+version: "1"
+supported_topologies: [standalone, replication, cluster]
+metadata:
+  description: Kill a primary mid forkless save, restart it, and verify recovery
+input_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    stable_keys: {type: integer, minimum: 1, maximum: 1000000, default: 3000}
+    mutable_keys: {type: integer, minimum: 1, maximum: 100000, default: 200}
+    mutation_rate: {type: number, minimum: 0, maximum: 20000, default: 200}
+    value_size: {type: integer, minimum: 1, maximum: 65536, default: 64}
+    key_save_delay_us: {type: integer, minimum: 100, maximum: 100000, default: 500}
+    kill_delay_s: {type: number, minimum: 0, maximum: 30, default: 0.2}
+    loss_window_s:
+      type: number
+      minimum: 0
+      maximum: 60
+      default: 2.0
+      description: acknowledged writes this close to the kill may be lost (appendfsync everysec / async replication)
+startup_overlays:
+  - overlay_id: forkless-enabled
+    server_config:
+      forkless-infrastructure-enabled: "yes"
+      bgsave-default-method: forkless
+      rdb-key-save-delay: {$ref: inputs.key_save_delay_us}
+components:
+  - kind: capability
+    component_id: valkey.build_probe
+    instance_id: forkless-support
+    config:
+      startup_config: {forkless-infrastructure-enabled: "yes", bgsave-default-method: forkless}
+      config_get: {bgsave-default-method: [forkless]}
+      info_fields: {persistence: [rdb_current_bgsave_type]}
+
+  - kind: observer
+    component_id: valkey.info
+    instance_id: persistence-info
+    config:
+      nodes: primary
+      sections: [persistence]
+      interval_s: 0.02
+      on_events: [bgsave.started]
+      expectations:
+        - {evidence_id: valkey.forkless.in_progress, field: rdb_current_bgsave_type, equals: forkless, when: during}
+
+  - kind: observer
+    component_id: valkey.log
+    instance_id: server-log
+    config:
+      nodes: primary
+      required:
+        - {evidence_id: valkey.forkless.log_started, pattern: "Beginning forklessSaveToDisk"}
+        - {evidence_id: valkey.forkless.log_completed, pattern: "forkless-save: forkless save complete"}
+
+  - kind: workload
+    component_id: valkey.kv_workload
+    instance_id: mutations
+    config:
+      stable_keys: {$ref: inputs.stable_keys}
+      mutable_keys: {$ref: inputs.mutable_keys}
+      rate: {$ref: inputs.mutation_rate}
+      value_size: {$ref: inputs.value_size}
+
+  - kind: fault
+    component_id: valkey.process_signal
+    instance_id: kill-during-save
+    config:
+      when_event: bgsave.started
+      node: primary
+      signal: SIGKILL
+      delay_s: {$ref: inputs.kill_delay_s}
+      restart: true
+      restart_mode: immediate
+
+  - kind: action
+    component_id: valkey.bgsave
+    instance_id: bgsave
+    depends_on: [mutations, persistence-info, server-log, kill-during-save]
+    config:
+      nodes: primary
+      expect: any
+      capture_rdb: false
+
+  - kind: action
+    component_id: valkey.bgsave
+    instance_id: bgsave-after-restart
+    depends_on: [bgsave]
+    config:
+      nodes: primaries
+      expect: ok
+      expect_type: forkless
+      started_event: recovery.bgsave.started
+      completed_event: recovery.bgsave.completed
+
+  - kind: oracle
+    component_id: valkey.rdb_snapshot
+    instance_id: snapshot
+    depends_on: [bgsave-after-restart]
+    config: {bgsave: bgsave-after-restart}
+
+  - kind: oracle
+    component_id: valkey.ledger
+    instance_id: data
+    config:
+      workload: mutations
+      loss_window_s: {$ref: inputs.loss_window_s}
+      loss_window_faults: [kill-during-save]
+      converge_timeout_s: 60
+
+  - kind: oracle
+    component_id: valkey.topology_state
+    instance_id: topology
+    config: {stabilization_wait_s: 3, timeout_s: 120}
+
+  - kind: oracle
+    component_id: valkey.liveness
+    instance_id: liveness
+required_events: [bgsave.started, node.recovered, recovery.bgsave.completed]
+required_evidence:
+  - {evidence_id: valkey.forkless.in_progress, source: persistence-info}
+  - {evidence_id: valkey.forkless.log_started, source: server-log}
+  - {evidence_id: valkey.fault.applied, source: kill-during-save}
+  - {evidence_id: valkey.forkless.log_completed, source: server-log}
+  - {evidence_id: valkey.rdb.reload_verified, source: snapshot}
+  - {evidence_id: valkey.data.ledger_verified, source: data}

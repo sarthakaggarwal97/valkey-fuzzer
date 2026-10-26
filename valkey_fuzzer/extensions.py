@@ -58,6 +58,7 @@ from .extensibility import (
     TopologyProviderRegistration,
     Workload,
 )
+from .feature_packs import load_feature_pack_yaml
 
 __all__ = [
     "EXTENSION_API_VERSION",
@@ -109,4 +110,5 @@ __all__ = [
     "TopologyProviderIdentity",
     "TopologyProviderRegistration",
     "Workload",
+    "load_feature_pack_yaml",
 ]

@@ -66,6 +66,8 @@ EXPECTED_PUBLIC_NAMES = {
     "TopologyProviderIdentity",
     "TopologyProviderRegistration",
     "Workload",
+    # Lets a plugin ship data-only YAML packs alongside its components.
+    "load_feature_pack_yaml",
 }
 
 FORBIDDEN_HOST_NAMES = {

@@ -1,0 +1,135 @@
+# Cut one primary off from every other cluster node (clients can still reach
+# both sides), wait for its replica to win the failover election, then heal.
+# Afterwards the cluster must converge on one primary per shard with full slot
+# coverage, the old primary must rejoin as a replica, and no acknowledged write
+# may be lost — except writes to the isolated shard's slots acknowledged inside
+# the partition window (Valkey Cluster is not linearizable under partitions).
+#
+# Needs Linux, root, iptables, and topology.addressing: per_node_loopback.
+pack_id: valkey.cluster-partition
+version: "1"
+supported_topologies: [cluster]
+metadata:
+  description: Partition a primary from the cluster bus, verify failover, healing, and bounded write loss
+input_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    isolate: {type: string, default: node-0, description: planned primary to isolate}
+    successor: {type: string, default: node-1, description: replica expected to take over}
+    stable_keys: {type: integer, minimum: 0, maximum: 1000000, default: 1000}
+    mutable_keys: {type: integer, minimum: 1, maximum: 100000, default: 300}
+    mutation_rate: {type: number, minimum: 1, maximum: 20000, default: 300}
+    hold_after_failover_s: {type: number, minimum: 0, maximum: 600, default: 1}
+    loss_window_after_s:
+      type: number
+      minimum: 0
+      maximum: 600
+      default: 5
+      description: after healing, how long writes to the isolated shard may still be lost while the old primary learns it was replaced
+components:
+  - kind: capability
+    component_id: valkey.host.capability
+    instance_id: host
+    config: {requires: [linux, root, iptables, per_node_loopback]}
+
+  - kind: observer
+    component_id: valkey.log
+    instance_id: logs
+    config:
+      nodes: all
+      required:
+        - {evidence_id: valkey.cluster.failure_detected_logged, pattern: "Marking node .* as failing \\(quorum reached\\)"}
+        - {evidence_id: valkey.cluster.election_won_logged, pattern: "Failover election won"}
+
+  - kind: workload
+    component_id: valkey.kv_workload
+    instance_id: writes
+    config:
+      stable_keys: {$ref: inputs.stable_keys}
+      mutable_keys: {$ref: inputs.mutable_keys}
+      rate: {$ref: inputs.mutation_rate}
+      op_timeout_s: 1.0
+
+  - kind: fault
+    component_id: valkey.net.partition
+    instance_id: partition
+    config:
+      when_event: partition.start
+      isolate: {$ref: inputs.isolate}
+      heal_event: partition.heal
+
+  - kind: action
+    component_id: valkey.wait_for
+    instance_id: run-then-partition
+    depends_on: [writes, logs, partition]
+    config: {seconds: 1, publish: partition.start}
+
+  - kind: action
+    component_id: valkey.wait_for
+    instance_id: successor-promoted
+    depends_on: [run-then-partition]
+    config:
+      nodes: {$ref: inputs.successor}
+      section: replication
+      field: role
+      predicate: {equals: master}
+      timeout_s: 60
+
+  - kind: action
+    component_id: valkey.wait_for
+    instance_id: hold-then-heal
+    depends_on: [successor-promoted]
+    config: {seconds: {$ref: inputs.hold_after_failover_s}, publish: partition.heal}
+
+  - kind: action
+    component_id: valkey.wait_for
+    instance_id: old-primary-demoted
+    depends_on: [hold-then-heal]
+    config:
+      nodes: {$ref: inputs.isolate}
+      section: replication
+      field: role
+      predicate: {equals: slave}
+      timeout_s: 60
+
+  - kind: action
+    component_id: valkey.wait_for
+    instance_id: old-primary-synced
+    depends_on: [old-primary-demoted]
+    config:
+      nodes: {$ref: inputs.isolate}
+      section: replication
+      field: master_link_status
+      predicate: {equals: up}
+      timeout_s: 120
+
+  - kind: oracle
+    component_id: valkey.ledger
+    instance_id: data
+    config:
+      workload: writes
+      loss_window_s: 1.0
+      loss_window_faults: [partition]
+      loss_window_after_s: {$ref: inputs.loss_window_after_s}
+      loss_window_scope: fault_target_slots
+      window_reads: written
+      converge_timeout_s: 60
+
+  - kind: oracle
+    component_id: valkey.topology_state
+    instance_id: topology
+    config: {stabilization_wait_s: 3, timeout_s: 120}
+
+  - kind: oracle
+    component_id: valkey.liveness
+    instance_id: liveness
+required_events: [partition.start, net.partitioned, partition.heal, net.healed]
+required_evidence:
+  - {evidence_id: valkey.fault.applied, source: partition}
+  - {evidence_id: valkey.cluster.failure_detected_logged, source: logs}
+  - {evidence_id: valkey.cluster.election_won_logged, source: logs}
+  - {evidence_id: valkey.wait.satisfied, source: successor-promoted}
+  - {evidence_id: valkey.wait.satisfied, source: old-primary-demoted}
+  - {evidence_id: valkey.data.ledger_verified, source: data}
+  - {evidence_id: valkey.topology.validated, source: topology}

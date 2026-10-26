@@ -1,0 +1,10 @@
+# Freeze a replica until it overflows a tiny backlog and require a full resync.
+scenario_id: replication-full-resync
+seed: 52
+feature:
+  use: valkey.replication-full-resync
+  version: "1"
+topology:
+  type: replication
+  replicas_per_shard: 1
+  base_port: 7450

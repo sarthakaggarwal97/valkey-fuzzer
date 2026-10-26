@@ -1,0 +1,111 @@
+# SIGKILL the primary under a continuous write workload, restart it from its
+# append-only file, and hold it to an explicit durability policy: every
+# acknowledged write must survive unless it was acknowledged within
+# loss_window_s of the crash (0 for appendfsync always).
+pack_id: valkey.aof-durability
+version: "1"
+supported_topologies: [standalone, replication]
+metadata:
+  description: Crash the primary under writes and verify acknowledged writes survive AOF recovery
+input_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    appendfsync: {type: string, enum: [always, everysec, "no"], default: always}
+    loss_window_s:
+      type: number
+      minimum: 0
+      maximum: 600
+      default: 0
+      description: acknowledged writes this close to the crash may be lost; 0 means none may be lost
+    mutable_keys: {type: integer, minimum: 1, maximum: 100000, default: 500}
+    mutation_rate: {type: number, minimum: 1, maximum: 20000, default: 400}
+    run_before_crash_s: {type: number, minimum: 0, maximum: 600, default: 2}
+    run_after_crash_s: {type: number, minimum: 0, maximum: 600, default: 1}
+startup_overlays:
+  - overlay_id: aof
+    server_config:
+      appendonly: "yes"
+      appendfsync: {$ref: inputs.appendfsync}
+components:
+  - kind: observer
+    component_id: valkey.info
+    instance_id: persistence-info
+    config:
+      nodes: primary
+      sections: [persistence]
+      interval_s: 0
+      expectations:
+        - {evidence_id: valkey.aof.enabled, field: aof_enabled, equals: 1, when: final}
+        - {evidence_id: valkey.aof.writes_ok, field: aof_last_write_status, equals: ok, when: final}
+
+  - kind: observer
+    component_id: valkey.log
+    instance_id: server-log
+    config:
+      nodes: primary
+      required:
+        - {evidence_id: valkey.aof.reloaded, pattern: "DB loaded from append only file"}
+      forbidden:
+        - {pattern: "Bad file format reading the append only file"}
+        - {pattern: "Unrecoverable error reading the append only file"}
+
+  - kind: workload
+    component_id: valkey.kv_workload
+    instance_id: writes
+    config:
+      stable_keys: 0
+      mutable_keys: {$ref: inputs.mutable_keys}
+      rate: {$ref: inputs.mutation_rate}
+      mix: {set: 0.8, del: 0.1, get: 0.1}
+      op_timeout_s: 1.0
+
+  - kind: fault
+    component_id: valkey.process_signal
+    instance_id: crash-primary
+    config:
+      when_event: durability.crash_point
+      node: primary
+      signal: SIGKILL
+      restart: true
+      restart_mode: immediate
+
+  - kind: action
+    component_id: valkey.wait_for
+    instance_id: run-before-crash
+    depends_on: [writes, persistence-info, server-log, crash-primary]
+    config:
+      seconds: {$ref: inputs.run_before_crash_s}
+      publish: durability.crash_point
+
+  - kind: action
+    component_id: valkey.wait_for
+    instance_id: run-after-crash
+    depends_on: [run-before-crash]
+    config:
+      seconds: {$ref: inputs.run_after_crash_s}
+
+  - kind: oracle
+    component_id: valkey.ledger
+    instance_id: durability
+    config:
+      workload: writes
+      acknowledged: must_survive
+      loss_window_s: {$ref: inputs.loss_window_s}
+      loss_window_faults: [crash-primary]
+      converge_timeout_s: 60
+
+  - kind: oracle
+    component_id: valkey.topology_state
+    instance_id: topology
+    config: {stabilization_wait_s: 1, timeout_s: 120}
+
+  - kind: oracle
+    component_id: valkey.liveness
+    instance_id: liveness
+required_events: [durability.crash_point, node.recovered]
+required_evidence:
+  - {evidence_id: valkey.fault.applied, source: crash-primary}
+  - {evidence_id: valkey.aof.reloaded, source: server-log}
+  - {evidence_id: valkey.aof.enabled, source: persistence-info}
+  - {evidence_id: valkey.data.ledger_verified, source: durability}

@@ -1,0 +1,117 @@
+# Cancel an in-progress forkless BGSAVE with BGSAVE CANCEL and require a clean
+# abort: the snapshot file is not replaced, the cancellation is logged, no
+# in-progress state leaks, and the next forkless save succeeds.
+pack_id: valkey.forkless-save-cancel
+version: "1"
+supported_topologies: [standalone, replication, cluster]
+metadata:
+  description: Cancel a forkless BGSAVE mid-flight and verify a clean abort and recovery
+input_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    stable_keys: {type: integer, minimum: 1, maximum: 1000000, default: 3000}
+    mutable_keys: {type: integer, minimum: 1, maximum: 100000, default: 200}
+    mutation_rate: {type: number, minimum: 0, maximum: 20000, default: 200}
+    key_save_delay_us: {type: integer, minimum: 100, maximum: 100000, default: 500}
+    cancel_delay_s: {type: number, minimum: 0, maximum: 30, default: 0.2}
+startup_overlays:
+  - overlay_id: forkless-enabled
+    server_config:
+      forkless-infrastructure-enabled: "yes"
+      bgsave-default-method: forkless
+      rdb-key-save-delay: {$ref: inputs.key_save_delay_us}
+components:
+  - kind: capability
+    component_id: valkey.build_probe
+    instance_id: forkless-support
+    config:
+      startup_config: {forkless-infrastructure-enabled: "yes", bgsave-default-method: forkless}
+      config_get: {bgsave-default-method: [forkless]}
+      info_fields: {persistence: [rdb_current_bgsave_type]}
+
+  - kind: observer
+    component_id: valkey.info
+    instance_id: persistence-info
+    config:
+      nodes: primaries
+      sections: [persistence]
+      interval_s: 0.02
+      on_events: [bgsave.started, bgsave.completed]
+      expectations:
+        - {evidence_id: valkey.forkless.in_progress, field: rdb_current_bgsave_type, equals: forkless, when: during, nodes: all}
+        - {evidence_id: valkey.persistence.idle_after, field: rdb_bgsave_in_progress, equals: 0, when: final, nodes: all}
+        - {evidence_id: valkey.persistence.no_current_save, field: rdb_current_bgsave_type, equals: none, when: final, nodes: all}
+        - {evidence_id: valkey.persistence.last_status_ok, field: rdb_last_bgsave_status, equals: ok, when: final, nodes: all}
+
+  - kind: observer
+    component_id: valkey.log
+    instance_id: server-log
+    config:
+      nodes: primaries
+      required:
+        - {evidence_id: valkey.forkless.log_cancel_requested, pattern: "Background saving \\(forkless\\) will be aborted", nodes: all}
+        - {evidence_id: valkey.forkless.log_cancelled, pattern: "forkless-save: forkless save cancelled", nodes: all}
+        - {evidence_id: valkey.forkless.log_completed, pattern: "forkless-save: forkless save complete", nodes: all}
+      forbidden:
+        - {pattern: "forkless-save: forkless save failed"}
+
+  - kind: workload
+    component_id: valkey.kv_workload
+    instance_id: mutations
+    config:
+      stable_keys: {$ref: inputs.stable_keys}
+      mutable_keys: {$ref: inputs.mutable_keys}
+      rate: {$ref: inputs.mutation_rate}
+
+  - kind: fault
+    component_id: valkey.command_fault
+    instance_id: cancel-save
+    config:
+      when_event: bgsave.started
+      node: primaries
+      command: [BGSAVE, CANCEL]
+      delay_s: {$ref: inputs.cancel_delay_s}
+
+  - kind: action
+    component_id: valkey.bgsave
+    instance_id: bgsave
+    depends_on: [mutations, persistence-info, server-log, cancel-save]
+    config:
+      nodes: primaries
+      expect: not_completed
+
+  - kind: action
+    component_id: valkey.bgsave
+    instance_id: bgsave-after-cancel
+    depends_on: [bgsave]
+    config:
+      nodes: primaries
+      expect: ok
+      expect_type: forkless
+      started_event: recovery.bgsave.started
+      completed_event: recovery.bgsave.completed
+
+  - kind: oracle
+    component_id: valkey.rdb_snapshot
+    instance_id: snapshot
+    depends_on: [bgsave-after-cancel]
+    config: {bgsave: bgsave-after-cancel, workload: mutations}
+
+  - kind: oracle
+    component_id: valkey.ledger
+    instance_id: data
+    config: {workload: mutations}
+
+  - kind: oracle
+    component_id: valkey.liveness
+    instance_id: liveness
+required_events: [bgsave.started, bgsave.completed, recovery.bgsave.completed]
+required_evidence:
+  - {evidence_id: valkey.forkless.in_progress, source: persistence-info}
+  - {evidence_id: valkey.fault.applied, source: cancel-save}
+  - {evidence_id: valkey.forkless.log_cancelled, source: server-log}
+  - {evidence_id: valkey.persistence.idle_after, source: persistence-info}
+  - {evidence_id: valkey.persistence.no_current_save, source: persistence-info}
+  - {evidence_id: valkey.rdb.reload_verified, source: snapshot}
+  - {evidence_id: valkey.data.ledger_verified, source: data}

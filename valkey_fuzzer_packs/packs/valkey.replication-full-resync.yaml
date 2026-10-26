@@ -1,0 +1,123 @@
+# Freeze a replica (SIGSTOP) while writes overflow a minimal backlog and the
+# replica output-buffer limit, then resume it.  The primary must drop the
+# replica, refuse the partial resync for lack of backlog, and serve a full
+# resync; the replica must converge with no acknowledged write lost.
+pack_id: valkey.replication-full-resync
+version: "1"
+supported_topologies: [replication, cluster]
+metadata:
+  description: Overflow the replication backlog during a replica stall and verify full resync and convergence
+input_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    stable_keys: {type: integer, minimum: 0, maximum: 1000000, default: 500}
+    mutable_keys: {type: integer, minimum: 1, maximum: 100000, default: 300}
+    mutation_rate: {type: number, minimum: 1, maximum: 20000, default: 1000}
+    value_size:
+      type: integer
+      minimum: 64
+      maximum: 65536
+      default: 8192
+      description: large enough that the stall overflows kernel socket buffers, not just the backlog
+    pause_s: {type: number, minimum: 0.5, maximum: 600, default: 3}
+startup_overlays:
+  - overlay_id: tiny-backlog
+    server_config:
+      repl-backlog-size: 16kb
+      client-output-buffer-limit: "replica 64kb 0 0"
+components:
+  - kind: observer
+    component_id: valkey.info
+    instance_id: primary-stats
+    config:
+      nodes: primaries
+      sections: [stats]
+      interval_s: 0.1
+      expectations:
+        - {evidence_id: valkey.replication.full_resync_counted, field: sync_full, delta_min: 1}
+        - {evidence_id: valkey.replication.partial_refused_counted, field: sync_partial_err, delta_min: 1}
+
+  - kind: observer
+    component_id: valkey.log
+    instance_id: logs
+    config:
+      nodes: all
+      required:
+        - {evidence_id: valkey.replication.output_limit_logged, pattern: "scheduled to be closed ASAP for overcoming of output buffer limits"}
+        - {evidence_id: valkey.replication.backlog_exhausted_logged, pattern: "Unable to partial resync with replica .* for lack of backlog"}
+        - {evidence_id: valkey.replication.full_sync_completed_logged, pattern: "sync: Finished with success"}
+
+  - kind: workload
+    component_id: valkey.kv_workload
+    instance_id: writes
+    config:
+      stable_keys: {$ref: inputs.stable_keys}
+      mutable_keys: {$ref: inputs.mutable_keys}
+      rate: {$ref: inputs.mutation_rate}
+      value_size: {$ref: inputs.value_size}
+      mix: {set: 0.9, get: 0.1}
+
+  - kind: fault
+    component_id: valkey.process_signal
+    instance_id: stall-replica
+    config:
+      when_event: resync.stall
+      node: replica
+      signal: SIGSTOP
+      pause_s: {$ref: inputs.pause_s}
+
+  - kind: action
+    component_id: valkey.wait_for
+    instance_id: run-then-stall
+    depends_on: [writes, primary-stats, logs, stall-replica]
+    config: {seconds: 1, publish: resync.stall}
+
+  - kind: action
+    component_id: valkey.wait_for
+    instance_id: settle
+    depends_on: [run-then-stall]
+    config: {seconds: 1}
+
+  # Once the overflow has forced a full resync, restore a production-sized
+  # limit so the resynchronized replica can keep up with the write stream.
+  - kind: action
+    component_id: valkey.command
+    instance_id: restore-output-limit
+    depends_on: [settle]
+    config:
+      nodes: primaries
+      command: [CONFIG, SET, client-output-buffer-limit, "replica 256mb 64mb 60"]
+      expect: {equals: OK}
+
+  - kind: action
+    component_id: valkey.wait_for
+    instance_id: links-up
+    depends_on: [restore-output-limit]
+    config:
+      nodes: replicas
+      section: replication
+      field: master_link_status
+      predicate: {equals: up}
+      timeout_s: 120
+
+  - kind: oracle
+    component_id: valkey.ledger
+    instance_id: data
+    config: {workload: writes, converge_timeout_s: 120}
+
+  - kind: oracle
+    component_id: valkey.topology_state
+    instance_id: topology
+    config: {stabilization_wait_s: 2, timeout_s: 120}
+
+  - kind: oracle
+    component_id: valkey.liveness
+    instance_id: liveness
+required_events: [resync.stall]
+required_evidence:
+  - {evidence_id: valkey.fault.applied, source: stall-replica}
+  - {evidence_id: valkey.replication.full_resync_counted, source: primary-stats}
+  - {evidence_id: valkey.replication.partial_refused_counted, source: primary-stats}
+  - {evidence_id: valkey.replication.backlog_exhausted_logged, source: logs}
+  - {evidence_id: valkey.data.ledger_verified, source: data}

@@ -1,0 +1,88 @@
+# Upgrade every node from one build to another while writes continue.
+# Replicas restart on the new build first, each shard then fails over
+# gracefully to an upgraded replica, and the former primary restarts on the
+# new build.  Graceful failover must not lose a single acknowledged write.
+#
+# The scenario declares both builds as valkey.local-binary artifacts, starts
+# every node on the old one (topology.valkey_binary), and passes the new one as
+# the `to_binary` input: {$ref: artifacts.<id>.binary}.
+pack_id: valkey.rolling-upgrade
+version: "1"
+supported_topologies: [replication, cluster]
+metadata:
+  description: Rolling upgrade under writes with graceful failovers and zero acknowledged-write loss
+input_schema:
+  type: object
+  additionalProperties: false
+  required: [to_binary]
+  properties:
+    to_binary:
+      type: environment_reference
+      reference_kinds: [artifacts]
+      description: "Binary every node is upgraded to, e.g. {$ref: artifacts.candidate.binary}"
+    stable_keys: {type: integer, minimum: 0, maximum: 1000000, default: 1000}
+    mutable_keys: {type: integer, minimum: 1, maximum: 100000, default: 300}
+    mutation_rate: {type: number, minimum: 1, maximum: 20000, default: 300}
+startup_overlays:
+  - overlay_id: durable-restarts
+    server_config:
+      appendonly: "yes"
+      appendfsync: always
+components:
+  - kind: capability
+    component_id: valkey.build_probe
+    instance_id: builds
+    config:
+      min_distinct_builds: 2
+      binaries: [{$ref: inputs.to_binary}]
+
+  - kind: observer
+    component_id: valkey.log
+    instance_id: logs
+    config:
+      nodes: all
+      required:
+        - {evidence_id: valkey.upgrade.restarted_logged, pattern: "Valkey is starting", nodes: all}
+
+  - kind: workload
+    component_id: valkey.kv_workload
+    instance_id: writes
+    config:
+      stable_keys: {$ref: inputs.stable_keys}
+      mutable_keys: {$ref: inputs.mutable_keys}
+      rate: {$ref: inputs.mutation_rate}
+      mix: {set: 0.7, del: 0.1, get: 0.2}
+
+  - kind: action
+    component_id: valkey.rolling_upgrade
+    instance_id: upgrade
+    depends_on: [writes, logs]
+    config:
+      to_binary: {$ref: inputs.to_binary}
+
+  - kind: oracle
+    component_id: valkey.binary_check
+    instance_id: provenance
+    config:
+      expect_binary: {$ref: inputs.to_binary}
+
+  - kind: oracle
+    component_id: valkey.ledger
+    instance_id: data
+    config: {workload: writes, acknowledged: must_survive, converge_timeout_s: 60}
+
+  - kind: oracle
+    component_id: valkey.topology_state
+    instance_id: topology
+    config: {stabilization_wait_s: 2, timeout_s: 120}
+
+  - kind: oracle
+    component_id: valkey.liveness
+    instance_id: liveness
+required_events: [upgrade.started, upgrade.completed]
+required_evidence:
+  - {evidence_id: valkey.upgrade.completed, source: upgrade}
+  - {evidence_id: valkey.upgrade.restarted_logged, source: logs}
+  - {evidence_id: valkey.binary.verified, source: provenance}
+  - {evidence_id: valkey.data.ledger_verified, source: data}
+  - {evidence_id: valkey.topology.validated, source: topology}

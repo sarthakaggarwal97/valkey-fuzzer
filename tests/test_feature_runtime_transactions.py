@@ -1,6 +1,7 @@
 """Atomic pinning and replay validation for the complete extension environment."""
 
 import threading
+from types import SimpleNamespace
 from typing import Any, Callable, Optional
 
 import pytest
@@ -442,7 +443,13 @@ def test_worker_thread_can_read_topology_registry_while_runtime_snapshot_is_pinn
     assert all(not worker.is_alive() for worker in worker_threads)
 
 
-def test_runtime_and_plugin_discovery_lock_order_both_make_progress():
+def test_runtime_and_plugin_discovery_lock_order_both_make_progress(monkeypatch):
+    # Discover nothing: installed plugins (such as the bundled Valkey packs)
+    # would otherwise change what discovery does before it takes any lock.
+    monkeypatch.setattr(
+        "valkey_fuzzer.extensibility.importlib_metadata.entry_points",
+        lambda: SimpleNamespace(select=lambda *, group: ()),
+    )
     validator_entered = threading.Event()
     release_validator = threading.Event()
     discovery_lock_attempted = threading.Event()

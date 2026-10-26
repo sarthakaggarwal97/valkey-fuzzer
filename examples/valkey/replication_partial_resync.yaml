@@ -1,0 +1,10 @@
+# Drop the replica links and require a partial resync (no full sync).
+scenario_id: replication-partial-resync
+seed: 51
+feature:
+  use: valkey.replication-partial-resync
+  version: "1"
+topology:
+  type: replication
+  replicas_per_shard: 1
+  base_port: 7440

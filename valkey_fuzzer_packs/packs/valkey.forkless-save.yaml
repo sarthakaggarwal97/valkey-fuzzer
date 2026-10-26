@@ -1,0 +1,121 @@
+# Forkless BGSAVE under concurrent mutations.
+#
+# Path evidence proves the forkless implementation ran (not merely that it was
+# configured): INFO reports a forkless save in progress and as the last save
+# type, rdb_saves advances, and the server logs the forkless save start and
+# completion.  Correctness oracles reload every captured RDB in a private
+# server (stable keys exact, every other value one that was actually written),
+# check the live dataset against the workload ledger, and validate topology
+# state.  Every pack includes the liveness/crash oracle.
+pack_id: valkey.forkless-save
+version: "1"
+supported_topologies: [standalone, replication, cluster]
+metadata:
+  description: Forkless BGSAVE under concurrent mutations with RDB reload and ledger oracles
+input_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    stable_keys: {type: integer, minimum: 1, maximum: 1000000, default: 2000}
+    mutable_keys: {type: integer, minimum: 1, maximum: 100000, default: 200}
+    mutation_rate: {type: number, minimum: 0, maximum: 20000, default: 300}
+    value_size: {type: integer, minimum: 1, maximum: 65536, default: 128}
+    compressible: {type: boolean, default: false}
+    key_save_delay_us:
+      type: integer
+      minimum: 0
+      maximum: 100000
+      default: 500
+      description: rdb-key-save-delay per key; stretches the save so mid-save observations are deterministic
+startup_overlays:
+  - overlay_id: forkless-enabled
+    server_config:
+      forkless-infrastructure-enabled: "yes"
+      bgsave-default-method: forkless
+      rdb-key-save-delay: {$ref: inputs.key_save_delay_us}
+components:
+  - kind: capability
+    component_id: valkey.build_probe
+    instance_id: forkless-support
+    config:
+      startup_config:
+        forkless-infrastructure-enabled: "yes"
+        bgsave-default-method: forkless
+      config_get:
+        bgsave-default-method: [forkless]
+      info_fields:
+        persistence: [rdb_current_bgsave_type, rdb_last_bgsave_type, forkless_estimated_seconds_remaining]
+
+  - kind: observer
+    component_id: valkey.info
+    instance_id: persistence-info
+    config:
+      nodes: primaries
+      sections: [persistence]
+      interval_s: 0.02
+      on_events: [bgsave.started, bgsave.completed]
+      expectations:
+        - {evidence_id: valkey.forkless.in_progress, field: rdb_current_bgsave_type, equals: forkless, when: during, nodes: all}
+        - {evidence_id: valkey.forkless.last_type, field: rdb_last_bgsave_type, equals: forkless, when: final, nodes: all}
+        - {evidence_id: valkey.persistence.saves_advanced, field: rdb_saves, delta_min: 1, nodes: all}
+        - {evidence_id: valkey.persistence.last_status_ok, field: rdb_last_bgsave_status, equals: ok, when: final, nodes: all}
+        - {evidence_id: valkey.persistence.idle_after, field: rdb_bgsave_in_progress, equals: 0, when: final, nodes: all}
+
+  - kind: observer
+    component_id: valkey.log
+    instance_id: server-log
+    config:
+      nodes: primaries
+      required:
+        - {evidence_id: valkey.forkless.log_started, pattern: "Beginning forklessSaveToDisk", nodes: all}
+        - {evidence_id: valkey.forkless.log_completed, pattern: "forkless-save: forkless save complete", nodes: all}
+      forbidden:
+        - {pattern: "forkless-save: forkless save failed"}
+        - {pattern: "Falling back to fork-based save"}
+
+  - kind: workload
+    component_id: valkey.kv_workload
+    instance_id: mutations
+    config:
+      stable_keys: {$ref: inputs.stable_keys}
+      mutable_keys: {$ref: inputs.mutable_keys}
+      rate: {$ref: inputs.mutation_rate}
+      value_size: {$ref: inputs.value_size}
+      compressible: {$ref: inputs.compressible}
+
+  - kind: action
+    component_id: valkey.bgsave
+    instance_id: bgsave
+    depends_on: [mutations, persistence-info, server-log]
+    config:
+      nodes: primaries
+      expect: ok
+      expect_type: forkless
+
+  - kind: oracle
+    component_id: valkey.rdb_snapshot
+    instance_id: snapshot
+    depends_on: [bgsave]
+    config: {bgsave: bgsave, workload: mutations}
+
+  - kind: oracle
+    component_id: valkey.ledger
+    instance_id: data
+    config: {workload: mutations}
+
+  - kind: oracle
+    component_id: valkey.topology_state
+    instance_id: topology
+
+  - kind: oracle
+    component_id: valkey.liveness
+    instance_id: liveness
+required_events: [workload.seeded, bgsave.started, bgsave.completed]
+required_evidence:
+  - {evidence_id: valkey.forkless.in_progress, source: persistence-info}
+  - {evidence_id: valkey.forkless.last_type, source: persistence-info}
+  - {evidence_id: valkey.persistence.saves_advanced, source: persistence-info}
+  - {evidence_id: valkey.forkless.log_started, source: server-log}
+  - {evidence_id: valkey.forkless.log_completed, source: server-log}
+  - {evidence_id: valkey.rdb.reload_verified, source: snapshot}
+  - {evidence_id: valkey.data.ledger_verified, source: data}

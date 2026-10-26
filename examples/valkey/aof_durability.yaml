@@ -1,0 +1,14 @@
+# Kill the primary under writes and require zero acknowledged-write loss with
+# appendfsync always.  For everysec, set loss_window_s to the fsync interval.
+scenario_id: aof-durability
+seed: 11
+feature:
+  use: valkey.aof-durability
+  version: "1"
+  with:
+    appendfsync: always
+    loss_window_s: 0
+topology:
+  type: replication
+  replicas_per_shard: 1
+  base_port: 7430

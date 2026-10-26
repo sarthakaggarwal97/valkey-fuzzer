@@ -1,0 +1,9 @@
+# SIGKILL the primary while a forkless BGSAVE is running, then restart it.
+scenario_id: forkless-save-crash
+seed: 124
+feature:
+  use: valkey.forkless-save-crash
+  version: "1"
+topology:
+  type: standalone
+  base_port: 7410

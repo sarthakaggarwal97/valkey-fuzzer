@@ -1,0 +1,101 @@
+# Drop every replica link from the primary side (CLIENT KILL TYPE replica)
+# under continuous writes and require a partial resynchronization: the primary
+# counts sync_partial_ok without any new full sync, both sides log the PSYNC
+# handshake, and every replica converges byte-for-byte with its primary.
+pack_id: valkey.replication-partial-resync
+version: "1"
+supported_topologies: [replication, cluster]
+metadata:
+  description: Disconnect replicas mid-stream and verify PSYNC partial resync and convergence
+input_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    stable_keys: {type: integer, minimum: 0, maximum: 1000000, default: 500}
+    mutable_keys: {type: integer, minimum: 1, maximum: 100000, default: 300}
+    mutation_rate: {type: number, minimum: 1, maximum: 20000, default: 400}
+    disconnect_after_s: {type: number, minimum: 0, maximum: 600, default: 1}
+components:
+  - kind: observer
+    component_id: valkey.info
+    instance_id: primary-stats
+    config:
+      nodes: primaries
+      sections: [stats, replication]
+      interval_s: 0.1
+      expectations:
+        - {evidence_id: valkey.replication.partial_resync_counted, field: sync_partial_ok, delta_min: 1}
+        - {evidence_id: valkey.replication.no_full_resync, field: sync_full, delta_max: 0, nodes: all}
+
+  - kind: observer
+    component_id: valkey.log
+    instance_id: logs
+    config:
+      nodes: all
+      required:
+        - {evidence_id: valkey.replication.psync_accepted_logged, pattern: "Partial resynchronization request from .* accepted"}
+        - {evidence_id: valkey.replication.psync_succeeded_logged, pattern: "Successful partial resynchronization with primary"}
+      forbidden:
+        - {pattern: "Full resync from primary"}
+
+  - kind: workload
+    component_id: valkey.kv_workload
+    instance_id: writes
+    config:
+      stable_keys: {$ref: inputs.stable_keys}
+      mutable_keys: {$ref: inputs.mutable_keys}
+      rate: {$ref: inputs.mutation_rate}
+      mix: {set: 0.8, del: 0.1, get: 0.1}
+
+  - kind: fault
+    component_id: valkey.command_fault
+    instance_id: drop-replica-links
+    config:
+      when_event: resync.disconnect
+      node: primaries
+      command: [CLIENT, KILL, TYPE, replica]
+
+  - kind: action
+    component_id: valkey.wait_for
+    instance_id: run-then-disconnect
+    depends_on: [writes, primary-stats, logs, drop-replica-links]
+    config: {seconds: {$ref: inputs.disconnect_after_s}, publish: resync.disconnect}
+
+  - kind: action
+    component_id: valkey.wait_for
+    instance_id: settle
+    depends_on: [run-then-disconnect]
+    config: {seconds: 0.5}
+
+  - kind: action
+    component_id: valkey.wait_for
+    instance_id: links-up
+    depends_on: [settle]
+    config:
+      nodes: replicas
+      section: replication
+      field: master_link_status
+      predicate: {equals: up}
+      timeout_s: 60
+
+  - kind: oracle
+    component_id: valkey.ledger
+    instance_id: data
+    config: {workload: writes, converge_timeout_s: 60}
+
+  - kind: oracle
+    component_id: valkey.topology_state
+    instance_id: topology
+    config: {stabilization_wait_s: 1}
+
+  - kind: oracle
+    component_id: valkey.liveness
+    instance_id: liveness
+required_events: [resync.disconnect]
+required_evidence:
+  - {evidence_id: valkey.fault.applied, source: drop-replica-links}
+  - {evidence_id: valkey.replication.partial_resync_counted, source: primary-stats}
+  - {evidence_id: valkey.replication.no_full_resync, source: primary-stats}
+  - {evidence_id: valkey.replication.psync_accepted_logged, source: logs}
+  - {evidence_id: valkey.replication.psync_succeeded_logged, source: logs}
+  - {evidence_id: valkey.data.ledger_verified, source: data}

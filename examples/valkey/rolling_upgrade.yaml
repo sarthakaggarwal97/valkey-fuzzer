@@ -1,0 +1,21 @@
+# Start every node on the baseline build and upgrade it to the candidate build
+# under writes, with zero acknowledged writes lost.
+scenario_id: rolling-upgrade
+seed: 61
+artifacts:
+  baseline:
+    use: valkey.local-binary
+    with: {path: /opt/valkey-8.1/src/valkey-server}
+  candidate:
+    use: valkey.local-binary
+    with: {path: /opt/valkey/src/valkey-server}
+feature:
+  use: valkey.rolling-upgrade
+  version: "1"
+  with:
+    to_binary: {$ref: artifacts.candidate.binary}
+topology:
+  type: replication
+  replicas_per_shard: 1
+  base_port: 7470
+  valkey_binary: {$ref: artifacts.baseline.binary}

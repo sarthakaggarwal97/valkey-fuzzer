@@ -1,0 +1,9 @@
+# Cancel a forkless BGSAVE mid-save with BGSAVE CANCEL.
+scenario_id: forkless-save-cancel
+seed: 125
+feature:
+  use: valkey.forkless-save-cancel
+  version: "1"
+topology:
+  type: standalone
+  base_port: 7420

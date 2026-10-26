@@ -1,0 +1,71 @@
+# A deterministic, build-agnostic workload for differential runs.
+#
+# A seeded workload performs exactly `operations` operations and drains; a
+# BGSAVE then snapshots the quiesced dataset.  Evidence records canonical
+# digests of the live dataset, of the reloaded RDB, and of every client-visible
+# reply.  Two variants of this plan (fork vs forkless save, baseline vs
+# candidate binary, a configuration flag on vs off) must produce identical
+# digests.  Variant-specific settings belong in topology.server_config or the
+# topology's binary, never in this pack, so it runs on any build.
+pack_id: valkey.snapshot-equivalence
+version: "1"
+supported_topologies: [standalone, replication, cluster]
+metadata:
+  description: Deterministic workload, quiesced BGSAVE, and dataset/RDB/reply digests for differential runs
+input_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    stable_keys: {type: integer, minimum: 0, maximum: 1000000, default: 1000}
+    mutable_keys: {type: integer, minimum: 1, maximum: 100000, default: 300}
+    operations: {type: integer, minimum: 1, maximum: 1000000, default: 2000}
+    rate: {type: number, minimum: 1, maximum: 100000, default: 2000}
+    value_size: {type: integer, minimum: 1, maximum: 65536, default: 64}
+components:
+  - kind: workload
+    component_id: valkey.kv_workload
+    instance_id: workload
+    config:
+      stable_keys: {$ref: inputs.stable_keys}
+      mutable_keys: {$ref: inputs.mutable_keys}
+      max_ops: {$ref: inputs.operations}
+      rate: {$ref: inputs.rate}
+      value_size: {$ref: inputs.value_size}
+      drain_on_stop: true
+
+  - kind: action
+    component_id: valkey.flow.wait_event
+    instance_id: drained
+    depends_on: [workload]
+    config: {event: workload.drained, timeout_s: 600}
+
+  - kind: action
+    component_id: valkey.bgsave
+    instance_id: bgsave
+    depends_on: [drained]
+    config: {nodes: primaries, expect: ok}
+
+  - kind: oracle
+    component_id: valkey.rdb_snapshot
+    instance_id: snapshot
+    depends_on: [bgsave]
+    config: {bgsave: bgsave, workload: workload}
+
+  - kind: oracle
+    component_id: valkey.ledger
+    instance_id: data
+    config: {workload: workload}
+
+  - kind: oracle
+    component_id: valkey.dataset_digest
+    instance_id: dataset
+
+  - kind: oracle
+    component_id: valkey.liveness
+    instance_id: liveness
+required_events: [workload.drained]
+required_evidence:
+  - {evidence_id: valkey.flow.event_observed, source: drained}
+  - {evidence_id: valkey.rdb.reload_verified, source: snapshot}
+  - {evidence_id: valkey.data.ledger_verified, source: data}
+  - {evidence_id: valkey.dataset.digest, source: dataset}

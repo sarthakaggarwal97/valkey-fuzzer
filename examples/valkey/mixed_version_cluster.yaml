@@ -1,0 +1,21 @@
+# Cluster with replicas on an older build; fail over shard 0 so the old build
+# is promoted.  Point the two artifacts at two different valkey-server builds.
+scenario_id: mixed-version-cluster
+seed: 21
+artifacts:
+  baseline:
+    use: valkey.local-binary
+    with: {path: /opt/valkey-8.1/src/valkey-server}
+  candidate:
+    use: valkey.local-binary
+    with: {path: /opt/valkey/src/valkey-server}
+feature:
+  use: valkey.mixed-version-cluster
+  version: "1"
+  with: {failover_shard: 0}
+topology:
+  type: cluster
+  base_port: 7460
+  valkey_binary: {$ref: artifacts.candidate.binary}
+  node_binaries:
+    replica: {$ref: artifacts.baseline.binary}

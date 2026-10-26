@@ -1,0 +1,13 @@
+# Jepsen-style partition of a cluster primary (Linux, root, iptables).
+scenario_id: cluster-partition
+seed: 31
+feature:
+  use: valkey.cluster-partition
+  version: "1"
+  with: {isolate: node-0, successor: node-1}
+topology:
+  type: cluster
+  num_shards: 3
+  replicas_per_shard: 1
+  base_port: 7490
+  addressing: per_node_loopback
