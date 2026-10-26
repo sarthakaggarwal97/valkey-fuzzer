@@ -9,12 +9,21 @@ immutable plan, and the generic runner executes registered capabilities,
 workloads, actions, faults, observers, and oracles. Adding a feature must not
 require a feature-specific CLI command or a switch in the core runner.
 
-The framework owns test mechanics, not Valkey feature implementations.
-Forkless save, replication compression, durability, data tiering, and possible
-future protocols are architecture stress cases only; they are not planned
-core-owned packs. Feature authors bring the feature-specific manifest,
-configuration, probes, actions, evidence, and oracles. Core supplies stable
-onboarding contracts and reusable, feature-neutral services.
+The framework core owns test mechanics, not Valkey feature implementations.
+Feature authors bring the feature-specific manifest, configuration, probes,
+actions, evidence, and oracles. Core supplies stable onboarding contracts and
+reusable, feature-neutral services.
+
+Valkey feature testing ships next to the core as
+[`valkey_fuzzer_packs`](valkey_fuzzer_packs/): an ordinary plugin that imports
+only `valkey_fuzzer.extensions` and registers through the
+`valkey_fuzzer.plugins` entry point, exactly as an external extension would. It
+provides a reusable Valkey component library (workloads with an
+acknowledged-operation ledger, actions, event-triggered faults, observers, and
+oracles), binary and filesystem providers, and feature packs for forkless save,
+AOF durability, disk-full recovery, replication resync, mixed-version clusters,
+rolling upgrades, and network partitions. See
+[Valkey feature packs](#valkey-feature-packs).
 
 ## Project status
 
@@ -44,19 +53,22 @@ The lean generic foundation is complete for extension development:
   the unchanged CLI
 - JSON or YAML result bundles
 
-The repository deliberately does **not** ship a core-owned Valkey feature pack.
-The manifest under `examples/feature-packs/` is an honest topology smoke: it
-proves that the generic compiler and topology provider can be composed, but it
-does not claim to exercise a Valkey feature. Feature implementations belong in
-extension-owned manifests or plugins; adding a core-owned pack is not a
-framework milestone.
+On top of the foundation, the core also provides feature-neutral services that
+the Valkey packs needed and that any extension can use:
 
-The foundation intentionally stops here. Event-driven concurrency, mixed
-binaries, common durability ledgers, managed object stores, reusable Valkey
-components, differential execution, semantic coverage, and minimization are
-optional libraries or future framework capabilities. Add one only when a real
-extension needs it and the resulting abstraction is reusable; none is required
-to onboard a feature today.
+- per-node binaries (`node_binaries`), per-node data roots
+  (`node_data_roots`), and per-node loopback addresses
+  (`addressing: per_node_loopback`) in local topologies
+- a topology service with process control, node files, live roles, tracked
+  clients, shard failover, and the topology state validators
+- report-safe topology provenance (layout, PIDs, per-node binary digests)
+- `list`, `replay`, `diff` (differential runs), `campaign` (matrix runs with
+  persistent semantic coverage), `coverage`, and `minimize` commands
+
+The core still owns no Valkey feature pack: every pack lives in a plugin. The
+manifest under `examples/feature-packs/` is an honest topology smoke: it proves
+that the generic compiler and topology provider can be composed, but it does
+not claim to exercise a Valkey feature.
 
 ## The model
 
@@ -276,9 +288,29 @@ The local topology provider accepts:
 - `base_port`, `base_data_dir`, `valkey_binary`, and `enable_cleanup`
 - topology-wide `server_config`
 - role or exact-node `node_configs`
+- role or exact-node `node_binaries`: the valkey-server each node starts
+- role or exact-node `node_data_roots`: where node data (RDB, AOF,
+  `nodes.conf`) lives, for example a size-limited filesystem resource; logs stay
+  under `base_data_dir`
+- `addressing`: `shared_loopback` (default, every node binds `127.0.0.1`) or
+  `per_node_loopback` (`node-N` binds `127.0.0.(N+2)`, also as its source
+  address, so network faults can target node pairs)
 
-Configuration precedence is topology-wide, then role, then exact node. Feature
-packs can add ordered startup overlays on top of the scenario topology.
+Configuration and per-node overrides take the exact node first, then the role,
+then the topology default. Feature packs can add ordered startup overlays on
+top of the scenario topology. Binaries and data roots usually come from
+providers:
+
+```yaml
+artifacts:
+  baseline: {use: valkey.local-binary, with: {path: /opt/valkey-8.1/src/valkey-server}}
+  candidate: {use: valkey.local-binary, with: {path: /opt/valkey/src/valkey-server}}
+topology:
+  type: cluster
+  valkey_binary: {$ref: artifacts.candidate.binary}
+  node_binaries:
+    replica: {$ref: artifacts.baseline.binary}
+```
 
 ## Feature-pack format
 
@@ -414,10 +446,23 @@ Only declared provider dependencies are visible while another provider is
 being acquired. Component code sees the complete acquired environment plus
 topology services. These are runtime capabilities, not report data: do not
 serialize or retain them after the component call. The built-in local topology
-service exposes immutable process-free node descriptors, `current_nodes()`,
-`execute_command(node_id, ...)`, and `restart(node_id)`. It deliberately does
-not export raw reconnectable clients or process handles; cleanup rejects new
-operations and waits for operations already in flight.
+service exposes:
+
+- immutable planned node descriptors (`nodes`, `node(node_id)`) and
+  `current_nodes()`
+- `execute_command(node_id, ...)`, `new_client(node_id)`, and, for clusters,
+  `cluster_client()`; clients it hands out are closed when the topology is
+  cleaned up
+- process control: `pid`, `is_alive`, `send_signal`, `wait_exit`, `restart`
+- node files: `log_file`, `log_start_offset` (where this run's log output
+  begins), `data_dir`
+- binaries: `binary`, `binaries`, and `set_binary` (used from the next restart)
+- live roles: `roles`, `primaries`, `replicas`, `refresh_roles`; restarts
+  record live roles first, so a failed-over node restarts in its current role
+- `failover(shard_id)` for clusters and `validate_state(...)`, which runs the
+  replication, cluster-status, slot-coverage, topology, and view validators
+
+Cleanup rejects new operations and waits for operations already in flight.
 
 ## CLI
 
@@ -470,6 +515,37 @@ Important options:
 - `--output PATH --format json|yaml`: save the complete outcome
 - `--allow-unsupported`: treat `SKIP_UNSUPPORTED` as a successful matrix cell
 
+Beyond `run` and `validate`, these commands work with any feature pack:
+
+```bash
+valkey-fuzzer list packs                      # or: list components; --format json
+valkey-fuzzer run examples/valkey/forkless_save.yaml --output report.json
+valkey-fuzzer replay report.json              # re-run the recorded plan (also accepts plan.json)
+valkey-fuzzer diff examples/valkey/differential_fork_vs_forkless.yaml
+valkey-fuzzer campaign examples/valkey/forkless_campaign.yaml --coverage coverage.json
+valkey-fuzzer coverage coverage.json --campaign examples/valkey/forkless_campaign.yaml
+valkey-fuzzer minimize report.json --output minimized.yaml
+```
+
+- `run --output` reports include the scenario and reproducer provenance
+  (pack digest, plugins, component implementations, plan digest, platform), so
+  the report alone is enough to `replay` or `minimize` a run.
+- `diff` runs one seeded scenario under several variants (dotted-path patches
+  of `feature`, `topology`, `artifacts`, `resources`, or `policies`) and
+  compares evidence fields: `equal` rules must match across variants and
+  `differ` rules must not, proving each variant exercised a different path.
+- `campaign` expands a base scenario over a matrix and runs combinations whose
+  semantic tuple (pack, topology shape, config mix, inputs, component
+  composition, environment providers) has been exercised least, boundary
+  values first. `--coverage` persists counts across invocations; `coverage`
+  summarizes them and lists combinations a campaign has not tried.
+- `minimize` greedily shrinks a failing run's scenario (topology size,
+  configuration keys, numeric inputs) while the failure signature — status,
+  failing components, missing evidence, and observed path evidence — holds.
+
+Each run of `replay`, `diff`, `campaign`, and `minimize` leaves `plan.json` and
+`report.json` under `--artifact-dir` (default `/tmp/valkey-fuzzer`).
+
 Exit codes:
 
 - `0`: pass, or an allowed unsupported target
@@ -515,6 +591,48 @@ python examples/run_fuzzer.py validate examples/standalone_scenario.yaml
 python examples/run_fuzzer.py run examples/standalone_scenario.yaml \
   --valkey-binary /absolute/path/to/valkey-server
 ```
+
+## Valkey feature packs
+
+`valkey_fuzzer_packs` is installed with the package and discovered like any
+plugin (`--no-plugins` disables it). Examples for every pack are in
+[`examples/valkey/`](examples/valkey/).
+
+| Pack | Topologies | What it proves |
+| --- | --- | --- |
+| `valkey.forkless-save` | standalone, replication, cluster | a forkless BGSAVE really ran (INFO and log path evidence), its RDB reloads, and live data matches the write ledger |
+| `valkey.forkless-save-crash` | standalone, replication, cluster | SIGKILL mid forkless save; the node restarts and recovers |
+| `valkey.forkless-save-cancel` | standalone, replication, cluster | `BGSAVE CANCEL` aborts a forkless save cleanly and the next save succeeds |
+| `valkey.aof-durability` | standalone, replication | no acknowledged write is lost across SIGKILL and AOF reload |
+| `valkey.bgsave-disk-full` | standalone (Linux, root) | AOF and BGSAVE fail gracefully on a full filesystem and recover |
+| `valkey.replication-partial-resync` | replication, cluster | dropped replica links resume with PSYNC, not a full sync |
+| `valkey.replication-full-resync` | replication, cluster | a stalled replica that overflows the backlog performs a full resync |
+| `valkey.mixed-version-cluster` | cluster | a cluster of two builds fails over; every node runs its assigned binary |
+| `valkey.rolling-upgrade` | replication, cluster | every node moves to a new build under writes with zero acknowledged-write loss |
+| `valkey.cluster-partition` | cluster (Linux, root, iptables) | an isolated primary is replaced, demoted, and resynced; loss is bounded to its slots and the partition window |
+| `valkey.snapshot-equivalence` | standalone, replication, cluster | deterministic workload and digests for `diff` |
+
+Every pack includes the `valkey.liveness` oracle, which fails a run when any
+node died or logged a crash, assertion, or sanitizer report. Hosts that cannot
+run a pack (no forkless support, a single build for a mixed-version pack, no
+tmpfs or iptables) report `SKIP_UNSUPPORTED` before anything starts.
+
+The library's components (`valkey-fuzzer list components`) can be composed in
+data-only manifests. Faults are event-triggered: each names its trigger in its
+own config (`when_event: bgsave.started`) and records when and where it fired.
+Providers: `valkey.local-binary` (resolves, fingerprints, and optionally
+verifies a binary; output `binary`), `valkey.fs.tmpdir`, and `valkey.fs.tmpfs`
+(output `path`).
+
+Live tests run every pack against real servers:
+
+```bash
+VALKEY_FUZZER_BINARY=/path/to/valkey-server \
+VALKEY_FUZZER_OLD_BINARY=/path/to/older/valkey-server \
+  pytest -m live tests/test_live_valkey_packs.py
+```
+
+[`docs/findings/`](docs/findings/) records Valkey bugs the packs found.
 
 ## Adding a feature
 

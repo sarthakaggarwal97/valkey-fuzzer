@@ -10,10 +10,13 @@ then use the existing `valkey-fuzzer validate` and `valkey-fuzzer run` commands.
 Normal onboarding must not require a feature enum, CLI command, scenario-parser
 branch, topology special case, or result-format fork.
 
-Forkless save, replication compression, durability, data tiering, and future
-protocols are architecture probes, not core-owned feature packs. The framework
-provides the execution seams; an extension provides the behavior and knowledge
-specific to the feature being tested.
+The framework provides the execution seams; an extension provides the behavior
+and knowledge specific to the feature being tested. No feature pack is
+core-owned. The Valkey packs (forkless save, durability, disk-full recovery,
+replication resync, mixed versions, rolling upgrades, partitions) ship in this
+repository as `valkey_fuzzer_packs`, a plugin that uses only the public
+extension API and the plugin entry point — the same path as any external
+extension. See [The in-repo Valkey plugin](#the-in-repo-valkey-plugin).
 
 The project is intentionally greenfield:
 
@@ -163,7 +166,9 @@ Core intentionally has no speculative event-scheduling language or schedule
 journal. If a real feature needs overlap or event-triggered fault placement, its
 extension can first implement that coordination locally. A common scheduler
 belongs in core only after multiple real extensions establish the same
-semantics.
+semantics. The Valkey plugin does exactly this: each fault names its trigger in
+its own config (`when_event`), subscribes when armed, and fires inside that
+event's dispatch.
 
 `mode: feature` requires at least one required oracle and one required evidence
 declaration. `mode: topology_smoke` tests infrastructure and cannot be presented
@@ -259,19 +264,53 @@ is `ERROR` even when an oracle also failed.
 Cleanup failures remain visible and can upgrade an otherwise successful run to
 `ERROR`.
 
+## The in-repo Valkey plugin
+
+`valkey_fuzzer_packs` holds everything Valkey-feature-specific:
+
+- a component library: build and host capability probes; a key/value workload
+  that records every operation's client-visible outcome (`ok`, `error`,
+  `ambiguous`) in a ledger; actions (commands, BGSAVE, failover, restart,
+  rolling upgrade, waits); event-triggered faults (signals, commands, network
+  partitions, disk fill, read-only data directories); INFO and log observers;
+  and oracles (liveness and crash reports, ledger consistency with explicit
+  loss windows, RDB reload, topology state, binary provenance, dataset digest,
+  evidence assertions)
+- providers: `valkey.local-binary` (artifact), `valkey.fs.tmpdir` and
+  `valkey.fs.tmpfs` (resources)
+- data-only feature packs under `valkey_fuzzer_packs/packs/`
+
+A test asserts that the plugin imports nothing from `valkey_fuzzer` except
+`valkey_fuzzer.extensions`. Its Valkey-specific knowledge stays out of core;
+what it needed from core was feature-neutral:
+
+- **Local topology:** per-node binaries, data roots, and loopback addresses,
+  and a topology service with process control, node files, live roles, tracked
+  clients, shard failover, and the existing state validators. These belong to
+  the core-owned local topology provider, not to any feature.
+- **Provenance:** provisioned topologies carry report-safe metadata (node
+  layout, PIDs, per-node binary digests) recorded under
+  `diagnostics.topology`.
+- **Execution tooling:** `diff`, `campaign`, `coverage`, `minimize`, `replay`,
+  and `list` operate only on scenarios, plans, outcomes, and opaque evidence;
+  they never interpret pack, component, or evidence identities.
+
 ## Optional capabilities
 
-The following may be valuable, but they are not prerequisites for generic
-onboarding:
+These remain outside the onboarding contract. Where each one lives today:
 
-- reusable Valkey command, workload, fault, and safety-oracle libraries
-- event-driven concurrent components and deterministic fault placement
-- per-node immutable binaries and rolling upgrade helpers
-- shared operation histories, checkpoints, and consistency policies
-- managed filesystem, object-store, proxy, and sidecar providers
-- immutable plugin, manifest, and tested-binary attestations
-- differential and metamorphic execution
-- campaign scheduling, semantic coverage, corpus management, and minimization
+| Capability | Status |
+| --- | --- |
+| reusable Valkey command, workload, fault, and safety-oracle libraries | Valkey plugin |
+| event-triggered fault placement | Valkey plugin (`when_event` in fault config) |
+| per-node immutable binaries and rolling upgrade helpers | core topology (`node_binaries`, `set_binary`); upgrade action in the plugin |
+| operation histories and consistency policies | Valkey plugin (write ledger, loss windows) |
+| managed filesystem providers | Valkey plugin (`valkey.fs.tmpdir`, `valkey.fs.tmpfs`) |
+| object-store, proxy, and sidecar providers | open |
+| immutable plugin, manifest, and tested-binary attestations | partial: reports record pack digest, plugins, component implementations, binary digests |
+| differential and metamorphic execution | core (`diff`) |
+| campaign scheduling, semantic coverage, and minimization | core (`campaign`, `coverage`, `minimize`) |
+| corpus management | open |
 
 Promote one into core only when:
 
