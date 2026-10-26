@@ -21,7 +21,7 @@ jobs:
       run: pip install ruff>=0.4.0
 
     - name: Ruff lint check
-      run: ruff check valkey_fuzzer/ tests/ examples/
+      run: ruff check valkey_fuzzer/ valkey_fuzzer_packs/ tests/ examples/
 
     - name: Ruff format check
-      run: ruff format --check valkey_fuzzer/ tests/ examples/
+      run: ruff format --check valkey_fuzzer/ valkey_fuzzer_packs/ tests/ examples/

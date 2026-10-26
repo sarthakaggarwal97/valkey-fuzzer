@@ -117,9 +117,19 @@ def test_every_ci_fuzzer_invocation_parses_with_the_current_cli(workflow_name):
 def test_lint_workflow_targets_the_package():
     scripts = "\n".join(_run_scripts(_workflow("lint.yml")))
 
-    assert "ruff check valkey_fuzzer/ tests/ examples/" in scripts
-    assert "ruff format --check valkey_fuzzer/ tests/ examples/" in scripts
+    assert "ruff check valkey_fuzzer/ valkey_fuzzer_packs/ tests/ examples/" in scripts
+    assert "ruff format --check valkey_fuzzer/ valkey_fuzzer_packs/ tests/ examples/" in scripts
     assert "src/" not in scripts
+
+
+def test_scheduled_run_exercises_the_valkey_packs_live_as_root():
+    job = _workflow("fuzzer-run.yml")["jobs"]["valkey-packs-live"]
+    script = "\n".join(_run_scripts({"jobs": {"valkey-packs-live": job}}))
+
+    # Root lets the tmpfs and iptables packs run instead of skipping.
+    assert "sudo -E" in script
+    assert "-m live" in script and "tests/test_live_valkey_packs.py" in script
+    assert "VALKEY_FUZZER_BINARY=" in script and "VALKEY_FUZZER_OLD_BINARY=" in script
 
 
 def test_acceptance_jobs_reference_files_that_exist():
