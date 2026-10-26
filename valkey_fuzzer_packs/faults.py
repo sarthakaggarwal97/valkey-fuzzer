@@ -107,6 +107,9 @@ class _EventFault:
     def _recover(self, context: Any, spec: ComponentSpec, record: dict[str, Any]) -> None:
         """Undo the fault during cleanup (restart, resume, ...)."""
 
+    def _disarm(self, context: Any, spec: ComponentSpec) -> None:
+        """Release what ``_prepare`` set up when the fault never fired."""
+
     def cleanup(self, context: Any, spec: ComponentSpec):
         if self._subscription is not None:
             context.event_bus.unsubscribe(self._subscription)
@@ -117,6 +120,7 @@ class _EventFault:
             return make_result(spec, ComponentStatus.ERROR, "fault was still firing when cleanup timed out")
         record = self._record
         if record is None:
+            self._disarm(context, spec)
             return make_result(
                 spec,
                 ComponentStatus.FAIL,
@@ -195,10 +199,17 @@ class ProcessSignalFault(_EventFault):
                 record["exited"] = handle.wait_exit(self._target, timeout=30)
                 if self._config["restart"] and self._config["restart_mode"] == "immediate":
                     # Recovery is part of the fault here so later actions in the
-                    # plan observe the restarted node.
+                    # plan observe the restarted node. A failed restart keeps
+                    # the kill record; cleanup retries it.
                     time.sleep(self._config["restart_delay_s"])
-                    self._restart(handle, record)
-                    context.event_bus.publish("node.recovered", source=spec.instance_id, payload={"node": self._target})
+                    try:
+                        self._restart(handle, record)
+                    except Exception as exc:
+                        record["restart_error"] = f"{type(exc).__name__}: {exc}"
+                    else:
+                        context.event_bus.publish(
+                            "node.recovered", source=spec.instance_id, payload={"node": self._target}
+                        )
         else:
             handle.send_signal(self._target, _SIGNALS[name])
             record["applied"] = True

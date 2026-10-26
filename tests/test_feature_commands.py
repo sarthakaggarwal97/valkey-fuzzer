@@ -258,3 +258,94 @@ def test_commands_report_bad_inputs_as_harness_errors(tmp_path, capsys):
     assert feature_commands.campaign_command(_args("campaign", missing)) == feature_commands.EXIT_CODES["ERROR"]
     assert feature_commands.coverage_command(_args("coverage", missing)) == feature_commands.EXIT_CODES["ERROR"]
     assert "not found" in capsys.readouterr().out
+
+
+def test_a_case_that_fails_execution_preflight_is_recorded_as_error(tmp_path, runs, monkeypatch, capsys):
+    calls = {"count": 0}
+
+    def run_plan(plan, *, deadline=None):
+        calls["count"] += 1
+        raise ValueError("unknown node_configs selector 'replica'")
+
+    runtime = feature_commands.runtime_for(None)
+    monkeypatch.setattr(runtime, "run_plan", run_plan)
+    code = feature_commands.campaign_command(
+        _args(
+            "campaign",
+            str(EXAMPLES / "forkless_campaign.yaml"),
+            "--max-runs",
+            "2",
+            "--artifact-dir",
+            str(tmp_path / "c"),
+        )
+    )
+    assert calls["count"] == 2, "one failing case must not abort the campaign"
+    assert code == feature_commands.EXIT_CODES["ERROR"]
+    assert "run failed before execution" in capsys.readouterr().out
+
+
+def test_a_campaign_that_runs_nothing_is_an_error(tmp_path, runs):
+    document = yaml.safe_load((EXAMPLES / "forkless_campaign.yaml").read_text())
+    document["matrix"] = {"topology.type": ["no-such-topology"]}
+    path = tmp_path / "campaign.yaml"
+    path.write_text(yaml.safe_dump(document))
+    code = feature_commands.campaign_command(_args("campaign", str(path), "--artifact-dir", str(tmp_path / "c")))
+    assert code == feature_commands.EXIT_CODES["ERROR"]
+    assert not runs.plans
+
+
+def test_campaign_ids_must_form_valid_scenario_ids(tmp_path, runs):
+    document = yaml.safe_load((EXAMPLES / "forkless_campaign.yaml").read_text())
+    document["campaign_id"] = "forkless matrix"
+    path = tmp_path / "campaign.yaml"
+    path.write_text(yaml.safe_dump(document))
+    assert feature_commands.campaign_command(_args("campaign", str(path))) == feature_commands.EXIT_CODES["ERROR"]
+
+
+def test_rerunning_a_campaign_explores_new_seeds(tmp_path, runs):
+    coverage = tmp_path / "coverage.json"
+    for _ in range(2):
+        feature_commands.campaign_command(
+            _args(
+                "campaign",
+                str(EXAMPLES / "forkless_campaign.yaml"),
+                "--coverage",
+                str(coverage),
+                "--max-runs",
+                "9",
+                "--artifact-dir",
+                str(tmp_path / "c"),
+            )
+        )
+    first, second = runs.plans[:9], runs.plans[9:]
+    assert len(second) == 9
+    assert {plan.seed for plan in first}.isdisjoint({plan.seed for plan in second})
+
+
+def test_valkey_binary_override_is_recorded_and_reused_by_minimize(tmp_path, runs):
+    runs.status = OutcomeStatus.FAIL
+    output = tmp_path / "report.json"
+    args = _args("run", str(EXAMPLES / "forkless_save.yaml"), "--output", str(output), "--valkey-binary", "/cand")
+    cli.FuzzerCLI().run_scenario(args)
+    report = json.loads(output.read_text())
+    assert report["scenario"]["topology"]["valkey_binary"] == "/cand"
+
+    feature_commands.minimize_command(_args("minimize", str(output), "--max-attempts", "2"))
+    assert {plan.topology_document["valkey_binary"] for plan in runs.plans} == {"/cand"}
+
+
+def test_yaml_reports_can_be_replayed(tmp_path, runs):
+    output = tmp_path / "report.yaml"
+    args = _args("run", str(EXAMPLES / "forkless_save.yaml"), "--output", str(output), "--format", "yaml")
+    assert cli.FuzzerCLI().run_scenario(args) == 0
+    assert feature_commands.replay_command(_args("replay", str(output), "--artifact-dir", str(tmp_path))) == 0
+    assert runs.plans[1] == runs.plans[0]
+
+
+def test_replay_honors_allow_unsupported(tmp_path, runs):
+    output = _run_report(tmp_path, runs)
+    runs.status = OutcomeStatus.SKIP_UNSUPPORTED
+    args = _args("replay", str(output), "--artifact-dir", str(tmp_path))
+    assert feature_commands.replay_command(args) == feature_commands.EXIT_CODES["SKIP_UNSUPPORTED"]
+    args = _args("replay", str(output), "--allow-unsupported", "--artifact-dir", str(tmp_path))
+    assert feature_commands.replay_command(args) == 0

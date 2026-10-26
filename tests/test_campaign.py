@@ -273,3 +273,17 @@ def test_coverage_report_counts_untried_cases_beyond_max_runs():
     session = valkey_runtime()
     report = coverage_report(CoverageDB(), Campaign.from_document(dict(CAMPAIGN, max_runs=2)), session.compile)
     assert report["campaign"]["untried_tuples"] == 9
+
+
+def test_error_signatures_include_the_error_type():
+    plan = _plan()
+    first = RunOutcome(plan=plan, status=OutcomeStatus.ERROR, summary="x", diagnostics={"error": {"type": "A"}})
+    second = RunOutcome(plan=plan, status=OutcomeStatus.ERROR, summary="x", diagnostics={"error": {"type": "B"}})
+    assert not same_failure(failure_signature(first), failure_signature(second))
+    assert same_failure(failure_signature(first), failure_signature(first))
+
+
+def test_coverage_distinguishes_builds():
+    first = _plan(document={"type": "standalone", "valkey_binary": "/opt/a"})
+    second = _plan(document={"type": "standalone", "valkey_binary": "/opt/b"})
+    assert coverage_key(first) != coverage_key(second)

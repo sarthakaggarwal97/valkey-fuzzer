@@ -244,3 +244,17 @@ def test_failover_requires_a_cluster_topology():
         for process in processes:
             process.kill()
             process.wait()
+
+
+def test_handle_exposes_each_nodes_process_output_file():
+    processes = [_process(), _process()]
+    try:
+        handle = LocalValkeyTopologyHandle(Mock(), _instance(processes), output_start_offsets={"node-1": 7})
+
+        assert handle.process_output_file("node-0") == "/tmp/log-0.stdio.log"
+        assert handle.process_output_start_offset("node-0") == 0
+        assert handle.process_output_start_offset("node-1") == 7
+    finally:
+        for process in processes:
+            process.kill()
+            process.wait()

@@ -75,22 +75,38 @@ def _validate_probe(config: Mapping[str, Any], spec: ComponentSpec, plan: RunPla
         raise ComponentConfigError("min_version must look like '8.1.0'")
 
 
+def _planned_roles(document: Mapping[str, Any], topology: str) -> dict[str, str]:
+    """``{node_id: role}`` in the local topology provider's planning order."""
+
+    defaults = {"standalone": (1, 0), "replication": (1, 1), "cluster": (3, 1)}
+    shards, replicas = defaults.get(topology, (1, 0))
+    shards = document.get("num_shards", shards) if topology == "cluster" else 1
+    replicas = document.get("replicas_per_shard", replicas)
+    if not isinstance(shards, int) or not isinstance(replicas, int):
+        return {}
+    roles = {}
+    for index in range(shards * (1 + replicas)):
+        roles[f"node-{index}"] = "primary" if index % (1 + replicas) == 0 else "replica"
+    return roles
+
+
 def plan_binaries(plan: RunPlan) -> dict[str, str]:
     """Return {label: binary} for every binary the plan's topology starts.
 
-    The topology default (``valkey_binary``, else ``valkey-server`` on PATH)
-    is always included; ``node_binaries`` overrides add one entry each.
-    Artifact references are bound before capability probes run.
+    ``node_binaries`` overrides (by node ID or role) add one entry each; the
+    topology default (``valkey_binary``, else the orchestrator's default) is
+    included when at least one planned node uses it. Artifact references are
+    bound before capability probes run.
     """
 
     document = to_plain_data(plan.topology_document)
     overrides = document.get("node_binaries") or {}
     if not isinstance(overrides, Mapping):
         overrides = {}
+    roles = _planned_roles(document, plan.topology)
+    uses_default = not roles or any(node not in overrides and role not in overrides for node, role in roles.items())
     binaries: dict[str, str] = {}
-    # Every role has its own binary, so no node starts the topology default.
-    covered = "primary" in overrides and ("replica" in overrides or plan.topology == "standalone")
-    if not covered:
+    if uses_default:
         binaries["default"] = document.get("valkey_binary") or ""
     for selector, binary in sorted(overrides.items()):
         if isinstance(binary, str):
@@ -98,12 +114,16 @@ def plan_binaries(plan: RunPlan) -> dict[str, str]:
     return binaries
 
 
+# Where the local topology builds valkey-server when none is configured or on PATH.
+_SOURCE_BUILD = os.path.join("/tmp/valkey-build", "valkey", "src", "valkey-server")
+
+
 def resolve_binary(binary: str) -> Optional[str]:
     if binary:
         if os.path.sep in binary or binary.startswith("."):
             return os.path.abspath(binary) if os.path.isfile(binary) else None
         return shutil.which(binary)
-    return shutil.which("valkey-server")
+    return shutil.which("valkey-server") or (_SOURCE_BUILD if os.path.isfile(_SOURCE_BUILD) else None)
 
 
 class _ProbeServer:
@@ -192,7 +212,8 @@ def probe_binary(binary: str, config: Mapping[str, Any]) -> tuple[ComponentStatu
 
     resolved = resolve_binary(binary)
     if resolved is None:
-        return ComponentStatus.ERROR, f"valkey-server binary {binary or 'valkey-server'!r} was not found", {}
+        hint = "" if binary else "; set topology.valkey_binary or put valkey-server on PATH"
+        return ComponentStatus.ERROR, f"valkey-server binary {binary or 'valkey-server'!r} was not found{hint}", {}
     server = _ProbeServer(resolved, config["startup_config"], config["timeout_s"])
     facts: dict[str, Any] = {"binary": resolved}
     try:
@@ -242,8 +263,12 @@ def probe_binary(binary: str, config: Mapping[str, Any]) -> tuple[ComponentStatu
         facts["info"] = info_values
 
         for command in config["commands"]:
-            reply = client.execute_command("COMMAND", "INFO", command)
-            if not reply or reply[0] is None:
+            try:
+                reply = client.execute_command("COMMAND", "INFO", command)
+            except TypeError:
+                # valkey-py cannot parse the nil entry an unknown command returns.
+                reply = None
+            if not isinstance(reply, Mapping) or command.lower() not in {name.lower() for name in reply}:
                 return ComponentStatus.SKIP, f"build does not implement command {command!r}", facts
         return ComponentStatus.PASS, "capability probe passed", facts
     finally:

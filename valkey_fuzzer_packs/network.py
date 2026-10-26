@@ -225,6 +225,10 @@ class PartitionFault(_EventFault):
     def _heal_on_event(self, event: Any) -> None:
         self._heal("event")
 
+    def _disarm(self, context: Any, spec: ComponentSpec) -> None:
+        if self._heal_subscription is not None:
+            context.event_bus.unsubscribe(self._heal_subscription)
+
     def _recover(self, context: Any, spec: ComponentSpec, record: dict[str, Any]) -> None:
         if self._heal_subscription is not None:
             context.event_bus.unsubscribe(self._heal_subscription)

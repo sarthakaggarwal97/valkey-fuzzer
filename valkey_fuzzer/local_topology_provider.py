@@ -55,7 +55,8 @@ logger = logging.getLogger(__name__)
 
 LOCAL_TOPOLOGY_SERVICE = "valkey.topology"
 LOCAL_TOPOLOGY_PROVIDER_ID = "valkey-fuzzer.local-topology"
-LOCAL_TOPOLOGY_PROVIDER_IMPLEMENTATION_VERSION = "1"
+# 2: per-node binaries, data roots, and addressing; restarts record live roles.
+LOCAL_TOPOLOGY_PROVIDER_IMPLEMENTATION_VERSION = "2"
 _SUPPORTED_CONFLICT_POLICIES = frozenset({"override", "error"})
 
 
@@ -347,12 +348,14 @@ class LocalValkeyTopologyHandle:
         coordinator: ClusterCoordinator,
         instance: ClusterInstance,
         log_start_offsets: Optional[Mapping[str, int]] = None,
+        output_start_offsets: Optional[Mapping[str, int]] = None,
     ):
         if not isinstance(instance, ClusterInstance):
             raise TypeError("instance must be a ClusterInstance")
         # Node log files are keyed by seed and node ID and are appended to by
         # every run; offsets mark where this topology's output begins.
         self._log_start_offsets = dict(log_start_offsets or {})
+        self._output_start_offsets = dict(output_start_offsets or {})
         # Clients handed to components; whatever is still open is closed when
         # the topology is cleaned up.
         self._clients: weakref.WeakSet[Any] = weakref.WeakSet()
@@ -565,6 +568,17 @@ class LocalValkeyTopologyHandle:
         with self._operation():
             self._node_info(node_id)
             return self._log_start_offsets.get(node_id, 0)
+
+    def process_output_file(self, node_id: str) -> Optional[str]:
+        """Return the file capturing the node's stdout/stderr (sanitizer reports land here)."""
+        with self._operation():
+            return ConfigurationManager._process_output_path(self._node_info(node_id).log_file)
+
+    def process_output_start_offset(self, node_id: str) -> int:
+        """Byte offset in ``process_output_file(node_id)`` where this topology's output starts."""
+        with self._operation():
+            self._node_info(node_id)
+            return self._output_start_offsets.get(node_id, 0)
 
     def data_dir(self, node_id: str) -> str:
         with self._operation():
@@ -808,12 +822,17 @@ class LocalValkeyTopologyProvider:
         config, expected_plans = self._prepare(plan)
         expected_config = copy.deepcopy(config)
         log_start_offsets = {}
+        output_start_offsets = {}
         for expected in expected_plans:
             log_path = os.path.join(config.base_data_dir, "logs", f"{plan.seed}-{expected.node_id}.log")
-            try:
-                log_start_offsets[expected.node_id] = os.path.getsize(log_path)
-            except OSError:
-                log_start_offsets[expected.node_id] = 0
+            for offsets, path in (
+                (log_start_offsets, log_path),
+                (output_start_offsets, ConfigurationManager._process_output_path(log_path)),
+            ):
+                try:
+                    offsets[expected.node_id] = os.path.getsize(path)
+                except (OSError, TypeError):
+                    offsets[expected.node_id] = 0
         coordinator = self._coordinator_factory()
         self._pending_baseline_cluster_ids = _active_cluster_ids(coordinator) or set()
         self._pending_coordinator = coordinator
@@ -838,7 +857,7 @@ class LocalValkeyTopologyProvider:
         instance = created_instance
         _validate_provisioned_instance(instance, expected_config, expected_plans)
 
-        handle = LocalValkeyTopologyHandle(coordinator, instance, log_start_offsets)
+        handle = LocalValkeyTopologyHandle(coordinator, instance, log_start_offsets, output_start_offsets)
         topology = ProvisionedTopology(
             handle=handle,
             services={LOCAL_TOPOLOGY_SERVICE: handle},

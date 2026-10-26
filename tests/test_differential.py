@@ -193,3 +193,10 @@ def test_replies_digest_ignores_timing_but_not_replies():
     changed = [dict(base[0], reply="w")]
     assert replies_digest(base) == replies_digest(later)
     assert replies_digest(base) != replies_digest(changed)
+
+
+def test_a_variant_failure_is_not_hidden_by_an_unsupported_variant():
+    differential = Differential.from_document(DOCUMENT)
+    outcomes = {"a": _outcome(OutcomeStatus.FAIL), "b": _outcome(OutcomeStatus.SKIP_UNSUPPORTED)}
+    status, summary = differential_status(differential, outcomes, compare_outcomes(differential, outcomes))
+    assert status == "FAIL" and "a" in summary

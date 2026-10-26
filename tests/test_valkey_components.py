@@ -476,3 +476,135 @@ def test_evidence_assert_requires_and_forbids():
     assert oracle.evaluate(FakeContext(FakeHandle()), spec, evidence).status is ComponentStatus.PASS
     evidence.append(Evidence("c.d", "z", "p", time.time(), 3))
     assert oracle.evaluate(FakeContext(FakeHandle()), spec, evidence).status is ComponentStatus.FAIL
+
+
+# ---------------------------------------------------------------------------
+# review regressions
+# ---------------------------------------------------------------------------
+
+
+class _LivenessHandle(FakeHandle):
+    def __init__(self, log_dir):
+        super().__init__(("node-0",), log_dir=log_dir)
+        self.output = os.path.join(log_dir, "node-0.stdio.log")
+
+    def is_alive(self, node_id):
+        return True
+
+    def new_client(self, node_id, timeout=5.0):
+        client = FakeClient()
+        client.ping = lambda: True
+        client.info = lambda section: {"loading": 0}
+        return client
+
+    def log_start_offset(self, node_id):
+        return 0
+
+    def process_output_file(self, node_id):
+        return self.output
+
+    def process_output_start_offset(self, node_id):
+        return 0
+
+
+def test_liveness_scans_process_output_for_sanitizer_reports(tmp_path):
+    from valkey_fuzzer_packs.oracles import LivenessOracle
+
+    handle = _LivenessHandle(str(tmp_path))
+    (tmp_path / "node-0.log").write_text("Ready to accept connections\n")
+    (tmp_path / "node-0.stdio.log").write_text("==1==ERROR: AddressSanitizer: heap-use-after-free\n")
+    spec = ComponentSpec(kind=ComponentKind.ORACLE, component_id="valkey.liveness", instance_id="liveness")
+
+    result = LivenessOracle().evaluate(FakeContext(handle), spec, ())
+
+    assert result.status is ComponentStatus.FAIL
+    assert "AddressSanitizer" in result.summary
+
+
+def test_cluster_write_failures_are_ambiguous():
+    import valkey
+
+    from valkey_fuzzer_packs.workloads import _classify
+
+    rejected = valkey.exceptions.ResponseError("READONLY You can't write against a read only replica.")
+    assert _classify(rejected) == "error"
+    assert _classify(rejected, cluster=True) == "ambiguous"
+    assert _classify(valkey.exceptions.ClusterDownError("CLUSTERDOWN"), cluster=True) == "ambiguous"
+    assert _classify(valkey.exceptions.TimeoutError()) == "ambiguous"
+
+
+def test_plan_binaries_count_node_id_overrides_as_covering_the_default():
+    document = {
+        "type": "replication",
+        "replicas_per_shard": 1,
+        "valkey_binary": "/unused",
+        "node_binaries": {"node-0": "/a", "node-1": "/b"},
+    }
+    assert plan_binaries(_plan(document=document, topology="replication")) == {
+        "node_binaries.node-0": "/a",
+        "node_binaries.node-1": "/b",
+    }
+
+
+def test_a_failed_immediate_restart_keeps_the_kill_record(monkeypatch):
+    handle = FakeHandle()
+    alive = {"node-0": True}
+    handle.send_signal = lambda node_id, signum: alive.update({node_id: False})
+    handle.wait_exit = lambda node_id, timeout=10: True
+    handle.is_alive = lambda node_id: alive[node_id]
+    attempts = []
+
+    def restart(node_id, wait_ready=True):
+        attempts.append(node_id)
+        if len(attempts) == 1:
+            raise RuntimeError("did not become ready")
+        alive[node_id] = True
+
+    handle.restart = restart
+    context = FakeContext(handle)
+    spec = ComponentSpec(
+        kind=ComponentKind.FAULT,
+        component_id="valkey.process_signal",
+        instance_id="kill",
+        config={"when_event": "go", "signal": "SIGKILL", "restart_mode": "immediate"},
+    )
+    fault = ProcessSignalFault()
+    fault.arm(context, spec)
+    context.event_bus.publish("go", source="test")
+    result = fault.cleanup(context, spec)
+
+    assert attempts == ["node-0", "node-0"], "cleanup retries the restart"
+    assert result.status is ComponentStatus.PASS
+    record = next(item.value for item in result.evidence if item.evidence_id == FAULT_APPLIED)
+    assert record["signal"] == "SIGKILL" and "did not become ready" in record["restart_error"]
+    assert record["restarted"] is True
+
+
+def test_a_fault_that_never_fires_releases_its_subscriptions(tmp_path):
+    from valkey_fuzzer_packs.storage import FillFilesystemFault
+
+    context = FakeContext(FakeHandle())
+    spec = ComponentSpec(
+        kind=ComponentKind.FAULT,
+        component_id="valkey.fs.fill",
+        instance_id="fill",
+        config={"when_event": "never", "path": str(tmp_path), "release_event": "release"},
+    )
+    fault = FillFilesystemFault()
+    fault.arm(context, spec)
+    assert fault.cleanup(context, spec).status is ComponentStatus.FAIL
+    # No handler is left behind for the release event.
+    context.event_bus.publish("release", source="test")
+    assert not os.path.exists(os.path.join(str(tmp_path), ".ballast-fill"))
+    assert len(context.event_bus._subscribers) == 0
+
+
+def test_loss_scope_without_fault_targets_covers_every_key():
+    from valkey_fuzzer_packs.oracles import _target_slot_ranges
+
+    handle = FakeHandle()
+    handle.topology_type = SimpleNamespace(value="cluster")
+    for node in handle.nodes:
+        node.shard_id, node.slot_start, node.slot_end = 0, 0, 16383
+    assert _target_slot_ranges(handle, []) is None
+    assert _target_slot_ranges(handle, ["node-0"]) == [(0, 16383)]

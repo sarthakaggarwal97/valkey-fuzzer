@@ -148,6 +148,11 @@ class FillFilesystemFault(_EventFault):
             "applied": full,
         }
 
+    def _disarm(self, context: Any, spec: ComponentSpec) -> None:
+        subscription = getattr(self, "_release_subscription", None)
+        if subscription is not None:
+            context.event_bus.unsubscribe(subscription)
+
     def _recover(self, context: Any, spec: ComponentSpec, record: dict[str, Any]) -> None:
         subscription = getattr(self, "_release_subscription", None)
         if subscription is not None:

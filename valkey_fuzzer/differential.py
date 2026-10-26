@@ -192,6 +192,11 @@ def differential_status(
     if "ERROR" in statuses.values():
         failing = [name for name, status in statuses.items() if status == "ERROR"]
         return "ERROR", f"variant(s) errored: {', '.join(failing)}"
+    # A variant's own FAIL is a trustworthy verdict even if another variant
+    # could not run.
+    failed = [name for name, status in statuses.items() if status == "FAIL" and differential.require_status != "FAIL"]
+    if failed:
+        return "FAIL", f"variant(s) failed: {', '.join(failed)}"
     if "SKIP_UNSUPPORTED" in statuses.values() and differential.require_status != "SKIP_UNSUPPORTED":
         skipped = [name for name, status in statuses.items() if status == "SKIP_UNSUPPORTED"]
         return "SKIP_UNSUPPORTED", f"variant(s) unsupported: {', '.join(skipped)}"

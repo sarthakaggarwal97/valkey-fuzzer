@@ -122,10 +122,14 @@ class _Target:
         self.reset()
 
 
-def _classify(exc: BaseException) -> str:
+def _classify(exc: BaseException, cluster: bool = False) -> str:
+    # The cluster client retries internally after timeouts and connection
+    # errors, so its final error may follow an attempt that was applied.
+    if cluster:
+        return "ambiguous"
     if isinstance(exc, valkey.exceptions.ResponseError):
-        # A server error reply (READONLY, MISCONF, OOM, WRONGTYPE, ...) means
-        # the command was rejected and not applied.
+        # A standalone client never retries: a server error reply (READONLY,
+        # MISCONF, OOM, WRONGTYPE, ...) means the command was not applied.
         return "error"
     return "ambiguous"
 
@@ -258,7 +262,7 @@ class KeyValueWorkload:
                 entry["reply"] = client.get(key)
             entry["outcome"] = "ok"
         except Exception as exc:
-            entry["outcome"] = _classify(exc)
+            entry["outcome"] = _classify(exc, self._target.cluster)
             entry["error"] = f"{type(exc).__name__}: {exc}"
             # Reconnect after any failure: an error reply such as READONLY means
             # the endpoint stopped being the writable primary (e.g. failover).

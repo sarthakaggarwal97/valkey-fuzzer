@@ -22,6 +22,7 @@ import itertools
 import json
 import os
 import random
+import re
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -35,6 +36,9 @@ COVERAGE_SCHEMA = "valkey-fuzzer.coverage/v1"
 class CampaignError(ValueError):
     """A campaign document is malformed."""
 
+
+# Case scenario IDs are "<campaign_id>-<combination>-<replica>".
+_CAMPAIGN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
 
 # Scenario sections a campaign matrix or differential variant may patch.
 _SCENARIO_SECTIONS = ("feature", "topology", "artifacts", "resources", "policies")
@@ -63,10 +67,15 @@ def static_tuple(plan: RunPlan) -> dict[str, Any]:
         "node_configs": document.get("node_configs", {}),
         "overlays": [to_plain_data(overlay) for overlay in plan.startup_overlays],
     }
-    # Which nodes get their own binary matters; resolved paths do not.
+    # Different builds are different combinations, whether a scenario names a
+    # binary directly or through an artifact declaration.
     artifact_mix = {
-        "providers": sorted(artifact.provider_id for artifact in plan.artifacts),
-        "node_binaries": sorted(document.get("node_binaries") or {}),
+        "valkey_binary": document.get("valkey_binary"),
+        "node_binaries": document.get("node_binaries") or {},
+        "artifacts": sorted(
+            (artifact.artifact_id, artifact.provider_id, _digest(to_plain_data(artifact.config)))
+            for artifact in plan.artifacts
+        ),
     }
     return {
         "feature": f"{plan.pack_id}@{plan.pack_version}",
@@ -80,6 +89,7 @@ def static_tuple(plan: RunPlan) -> dict[str, Any]:
         "inputs": to_plain_data(plan.inputs),
         "artifact_mix": _digest(artifact_mix),
         "resources": sorted(resource.provider_id for resource in plan.resources),
+        "policies": sorted(policy.policy_type for policy in plan.policies),
         "workloads": of_kind(ComponentKind.WORKLOAD),
         "actions": of_kind(ComponentKind.ACTION),
         "faults": of_kind(ComponentKind.FAULT),
@@ -307,6 +317,12 @@ class Campaign:
         for name in ("campaign_id", "base"):
             if name not in document:
                 raise CampaignError(f"campaign is missing {name!r}")
+        campaign_id = document["campaign_id"]
+        if not isinstance(campaign_id, str) or not _CAMPAIGN_ID.fullmatch(campaign_id):
+            raise CampaignError("campaign_id must be letters, digits, '.', '_', ':' or '-'")
+        max_runs = document.get("max_runs")
+        if max_runs is not None and (isinstance(max_runs, bool) or not isinstance(max_runs, int) or max_runs < 1):
+            raise CampaignError("max_runs must be a positive integer")
         base = document["base"]
         if not isinstance(base, Mapping) or "feature" not in base or "topology" not in base:
             raise CampaignError("base must be a scenario with feature and topology")
@@ -375,6 +391,13 @@ class Campaign:
             try:
                 case.plan = compile_fn(case.scenario)
                 case.key = coverage_key(case.plan)
+                prior = coverage.runs(case.key)
+                if prior:
+                    # Re-running a campaign explores new seeds for tuples it
+                    # has already exercised, still reproducibly.
+                    case.seed = random.Random(f"{self.seed}:{case.case_id}:{prior}").randrange(1, 2**31)
+                    case.scenario["seed"] = case.seed
+                    case.plan = compile_fn(case.scenario)
             except Exception as exc:
                 case.compile_error = f"{type(exc).__name__}: {exc}"
         valid = [case for case in cases if case.plan is not None]
@@ -466,11 +489,14 @@ def failure_signature(outcome: RunOutcome, required_evidence: Iterable[str] = ()
     )
     missing = sorted(item["evidence_id"] for item in diagnostics.get("missing_required_evidence", ()))
     observed = {item.evidence_id for item in outcome.all_evidence}
+    error = diagnostics.get("error")
     return {
         "status": outcome.status.value,
         "failing_components": failing,
         "missing_evidence": missing,
         "path_evidence": sorted(observed & set(required_evidence)),
+        # An ERROR is the same failure only if the same kind of error caused it.
+        "error_type": error.get("type") if isinstance(error, Mapping) else None,
     }
 
 
@@ -480,6 +506,7 @@ def same_failure(reference: Mapping[str, Any], candidate: Mapping[str, Any]) -> 
         and candidate["failing_components"] == reference["failing_components"]
         and candidate["missing_evidence"] == reference["missing_evidence"]
         and set(reference["path_evidence"]) <= set(candidate["path_evidence"])
+        and candidate.get("error_type") == reference.get("error_type")
     )
 
 

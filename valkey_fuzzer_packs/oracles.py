@@ -116,12 +116,21 @@ class LivenessOracle:
                     status[node.node_id] = reason
                     break
                 time.sleep(0.1)
+        patterns = CRASH_PATTERNS + tuple(config["extra_crash_patterns"])
         offset_of = getattr(handle, "log_start_offset", None)
         crashes = scan_for_crashes(
             {node.node_id: handle.log_file(node.node_id) for node in handle.nodes},
-            CRASH_PATTERNS + tuple(config["extra_crash_patterns"]),
+            patterns,
             {node.node_id: offset_of(node.node_id) for node in handle.nodes} if callable(offset_of) else None,
         )
+        # Sanitizers report on stderr, which the topology captures separately.
+        output_of = getattr(handle, "process_output_file", None)
+        if callable(output_of):
+            outputs = {node.node_id: output_of(node.node_id) for node in handle.nodes}
+            output_offsets = {node.node_id: handle.process_output_start_offset(node.node_id) for node in handle.nodes}
+            found = scan_for_crashes({key: path for key, path in outputs.items() if path}, patterns, output_offsets)
+            for node_id, lines in found.items():
+                crashes.setdefault(node_id, []).extend(lines)
         problems = [f"{node_id}: {reason}" for node_id, reason in status.items() if reason != "ok"]
         problems += [f"{node_id}: crash report ({lines[0]})" for node_id, lines in crashes.items()]
         record = {"nodes": status, "crash_reports": crashes}
@@ -473,6 +482,8 @@ class LedgerOracle:
     def _check_replicas(context: Any, handle: Any, keys: list, primary_values: dict, timeout_s: float) -> dict:
         report: dict[str, Any] = {}
         replicas = handle.replicas()
+        for node_id in _unreachable(handle):
+            report[node_id] = {"keys": 0, "diverged": True, "mismatched": [], "error": "node is unreachable"}
         cluster = getattr(handle.topology_type, "value", "") == "cluster"
         deadline = time.monotonic() + remaining(context, timeout_s)
         for node_id in replicas:
@@ -502,6 +513,13 @@ class LedgerOracle:
         return report
 
 
+def _unreachable(handle: Any) -> list[str]:
+    """Nodes whose live replication role cannot be read."""
+
+    roles = handle.roles()
+    return [node.node_id for node in handle.nodes if node.node_id not in roles]
+
+
 def _target_slot_ranges(handle: Any, targets: Sequence[str]) -> Optional[list]:
     """Planned slot ranges of the shards containing ``targets`` (cluster only)."""
 
@@ -512,7 +530,9 @@ def _target_slot_ranges(handle: Any, targets: Sequence[str]) -> Optional[list]:
     for node in handle.nodes:
         if node.shard_id in shards and node.slot_start is not None:
             ranges.append((node.slot_start, node.slot_end))
-    return sorted(set(ranges))
+    # Faults that record no targets cannot be scoped; fall back to every key
+    # rather than an empty scope that would forbid all loss.
+    return sorted(set(ranges)) or None
 
 
 def _keys_owned_by_primary_of(handle: Any, replica_id: str, keys: list) -> list:
@@ -590,22 +610,28 @@ def load_rdb(binary: str, rdb_path: str, timeout_s: float) -> tuple[Optional[dic
         stderr=subprocess.DEVNULL,
     )
     client = None
+    loaded = False
     try:
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             if process.poll() is not None:
                 break
             if os.path.exists(socket_path):
-                try:
+                if client is None:
                     client = valkey.Valkey(unix_socket_path=socket_path, socket_timeout=10, decode_responses=True)
+                try:
                     if str(client.info("persistence").get("loading")) == "0":
+                        loaded = True
                         break
                 except valkey.exceptions.ConnectionError:
+                    client.close()
                     client = None
                 except valkey.exceptions.BusyLoadingError:
                     pass
             time.sleep(0.05)
-        if client is None or process.poll() is not None:
+        if not loaded:
+            if process.poll() is None:
+                return None, f"the RDB did not finish loading within {timeout_s}s"
             try:
                 with open(log_path, encoding="utf-8", errors="replace") as handle:
                     return None, handle.read()[-2000:]
@@ -718,6 +744,11 @@ class DatasetDigestOracle:
         per_node = {}
         problems = []
         cluster = getattr(handle.topology_type, "value", "") == "cluster"
+        unreachable = _unreachable(handle)
+        if unreachable:
+            # A digest that silently leaves out a node would compare as a
+            # different (or, worse, the same) dataset in differential runs.
+            problems.append(f"unreachable node(s): {', '.join(unreachable)}")
         for node_id in handle.primaries():
             client = handle.new_client(node_id, timeout=10.0)
             try:
@@ -887,10 +918,13 @@ class BinaryCheckOracle:
                 problems.append(f"{node_id}: runs {reported['executable']}, assigned {assigned}")
             if expected["version"] and expected["version"] != reported["version"]:
                 problems.append(f"{node_id}: runs {reported['version']}, its binary is {expected['version']}")
-            expected_sha = (expected["git_sha"] or "").lower()
-            if expected_sha and set(expected_sha) != {"0"} and reported["git_sha"]:
-                short = min(len(expected_sha), len(reported["git_sha"]))
-                if expected_sha[:short] != reported["git_sha"][:short]:
+            # INFO parsing turns an all-digit SHA into an integer, so compare
+            # without leading zeros.
+            expected_sha = (expected["git_sha"] or "").lower().lstrip("0")
+            reported_sha = reported["git_sha"].lstrip("0")
+            if expected_sha and reported_sha:
+                short = min(len(expected_sha), len(reported_sha))
+                if expected_sha[:short] != reported_sha[:short]:
                     problems.append(f"{node_id}: git sha {reported['git_sha']} does not match its binary")
             if str(reported["process_id"]) != str(handle.pid(node_id)):
                 problems.append(f"{node_id}: INFO process_id does not match the managed process")

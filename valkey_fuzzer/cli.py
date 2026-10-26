@@ -120,8 +120,13 @@ class FuzzerCLI:
             if output_path:
                 # The scenario and provenance make the report replayable and
                 # minimizable on its own.
+                # Record the scenario as run, including a --valkey-binary override.
+                scenario = feature_commands.with_binary(
+                    feature_commands.plain(load_scenario_yaml(source, source_name=str(path))),
+                    getattr(args, "valkey_binary", None),
+                )
                 extra = {
-                    "scenario": feature_commands.plain(load_scenario_yaml(source, source_name=str(path))),
+                    "scenario": scenario,
                     "reproducer": feature_commands.reproducer(runtime, plan, outcome),
                 }
                 self._save_outcomes((outcome,), output_path, getattr(args, "format", "json"), extra=extra)

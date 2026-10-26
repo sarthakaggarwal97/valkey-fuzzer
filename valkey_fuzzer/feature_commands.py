@@ -87,12 +87,12 @@ def load_yaml_document(path: str) -> Any:
 
 
 def with_binary(scenario: Mapping[str, Any], valkey_binary: Optional[str]) -> dict[str, Any]:
-    """Return a copy whose topology uses ``valkey_binary`` unless it names its own."""
+    """Return a copy whose topology uses ``valkey_binary``, as ``run --valkey-binary`` does."""
 
     updated = copy.deepcopy(dict(scenario))
     if valkey_binary:
         topology = dict(updated.get("topology") or {})
-        topology.setdefault("valkey_binary", valkey_binary)
+        topology["valkey_binary"] = valkey_binary
         updated["topology"] = topology
     return updated
 
@@ -158,7 +158,18 @@ def execute(
     os.makedirs(report_dir, exist_ok=True)
     write_json(os.path.join(report_dir, "plan.json"), plain(plan.to_data()))
     deadline = time.monotonic() + timeout if timeout is not None else None
-    outcome = runtime.run_plan(plan, deadline=deadline)
+    try:
+        outcome = runtime.run_plan(plan, deadline=deadline)
+    except Exception as exc:
+        # A plan can compile yet fail execution preflight (for example a
+        # topology selector a reduced scenario no longer has). Record it as an
+        # ERROR run so campaigns, differentials, and minimization continue.
+        outcome = RunOutcome(
+            plan=plan,
+            status=OutcomeStatus.ERROR,
+            summary=f"run failed before execution: {exc}",
+            diagnostics={"error": {"type": type(exc).__name__, "message": str(exc)[:2000]}},
+        )
     report = run_report(runtime, scenario, outcome)
     write_json(os.path.join(report_dir, "report.json"), report)
     return outcome, report
@@ -237,8 +248,19 @@ def list_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_report(path: str) -> Any:
+    # JSON is YAML, so this reads --format json and --format yaml reports.
+    return yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+
+
+def _exit_code(status: str, args: argparse.Namespace) -> int:
+    if status == OutcomeStatus.SKIP_UNSUPPORTED.value and getattr(args, "allow_unsupported", False):
+        return 0
+    return EXIT_CODES[status]
+
+
 def _plan_from_file(path: str) -> tuple[RunPlan, Optional[dict[str, Any]]]:
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    data = _load_report(path)
     if isinstance(data, Mapping) and data.get("schema") == REPORT_SCHEMA:
         return RunPlan.from_data(data["outcome"]["plan"]), data.get("scenario")
     if isinstance(data, Mapping) and isinstance(data.get("results"), list):
@@ -265,7 +287,7 @@ def replay_command(args: argparse.Namespace) -> int:
     print(f"Report: {os.path.join(report_dir, 'report.json')}")
     if args.output:
         write_json(args.output, report)
-    return EXIT_CODES[outcome.status.value]
+    return _exit_code(outcome.status.value, args)
 
 
 @_guard
@@ -273,11 +295,13 @@ def diff_command(args: argparse.Namespace) -> int:
     differential = Differential.from_document(load_yaml_document(args.file))
     if args.seed is not None:
         differential.base["seed"] = args.seed
+    # Variants patch the base, so a variant that sets its own binary keeps it.
+    differential.base = with_binary(differential.base, args.valkey_binary)
     runtime = runtime_for(args)
     base_dir = _base_dir(args, "differential", differential.differential_id)
 
     def compile_variant(scenario: dict) -> RunPlan:
-        return runtime.compile(with_binary(scenario, args.valkey_binary))
+        return runtime.compile(scenario)
 
     def execute_variant(name: str, scenario: dict, plan: RunPlan) -> tuple[RunOutcome, str]:
         run_dir = os.path.join(base_dir, name)
@@ -302,7 +326,7 @@ def diff_command(args: argparse.Namespace) -> int:
     write_json(os.path.join(base_dir, "differential.json"), report)
     if args.output:
         write_json(args.output, report)
-    return EXIT_CODES[report["status"]]
+    return _exit_code(report["status"], args)
 
 
 @_guard
@@ -310,12 +334,14 @@ def campaign_command(args: argparse.Namespace) -> int:
     campaign = Campaign.from_document(load_yaml_document(args.file))
     if args.max_runs is not None:
         campaign.max_runs = args.max_runs
+    # Matrix dimensions patch the base, so a dimension over binaries still wins.
+    campaign.base = with_binary(campaign.base, args.valkey_binary)
     runtime = runtime_for(args)
     coverage = CoverageDB(args.coverage)
     base_dir = _base_dir(args, "campaigns", campaign.campaign_id)
 
     def compile_case(scenario: dict) -> RunPlan:
-        return runtime.compile(with_binary(scenario, args.valkey_binary))
+        return runtime.compile(scenario)
 
     if args.dry_run:
         schedule = campaign.schedule(compile_case, coverage)
@@ -332,7 +358,7 @@ def campaign_command(args: argparse.Namespace) -> int:
             runtime,
             case.scenario,
             case.plan,
-            report_dir=os.path.join(base_dir, case.case_id),
+            report_dir=os.path.join(base_dir, f"{case.case_id}-seed{case.seed}"),
             timeout=args.timeout,
         )
         return outcome
@@ -356,10 +382,13 @@ def campaign_command(args: argparse.Namespace) -> int:
     if args.output:
         write_json(args.output, summary)
     statuses = summary["statuses"]
-    if statuses.get(OutcomeStatus.ERROR.value):
-        return EXIT_CODES[OutcomeStatus.ERROR.value]
     if statuses.get(OutcomeStatus.FAIL.value):
         return EXIT_CODES[OutcomeStatus.FAIL.value]
+    if statuses.get(OutcomeStatus.ERROR.value):
+        return EXIT_CODES[OutcomeStatus.ERROR.value]
+    if not summary["cases_run"]:
+        print("Error: the campaign ran no cases")
+        return EXIT_CODES[OutcomeStatus.ERROR.value]
     return 0
 
 
@@ -404,7 +433,7 @@ def coverage_command(args: argparse.Namespace) -> int:
 
 @_guard
 def minimize_command(args: argparse.Namespace) -> int:
-    report = json.loads(Path(args.report).read_text(encoding="utf-8"))
+    report = _load_report(args.report)
     scenario = report.get("scenario") if isinstance(report, Mapping) else None
     if not isinstance(scenario, Mapping) or "feature" not in scenario:
         raise ValueError("report does not contain the original scenario; minimize needs a 'run' report")
@@ -423,9 +452,10 @@ def minimize_command(args: argparse.Namespace) -> int:
     spec = runtime.catalog.resolve(plan.pack_id, plan.pack_version)
     base_dir = _base_dir(args, "minimize", plan.scenario_id)
     attempts = {"count": 0}
+    scenario = with_binary(scenario, args.valkey_binary)
 
     def compile_candidate(candidate: dict) -> RunPlan:
-        return runtime.compile(with_binary(candidate, args.valkey_binary))
+        return runtime.compile(candidate)
 
     def execute_candidate(candidate: dict, candidate_plan: RunPlan) -> RunOutcome:
         attempts["count"] += 1

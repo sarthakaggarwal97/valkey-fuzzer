@@ -455,7 +455,8 @@ service exposes:
   cleaned up
 - process control: `pid`, `is_alive`, `send_signal`, `wait_exit`, `restart`
 - node files: `log_file`, `log_start_offset` (where this run's log output
-  begins), `data_dir`
+  begins), `process_output_file` (captured stdout/stderr, where sanitizer
+  reports land), `data_dir`
 - binaries: `binary`, `binaries`, and `set_binary` (used from the next restart)
 - live roles: `roles`, `primaries`, `replicas`, `refresh_roles`; restarts
   record live roles first, so a failed-over node restarts in its current role
