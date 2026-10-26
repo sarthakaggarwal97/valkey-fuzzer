@@ -687,8 +687,11 @@ class FeatureRunner:
         started_at: float,
         diagnostics: Optional[Mapping[str, Any]] = None,
         valkey_sha: Optional[str] = None,
+        topology_metadata: Optional[Mapping[str, Any]] = None,
     ) -> RunOutcome:
         combined_diagnostics = dict(diagnostics or {})
+        if topology_metadata:
+            combined_diagnostics["topology"] = topology_metadata
         combined_diagnostics["events"] = tuple(_event_data(event) for event in context.event_bus.attempted_history())
         combined_diagnostics["committed_events"] = tuple(
             _event_data(event) for event in context.event_bus.committed_history()
@@ -1222,6 +1225,7 @@ class FeatureRunner:
         terminal: Optional[_EarlyTerminalError] = None
         topology: Optional[ProvisionedTopology] = None
         valkey_sha: Optional[str] = None
+        topology_metadata: Optional[Mapping[str, Any]] = None
         provider: Optional[TopologyProvider] = None
         topology_registration: Optional[TopologyProviderRegistration] = None
         cleanups: list[_CleanupEntry] = []
@@ -1345,6 +1349,7 @@ class FeatureRunner:
                 raise invalid_provision
             topology = provisioned
             valkey_sha = topology.valkey_sha
+            topology_metadata = topology.metadata
             self._check_topology_registry_drift(topology_registration)
             topology_bound_plan = BoundRunPlan.materialize(
                 context.source_plan,
@@ -1690,6 +1695,7 @@ class FeatureRunner:
                 started_at=started_at,
                 diagnostics=diagnostics,
                 valkey_sha=valkey_sha,
+                topology_metadata=topology_metadata,
             ),
             trustworthy_feature_failure=trustworthy_feature_failure,
         )

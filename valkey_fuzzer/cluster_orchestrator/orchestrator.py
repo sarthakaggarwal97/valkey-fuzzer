@@ -186,30 +186,43 @@ class ConfigurationManager:
         self.cluster_id = str(uuid.uuid4())[:8]
         self.seed = seed
         self._spawned_nodes: dict[str, NodeInfo] = {}
+        # Cluster directories created under per-node data roots; removed with
+        # the main cluster directory during cleanup.
+        self._extra_cluster_dirs: set[str] = set()
 
     @property
     def spawned_nodes(self) -> list[NodeInfo]:
         """Return nodes currently owned by this manager."""
         return list(self._spawned_nodes.values())
 
+    @staticmethod
+    def resolve_binary_path(configured_binary: str, label: str = "valkey_binary") -> str:
+        """Return an absolute, executable path for a configured binary path or command name."""
+        # For absolute/relative paths, check existence and permissions directly
+        if os.path.sep in configured_binary or configured_binary.startswith("."):
+            if not os.path.isfile(configured_binary):
+                raise FileNotFoundError(f"Configured {label} '{configured_binary}' does not exist.")
+            if not os.access(configured_binary, os.X_OK):
+                raise PermissionError(f"Configured {label} '{configured_binary}' exists but is not executable.")
+            return os.path.abspath(configured_binary)
+        # Bare command name — search PATH
+        resolved_binary = shutil.which(configured_binary)
+        if resolved_binary:
+            return resolved_binary
+        raise FileNotFoundError(f"Configured {label} '{configured_binary}' could not be found on PATH.")
+
+    def resolve_node_binaries(self) -> None:
+        """Resolve every per-node binary override to an executable path, in place."""
+        self.clusterConfig.node_binaries = {
+            selector: self.resolve_binary_path(binary, f"node_binaries.{selector}")
+            for selector, binary in (self.clusterConfig.node_binaries or {}).items()
+        }
+
     def setup_valkey_from_source(self, base_dir: str = "/tmp/valkey-build") -> str:
         """Clone and build Valkey binary, return path to valkey-server binary"""
         configured_binary = self.clusterConfig.valkey_binary
         if configured_binary:
-            # For absolute/relative paths, check existence and permissions directly
-            if os.path.sep in configured_binary or configured_binary.startswith("."):
-                if not os.path.isfile(configured_binary):
-                    raise FileNotFoundError(f"Configured valkey_binary '{configured_binary}' does not exist.")
-                if not os.access(configured_binary, os.X_OK):
-                    raise PermissionError(
-                        f"Configured valkey_binary '{configured_binary}' exists but is not executable."
-                    )
-                return os.path.abspath(configured_binary)
-            # Bare command name — search PATH
-            resolved_binary = shutil.which(configured_binary)
-            if resolved_binary:
-                return resolved_binary
-            raise FileNotFoundError(f"Configured valkey_binary '{configured_binary}' could not be found on PATH.")
+            return self.resolve_binary_path(configured_binary)
 
         valkey_binary = shutil.which("valkey-server")
         if valkey_binary:
@@ -245,6 +258,9 @@ class ConfigurationManager:
         node_id = f"node-{node_counter}"
         client_port, bus_port = self.port_manager.allocate_ports(node_id)
         server_config = self.resolve_node_server_config(node_id, role)
+        host = "127.0.0.1"
+        if self.clusterConfig.addressing == "per_node_loopback":
+            host = f"127.0.0.{node_counter + 2}"
 
         return NodePlan(
             node_id=node_id,
@@ -256,7 +272,16 @@ class ConfigurationManager:
             slot_end=slot_end,
             master_node_id=master_node_id,
             server_config=server_config,
+            valkey_binary=self._node_value(self.clusterConfig.node_binaries, node_id, role),
+            data_root=self._node_value(self.clusterConfig.node_data_roots, node_id, role),
+            host=host,
         )
+
+    @staticmethod
+    def _node_value(values: Optional[Mapping[str, str]], node_id: str, role: str) -> Optional[str]:
+        """Return the exact-node value, else the role value, else None."""
+        values = values or {}
+        return values.get(node_id) or values.get(role)
 
     def resolve_node_server_config(self, node_id: str, role: str) -> dict[str, Any]:
         """Resolve global, role, and exact-node server configuration layers."""
@@ -344,9 +369,16 @@ class ConfigurationManager:
 
         return nodes
 
-    def create_node_directories(self, node_id: str) -> tuple[str, str]:
-        """Create directories for a node and return path"""
-        node_data_dir = os.path.join(self.clusterConfig.base_data_dir, f"cluster-{self.cluster_id}", node_id, "data")
+    def create_node_directories(self, node_id: str, data_root: Optional[str] = None) -> tuple[str, str]:
+        """Create directories for a node and return path.
+
+        ``data_root`` places the node's data (RDB, AOF, nodes.conf) on another
+        filesystem, e.g. a size-limited resource; logs stay under base_data_dir.
+        """
+        cluster_dir = os.path.join(data_root or self.clusterConfig.base_data_dir, f"cluster-{self.cluster_id}")
+        if data_root:
+            self._extra_cluster_dirs.add(cluster_dir)
+        node_data_dir = os.path.join(cluster_dir, node_id, "data")
         log_dir = os.path.join(self.clusterConfig.base_data_dir, "logs")
 
         os.makedirs(node_data_dir, exist_ok=True)
@@ -372,16 +404,24 @@ class ConfigurationManager:
         data_dir: str,
         log_file: str,
         server_config: Optional[Mapping[str, Any]] = None,
+        valkey_binary: Optional[str] = None,
+        host: str = "127.0.0.1",
     ) -> list[str]:
         """Build a shell-safe Valkey command for the configured topology."""
         topology_type = _coerce_topology_type(self.clusterConfig.topology_type)
         cluster_enabled = topology_type == TopologyType.CLUSTER
         command = [
-            self.clusterConfig.valkey_binary,
+            valkey_binary or self.clusterConfig.valkey_binary,
             "--port",
             str(port),
             "--bind",
-            "127.0.0.1",
+            host,
+        ]
+        if host != "127.0.0.1":
+            # Replication and cluster-bus connections must originate from the
+            # node's own address so network faults can match node pairs.
+            command.extend(["--bind-source-addr", host])
+        command += [
             "--protected-mode",
             "no",
             "--cluster-enabled",
@@ -431,26 +471,28 @@ class ConfigurationManager:
         # we did not start would otherwise answer readiness checks and receive
         # topology commands such as CLUSTER RESET HARD.
         for plan in node_plans:
-            self.ensure_ports_available(plan.node_id, plan.port, plan.bus_port)
+            self.ensure_ports_available(plan.node_id, plan.port, plan.bus_port, host=plan.host)
 
         try:
             for plan in node_plans:
                 logger.debug(f"Spawning {plan.node_id} on port {plan.port}")
-                node_data_dir, log_file = self.create_node_directories(plan.node_id)
+                node_data_dir, log_file = self.create_node_directories(plan.node_id, plan.data_root)
                 # Build command using the configuration resolved while planning.
                 cmd = self.build_node_command(
                     plan.port,
                     node_data_dir,
                     log_file,
                     server_config=plan.server_config,
+                    valkey_binary=plan.valkey_binary,
+                    host=plan.host,
                 )
                 process = None
                 try:
                     process = self._start_process(cmd, log_file)
 
-                    # Note: host defaults to 127.0.0.1 in NodeInfo
                     node_info = NodeInfo(
                         node_id=plan.node_id,
+                        host=plan.host,
                         role=plan.role,
                         shard_id=plan.shard_id,
                         port=plan.port,
@@ -463,6 +505,7 @@ class ConfigurationManager:
                         slot_end=plan.slot_end,
                         master_node_id=plan.master_node_id,
                         server_config=dict(plan.server_config),
+                        valkey_binary=plan.valkey_binary,
                     )
 
                     self._spawned_nodes[node_info.node_id] = node_info
@@ -607,12 +650,15 @@ class ConfigurationManager:
         """Restart a Valkey node process."""
         logger.info(f"Restarting {node.node_id} on port {node.port}")
 
-        # Build command using centralized configuration
+        # Build command using centralized configuration. The node keeps its
+        # address, binary, and resolved startup config across restarts.
         cmd = self.build_node_command(
             node.port,
             node.data_dir,
             node.log_file,
             server_config=node.server_config,
+            valkey_binary=node.valkey_binary,
+            host=node.host,
         )
         topology_type = _coerce_topology_type(self.clusterConfig.topology_type)
         if topology_type == TopologyType.REPLICATION and node.role == "replica":
@@ -838,19 +884,21 @@ class ConfigurationManager:
                 self._spawned_nodes.pop(node_id, None)
 
         if self.clusterConfig.enable_cleanup:
-            cluster_dir = os.path.join(self.clusterConfig.base_data_dir, f"cluster-{self.cluster_id}")
-            try:
-                cluster_dir_exists = os.path.exists(cluster_dir)
-            except BaseException as exc:
-                failures.append((f"inspect {cluster_dir}", exc))
-                cluster_dir_exists = False
-
-            if cluster_dir_exists:
+            cluster_dirs = [os.path.join(self.clusterConfig.base_data_dir, f"cluster-{self.cluster_id}")]
+            cluster_dirs.extend(sorted(self._extra_cluster_dirs))
+            for cluster_dir in cluster_dirs:
                 try:
-                    shutil.rmtree(cluster_dir)
-                    logger.info("Deleted data directory")
+                    cluster_dir_exists = os.path.exists(cluster_dir)
                 except BaseException as exc:
-                    failures.append((f"delete {cluster_dir}", exc))
+                    failures.append((f"inspect {cluster_dir}", exc))
+                    cluster_dir_exists = False
+
+                if cluster_dir_exists:
+                    try:
+                        shutil.rmtree(cluster_dir)
+                        logger.info("Deleted data directory")
+                    except BaseException as exc:
+                        failures.append((f"delete {cluster_dir}", exc))
 
         for action, exc in failures:
             logger.error("Cleanup action failed during %s (%s): %s", context, action, exc)

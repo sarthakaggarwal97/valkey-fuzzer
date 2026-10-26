@@ -20,8 +20,14 @@ LOCAL_TOPOLOGY_DOCUMENT_FIELDS = frozenset(
         "enable_cleanup",
         "server_config",
         "node_configs",
+        "node_binaries",
+        "node_data_roots",
+        "addressing",
     }
 )
+ADDRESSING_MODES = ("shared_loopback", "per_node_loopback")
+# node-N binds 127.0.0.(N+2); the last usable address is 127.0.0.254.
+MAX_PER_NODE_LOOPBACK_NODES = 253
 
 
 def validate_topology_dimensions(
@@ -87,6 +93,28 @@ def _validate_runtime_field_types(topology_document: Mapping[str, Any]) -> None:
     enable_cleanup = topology_document.get("enable_cleanup", True)
     if not isinstance(enable_cleanup, bool):
         raise ValueError("enable_cleanup must be a boolean")
+
+
+def _parse_node_paths(
+    topology_document: Mapping[str, Any],
+    field_name: str,
+    selectors: set[str],
+    topology_type: TopologyType,
+) -> dict[str, str]:
+    """Validate a ``{role-or-node-id: path}`` mapping (pure)."""
+    value = topology_document.get(field_name, {})
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{field_name} must map roles or node IDs to paths")
+    parsed = {}
+    for selector, path in value.items():
+        if not isinstance(selector, str):
+            raise ValueError(f"{field_name} keys must be role or node ID strings")
+        if selector not in selectors:
+            raise ValueError(f"Unknown {field_name} selector '{selector}' for {topology_type.value} topology")
+        if not isinstance(path, str) or not path or "\0" in path:
+            raise ValueError(f"{field_name}.{selector} must be a non-empty path without null bytes")
+        parsed[selector] = path
+    return parsed
 
 
 def cluster_config_from_topology_document(
@@ -174,6 +202,17 @@ def cluster_config_from_topology_document(
             raise ValueError(f"Invalid node_configs.{node_id}: {exc}") from exc
         copied_node_configs[node_id] = copied_node_config
 
+    node_binaries = _parse_node_paths(topology_document, "node_binaries", selectors, topology_type)
+    node_data_roots = _parse_node_paths(topology_document, "node_data_roots", selectors, topology_type)
+    addressing = topology_document.get("addressing", "shared_loopback")
+    if addressing not in ADDRESSING_MODES:
+        raise ValueError(f"addressing must be one of {list(ADDRESSING_MODES)}, got {addressing!r}")
+    node_count = (
+        num_shards * (1 + replicas_per_shard) if topology_type == TopologyType.CLUSTER else 1 + replicas_per_shard
+    )
+    if addressing == "per_node_loopback" and node_count > MAX_PER_NODE_LOOPBACK_NODES:
+        raise ValueError(f"per_node_loopback supports at most {MAX_PER_NODE_LOOPBACK_NODES} nodes")
+
     kwargs = {
         "num_shards": num_shards,
         "replicas_per_shard": replicas_per_shard,
@@ -181,6 +220,9 @@ def cluster_config_from_topology_document(
         "topology_type": topology_type,
         "server_config": copied_server_config,
         "node_configs": copied_node_configs,
+        "node_binaries": node_binaries,
+        "node_data_roots": node_data_roots,
+        "addressing": addressing,
     }
     if "base_data_dir" in topology_document:
         kwargs["base_data_dir"] = topology_document["base_data_dir"]

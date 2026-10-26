@@ -57,6 +57,7 @@ class ClusterCoordinator:
             # Setup Valkey binary
             valkey_binary = config_manager.setup_valkey_from_source()
             config.valkey_binary = valkey_binary
+            config_manager.resolve_node_binaries()
             logger.debug(f"Using Valkey binary: {valkey_binary}")
 
             valkey_sha = detect_valkey_sha(valkey_binary)

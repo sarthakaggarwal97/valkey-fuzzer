@@ -1,13 +1,19 @@
 """Local Valkey topology provider for the generic feature runner."""
 
 import copy
+import hashlib
 import logging
+import os
+import subprocess
 import threading
+import weakref
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Optional, Union
+
+import valkey
 
 from .bound_plan import BoundRunPlan, BoundStartupOverlay
 from .cluster_orchestrator.orchestrator import ConfigurationManager, PortManager
@@ -22,12 +28,28 @@ from .extensibility import (
 )
 from .feature_runner import TopologyProviderFactory
 from .fuzzer_engine.cluster_coordinator import ClusterCoordinator
-from .models import ClusterConfig, ClusterConnection, ClusterInstance, NodeInfo, NodePlan, TopologyType
+from .fuzzer_engine.fuzzer_engine import FuzzerEngine
+from .fuzzer_engine.operation_orchestrator import OperationOrchestrator
+from .fuzzer_engine.state_validator import StateValidator
+from .models import (
+    ClusterConfig,
+    ClusterConnection,
+    ClusterInstance,
+    ExpectedTopology,
+    NodeInfo,
+    NodePlan,
+    Operation,
+    OperationTiming,
+    OperationType,
+    StateValidationConfig,
+    TopologyType,
+)
 from .utils.server_config import (
     canonicalize_server_config,
     server_config_values,
 )
 from .utils.topology_config import cluster_config_from_topology_document
+from .utils.valkey_utils import valkey_client
 
 logger = logging.getLogger(__name__)
 
@@ -150,8 +172,8 @@ def _validate_provisioned_instance(
     nodes_by_id = {node.node_id: node for node in nodes}
     for node_id, expected in expected_by_id.items():
         node = nodes_by_id[node_id]
-        if node.host != "127.0.0.1":
-            raise LocalTopologyError(f"local node {node_id!r} must use the loopback host")
+        if node.host != expected.host:
+            raise LocalTopologyError(f"local node {node_id!r} must use its planned loopback host {expected.host}")
         if node.port != expected.port or node.bus_port != expected.bus_port:
             raise LocalTopologyError(f"local node {node_id!r} does not use its planned ports")
         if (
@@ -174,6 +196,47 @@ def _validate_provisioned_instance(
             raise LocalTopologyError(f"local node {node_id!r} returned an invalid server config") from exc
         if actual_tokens != expected_tokens:
             raise LocalTopologyError(f"local node {node_id!r} does not use its planned server config")
+
+
+def _binary_digest(path: str, cache: dict[str, Optional[str]]) -> Optional[str]:
+    if path not in cache:
+        digest = hashlib.sha256()
+        try:
+            with open(path, "rb") as binary:
+                for chunk in iter(lambda: binary.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            cache[path] = digest.hexdigest()
+        except OSError:
+            cache[path] = None
+    return cache[path]
+
+
+def topology_metadata(instance: ClusterInstance) -> dict[str, Any]:
+    """Report-safe provenance: node layout, binaries, and processes."""
+    default_binary = instance.config.valkey_binary or ""
+    digests: dict[str, Optional[str]] = {}
+    nodes = []
+    for node in instance.nodes:
+        binary = node.valkey_binary or default_binary
+        nodes.append(
+            {
+                "node_id": node.node_id,
+                "role": node.role,
+                "shard_id": node.shard_id,
+                "host": node.host,
+                "port": node.port,
+                "pid": node.pid,
+                "binary": binary,
+                "binary_sha256": _binary_digest(binary, digests) if binary else None,
+            }
+        )
+    return {
+        "cluster_id": instance.cluster_id,
+        "topology_type": TopologyType(instance.config.topology_type).value,
+        "addressing": instance.config.addressing,
+        "valkey_sha": instance.valkey_sha,
+        "nodes": nodes,
+    }
 
 
 def _value_tokens(option: str, value: Any) -> tuple[str, ...]:
@@ -283,9 +346,16 @@ class LocalValkeyTopologyHandle:
         self,
         coordinator: ClusterCoordinator,
         instance: ClusterInstance,
+        log_start_offsets: Optional[Mapping[str, int]] = None,
     ):
         if not isinstance(instance, ClusterInstance):
             raise TypeError("instance must be a ClusterInstance")
+        # Node log files are keyed by seed and node ID and are appended to by
+        # every run; offsets mark where this topology's output begins.
+        self._log_start_offsets = dict(log_start_offsets or {})
+        # Clients handed to components; whatever is still open is closed when
+        # the topology is cleaned up.
+        self._clients: weakref.WeakSet[Any] = weakref.WeakSet()
         node_ids = [node.node_id for node in instance.nodes]
         if len(set(node_ids)) != len(node_ids):
             raise LocalTopologyError("provisioned node IDs must be unique")
@@ -383,6 +453,21 @@ class LocalValkeyTopologyHandle:
                 raise LocalTopologyError("local topology handle was not closing")
             self._state = _LocalTopologyHandleState.CLOSED
             self._condition.notify_all()
+        self._close_clients()
+
+    def _close_clients(self) -> None:
+        for client in list(self._clients):
+            try:
+                client.close()
+            except Exception:  # pragma: no cover - best effort
+                pass
+        self._clients.clear()
+
+    def _node_info(self, node_id: str) -> NodeInfo:
+        try:
+            return self._node_infos_by_id[node_id]
+        except KeyError as exc:
+            raise KeyError(f"unknown node ID {node_id!r}") from exc
 
     def node(self, node_id: str) -> LocalTopologyNode:
         """Return one initially planned node by its stable harness ID."""
@@ -410,17 +495,249 @@ class LocalValkeyTopologyHandle:
             return client.execute_command(*args, **kwargs)
 
     def restart(self, node_id: str, wait_ready: bool = True) -> LocalTopologyNode:
-        """Restart one node while preserving its resolved startup config."""
+        """Restart one node while preserving its resolved startup config.
+
+        Live replication roles are recorded first, so a node that was failed
+        over restarts in its current role rather than its planned one.
+        """
         with self._operation():
             if node_id not in self._node_infos_by_id:
                 raise KeyError(f"unknown node ID {node_id!r}")
+            self._refresh_roles()
             if not self._coordinator.restart_node(
                 self.cluster_id,
                 node_id,
                 wait_ready=wait_ready,
             ):
                 raise LocalTopologyError(f"failed to restart node {node_id!r} in topology {self.cluster_id!r}")
+            # The cached client is bound to the old process's socket.
+            connections = getattr(getattr(self._coordinator, "cluster_manager", None), "connections", None)
+            if isinstance(connections, dict):
+                stale = connections.pop(node_id, None)
+                if stale is not None:
+                    try:
+                        stale.close()
+                    except Exception:  # pragma: no cover - best effort
+                        pass
             return self._nodes_by_id[node_id]
+
+    # -- Process control ---------------------------------------------------
+
+    def pid(self, node_id: str) -> int:
+        """Return the process ID of the node's current server process."""
+        with self._operation():
+            return self._node_info(node_id).pid
+
+    def is_alive(self, node_id: str) -> bool:
+        """Return whether the node's current server process is running."""
+        with self._operation():
+            process = self._node_info(node_id).process
+            return process is not None and process.poll() is None
+
+    def send_signal(self, node_id: str, signum: int) -> None:
+        """Deliver a POSIX signal to the node's current server process."""
+        with self._operation():
+            node = self._node_info(node_id)
+            if node.process is None or node.process.poll() is not None:
+                raise ProcessLookupError(f"node {node_id!r} is not running")
+            node.process.send_signal(signum)
+
+    def wait_exit(self, node_id: str, timeout: float = 10.0) -> bool:
+        """Wait for (and reap) the node's current process; False on timeout."""
+        with self._operation():
+            process = self._node_info(node_id).process
+            if process is None:
+                return True
+            try:
+                process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                return False
+            return True
+
+    # -- Files and binaries -------------------------------------------------
+
+    def log_file(self, node_id: str) -> str:
+        with self._operation():
+            return self._node_info(node_id).log_file
+
+    def log_start_offset(self, node_id: str) -> int:
+        """Byte offset in ``log_file(node_id)`` where this topology's output starts."""
+        with self._operation():
+            self._node_info(node_id)
+            return self._log_start_offsets.get(node_id, 0)
+
+    def data_dir(self, node_id: str) -> str:
+        with self._operation():
+            return self._node_info(node_id).data_dir
+
+    def binary(self, node_id: str) -> str:
+        """Return the valkey-server binary the node's next (re)start uses."""
+        with self._operation():
+            return self._node_info(node_id).valkey_binary or self._instance.config.valkey_binary
+
+    def binaries(self) -> dict[str, str]:
+        """Return ``{node_id: binary}`` for every node."""
+        with self._operation():
+            default = self._instance.config.valkey_binary
+            return {node.node_id: node.valkey_binary or default for node in self._node_infos}
+
+    def set_binary(self, node_id: str, binary: str) -> str:
+        """Use ``binary`` from the node's next restart on; return its resolved path."""
+        with self._operation():
+            node = self._node_info(node_id)
+            resolved = ConfigurationManager.resolve_binary_path(binary, f"binary for {node_id}")
+            node.valkey_binary = resolved
+            return resolved
+
+    # -- Clients and roles ----------------------------------------------------
+
+    def new_client(self, node_id: str, timeout: float = 5.0) -> Any:
+        """Return a fresh client for one node; it is closed at topology cleanup."""
+        with self._operation():
+            node = self._node_info(node_id)
+            client = valkey.Valkey(
+                host=node.host,
+                port=node.port,
+                socket_timeout=timeout,
+                socket_connect_timeout=timeout,
+                decode_responses=True,
+            )
+            self._clients.add(client)
+            return client
+
+    def cluster_client(self, timeout: float = 5.0) -> Any:
+        """Return a fresh slot-routing client; only for cluster topologies."""
+        with self._operation():
+            if self.topology_type is not TopologyType.CLUSTER:
+                raise LocalTopologyError("cluster_client is only available for cluster topologies")
+            from valkey.cluster import ClusterNode, ValkeyCluster
+
+            client = ValkeyCluster(
+                startup_nodes=[ClusterNode(node.host, node.port) for node in self._node_infos],
+                socket_timeout=timeout,
+                socket_connect_timeout=timeout,
+                decode_responses=True,
+            )
+            self._clients.add(client)
+            return client
+
+    def roles(self) -> dict[str, str]:
+        """Return each reachable node's live replication role: ``primary`` or ``replica``."""
+        with self._operation():
+            return {node_id: role for node_id, (role, _, _) in self._live_replication().items()}
+
+    def primaries(self) -> list[str]:
+        """Return live primary node IDs, falling back to the planned layout."""
+        roles = self.roles()
+        if roles:
+            return [node.node_id for node in self._nodes if roles.get(node.node_id) == "primary"]
+        return [node.node_id for node in self._nodes if node.role == "primary"]
+
+    def replicas(self) -> list[str]:
+        """Return live replica node IDs, falling back to the planned layout."""
+        roles = self.roles()
+        if roles:
+            return [node.node_id for node in self._nodes if roles.get(node.node_id) == "replica"]
+        return [node.node_id for node in self._nodes if node.role == "replica"]
+
+    def refresh_roles(self) -> dict[str, str]:
+        """Record live roles so later restarts and validators use them."""
+        with self._operation():
+            return self._refresh_roles()
+
+    def _live_replication(self) -> dict[str, tuple[str, Optional[str], Optional[int]]]:
+        replication = {}
+        for node in self._node_infos:
+            try:
+                with valkey_client(node.host, node.port, timeout=2.0, decode_responses=True) as client:
+                    info = client.info("replication")
+            except Exception:
+                continue
+            role = str(info.get("role", "")).lower()
+            if role in ("master", "primary"):
+                replication[node.node_id] = ("primary", None, None)
+            else:
+                port = info.get("master_port")
+                replication[node.node_id] = (
+                    "replica",
+                    str(info.get("master_host") or ""),
+                    int(port) if port not in (None, "") else None,
+                )
+        return replication
+
+    def _refresh_roles(self) -> dict[str, str]:
+        by_address = {(node.host, node.port): node for node in self._node_infos}
+        roles = {}
+        for node_id, (role, primary_host, primary_port) in self._live_replication().items():
+            node = self._node_infos_by_id[node_id]
+            node.role = role
+            if role == "primary":
+                node.master_node_id = None
+            else:
+                primary = by_address.get((primary_host, primary_port))
+                if primary is not None:
+                    node.master_node_id = primary.node_id
+            roles[node_id] = role
+        return roles
+
+    # -- Topology operations and checks ---------------------------------------
+
+    def failover(self, shard_id: int, *, force: bool = False, timeout: float = 60.0) -> bool:
+        """Promote a replica of ``shard_id``'s current primary; True on success."""
+        with self._operation():
+            if self.topology_type is not TopologyType.CLUSTER:
+                raise LocalTopologyError("failover is only available for cluster topologies")
+            orchestrator = OperationOrchestrator(self._connection)
+            operation = Operation(
+                type=OperationType.FAILOVER,
+                target_node=f"shard-{shard_id}-primary",
+                parameters={"force": force},
+                timing=OperationTiming(timeout=timeout),
+            )
+            return bool(orchestrator.execute_operation(operation))
+
+    def validate_state(
+        self,
+        *,
+        check_replication: bool = True,
+        check_cluster_status: bool = True,
+        check_slot_coverage: bool = True,
+        check_topology: bool = True,
+        check_view_consistency: bool = True,
+        stabilization_wait: float = 1.0,
+        timeout: float = 60.0,
+    ) -> dict[str, Any]:
+        """Run the topology state validators; return a report-safe summary."""
+        with self._operation():
+            validation = StateValidationConfig(
+                check_replication=check_replication,
+                check_cluster_status=check_cluster_status,
+                check_slot_coverage=check_slot_coverage,
+                check_topology=check_topology,
+                check_view_consistency=check_view_consistency,
+                check_data_consistency=False,
+                check_logs=False,
+                stabilization_wait=stabilization_wait,
+                validation_timeout=timeout,
+            )
+            topology_type = self.topology_type
+            FuzzerEngine._adapt_validation_config_for_topology(validation, topology_type)
+            primaries = sum(node.role == "primary" for node in self._nodes)
+            replicas = sum(node.role == "replica" for node in self._nodes)
+            per_shard = replicas // primaries if primaries else 0
+            validation.replication_config.min_replicas_per_shard = min(
+                validation.replication_config.min_replicas_per_shard, per_shard
+            )
+            result = StateValidator(validation).validate_state(
+                self._connection,
+                ExpectedTopology(num_primaries=primaries, num_replicas=replicas, shard_structure={}),
+                None,
+            )
+            return {
+                "overall_success": bool(result.overall_success),
+                "failed_checks": [str(check) for check in result.failed_checks],
+                "error_messages": [str(message) for message in result.error_messages],
+            }
 
 
 class LocalValkeyTopologyProvider:
@@ -490,6 +807,13 @@ class LocalValkeyTopologyProvider:
         plan = context.plan
         config, expected_plans = self._prepare(plan)
         expected_config = copy.deepcopy(config)
+        log_start_offsets = {}
+        for expected in expected_plans:
+            log_path = os.path.join(config.base_data_dir, "logs", f"{plan.seed}-{expected.node_id}.log")
+            try:
+                log_start_offsets[expected.node_id] = os.path.getsize(log_path)
+            except OSError:
+                log_start_offsets[expected.node_id] = 0
         coordinator = self._coordinator_factory()
         self._pending_baseline_cluster_ids = _active_cluster_ids(coordinator) or set()
         self._pending_coordinator = coordinator
@@ -514,11 +838,12 @@ class LocalValkeyTopologyProvider:
         instance = created_instance
         _validate_provisioned_instance(instance, expected_config, expected_plans)
 
-        handle = LocalValkeyTopologyHandle(coordinator, instance)
+        handle = LocalValkeyTopologyHandle(coordinator, instance, log_start_offsets)
         topology = ProvisionedTopology(
             handle=handle,
             services={LOCAL_TOPOLOGY_SERVICE: handle},
             valkey_sha=instance.valkey_sha,
+            metadata=topology_metadata(instance),
         )
 
         self._active_coordinator = coordinator

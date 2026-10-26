@@ -33,6 +33,15 @@ class ClusterConfig:
     topology_type: TopologyType = TopologyType.CLUSTER
     server_config: dict[str, Any] = field(default_factory=dict)
     node_configs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Per-node overrides keyed by role ("primary"/"replica") or exact node ID.
+    # An exact node ID wins over a role, which wins over ``valkey_binary``.
+    node_binaries: dict[str, str] = field(default_factory=dict)
+    # Roots that hold node data (RDB, AOF, nodes.conf) instead of
+    # ``base_data_dir``, e.g. a size-limited filesystem. Logs stay put.
+    node_data_roots: dict[str, str] = field(default_factory=dict)
+    # "shared_loopback": every node binds 127.0.0.1. "per_node_loopback":
+    # node-N binds 127.0.0.(N+2), so network faults can target node pairs.
+    addressing: str = "shared_loopback"
 
     def __post_init__(self):
         if isinstance(self.topology_type, str):
@@ -52,6 +61,9 @@ class NodePlan:
     slot_end: Optional[int] = None
     master_node_id: Optional[str] = None
     server_config: dict[str, Any] = field(default_factory=dict)
+    valkey_binary: Optional[str] = None
+    data_root: Optional[str] = None
+    host: str = "127.0.0.1"
 
 
 @dataclass
@@ -73,6 +85,8 @@ class NodeInfo:
     master_node_id: Optional[str] = None
     cluster_node_id: Optional[str] = None
     server_config: dict[str, Any] = field(default_factory=dict)
+    # Binary used to (re)start this node; None means the topology default.
+    valkey_binary: Optional[str] = None
 
 
 class OperationType(Enum):

@@ -1647,10 +1647,16 @@ class ProvisionedTopology:
     )
     # Report-safe identity of the valkey-server build, recorded on the outcome.
     valkey_sha: Optional[str] = None
+    # Report-safe provenance (node layout, binaries, processes) recorded in the
+    # outcome diagnostics so a reproducer shows what was actually tested.
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.valkey_sha is not None and not isinstance(self.valkey_sha, str):
             raise TypeError("provisioned topology valkey_sha must be a string or None")
+        if not isinstance(self.metadata, Mapping):
+            raise TypeError("provisioned topology metadata must be a mapping")
+        object.__setattr__(self, "metadata", _freeze_mapping(self.metadata))
         if not isinstance(self.services, Mapping):
             raise TypeError("provisioned topology services must be a mapping")
         if any(not isinstance(key, str) for key in self.services):
