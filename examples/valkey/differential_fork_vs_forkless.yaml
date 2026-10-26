@@ -1,0 +1,27 @@
+# Run the same seeded workload with a fork-based and a forkless BGSAVE.
+# Datasets, reloaded snapshots, and every client reply must be identical,
+# while the recorded save type must differ (proving each path ran).
+#   valkey-fuzzer diff examples/valkey/differential_fork_vs_forkless.yaml
+differential_id: fork-vs-forkless
+base:
+  scenario_id: snapshot-equivalence
+  seed: 41
+  feature:
+    use: valkey.snapshot-equivalence
+    version: "1"
+    with: {operations: 3000, stable_keys: 1000}
+  topology:
+    type: standalone
+    base_port: 7620
+variants:
+  fork:
+    topology.server_config: {bgsave-default-method: fork, forkless-infrastructure-enabled: "yes"}
+  forkless:
+    topology.server_config: {bgsave-default-method: forkless, forkless-infrastructure-enabled: "yes"}
+compare:
+  equal:
+    - {evidence_id: valkey.dataset.digest, source: dataset, field: digest}
+    - {evidence_id: valkey.rdb.reload_verified, source: snapshot, field: content_digest}
+    - {evidence_id: valkey.workload.ledger, source: workload, field: replies_digest}
+  differ:
+    - {evidence_id: valkey.bgsave.result, source: bgsave, field: after.rdb_last_bgsave_type}

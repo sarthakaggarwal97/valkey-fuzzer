@@ -1,0 +1,19 @@
+# Sweep the forkless-save pack across topologies and mutation rates.
+# Untried semantic tuples run first; coverage persists across invocations.
+#   valkey-fuzzer campaign examples/valkey/forkless_campaign.yaml --coverage coverage.json
+campaign_id: forkless-matrix
+seed: 2026
+max_runs: 6
+stop_on_failure: false
+base:
+  feature:
+    use: valkey.forkless-save
+    version: "1"
+    with:
+      stable_keys: 1000
+  topology:
+    type: standalone
+    base_port: 7600
+matrix:
+  topology.type: [standalone, replication, cluster]
+  feature.with.mutation_rate: [0, 300, 1500]

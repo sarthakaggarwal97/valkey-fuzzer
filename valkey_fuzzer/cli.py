@@ -16,8 +16,10 @@ from typing import Any, Optional
 
 import yaml
 
+from . import feature_commands
 from .cluster_cli import ClusterFuzzerCLI, is_cluster_dsl_document
 from .extensibility import ComponentStatus, OutcomeStatus, RunOutcome, RunPlan, to_plain_data
+from .feature_packs import load_scenario_yaml
 from .feature_runtime import FeatureRuntime
 from .utils.cluster_utils import cleanup_logs
 
@@ -116,7 +118,13 @@ class FuzzerCLI:
 
             output_path = getattr(args, "output", None)
             if output_path:
-                self._save_outcomes((outcome,), output_path, getattr(args, "format", "json"))
+                # The scenario and provenance make the report replayable and
+                # minimizable on its own.
+                extra = {
+                    "scenario": feature_commands.plain(load_scenario_yaml(source, source_name=str(path))),
+                    "reproducer": feature_commands.reproducer(runtime, plan, outcome),
+                }
+                self._save_outcomes((outcome,), output_path, getattr(args, "format", "json"), extra=extra)
 
             return self._exit_code(outcome, allow_unsupported=getattr(args, "allow_unsupported", False))
         except Exception as exc:
@@ -274,9 +282,10 @@ class FuzzerCLI:
         print()
 
     @staticmethod
-    def _report(outcomes: tuple[RunOutcome, ...]) -> dict[str, Any]:
+    def _report(outcomes: tuple[RunOutcome, ...], extra: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         statuses = tuple(outcome.status for outcome in outcomes)
         return {
+            **(extra or {}),
             "generated_at": datetime.now().astimezone().isoformat(),
             "summary": {
                 "total": len(outcomes),
@@ -293,6 +302,7 @@ class FuzzerCLI:
         outcomes: tuple[RunOutcome, ...],
         output_path: str,
         output_format: str,
+        extra: Optional[dict[str, Any]] = None,
     ) -> None:
         """Atomically save complete generic outcomes."""
 
@@ -312,7 +322,7 @@ class FuzzerCLI:
                 delete=False,
             ) as temporary:
                 temporary_path = Path(temporary.name)
-                report = self._report(outcomes)
+                report = self._report(outcomes, extra)
                 if output_format == "json":
                     json.dump(report, temporary, indent=2, allow_nan=False)
                     temporary.write("\n")
@@ -395,6 +405,15 @@ Examples:
   valkey-fuzzer run scenario.yaml --feature-pack-dir ./feature-packs
   valkey-fuzzer run scenario.yaml --timeout 120 --output results.json
   valkey-fuzzer validate scenario.yaml --feature-pack-dir ./feature-packs
+  valkey-fuzzer run examples/valkey/forkless_save.yaml --output report.json
+  valkey-fuzzer list packs
+  valkey-fuzzer replay report.json
+  valkey-fuzzer diff examples/valkey/differential_fork_vs_forkless.yaml
+  valkey-fuzzer campaign examples/valkey/forkless_campaign.yaml --coverage coverage.json
+  valkey-fuzzer coverage coverage.json --campaign examples/valkey/forkless_campaign.yaml
+  valkey-fuzzer minimize report.json --output minimized.yaml
+
+  Feature-run exit codes: 0 PASS, 1 FAIL, 2 ERROR, 3 SKIP_UNSUPPORTED
 
   # Random cluster fuzzing
   valkey-fuzzer cluster --random
@@ -444,6 +463,8 @@ Examples:
     _add_runtime_options(validate_parser, execution=False)
     validate_parser.add_argument("--verbose", action="store_true", help="Show the resolved component plan")
 
+    feature_commands.add_commands(subparsers, _add_runtime_options)
+
     cleanup_parser = subparsers.add_parser("cleanup-logs", help="Clean up log files for a seed")
     cleanup_parser.add_argument("seed", type=int, help="Seed whose logs should be removed")
     cleanup_parser.add_argument("--data-dir", help="Base data directory (default: /tmp/valkey-fuzzer)")
@@ -482,6 +503,8 @@ def main() -> int:
             return cli.validate_scenario(args)
         if args.command == "cleanup-logs":
             return cleanup_logs(args.seed, args.data_dir or "/tmp/valkey-fuzzer", args.force)
+        if args.command in feature_commands.COMMANDS:
+            return feature_commands.COMMANDS[args.command](args)
     except KeyboardInterrupt:
         print("\n\nValkey Fuzzer process was interrupted by user")
         return 130
