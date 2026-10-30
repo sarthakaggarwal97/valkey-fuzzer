@@ -9,9 +9,9 @@ a handler raises is reported once, by :func:`valkey_fuzzer.cli.main`.
 
 from typing import Any
 
-from . import batch, diff, listing, minimize, replay, run, sweep, validate
+from . import batch, diff, listing, minimize, replay, run, spec, sweep, validate
 
-COMMAND_MODULES = (run, batch, validate, listing, replay, diff, minimize, sweep)
+COMMAND_MODULES = (run, batch, validate, listing, replay, diff, minimize, sweep, spec)
 
 
 def register_commands(subparsers: Any) -> None:
