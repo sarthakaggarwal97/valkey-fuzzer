@@ -43,6 +43,11 @@ dev = [
 Repository = "https://github.com/valkey-io/valkey-fuzzer"
 Issues = "https://github.com/valkey-io/valkey-fuzzer/issues"
 
+# The Valkey component library and experiments ship in this distribution but
+# register like any external extension, through the public plugin entry point.
+[project.entry-points."valkey_fuzzer.plugins"]
+"valkey-fuzzer.valkey-experiments" = "valkey_fuzzer_experiments:PLUGIN"
+
 # The packages are listed (tests/test_packaging.py keeps the list complete)
 # because the spec bundles under formal/ ship as valkey_fuzzer/formal: a
 # shipped experiment that names a bundle (spec: cluster-election) must find
@@ -57,6 +62,7 @@ packages = [
     "valkey_fuzzer.extensions",
     "valkey_fuzzer.formal",
     "valkey_fuzzer.spec",
+    "valkey_fuzzer_experiments",
 ]
 
 [tool.setuptools.package-dir]
@@ -65,6 +71,7 @@ packages = [
 [tool.setuptools.package-data]
 valkey_fuzzer = ["py.typed"]
 "valkey_fuzzer.formal" = ["*/*", "*/*/*"]
+valkey_fuzzer_experiments = ["experiments/*.yaml", "fragments/*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
