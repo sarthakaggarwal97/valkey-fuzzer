@@ -1,10 +1,13 @@
-name: Daily Valkey Fuzzer
+name: Valkey Fuzzer Cluster Chaos Every 4 Hours
 
+# Three fresh valkey.cluster-chaos seeds through the batch runner, every four hours.
 on:
   schedule:
-    # Run every 4 hours
     - cron: '0 */4 * * *'
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   random-fuzzer:
@@ -12,13 +15,16 @@ jobs:
     timeout-minutes: 60
     env:
       FUZZER_ARTIFACT_DIR: /tmp/valkey-fuzzer/artifacts
+      # The batch folder; valkey-ci-agent's fuzzer monitor reads batch/summary.json
+      # and, for each entry of its runs, the run report at batch/<runs[].report>.
+      FUZZER_BATCH_DIR: /tmp/valkey-fuzzer/artifacts/batch
     
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
     
     - name: Set up Python
-      uses: actions/setup-python@v6
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
       with:
         python-version: '3.11'
     
@@ -29,18 +35,18 @@ jobs:
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
         pip install -e .
     
-    - name: Run random fuzzer test
+    - name: Run the fuzzer batch
       run: |
         mkdir -p "${FUZZER_ARTIFACT_DIR}"
         echo "========================================"
-        echo "Random Fuzzer Test"
+        echo "Random Fuzzer Batch"
         echo "Timestamp: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
         echo "========================================"
-        valkey-fuzzer cluster --random --verbose \
-          --output "${FUZZER_ARTIFACT_DIR}/results.json" \
-          --format json \
-          --export-dsl "${FUZZER_ARTIFACT_DIR}/scenario.yaml"
-    
+        # Three fresh cluster chaos seeds, one at a time; the batch folder holds
+        # each run's own report (runs/<id>/report.json) and summary.json.
+        valkey-fuzzer batch --random valkey.cluster-chaos --seeds 3 --profile nightly-soak --timeout 900 \
+          --out "${FUZZER_BATCH_DIR}"
+
     - name: Print Valkey node logs
       if: always()
       run: |
@@ -48,16 +54,17 @@ jobs:
         echo "========================================"
         echo "Valkey Node Logs"
         echo "========================================"
-        if [ -d "/tmp/valkey-fuzzer/logs" ]; then
-          for logfile in /tmp/valkey-fuzzer/logs/*.log; do
-            if [ -f "$logfile" ]; then
-              echo ""
-              echo "--- $(basename $logfile) ---"
-              cat "$logfile"
-            fi
-          done
-        else
-          echo "No Valkey logs found at /tmp/valkey-fuzzer/logs"
+        found=0
+        for logfile in "${FUZZER_BATCH_DIR}"/runs/*/logs/*.log; do
+          if [ -f "$logfile" ]; then
+            found=1
+            echo ""
+            echo "--- ${logfile#"${FUZZER_BATCH_DIR}"/} ---"
+            cat "$logfile"
+          fi
+        done
+        if [ "$found" = 0 ]; then
+          echo "No Valkey logs found under ${FUZZER_BATCH_DIR}/runs"
         fi
 
     - name: Prepare analysis bundle
@@ -65,66 +72,44 @@ jobs:
       shell: bash
       run: |
         set -euo pipefail
-        mkdir -p "${FUZZER_ARTIFACT_DIR}/logs"
-        if [ -d "/tmp/valkey-fuzzer/logs" ]; then
-          cp -R /tmp/valkey-fuzzer/logs/. "${FUZZER_ARTIFACT_DIR}/logs/"
-        fi
-
         python - <<'PY'
         import json
         import os
         from pathlib import Path
 
+        batch = Path(os.environ["FUZZER_BATCH_DIR"])
         artifact_dir = Path(os.environ["FUZZER_ARTIFACT_DIR"])
-        results_path = artifact_dir / "results.json"
-        scenario_path = artifact_dir / "scenario.yaml"
-        logs_dir = artifact_dir / "logs"
-
-        result = None
-        if results_path.exists():
-            payload = json.loads(results_path.read_text())
-            results = payload.get("results") or []
-            if results:
-                result = results[0]
-
-        manifest = {
-            "schema_version": 2,
-            "results_path": "results.json" if results_path.exists() else None,
-            "scenario_path": "scenario.yaml" if scenario_path.exists() else None,
-            "log_files": sorted(
-                str(path.relative_to(artifact_dir))
-                for path in logs_dir.rglob("*")
-                if path.is_file()
-            ),
-            "scenario_id": result.get("scenario_id") if isinstance(result, dict) else None,
-            "seed": result.get("seed") if isinstance(result, dict) else None,
-            "success": result.get("success") if isinstance(result, dict) else None,
-            "valkey_sha": result.get("valkey_sha") if isinstance(result, dict) else None,
-        }
-        (artifact_dir / "manifest.json").write_text(
-            json.dumps(manifest, indent=2),
-            encoding="utf-8",
-        )
+        # summary.json lists every run; runs[].report is that run's own run report.
+        summary_file = batch / "summary.json"
+        summary = json.loads(summary_file.read_text()) if summary_file.exists() else {"runs": []}
 
         lines = ["## Fuzzer Run Artifact Bundle", ""]
-        if isinstance(result, dict):
-            lines.append(f"- Scenario: `{result.get('scenario_id', 'unknown')}`")
-            lines.append(f"- Seed: `{result.get('seed', 'unknown')}`")
-            lines.append(
-                f"- Status: `{'PASSED' if result.get('success') else 'FAILED'}`"
-            )
-            validation = result.get("final_validation") or {}
-            failed_checks = validation.get("failed_checks") or []
-            if failed_checks:
-                lines.append(
-                    f"- Failed checks: {', '.join(str(item) for item in failed_checks)}"
-                )
-        else:
-            lines.append("- Structured results were not generated for this run.")
+        if summary_file.exists():
+            lines.append(f"- Batch status: `{summary['status']}`; runs by status: `{summary['counts']}`")
+        for run in summary["runs"]:
+            if not run["report"]:
+                lines.append(f"- Run `{run['id']}`: `{run['status']}`, no run report: {run['summary']}")
+                continue
+            report = json.loads((batch / run["report"]).read_text())
+            result = report.get("outcome") or {}
+            plan = result.get("plan") or {}
+            folder = (batch / run["report"]).parent.relative_to(artifact_dir)
+            lines.append(f"- Scenario: `{plan.get('scenario_id')}`")
+            lines.append(f"  - Seed: `{plan.get('seed')}`")
+            lines.append(f"  - Status: `{result.get('status')}`")
+            lines.append(f"  - Summary: {result.get('summary')}")
+            lines.append(f"  - Valkey SHA: `{result.get('valkey_sha')}`")
+            for item in result.get("component_results") or []:
+                if item.get("status") in ("FAIL", "ERROR"):
+                    lines.append(f"  - Failed: {item.get('component_id')}: {item.get('summary')}")
+            lines.append(f"  - Reproduce: `valkey-fuzzer run {folder}/scenario.yaml`")
+        if not summary["runs"]:
+            lines.append("- No run folders were written.")
+        for group in summary.get("signatures", []):
+            lines.append(f"- Signature ({group['count']} run(s)): {group['label']}")
 
-        lines.append(
-            f"- Collected files: `{len(manifest['log_files']) + int(results_path.exists()) + int(scenario_path.exists()) + 1}`"
-        )
+        collected = sum(1 for path in artifact_dir.rglob("*") if path.is_file())
+        lines.append(f"- Collected files: `{collected}`")
         lines.append("")
 
         summary_path = os.environ.get("GITHUB_STEP_SUMMARY")

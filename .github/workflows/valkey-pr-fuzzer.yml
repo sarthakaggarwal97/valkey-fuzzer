@@ -500,22 +500,20 @@ jobs:
 
           if [ "${status}" = "success" ]; then
             stage=fuzzer
-            valkey-fuzzer cluster \
-              --random \
-              --verbose \
+            # One fresh seed through the batch runner: batch/ holds summary.json and the
+            # run folder runs/<id>/ (report.json, scenario.yaml, logs/), as the scheduled run uploads.
+            valkey-fuzzer batch \
+              --random valkey.cluster-chaos \
+              --seeds 1 \
               --valkey-binary "${VALKEY_BINARY}" \
-              --output "${artifact_dir}/result.json" \
-              --format json \
+              --batch-id "pr-run-${RUN_ID}" \
+              --out "${artifact_dir}/batch" \
               2>&1 | tee "${artifact_dir}/console.log"
             fuzzer_exit=${PIPESTATUS[0]}
             if [ "${fuzzer_exit}" -ne 0 ]; then
               exit_code="${fuzzer_exit}"
               status=failure
             fi
-          fi
-
-          if [ -d "/tmp/valkey-fuzzer/logs" ]; then
-            cp -R /tmp/valkey-fuzzer/logs "${artifact_dir}/node-logs"
           fi
 
           export EXIT_CODE="${exit_code}"
@@ -527,7 +525,8 @@ jobs:
           import os
 
           artifact_dir = os.path.join(os.environ["RUN_ROOT"], f"run-{os.environ['RUN_ID']}")
-          result_path = os.path.join(artifact_dir, "result.json")
+          batch_dir = os.path.join(artifact_dir, "batch")
+          summary_path = os.path.join(batch_dir, "summary.json")
 
           metadata = {
               "run_id": int(os.environ["RUN_ID"]),
@@ -536,33 +535,41 @@ jobs:
               "exit_code": int(os.environ["EXIT_CODE"]),
               "scenario_id": None,
               "seed": None,
-              "result_success": None,
+              "outcome": None,
               "duration": None,
-              "post_operation_validation_failures": 0,
-              "final_failed_checks": [],
-              "error_message": None,
+              "failed_components": [],
+              "summary": None,
+              "valkey_sha": None,
           }
 
-          if os.path.exists(result_path):
-              with open(result_path, "r", encoding="utf-8") as handle:
-                  result_payload = json.load(handle)
+          # summary.json lists the batch's one run; runs[].report is its run report.
+          runs = []
+          if os.path.exists(summary_path):
+              with open(summary_path, "r", encoding="utf-8") as handle:
+                  runs = json.load(handle)["runs"]
+          for run in runs:
+              # The batch's verdict: a run that left servers or directories behind is an ERROR.
+              metadata["summary"] = run["summary"]
+              metadata["outcome"] = run["status"]
+              metadata["seed"] = run.get("seed")
+              if not run["report"]:
+                  continue
+              with open(os.path.join(batch_dir, run["report"]), "r", encoding="utf-8") as handle:
+                  report = json.load(handle)
 
-              results = result_payload.get("results", [])
-              if results:
-                  first_result = results[0]
-                  metadata["scenario_id"] = first_result.get("scenario_id")
-                  metadata["seed"] = first_result.get("seed")
-                  metadata["result_success"] = first_result.get("success")
-                  metadata["duration"] = first_result.get("duration")
-                  metadata["post_operation_validation_failures"] = sum(
-                      1
-                      for validation in first_result.get("per_operation_validations", [])
-                      if not validation.get("overall_success", False)
-                  )
-                  metadata["final_failed_checks"] = (
-                      first_result.get("final_validation", {}).get("failed_checks", [])
-                  )
-                  metadata["error_message"] = first_result.get("error_message")
+              result = report.get("outcome")
+              if result:
+                  plan = result.get("plan") or {}
+                  metadata["scenario_id"] = plan.get("scenario_id")
+                  metadata["seed"] = plan.get("seed")
+                  if result.get("started_at") is not None and result.get("ended_at") is not None:
+                      metadata["duration"] = round(result["ended_at"] - result["started_at"], 2)
+                  metadata["failed_components"] = [
+                      f"{item.get('component_id')}: {item.get('summary')}"
+                      for item in result.get("component_results") or []
+                      if item.get("status") in ("FAIL", "ERROR")
+                  ]
+                  metadata["valkey_sha"] = result.get("valkey_sha")
 
           with open(os.path.join(artifact_dir, "metadata.json"), "w", encoding="utf-8") as handle:
               json.dump(metadata, handle, indent=2)
@@ -724,27 +731,24 @@ jobs:
                   f"- Failed runs: {failed_runs}",
                   f"- Missing run artifacts: {len(missing_runs)}",
                   "",
-                  "| Run | Status | Seed | Stage | Duration (s) | Post-op Failures | Final Checks | Error |",
-                  "| --- | --- | --- | --- | --- | --- | --- | --- |",
+                  "| Run | Status | Seed | Stage | Duration (s) | Outcome | Failed components |",
+                  "| --- | --- | --- | --- | --- | --- | --- |",
               ])
 
               for run_id in range(1, run_count + 1):
                   result = run_results.get(run_id)
                   if result is None:
                       lines.append(
-                          f"| {run_id} | missing | - | artifact | - | - | - | artifact not uploaded |"
+                          f"| {run_id} | missing | - | artifact | - | - | artifact not uploaded |"
                       )
                       continue
 
-                  error = result.get("error_message") or "-"
-                  error = str(error).replace("\n", " ").replace("|", "/")
                   seed = result.get("seed") if result.get("seed") is not None else "-"
                   duration = result.get("duration") if result.get("duration") is not None else "-"
-                  post_op_failures = result.get("post_operation_validation_failures", 0)
-                  final_checks = ", ".join(result.get("final_failed_checks", [])) or "-"
-                  final_checks = final_checks.replace("|", "/")
+                  failures = "; ".join(result.get("failed_components") or []) or "-"
+                  failures = failures.replace("\n", " ").replace("|", "/")
                   lines.append(
-                      f"| {run_id} | {result['status']} | {seed} | {result.get('stage', '-')} | {duration} | {post_op_failures} | {final_checks} | {error} |"
+                      f"| {run_id} | {result['status']} | {seed} | {result.get('stage', '-')} | {duration} | {result.get('outcome') or '-'} | {failures} |"
                   )
 
           if missing_runs:
@@ -788,7 +792,7 @@ jobs:
                           "<details>",
                           "<summary>Failure details</summary>",
                           "",
-                          "| Run | Status | Seed | Stage | Final Checks | Error |",
+                          "| Run | Status | Seed | Stage | Outcome | Failed components |",
                           "| --- | --- | --- | --- | --- | --- |",
                       ])
 
@@ -803,15 +807,17 @@ jobs:
                           if result["status"] == "success":
                               continue
 
-                          error = format_comment_value(result.get("error_message") or "-")
                           seed = result.get("seed") if result.get("seed") is not None else "-"
-                          final_checks = ", ".join(result.get("final_failed_checks", [])) or "-"
-                          final_checks = format_comment_value(final_checks, limit=80)
+                          failures = format_comment_value("; ".join(result.get("failed_components") or []) or "-", limit=200)
                           comment_lines.append(
-                              f"| {run_id} | {result['status']} | {seed} | {result.get('stage', '-')} | {final_checks} | {error} |"
+                              f"| {run_id} | {result['status']} | {seed} | {result.get('stage', '-')} | {result.get('outcome') or '-'} | {failures} |"
                           )
 
                       comment_lines.extend([
+                          "",
+                          "Reproduce a run with `valkey-fuzzer run --seed <seed> --experiment valkey.cluster-chaos "
+                          "--valkey-binary <valkey-server>`, or with `valkey-fuzzer run batch/runs/<run>/scenario.yaml` "
+                          "from its artifact.",
                           "",
                           "</details>",
                       ])

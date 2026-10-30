@@ -1,0 +1,253 @@
+name: Valkey Fuzzer PR Batch
+
+# Runs given scenarios (valkey-ci-agent's AI proposals and spec-translated
+# scenarios for a pull request) against one Valkey commit, through the batch
+# runner with the candidate profile, and uploads the batch folder. The
+# scenarios arrive as a JSON object mapping a name to scenario YAML; they run
+# as written, on the build of valkey_sha (a full, lowercase 40-hex SHA).
+# Scenarios translated from a spec bundle that brings its own data-only
+# experiments come with the bundle in spec_bundles: the batch finds the bundle
+# through VALKEY_FUZZER_SPEC_PATH and loads its experiments/ with --experiment-dir.
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenarios:
+        description: 'JSON object mapping a scenario name to its YAML (at most 60,000 characters)'
+        required: true
+        type: string
+      spec_bundles:
+        description: >-
+          JSON object mapping a spec bundle name to {path in the bundle: file text}, for bundles the
+          scenarios need (claims.yaml, model.tla, mapping.yaml, *.cfg, negative-controls/, experiments/;
+          at most 60,000 characters)
+        required: false
+        type: string
+        default: ""
+      valkey_repository:
+        description: Repository holding the Valkey commit to test
+        required: false
+        type: string
+        default: valkey-io/valkey
+      valkey_ref:
+        description: The ref the commit came from (for example refs/pull/123/head); recorded in the summary
+        required: false
+        type: string
+        default: ""
+      valkey_sha:
+        description: Full SHA of the Valkey commit to build and test (40 lowercase hex characters)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  batch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CANDIDATES_DIR: /tmp/fuzzer-pr-batch/candidates
+      # The spec bundles, one directory each: the batch looks them up here by name.
+      SPEC_DIR: /tmp/fuzzer-pr-batch/spec
+      # The uploaded batch folder: summary.json lists every run and runs[].report its run report.
+      BATCH_DIR: /tmp/fuzzer-pr-batch/batch
+    steps:
+      - name: Checkout valkey-fuzzer
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.11'
+
+      - name: Install valkey-fuzzer
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+
+      # Inputs reach the scripts only through the environment, never the shell.
+      - name: Check the inputs and write the scenarios and bundles
+        env:
+          INPUT_SCENARIOS: ${{ inputs.scenarios }}
+          INPUT_SPEC_BUNDLES: ${{ inputs.spec_bundles }}
+          INPUT_VALKEY_REPOSITORY: ${{ inputs.valkey_repository }}
+          INPUT_VALKEY_SHA: ${{ inputs.valkey_sha }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          import yaml
+
+          raw = os.environ["INPUT_SCENARIOS"]
+          if len(raw) > 60000:
+              raise SystemExit(f"scenarios is {len(raw)} characters; the limit is 60,000")
+          raw_bundles = os.environ["INPUT_SPEC_BUNDLES"]
+          if len(raw_bundles) > 60000:
+              raise SystemExit(f"spec_bundles is {len(raw_bundles)} characters; the limit is 60,000")
+          if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", os.environ["INPUT_VALKEY_REPOSITORY"]):
+              raise SystemExit("valkey_repository must be OWNER/NAME")
+          if not re.fullmatch(r"[0-9a-f]{40}", os.environ["INPUT_VALKEY_SHA"]):
+              raise SystemExit("valkey_sha must be a full 40-character lowercase commit SHA")
+          try:
+              scenarios = json.loads(raw)
+          except ValueError as exc:
+              raise SystemExit(f"scenarios is not JSON: {exc}")
+          if not isinstance(scenarios, dict) or not scenarios:
+              raise SystemExit("scenarios must be a non-empty JSON object mapping a name to scenario YAML")
+          out = Path(os.environ["CANDIDATES_DIR"])
+          out.mkdir(parents=True)
+          for name, text in scenarios.items():
+              if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", name) or ".." in name:
+                  raise SystemExit(f"scenario name {name!r} must be letters, digits, '.', '_', or '-'")
+              if not isinstance(text, str):
+                  raise SystemExit(f"scenario {name}: the value must be YAML text")
+              try:
+                  document = yaml.safe_load(text)
+              except yaml.YAMLError as exc:
+                  raise SystemExit(f"scenario {name} is not YAML: {exc}")
+              if not isinstance(document, dict):
+                  raise SystemExit(f"scenario {name} must be a mapping")
+              if "valkey_binary" in (document.get("deployment") or {}):
+                  raise SystemExit(f"scenario {name} sets deployment.valkey_binary; the batch runs valkey_sha's build")
+              (out / f"{name}.yaml").write_text(text, encoding="utf-8")
+          print(f"{len(scenarios)} scenario(s) written to {out}")
+
+          # spec_bundles: {bundle name: {path in the bundle: text}}, written under SPEC_DIR.
+          try:
+              bundles = json.loads(raw_bundles) if raw_bundles.strip() else {}
+          except ValueError as exc:
+              raise SystemExit(f"spec_bundles is not JSON: {exc}")
+          if not isinstance(bundles, dict):
+              raise SystemExit("spec_bundles must be a JSON object mapping a bundle name to its files")
+          spec_dir = Path(os.environ["SPEC_DIR"])
+          spec_dir.mkdir(parents=True)
+          file_name = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}"
+          allowed = (
+              rf"(?:claims|mapping)\.yaml|model\.tla|{file_name}\.cfg"
+              rf"|negative-controls/{file_name}\.(?:cfg|tla)|experiments/{file_name}\.ya?ml"
+          )
+          for bundle, files in bundles.items():
+              if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", bundle):
+                  raise SystemExit(f"spec bundle name {bundle!r} must be lowercase letters, digits, or '-'")
+              if not isinstance(files, dict) or not files:
+                  raise SystemExit(f"spec bundle {bundle}: the value must map paths in the bundle to file text")
+              for required in ("claims.yaml", "model.tla", "mapping.yaml"):
+                  if required not in files:
+                      raise SystemExit(f"spec bundle {bundle} has no {required}")
+              for path, text in files.items():
+                  if not isinstance(path, str) or not re.fullmatch(allowed, path) or ".." in path:
+                      raise SystemExit(
+                          f"spec bundle {bundle}: {path!r} must be claims.yaml, model.tla, mapping.yaml, <name>.cfg, "
+                          "negative-controls/<name>.cfg or .tla, or experiments/<name>.yaml"
+                      )
+                  if not isinstance(text, str):
+                      raise SystemExit(f"spec bundle {bundle}: {path} must be file text")
+                  if path.endswith((".yaml", ".yml")):
+                      try:
+                          document = yaml.safe_load(text)
+                      except yaml.YAMLError as exc:
+                          raise SystemExit(f"spec bundle {bundle}: {path} is not YAML: {exc}")
+                      if not isinstance(document, dict):
+                          raise SystemExit(f"spec bundle {bundle}: {path} must be a mapping")
+                  target = spec_dir / bundle / path
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  target.write_text(text, encoding="utf-8")
+              # The same checks the batch makes when a scenario names the bundle.
+              from valkey_fuzzer.spec.bundle import BundleError, load_bundle
+
+              try:
+                  load_bundle(str(spec_dir / bundle))
+              except BundleError as exc:
+                  raise SystemExit(f"spec bundle {bundle} is invalid: {exc}")
+          print(f"{len(bundles)} spec bundle(s) written to {spec_dir}")
+          PY
+
+      - name: Checkout Valkey
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ inputs.valkey_repository }}
+          ref: ${{ inputs.valkey_sha }}
+          fetch-depth: 1
+          path: valkey-src
+          persist-credentials: false
+
+      - name: Build Valkey
+        working-directory: valkey-src
+        env:
+          INPUT_VALKEY_SHA: ${{ inputs.valkey_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "${INPUT_VALKEY_SHA}"
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev tcl
+          make -j"$(nproc)"
+          src/valkey-server --version
+
+      - name: Run the scenarios through batch
+        id: batch
+        continue-on-error: true
+        env:
+          VALKEY_FUZZER_SPEC_PATH: ${{ env.SPEC_DIR }}
+        run: |
+          # Each bundle's own data-only experiments, for the scenarios translated from it.
+          experiment_dirs=()
+          for directory in "${SPEC_DIR}"/*/experiments; do
+            if [ -d "${directory}" ]; then
+              experiment_dirs+=(--experiment-dir "${directory}")
+            fi
+          done
+          valkey-fuzzer batch --scenarios "${CANDIDATES_DIR}" --profile candidate --workers 2 \
+            --valkey-binary "${GITHUB_WORKSPACE}/valkey-src/src/valkey-server" --batch-id fuzzer-pr-batch \
+            --out "${BATCH_DIR}" "${experiment_dirs[@]}"
+
+      - name: Summarize the batch
+        if: always()
+        env:
+          INPUT_VALKEY_REPOSITORY: ${{ inputs.valkey_repository }}
+          INPUT_VALKEY_REF: ${{ inputs.valkey_ref }}
+          INPUT_VALKEY_SHA: ${{ inputs.valkey_sha }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          summary_file = Path(os.environ["BATCH_DIR"]) / "summary.json"
+          lines = [
+              "## Valkey Fuzzer PR Batch",
+              "",
+              f"- Valkey: `{os.environ['INPUT_VALKEY_REPOSITORY']}` `{os.environ['INPUT_VALKEY_REF'] or '-'}` "
+              f"`{os.environ['INPUT_VALKEY_SHA']}`",
+          ]
+          if summary_file.exists():
+              summary = json.loads(summary_file.read_text())
+              lines.append(f"- Batch status: `{summary['status']}`; runs by status: `{summary['counts']}`")
+              lines += ["", "| Run | Status | Summary |", "| --- | --- | --- |"]
+              for run in summary["runs"]:
+                  text = str(run["summary"]).replace("\n", " ").replace("|", "/")[:200]
+                  lines.append(f"| {run['id']} | {run['status']} | {text} |")
+              for group in summary["signatures"]:
+                  lines.append(f"- Signature ({group['count']} run(s)): {group['label']}")
+          else:
+              lines.append("- The batch wrote no summary; see the step log.")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as handle:
+              handle.write("\n".join(lines) + "\n")
+          PY
+
+      - name: Upload the batch folder
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzzer-batch-${{ github.run_id }}
+          path: ${{ env.BATCH_DIR }}
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Fail when the batch did not pass
+        if: steps.batch.outcome != 'success'
+        run: exit 1
