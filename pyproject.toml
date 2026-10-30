@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "valkey-fuzzer"
-version = "0.1.0"
-description = "Chaos engineering and fuzzing framework for Valkey cluster bus testing"
+version = "0.2.0"
+description = "Seeded fault-injection tests for Valkey standalone and cluster deployments"
 readme = "README.md"
 requires-python = ">=3.9"
-license = {text = "MIT"}
+license = {text = "BSD-3-Clause"}
 authors = [
     {name = "valkey-io"}
 ]
-keywords = ["valkey", "cluster", "chaos-engineering", "fuzzing", "testing"]
+keywords = ["valkey", "fault-injection", "fuzzing", "chaos-engineering", "testing", "cluster", "failover", "durability"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -26,7 +26,7 @@ classifiers = [
 
 dependencies = [
     "pyyaml>=6.0",
-    "valkey>=5.0.0",
+    "valkey[libvalkey]>=6.0.0",
 ]
 
 [project.optional-dependencies]
@@ -40,21 +40,28 @@ dev = [
 Repository = "https://github.com/valkey-io/valkey-fuzzer"
 Issues = "https://github.com/valkey-io/valkey-fuzzer/issues"
 
-[project.scripts]
-valkey-fuzzer = "src.cli:main"
-
 [tool.setuptools]
-packages = ["src", "src.fuzzer_engine", "src.cluster_orchestrator", "src.chaos_engine"]
+packages = [
+    "valkey_fuzzer",
+    "valkey_fuzzer.environment",
+]
+
+[tool.setuptools.package-data]
+valkey_fuzzer = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-v --tb=short"
+addopts = "--strict-markers --tb=short"
+markers = [
+    "slow: starts real processes (valkey-server, batch workers); deselect with -m 'not slow'",
+    "live: runs the Valkey experiments against real servers (also marked slow)",
+]
 
 [tool.coverage.run]
-source = ["src"]
+source = ["valkey_fuzzer", "valkey_fuzzer_experiments"]
 omit = ["tests/*", "examples/*"]
 
 [tool.coverage.report]
@@ -93,7 +100,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["src"]
+known-first-party = ["valkey_fuzzer", "valkey_fuzzer_experiments"]
 
 [tool.ruff.format]
 quote-style = "double"
