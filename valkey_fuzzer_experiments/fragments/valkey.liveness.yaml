@@ -1,0 +1,6 @@
+# Every instance is alive and responsive and logged no crash or sanitizer report,
+# and no valkey.observer.log in the run matched one of its forbidden patterns.
+# The plugin adds this to every experiment it ships; data-only experiments extend it.
+components:
+  - use: valkey.oracle.liveness
+    id: liveness

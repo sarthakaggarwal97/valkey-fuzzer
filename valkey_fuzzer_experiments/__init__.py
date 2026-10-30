@@ -21,6 +21,7 @@ from valkey_fuzzer.extensions import (
     load_yaml_mapping,
 )
 
+from .generators import GENERATORS
 from .providers import ARTIFACT_PROVIDERS, RESOURCE_PROVIDERS
 
 PLUGIN_ID = "valkey-fuzzer.valkey-experiments"
@@ -34,6 +35,7 @@ _MODULES = tuple(
         "storage",
         "workloads",
         "actions",
+        "chaos",
         "faults",
         "network",
         "observers",
@@ -42,6 +44,7 @@ _MODULES = tuple(
         "snapshots",
         "compression",
         "cluster",
+        "replication_chaos",
     )
 )
 
@@ -77,6 +80,7 @@ def experiments() -> tuple[Any, ...]:
 PLUGIN = PluginManifest(
     plugin_id=PLUGIN_ID,
     registrations=component_registrations(),
+    generators=GENERATORS,
     experiments=experiments(),
     artifact_providers=ARTIFACT_PROVIDERS,
     resource_providers=RESOURCE_PROVIDERS,
@@ -87,6 +91,7 @@ PLUGIN = PluginManifest(
 __all__ = [
     "EXPERIMENT_DIRECTORY",
     "FRAGMENT_DIRECTORY",
+    "GENERATORS",
     "PLUGIN",
     "PLUGIN_ID",
     "component_registrations",

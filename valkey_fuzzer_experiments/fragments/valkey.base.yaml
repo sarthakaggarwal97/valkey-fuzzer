@@ -1,0 +1,6 @@
+# valkey.writes plus the `deployment-state` oracle, which runs the deployment's
+# state validators (replication links, cluster state, slot coverage, views).
+extends: [valkey.writes]
+components:
+  - use: valkey.oracle.deployment-state
+    id: deployment-state

@@ -356,6 +356,10 @@ def test_an_event_targeted_kill_records_the_cluster_vars_it_left_on_disk_and_nee
 
 
 _LOOPBACK = {"addressing": "per_instance_loopback"}
+_CC, _RC = "valkey.action.cluster-chaos", "valkey.action.replication-chaos"
+_SHARDS = {"primaries": 3, "replicas_per_primary": 1}  # cluster chaos waves
+_PAIR = {"replicas_per_primary": 2}  # replication chaos waves
+_FO0 = {"op": "failover", "shard": 0}
 
 
 @pytest.mark.parametrize(
@@ -380,6 +384,24 @@ _LOOPBACK = {"addressing": "per_instance_loopback"}
          "standalone", {}, "reserved groups"),
         ("valkey.observer.log-trigger", "observer", {"rules": [{"pattern": "a", "publish": "x", "evidence_id": "flat"}]},
          "standalone", {}, "namespaced"),
+        (_CC, "action", {"waves": []}, "cluster", _SHARDS, "at least one wave"),
+        (_CC, "action", {"waves": [[{"op": "failover", "shard": 3}]]}, "cluster", _SHARDS, "not below primaries 3"),
+        (_CC, "action", {"waves": [[_FO0, _FO0]]}, "cluster", _SHARDS, "already fails over in this wave"),
+        (_CC, "action", {"waves": [[{"op": "kill", "target": "valkey-6"}]]}, "cluster", _SHARDS, "not a planned instance"),
+        (_CC, "action", {"waves": [[{"op": "kill", "target": []}]]}, "cluster", _SHARDS, "names no instance"),
+        (_CC, "action", {"waves": [[{"op": "kill", "after": 0}]]}, "cluster", _SHARDS, "earlier operation"),
+        (_CC, "action", {"waves": [[_FO0]], "validation": {"replication_config": {"lag": 1}}}, "cluster", _SHARDS,
+         "replication_config contains unknown fields"),
+        (_CC, "action", {"waves": [[_FO0]]}, "cluster", {"replicas_per_primary": 0}, "replicas_per_primary >= 1"),
+        (_RC, "action", {"waves": [[]]}, "standalone", _PAIR, "has no operations"),
+        (_RC, "action", {"waves": [[_FO0]]}, "standalone", _PAIR, r"op must be one of \['kill', 'restart'"),
+        (_RC, "action", {"waves": [[{"op": "restart"}]]}, "standalone", _PAIR, "needs a kill with a smaller delay_s"),
+        (_RC, "action", {"waves": [[{"op": "promote", "target": "primary"}]]}, "standalone", _PAIR, "must be one of"),
+        (_RC, "action", {"waves": [[{"op": "repoint", "target": "valkey-1", "to": "valkey-1"}]]}, "standalone", _PAIR,
+         "cannot replicate itself"),
+        (_RC, "action", {"waves": [[{"op": "repoint", "target": "replica", "to": "replica"}]]}, "standalone",
+         {"replicas_per_primary": 1}, "replicas_per_primary >= 2"),
+        (_RC, "action", {"waves": [[{"op": "partition", "target": "replica"}]]}, "standalone", _PAIR, "per_instance_loopback"),
         ("valkey.action.rolling-upgrade", "action", {"to_binary": "/x"}, "standalone", {}, "replicas_per_primary >= 1"),
     ],
 )  # fmt: skip
