@@ -34,6 +34,9 @@ dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
     "ruff>=0.4.0",
+    # The neutral plugin template test builds and installs a wheel.
+    "setuptools>=64",
+    "wheel",
 ]
 
 [project.urls]
@@ -47,6 +50,7 @@ packages = [
     "valkey_fuzzer.deployment.local",
     "valkey_fuzzer.deployment.local.validation",
     "valkey_fuzzer.environment",
+    "valkey_fuzzer.extensions",
 ]
 
 [tool.setuptools.package-data]

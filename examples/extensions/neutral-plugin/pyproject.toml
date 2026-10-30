@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "valkey-fuzzer-neutral-plugin"
+version = "0.1.0"
+description = "Minimal external extension template for valkey-fuzzer"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["valkey-fuzzer>=0.2.0"]
+
+[project.entry-points."valkey_fuzzer.plugins"]
+"example.neutral-plugin" = "valkey_fuzzer_neutral_plugin:PLUGIN"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -5,14 +5,22 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from tests.support import deployment_identity
+from tests.support import component_registration, deployment_identity
+from valkey_fuzzer._data import (
+    DuplicateRegistrationError,
+    FrozenRegistryError,
+    RegistrationError,
+)
+from valkey_fuzzer.catalog import ExtensionCatalog
 from valkey_fuzzer.contracts import (
     ComponentRole,
     ComponentSpec,
+    DeploymentProviderRegistration,
     EvidenceRequirement,
     ExecutionPlan,
     ExperimentSpec,
     InstanceSelector,
+    PluginManifest,
     RunMode,
 )
 from valkey_fuzzer.environment import ArtifactSpec, PolicySpec
@@ -91,6 +99,8 @@ def test_plans_take_deep_immutable_snapshots_and_round_trip_through_json():
         (lambda: _experiment(deployment_requirements={"mode": {}}), ValueError, "must name a deployment field"),
         (lambda: InstanceSelector.parse(["valkey-9"]).resolve(["valkey-0"], {}), ValueError, r"unknown instance IDs \['valkey-9'\]"),
         (lambda: InstanceSelector.parse([1]), ValueError, "an instance selector is one of"),
+        # A manifest's entries are checked when the catalog registers them.
+        (lambda: ExtensionCatalog().register_plugins((PluginManifest("x.p", deployment_providers=(_deployment(),) * 2),)), DuplicateRegistrationError, "standalone"),
     ],
 )  # fmt: skip
 def test_a_malformed_spec_or_plan_is_rejected(build, error, message):
@@ -126,3 +136,36 @@ def test_the_event_bus_orders_subscribers_snapshots_payloads_and_commits_only_di
         bus.publish("late.event", source="late")
     with pytest.raises(EventBusQuiescedError):
         bus.subscribe("late.event", calls.append)
+
+
+def _deployment(provider_id="example.deployment.fake"):
+    return DeploymentProviderRegistration(deployment_mode="standalone", provider_id=provider_id, factory=object)
+
+
+@pytest.mark.parametrize(
+    ("existing", "plugins", "error"),
+    [
+        (None, [PluginManifest("x.p", (component_registration("example.oracle_check", role=ComponentRole.ORACLE),))], RegistrationError),
+        ("frozen", [PluginManifest("x.p", (component_registration(),), experiment_fragments={"x.base": {}})], FrozenRegistryError),
+        ("action", [PluginManifest("x.p", (component_registration("new.oracle.fake"), component_registration()))], DuplicateRegistrationError),
+        ("frozen-providers", [PluginManifest("x.p", (component_registration(),), deployment_providers=(_deployment(),))], FrozenRegistryError),
+        (None, [PluginManifest("x.a", (component_registration(),), experiment_fragments={"x.base": {}}), PluginManifest("x.b", experiment_fragments={"x.base": {}})], RegistrationError),
+        (None, [PluginManifest("x.a", deployment_providers=(_deployment(),)), PluginManifest("x.b", (component_registration(),), deployment_providers=(_deployment(),))], DuplicateRegistrationError),
+        (None, [PluginManifest("x.a"), PluginManifest("x.a")], RegistrationError),
+    ],
+    ids=["misnamed-component", "frozen-catalog", "duplicate-component", "frozen-provider-registry", "duplicate-fragment", "duplicate-provider", "duplicate-plugin-id"],
+)  # fmt: skip
+def test_a_rejected_plugin_set_registers_nothing(existing, plugins, error):
+    catalog = ExtensionCatalog()
+    if existing == "frozen":
+        catalog.freeze()
+    elif existing == "frozen-providers":
+        catalog.deployment_providers.freeze()
+    elif existing == "action":
+        catalog.components.register(component_registration())
+
+    with pytest.raises(error):
+        catalog.register_plugins(plugins)
+
+    assert len(catalog.components) == (existing == "action")
+    assert catalog.plugins == () and dict(catalog.fragments) == {}

@@ -1,0 +1,10 @@
+scenario_id: neutral-plugin-example
+seed: 17
+
+experiment:
+  id: example.neutral
+  inputs:
+    message: configuration-reached-the-plugin
+
+deployment:
+  mode: example-neutral
