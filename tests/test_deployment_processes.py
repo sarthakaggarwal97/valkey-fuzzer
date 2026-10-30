@@ -11,6 +11,7 @@ import pytest
 
 from tests.deployment_support import PROCESSES, client_context, fake_client, formed_cluster, instance, process_manager
 from tests.support import VirtualClock
+from valkey_fuzzer.commands.run import cleanup_logs
 from valkey_fuzzer.deployment.local import queries
 from valkey_fuzzer.deployment.local.formation import Formation
 from valkey_fuzzer.deployment.local.models import DeploymentMode, LocalDeploymentError
@@ -143,6 +144,16 @@ def test_a_server_whose_termination_failed_keeps_its_data_and_a_retry_stops_it(t
     assert manager.spawned_instances == [stuck] and data_dir.exists()
     manager.cleanup_deployment(manager.spawned_instances)
     assert manager.spawned_instances == [] and not data_dir.exists()
+
+
+def test_two_deployments_with_the_same_seed_write_separate_logs_that_cleanup_finds(tmp_path):
+    # Concurrent runs of one seed must not interleave their instance logs: log checks would read the other's lines.
+    paths = [process_manager(tmp_path, seed=7).create_instance_directories("valkey-0")[1] for _ in range(2)]
+    assert paths[0] != paths[1]
+    for path in paths:
+        open(path, "w").close()
+    assert cleanup_logs(7, str(tmp_path), force=True) == 0
+    assert not any(os.path.exists(path) for path in paths)
 
 
 def test_process_output_goes_to_one_file_per_instance_that_a_startup_failure_reports(tmp_path):

@@ -1,0 +1,120 @@
+"""What every command shares: the common options, the run service, and terminal output."""
+
+import argparse
+import json
+import math
+import re
+from collections.abc import Mapping
+from typing import Any
+
+from ..service import RunService
+
+# ---------------------------------------------------------------------------
+# Common options and the service
+# ---------------------------------------------------------------------------
+
+
+def positive_seconds(value: str) -> float:
+    try:
+        seconds = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a number greater than zero") from exc
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise argparse.ArgumentTypeError("must be a finite number greater than zero")
+    return seconds
+
+
+def positive_count(value: str) -> int:
+    try:
+        count = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a whole number of at least 1") from exc
+    if count < 1:
+        raise argparse.ArgumentTypeError("must be a whole number of at least 1")
+    return count
+
+
+def add_common_options(
+    parser: argparse.ArgumentParser,
+    *,
+    valkey_binary: bool = False,
+    artifact_dir: bool = False,
+    timeout: bool = False,
+    allow_unsupported: bool = False,
+) -> None:
+    """Register ``--experiment-dir`` and ``--no-plugins``, and the other shared options a command uses.
+
+    An option a command does not take still has its default, so every handler reads ``args.<option>``.
+    """
+
+    parser.set_defaults(valkey_binary=None, artifact_dir="", timeout=None, allow_unsupported=False)
+    if valkey_binary:
+        parser.add_argument("--valkey-binary", help="Override the Valkey binary used by the deployment")
+    parser.add_argument(
+        "--experiment-dir",
+        dest="experiment_dirs",
+        action="append",
+        default=[],
+        metavar="DIR",
+        help="Directory containing data-only experiment documents; may be repeated",
+    )
+    parser.add_argument(
+        "--no-plugins",
+        action="store_true",
+        help="Disable trusted installed plugins, which are loaded from valkey_fuzzer.plugins by default",
+    )
+    if artifact_dir:
+        parser.add_argument(
+            "--artifact-dir",
+            default="",
+            metavar="DIR",
+            help="Root for report folders, which hold each run's component artifacts, and provider directories "
+            "(default: <tmp>/valkey-fuzzer)",
+        )
+    if timeout:
+        parser.add_argument(
+            "--timeout",
+            type=positive_seconds,
+            metavar="SECONDS",
+            help="Cooperative run deadline in seconds",
+        )
+    if allow_unsupported:
+        parser.add_argument(
+            "--allow-unsupported",
+            action="store_true",
+            help="Return success when a required capability reports unsupported",
+        )
+
+
+def service_for(args: argparse.Namespace) -> RunService:
+    """A run service for the options in ``args``; its catalog is built on first use."""
+
+    return RunService(
+        experiment_directories=tuple(args.experiment_dirs),
+        discover_plugins=not args.no_plugins,
+        artifact_dir=args.artifact_dir,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+
+
+def print_header(title: str) -> None:
+    print()
+    print("=" * 80)
+    print(title)
+    print("=" * 80)
+    print()
+
+
+def describe_drift(entry: Mapping[str, Any]) -> str:
+    """One terminal line for a replay drift entry."""
+
+    def shown(value: Any) -> str:
+        text = "none" if value is None else value if isinstance(value, str) else json.dumps(value, sort_keys=True)
+        # Reports keep full digests; a prefix is enough on the terminal.
+        return re.sub(r"\b([0-9a-f]{12})[0-9a-f]{52}\b", r"\1...", text)
+
+    return f"{entry['item']}: recorded {shown(entry['recorded'])}, replay uses {shown(entry['replay'])}"

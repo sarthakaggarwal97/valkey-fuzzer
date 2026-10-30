@@ -43,6 +43,9 @@ dev = [
 Repository = "https://github.com/valkey-io/valkey-fuzzer"
 Issues = "https://github.com/valkey-io/valkey-fuzzer/issues"
 
+[project.scripts]
+valkey-fuzzer = "valkey_fuzzer.cli:main"
+
 # The Valkey component library and experiments ship in this distribution but
 # register like any external extension, through the public plugin entry point.
 [project.entry-points."valkey_fuzzer.plugins"]
@@ -55,6 +58,7 @@ Issues = "https://github.com/valkey-io/valkey-fuzzer/issues"
 [tool.setuptools]
 packages = [
     "valkey_fuzzer",
+    "valkey_fuzzer.commands",
     "valkey_fuzzer.deployment",
     "valkey_fuzzer.deployment.local",
     "valkey_fuzzer.deployment.local.validation",
