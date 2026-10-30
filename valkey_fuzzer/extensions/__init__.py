@@ -88,6 +88,8 @@ from ..schema import (
     load_yaml_mapping,
     plain_config,
 )
+from ..spec.bundle import BundleError as SpecBundleError
+from ..spec.bundle import load_mapping as load_spec_mapping
 
 __all__ = [
     "PLUGIN_ENTRY_POINT_GROUP",
@@ -136,6 +138,7 @@ __all__ = [
     "RunContext",
     "RunEvent",
     "RunMode",
+    "SpecBundleError",
     "StartupOverlay",
     "SupportDecision",
     "Workload",
@@ -144,6 +147,7 @@ __all__ = [
     "evidence_of",
     "jsonable",
     "load_experiment_yaml",
+    "load_spec_mapping",
     "load_yaml_mapping",
     "make_evidence",
     "make_result",
