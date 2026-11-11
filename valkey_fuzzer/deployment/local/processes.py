@@ -43,6 +43,7 @@ from .models import (
 from .ports import ensure_ports_free
 from .queries import query_cluster_info, query_replication, response_text, valkey_client, wait_until
 from .server_config import arguments_for_build, build_server_config_arguments, effective_server_config
+from .tls import TlsFiles, create_tls_files
 
 logger = logging.getLogger(__name__)
 
@@ -258,6 +259,8 @@ class ProcessManager:
         self._extra_deployment_dirs: set[str] = set()
         # Deployment directories that hold this process's owner tag.
         self._tagged_dirs: set[str] = set()
+        # The deployment's certificates, once made (see tls_files).
+        self.tls: Optional[TlsFiles] = None
 
     @property
     def spawned_instances(self) -> list[InstanceInfo]:
@@ -289,27 +292,38 @@ class ProcessManager:
         """
         # Absolute: each server runs in its own data directory, so a relative log path would not resolve.
         base_data_dir = os.path.abspath(self.config.base_data_dir)
-        deployment_dir = os.path.join(os.path.abspath(data_root or base_data_dir), f"deployment-{self.deployment_id}")
-        if data_root:
-            self._extra_deployment_dirs.add(deployment_dir)
-        instance_data_dir = os.path.join(deployment_dir, instance_id, "data")
+        instance_data_dir = os.path.join(self._deployment_directory(data_root), instance_id, "data")
         log_dir = os.path.join(base_data_dir, "logs")
-        if os.path.normpath(self.config.base_data_dir) == DEFAULT_BASE_DATA_DIR:
-            # Every user's runs share the default base_data_dir and its logs; a deployment directory is its own.
-            shared_directory(self.config.base_data_dir)
-            shared_directory(log_dir)
-
-        if deployment_dir not in self._tagged_dirs:
-            # Tagged while still empty, before anything is made in it: a kill in between leaves no untagged tree.
-            os.makedirs(deployment_dir, exist_ok=True)
-            tag_directory(deployment_dir, "deployment", f"deployment {self.deployment_id} seed {self.seed}")
-            self._tagged_dirs.add(deployment_dir)
         os.makedirs(instance_data_dir, exist_ok=True)
         os.makedirs(log_dir, exist_ok=True)
 
         # One file per deployment: concurrent runs of one seed must not share a log.
         log_file = os.path.join(log_dir, f"{self.seed}-{self.deployment_id}-{instance_id}.log")
         return instance_data_dir, log_file
+
+    def _deployment_directory(self, data_root: Optional[str] = None) -> str:
+        """This deployment's directory under ``data_root`` (default: base_data_dir), made and tagged on first use."""
+        base_data_dir = os.path.abspath(self.config.base_data_dir)
+        deployment_dir = os.path.join(os.path.abspath(data_root or base_data_dir), f"deployment-{self.deployment_id}")
+        if data_root:
+            self._extra_deployment_dirs.add(deployment_dir)
+        if os.path.normpath(self.config.base_data_dir) == DEFAULT_BASE_DATA_DIR:
+            # Every user's runs share the default base_data_dir and its logs; a deployment directory is its own.
+            shared_directory(self.config.base_data_dir)
+            shared_directory(os.path.join(base_data_dir, "logs"))
+
+        if deployment_dir not in self._tagged_dirs:
+            # Tagged while still empty, before anything is made in it: a kill in between leaves no untagged tree.
+            os.makedirs(deployment_dir, exist_ok=True)
+            tag_directory(deployment_dir, "deployment", f"deployment {self.deployment_id} seed {self.seed}")
+            self._tagged_dirs.add(deployment_dir)
+        return deployment_dir
+
+    def tls_files(self) -> Optional[TlsFiles]:
+        """The deployment's certificates when it runs over TLS, made in its directory on first use; else None."""
+        if self.config.tls and self.tls is None:
+            self.tls = create_tls_files(os.path.join(self._deployment_directory(), "tls"))
+        return self.tls
 
     def build_instance_command(
         self,
@@ -324,13 +338,8 @@ class ProcessManager:
         mode = self.config.mode
         cluster_enabled = mode == DeploymentMode.CLUSTER
         binary = valkey_binary or self.config.valkey_binary
-        command = [
-            binary,
-            "--port",
-            str(port),
-            "--bind",
-            host,
-        ]
+        tls = self.tls_files()
+        command = [binary, *(tls.server_arguments(port) if tls else ["--port", str(port)]), "--bind", host]
         if host != "127.0.0.1":
             # Replication and cluster-bus connections must originate from the
             # instance's own address so network faults can match instance pairs.
@@ -382,6 +391,7 @@ class ProcessManager:
                         started_at=time.time(),
                         data_dir=instance_data_dir,
                         log_file=log_file,
+                        tls=self.tls,
                     )
 
                     self._spawned_instances[info.instance_id] = info
@@ -567,7 +577,7 @@ class ProcessManager:
     @staticmethod
     def _answers(instance: InstanceInfo) -> bool:
         """Whether the instance answers PING as the process we started (a foreign server raises)."""
-        with valkey_client(instance.host, instance.port, timeout=3.0) as client:
+        with valkey_client(instance.host, instance.port, timeout=3.0, tls=instance.tls) as client:
             if not client.ping():
                 return False
             verify_instance_process_identity(instance, client)
@@ -578,7 +588,7 @@ class ProcessManager:
         if instance.process.poll() is not None:
             raise LocalDeploymentError(f"Instance {instance.instance_id} process died during restart")
         try:
-            with valkey_client(instance.host, instance.port, timeout=0.5) as client:
+            with valkey_client(instance.host, instance.port, timeout=0.5, tls=instance.tls) as client:
                 return self._restart_is_ready(instance, client, mode)
         except (valkey.ValkeyError, OSError) as exc:
             logger.debug("Instance %s is not ready after restart: %s", instance.instance_id, exc)

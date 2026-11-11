@@ -119,6 +119,11 @@ class DeploymentProvider(Protocol):
     def cleanup(self, context: RunContext, deployment: ProvisionedDeployment) -> None: ...
 
 
+class UnsupportedDeploymentError(RuntimeError):
+    """The deployment the plan describes cannot run on these builds or this host (a provider raises it from
+    ``provision``): the run is SKIP_UNSUPPORTED, not ERROR."""
+
+
 @runtime_checkable
 class CapabilityProbe(Protocol):
     def probe(self, context: RunContext, spec: "ComponentSpec") -> "ComponentResult": ...

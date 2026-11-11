@@ -33,7 +33,9 @@ class _Cluster:
 
 
 def test_the_same_seed_preloads_the_same_distinct_keys_into_every_slot():
-    cluster = SimpleNamespace(mode=DeploymentMode.CLUSTER, startup_nodes=[{"host": "127.0.0.1", "port": 7000}])
+    cluster = SimpleNamespace(
+        mode=DeploymentMode.CLUSTER, startup_nodes=[{"host": "127.0.0.1", "port": 7000}], tls=None
+    )
     clients = [_Cluster(), _Cluster(), _Cluster(refused={"key:{0}:1"})]
     with patch("valkey_fuzzer.deployment.local.service.ValkeyCluster", side_effect=clients):
         assert load_all_slots(cluster, keys_per_slot=2, rng=random.Random(1234)) is True

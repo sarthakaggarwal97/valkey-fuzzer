@@ -13,6 +13,7 @@ from valkey.crc import key_slot
 from ..cluster_nodes import HASH_SLOTS
 from ..models import DeploymentMode
 from ..queries import valkey_client
+from ..tls import client_options
 from ..topology import DeploymentConnection, TopologyNode
 from .config import DataConsistencyValidationConfig
 from .results import DataConsistencyValidation, DataInconsistency
@@ -100,7 +101,7 @@ def write_test_keys(
     # Each primary's keys go over one connection to it, which then WAITs for its replicas.
     acknowledged: set[str] = set()
     for owner in (row for row in live_instances if row.address in owner_of.values()):
-        with valkey_client(owner.host, owner.port, config.timeout) as client:
+        with valkey_client(owner.host, owner.port, config.timeout, tls=owner.tls) as client:
             for key in (key for key in test_keys if owner_of[key] == owner.address):
                 try:
                     if not client.set(key, values[key]):
@@ -226,6 +227,7 @@ def check_data(
                 skip_full_coverage_check=True,
                 read_from_replicas=False,
                 socket_timeout=config.timeout,
+                **client_options(live_instances[0].tls),
             )
             try:
                 _check_test_keys(
@@ -251,7 +253,7 @@ def check_data(
             )
         primary_address = primary.address
         try:
-            with valkey_client(primary.host, primary.port, config.timeout) as direct_client:
+            with valkey_client(primary.host, primary.port, config.timeout, tls=primary.tls) as direct_client:
                 _check_test_keys(
                     test_keys,
                     lambda key: (direct_client.get(key), primary_address),
@@ -349,7 +351,7 @@ def _check_replicas(
             )
 
         try:
-            with valkey_client(replica.host, replica.port, config.timeout) as client:
+            with valkey_client(replica.host, replica.port, config.timeout, tls=replica.tls) as client:
                 if cluster:
                     # Cluster replicas refuse direct reads without READONLY, even for their own shard's keys.
                     client.execute_command("READONLY")

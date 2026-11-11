@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
 
+from .tls import TlsFiles
+
 
 class LocalDeploymentError(RuntimeError):
     """Base class for local deployment lifecycle failures."""
@@ -65,6 +67,8 @@ class DeploymentConfig:
     # The /24 of 127.0.0.0/16 per-instance addresses come from: a batch gives each worker its own, so a
     # partition (which matches addresses) in one worker never cuts another's instances.
     loopback_block: int = 0
+    # Every connection over TLS: clients, replication, and the cluster bus (see :mod:`.tls`).
+    tls: bool = False
 
     def __post_init__(self):
         defaults = DEFAULT_DIMENSIONS[self.mode]
@@ -110,6 +114,8 @@ class InstanceInfo(InstancePlan):
     data_dir: str = ""
     log_file: str = ""
     cluster_node_id: Optional[str] = None
+    # The deployment's certificates when it runs over TLS; a client of the instance connects with them.
+    tls: Optional[TlsFiles] = None
 
     @property
     def is_running(self) -> bool:

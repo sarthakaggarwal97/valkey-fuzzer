@@ -33,7 +33,7 @@ def replica_sync_problem(replica: TopologyNode, primary: TopologyNode) -> Option
     shard's data with nothing.
     """
     try:
-        with valkey_client(replica.host, replica.port, timeout=2.0) as client:
+        with valkey_client(replica.host, replica.port, timeout=2.0, tls=replica.tls) as client:
             info = query_replication(client)
     except (valkey.ValkeyError, OSError) as exc:
         return f"unreachable ({type(exc).__name__})"
@@ -51,7 +51,7 @@ def replica_sync_problem(replica: TopologyNode, primary: TopologyNode) -> Option
 
 
 def _responds_to_ping(node: TopologyNode) -> bool:
-    return bool(query_or_none(node.host, node.port, 1.0, lambda client: client.ping()))
+    return bool(query_or_none(node.host, node.port, 1.0, lambda client: client.ping(), tls=node.tls))
 
 
 def _first_synced(
@@ -187,7 +187,7 @@ def failover_shard(
     logger.info(
         "Executing CLUSTER %s from the replica at port %s", "FAILOVER FORCE" if force else "FAILOVER", replica.port
     )
-    with valkey_client(replica.host, replica.port, timeout=5.0) as replica_client:
+    with valkey_client(replica.host, replica.port, timeout=5.0, tls=replica.tls) as replica_client:
         replica_client.execute_command("CLUSTER", "FAILOVER", *(["FORCE"] if force else []))
     return settled(target.node_id)
 
@@ -243,7 +243,7 @@ def _shard_settled(
     for replica in members:
         if replica is primary:
             continue
-        with valkey_client(replica.host, replica.port, timeout=2.0) as client:
+        with valkey_client(replica.host, replica.port, timeout=2.0, tls=replica.tls) as client:
             info = query_replication(client)
         if info.role != "replica" or not info.link_up or info.primary_port != primary.port:
             return False

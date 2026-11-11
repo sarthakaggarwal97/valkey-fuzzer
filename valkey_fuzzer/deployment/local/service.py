@@ -28,6 +28,7 @@ from .models import (
 )
 from .processes import ProcessManager, process_output_path, resolve_binary_path
 from .queries import Replication, query_or_none, query_replication, valkey_client, wait_until
+from .tls import client_options, supports_tls
 from .topology import DeploymentConnection
 from .validation.check import DeploymentStateCheck, adapt_validation_config, scenario_rng
 from .validation.config import validation_config_from_document
@@ -60,6 +61,7 @@ def load_all_slots(connection: DeploymentConnection, keys_per_slot: int, rng: ra
         startup_nodes=[ClusterNode(host=node["host"], port=node["port"]) for node in connection.startup_nodes],
         decode_responses=True,
         skip_full_coverage_check=True,
+        **client_options(connection.tls),
     )
     keys = [f"key:{{{tag}}}:{index}" for index in range(keys_per_slot) for tag in slot_hash_tags()]
     failures = []
@@ -268,7 +270,11 @@ class ValkeyDeploymentService:
                 client = self._command_clients.get(instance_id)
                 if client is None:
                     client = self._command_clients[instance_id] = valkey.Valkey(
-                        host=info.host, port=info.port, socket_timeout=5, decode_responses=True
+                        host=info.host,
+                        port=info.port,
+                        socket_timeout=5,
+                        decode_responses=True,
+                        **client_options(info.tls),
                     )
             return client.execute_command(*args, **kwargs)
 
@@ -380,6 +386,8 @@ class ValkeyDeploymentService:
         with self._operation():
             info = self._info(instance_id)
             resolved = resolve_binary_path(binary, f"binary for {instance_id}")
+            if info.tls is not None and not supports_tls(resolved):
+                raise LocalDeploymentError(f"{instance_id} runs over TLS, and {resolved} is a build without TLS")
             info.valkey_binary = resolved
             return resolved
 
@@ -401,6 +409,7 @@ class ValkeyDeploymentService:
                 socket_connect_timeout=timeout,
                 decode_responses=decode_responses,
                 retry=Retry(NoBackoff(), 0),
+                **client_options(info.tls),
             )
             self._clients.add(client)
             return client
@@ -415,6 +424,7 @@ class ValkeyDeploymentService:
                 socket_timeout=timeout,
                 socket_connect_timeout=timeout,
                 decode_responses=True,
+                **client_options(self._infos[0].tls),
             )
             self._clients.add(client)
             return client
@@ -467,14 +477,14 @@ class ValkeyDeploymentService:
             if not info.is_running:
                 return
             command = ("REPLICAOF", "NO", "ONE") if primary is None else ("REPLICAOF", primary.host, primary.port)
-            with valkey_client(info.host, info.port, timeout=timeout) as client:
+            with valkey_client(info.host, info.port, timeout=timeout, tls=info.tls) as client:
                 client.execute_command(*command)
 
     def _live_replication(self) -> dict[str, Replication]:
         """Each reachable instance's INFO replication; an instance that reports neither role counts as a replica."""
         live = {}
         for info in self._infos:
-            replication = query_or_none(info.host, info.port, 2.0, query_replication)
+            replication = query_or_none(info.host, info.port, 2.0, query_replication, tls=info.tls)
             if replication is not None:
                 live[info.instance_id] = replication if replication.role else replace(replication, role="replica")
         return live

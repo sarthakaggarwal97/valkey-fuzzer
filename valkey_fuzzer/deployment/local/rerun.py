@@ -4,7 +4,7 @@ A generated scenario's ports are not part of what it tests, so when they are
 taken it moves to free ones. A replay must run the binaries the recorded run
 ran, which the local deployment records per instance (``binary`` and
 ``binary_sha256`` in its metadata). The minimizer shrinks a deployment by its
-instance counts and drops its server config. See
+instance counts, turns its TLS off, and drops its server config. See
 :class:`~valkey_fuzzer.registrations.DeploymentProviderRegistration` for the
 hooks these implement.
 """
@@ -73,7 +73,8 @@ def relocate_ports(plan: ExecutionPlan) -> tuple[dict[str, Any], Optional[str]]:
 def deployment_reductions(
     deployment: Mapping[str, Any], requirements: Mapping[str, Any]
 ) -> list[tuple[str, dict[str, Any]]]:
-    """Smaller deployment sections, most aggressive first: fewer instances, then less server config.
+    """Smaller deployment sections, most aggressive first: fewer instances, then plain text instead of TLS, then
+    less server config.
 
     The experiment's ``requirements`` bound the instance counts; a size the
     deployment refuses fails to compile, which costs no run.
@@ -84,6 +85,8 @@ def deployment_reductions(
         minimum = (requirements.get(name) or {}).get("minimum", 0)
         for value in smaller(deployment.get(name), minimum):
             reductions.append((f"deployment.{name}={value}", {**copy.deepcopy(dict(deployment)), name: value}))
+    if deployment.get("tls"):
+        reductions.append(("deployment.tls=false", {**copy.deepcopy(dict(deployment)), "tls": False}))
     for field, label in (
         ("server_config", "drop deployment.server_config.{}"),
         ("instance_configs", "drop deployment.instance_configs.{}"),

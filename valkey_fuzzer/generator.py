@@ -9,6 +9,7 @@ fragments it extends merge into it like the rest of ``metadata``::
         deployment:
           mode: [standalone, cluster]            # default: every mode the experiment supports
           replicas_per_primary: {minimum: 1, maximum: 2}
+          tls: fixed                             # default: the provider's (generated_fields)
           cluster: {primaries: {minimum: 3, maximum: 4}}   # fields drawn only in that mode
         inputs:                                  # default: every input with enum, boolean, or min+max
           value_size: {values: [1, 64, 4096]}
@@ -82,7 +83,7 @@ import yaml
 
 from ._data import to_plain_data
 from .catalog import Catalog
-from .compiler import with_valkey_binary
+from .compiler import scenario_provider, with_valkey_binary
 from .documents import ABSENT, get_path, merge
 from .fields import is_number
 from .plan import ExecutionPlan, ExperimentSpec
@@ -358,6 +359,23 @@ def _fragment_tables(catalog: Catalog, key: str, what: str) -> dict[str, Any]:
     return found
 
 
+def _provider_fields(
+    catalog: Catalog, spec: ExperimentSpec, base: Optional[Mapping[str, Any]]
+) -> dict[str, Mapping[str, Sequence[Any]]]:
+    """By mode of ``spec``, the ``generated_fields`` of the provider its scenarios run on (``base`` may name it);
+    none for a mode without one, which the compiler then reports."""
+
+    deployment = (base or {}).get("deployment")
+    provider = deployment.get("provider") if isinstance(deployment, Mapping) else None
+    fields = {}
+    for mode in spec.deployment_modes:
+        try:
+            fields[mode] = scenario_provider(catalog, mode, provider).generated_fields
+        except ScenarioCompileError:
+            continue
+    return fields
+
+
 def installed_pools(catalog: Catalog) -> dict[str, dict[str, Any]]:
     """Every pool in the ``metadata.generator.pools`` of the installed fragments, by ID."""
 
@@ -519,7 +537,14 @@ class GeneratorBlock:
         return ([self.hook] if self.hook else []) + ids
 
     @classmethod
-    def parse(cls, spec: ExperimentSpec, pools: Mapping[str, Mapping[str, Any]]) -> "GeneratorBlock":
+    def parse(
+        cls,
+        spec: ExperimentSpec,
+        pools: Mapping[str, Mapping[str, Any]],
+        provider_fields: Optional[Mapping[str, Mapping[str, Sequence[Any]]]] = None,
+    ) -> "GeneratorBlock":
+        """The experiment's block; ``provider_fields`` holds, by mode, the ``generated_fields`` of the deployment
+        provider a scenario of that mode runs on, drawn for each field the block gives no rule."""
         document = generator_document(spec)
         where = f"{spec.experiment_id} metadata.generator"
         if document is None:
@@ -545,6 +570,12 @@ class GeneratorBlock:
             for mode in spec.deployment_modes
             if mode in deployment
         }
+        for mode, generated in (provider_fields or {}).items():
+            own = {**deployment, **mode_deployment.get(mode, {})}
+            drawn = {name: list(values) for name, values in generated.items() if name not in own}
+            if drawn:
+                rules = _rules(drawn, f"the {mode} deployment provider's generated_fields")
+                mode_deployment[mode] = {**rules, **mode_deployment.get(mode, {})}
 
         experiment_pools = dict(pools)
         for pool_id, pool in (document.get("pools") or {}).items():
@@ -870,7 +901,7 @@ def generate(
 
     experiment = experiment or choose_experiment(catalog, seed, excludes)
     spec = catalog.experiments.resolve(experiment)
-    block = GeneratorBlock.parse(spec, installed_pools(catalog))
+    block = GeneratorBlock.parse(spec, installed_pools(catalog), _provider_fields(catalog, spec, base))
     hooks = _hooks(catalog, block.hook_ids)
 
     def with_binary(scenario: Mapping[str, Any]) -> dict[str, Any]:

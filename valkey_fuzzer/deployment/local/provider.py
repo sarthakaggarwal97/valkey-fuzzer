@@ -14,7 +14,7 @@ from typing import Any, Optional
 
 from ..._data import exception_type, file_sha256, to_plain_data
 from ...plan import ExecutionPlan, StartupOverlay
-from ...protocols import ProvisionedDeployment, RunContext
+from ...protocols import ProvisionedDeployment, RunContext, UnsupportedDeploymentError
 from ...registrations import DeploymentProviderRegistration
 from ...schema import plain_config
 from . import rerun
@@ -33,10 +33,13 @@ from .ports import PortUnavailableError, claim_loopback_block, ensure_ports_free
 from .processes import BUILD_TIMEOUT_S, ProcessManager, detect_valkey_sha
 from .server_config import effective_server_config
 from .service import VALKEY_DEPLOYMENT_SERVICE, ValkeyDeploymentService
+from .tls import supports_tls
 
 logger = logging.getLogger(__name__)
 
 LOCAL_DEPLOYMENT_PROVIDER_ID = "valkey-fuzzer.deployment.local"
+# Every generated scenario draws whether its deployment runs over TLS (see .tls), unless its experiment sets a rule.
+GENERATED_FIELDS = {"tls": (False, True)}
 
 
 def deployment_metadata(deployment: LocalDeployment) -> dict[str, Any]:
@@ -135,6 +138,10 @@ class LocalDeploymentProvider:
             build_timeout = min(build_timeout, max(0.0, context.deadline - time.monotonic()))
         config.valkey_binary = processes.resolve_valkey_binary(build_timeout=build_timeout)
         processes.resolve_instance_binaries(instance_plans)
+        if config.tls:
+            for binary in sorted({config.valkey_binary, *(plan.valkey_binary for plan in instance_plans)} - {None}):
+                if not supports_tls(binary):
+                    raise UnsupportedDeploymentError(f"deployment.tls needs a build with TLS (BUILD_TLS=yes): {binary}")
         logger.debug("Using Valkey binary: %s", config.valkey_binary)
         valkey_sha = detect_valkey_sha(config.valkey_binary)
         if valkey_sha:
@@ -261,6 +268,7 @@ def local_deployment_provider_registrations() -> dict[str, DeploymentProviderReg
             binary_drift=rerun.binary_drift,
             reductions=rerun.deployment_reductions,
             host_fields=rerun.HOST_FIELDS,
+            generated_fields=GENERATED_FIELDS,
         )
         for mode in DeploymentMode
     }

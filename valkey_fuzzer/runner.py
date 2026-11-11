@@ -63,7 +63,14 @@ from .fields import carry_path
 from .hoststate import new_run_folder, normalize_artifact_root
 from .obligations import ObligationLedger
 from .plan import ComponentSpec, ExecutionPlan
-from .protocols import ROLES, ComponentRole, DeploymentProvider, ProvisionedDeployment, Stage
+from .protocols import (
+    ROLES,
+    ComponentRole,
+    DeploymentProvider,
+    ProvisionedDeployment,
+    Stage,
+    UnsupportedDeploymentError,
+)
 from .results import ComponentResult, ComponentStatus, Evidence, OutcomeStatus, RunOutcome
 from .schema import ScenarioCompileError
 
@@ -605,6 +612,10 @@ class _Execution:
             self.release_deployment("rollback", provider.rollback)
             if self.interrupt is not None and isinstance(provision_error, Exception):
                 raise self.interrupt from provision_error
+            if isinstance(provision_error, UnsupportedDeploymentError):
+                raise _EarlyTerminalError(
+                    OutcomeStatus.SKIP_UNSUPPORTED, f"the deployment is unsupported: {provision_error}"
+                ) from provision_error
             raise
         self.deployment = deployment
         self.context.bind_deployment(deployment.services)

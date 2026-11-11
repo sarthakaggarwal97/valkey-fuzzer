@@ -14,6 +14,7 @@ from .cluster_nodes import HASH_SLOTS, parse_cluster_nodes
 from .models import DeploymentMode, InstanceInfo, LocalDeploymentError
 from .processes import verify_instance_process_identity
 from .queries import WaitInterruptedError, pause, query_cluster_info, query_replication, wait_until
+from .tls import client_options
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,11 @@ class Formation:
         """Get or create the cached client for an instance."""
         if instance.instance_id not in self.connections:
             self.connections[instance.instance_id] = valkey.Valkey(
-                host=instance.host, port=instance.port, socket_timeout=5, decode_responses=True
+                host=instance.host,
+                port=instance.port,
+                socket_timeout=5,
+                decode_responses=True,
+                **client_options(instance.tls),
             )
         return self.connections[instance.instance_id]
 

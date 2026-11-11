@@ -2,7 +2,7 @@
 
 import random
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Generic, Optional, TypeVar
 
 from .declarations import Declarations
@@ -133,6 +133,9 @@ class DeploymentProviderRegistration:
       minimizer tries them.
     - ``host_fields``: the deployment fields that only place the deployment
       on a host (ports, folders), which a run's coverage leaves out.
+    - ``generated_fields``: ``{field: values}``, the deployment fields every
+      generated scenario of the provider draws from those values, unless the
+      experiment's generator block gives the field a rule of its own.
     """
 
     deployment_mode: str
@@ -149,6 +152,7 @@ class DeploymentProviderRegistration:
         None
     )
     host_fields: tuple[str, ...] = ()
+    generated_fields: Mapping[str, Sequence[Any]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         require_name(self.deployment_mode, "deployment_mode")

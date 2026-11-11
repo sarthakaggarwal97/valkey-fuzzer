@@ -186,11 +186,11 @@ def syncing_replicas(connection: DeploymentConnection) -> list[str]:
     syncing = []
     for instance in connection.instances:
         try:
-            with valkey_client(instance.host, instance.port, timeout=1.0) as client:
+            with valkey_client(instance.host, instance.port, timeout=1.0, tls=instance.tls) as client:
                 info = query_replication(client)
             if info.role != "replica" or info.link_up:
                 continue
-            with valkey_client(info.primary_host, info.primary_port, timeout=1.0) as primary:
+            with valkey_client(info.primary_host, info.primary_port, timeout=1.0, tls=instance.tls) as primary:
                 primary.ping()
         except (valkey.ValkeyError, OSError):
             continue

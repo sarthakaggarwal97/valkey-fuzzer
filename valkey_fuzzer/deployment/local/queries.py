@@ -12,6 +12,7 @@ import valkey
 
 from ...protocols import RunContext
 from .cluster_nodes import parse_cluster_nodes
+from .tls import TlsFiles, client_options
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +209,10 @@ def query_cluster_info(client: valkey.Valkey) -> dict[str, str]:
 
 
 @contextmanager
-def valkey_client(host: str, port: int, timeout: float, decode_responses: bool = True) -> Iterator[valkey.Valkey]:
+def valkey_client(
+    host: str, port: int, timeout: float, decode_responses: bool = True, *, tls: Optional[TlsFiles] = None
+) -> Iterator[valkey.Valkey]:
+    """A client of ``host:port``, closed on exit; over TLS with ``tls``, the certificates of its deployment."""
     client = None
     try:
         client = valkey.Valkey(
@@ -217,6 +221,7 @@ def valkey_client(host: str, port: int, timeout: float, decode_responses: bool =
             socket_timeout=timeout,
             socket_connect_timeout=timeout,
             decode_responses=decode_responses,
+            **client_options(tls),
         )
         yield client
     finally:
@@ -227,10 +232,13 @@ def valkey_client(host: str, port: int, timeout: float, decode_responses: bool =
                 pass  # Ignore errors during cleanup
 
 
-def query_or_none(host: str, port: int, timeout: float, query: Callable[[valkey.Valkey], T]) -> Optional[T]:
-    """``query`` on a short-lived client of ``host:port``; None when the server did not answer it."""
+def query_or_none(
+    host: str, port: int, timeout: float, query: Callable[[valkey.Valkey], T], *, tls: Optional[TlsFiles] = None
+) -> Optional[T]:
+    """``query`` on a short-lived client of ``host:port`` (see :func:`valkey_client`); None when the server did not
+    answer it."""
     try:
-        with valkey_client(host, port, timeout) as client:
+        with valkey_client(host, port, timeout, tls=tls) as client:
             return query(client)
     except (valkey.ValkeyError, OSError) as exc:
         logger.debug("%s:%s did not answer: %s", host, port, exc)
@@ -241,4 +249,4 @@ def query_cluster_nodes(node: dict, timeout: float = 2.0) -> Optional[list[dict]
     def query(client: valkey.Valkey) -> list[dict]:
         return parse_cluster_nodes(response_text(client.execute_command("CLUSTER", "NODES")))
 
-    return query_or_none(node["host"], node["port"], timeout, query)
+    return query_or_none(node["host"], node["port"], timeout, query, tls=node.get("tls"))

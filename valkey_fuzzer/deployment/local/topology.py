@@ -7,6 +7,7 @@ from typing import Optional
 from .cluster_nodes import parse_slot_tokens
 from .models import DeploymentMode, InstanceInfo
 from .queries import Replication, query_cluster_nodes, query_or_none, query_replication
+from .tls import TlsFiles
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,8 @@ class TopologyNode:
     slots: Optional[tuple[int, ...]] = None
     # Standalone mode: the INFO replication the role came from, so a state check need not ask again.
     replication: Optional[Replication] = None
+    # The deployment's certificates when it runs over TLS; a client of the node connects with them.
+    tls: Optional[TlsFiles] = None
 
     @property
     def address(self) -> str:
@@ -48,7 +51,9 @@ class DeploymentConnection:
 
     def __post_init__(self):
         self.mode = DeploymentMode(self.mode)
-        self.startup_nodes = [{"host": instance.host, "port": instance.port} for instance in self.instances]
+        self.startup_nodes = [
+            {"host": instance.host, "port": instance.port, "tls": instance.tls} for instance in self.instances
+        ]
         # The plan's slot ranges, fixed now: instance records are updated with
         # live roles later, and a demoted primary must keep naming its shard.
         self._planned_slot_ranges = tuple(
@@ -57,6 +62,11 @@ class DeploymentConnection:
             if planned.slot_start is not None and planned.slot_end is not None
         )
         self._planned_port_shards = {planned.port: planned.shard_id for planned in self.instances}
+
+    @property
+    def tls(self) -> Optional[TlsFiles]:
+        """The deployment's certificates when it runs over TLS (its instances share them); else None."""
+        return self.instances[0].tls if self.instances else None
 
     def get_current_nodes(self, include_failed: bool = True, timeout: float = 2.0) -> list[TopologyNode]:
         """The current instances, from the deployment's authoritative source, waiting up to ``timeout`` seconds
@@ -127,6 +137,7 @@ class DeploymentConnection:
                         failed=is_failed,
                         marked_fail="fail" in node["flags"].split(","),
                         slots=tuple(slots_of[node["node_id"]]),
+                        tls=self.tls,
                     )
                 )
 
@@ -143,7 +154,9 @@ class DeploymentConnection:
         current_instances = []
         for instance in self.instances:
             replication = (
-                query_or_none(instance.host, instance.port, timeout, query_replication) if instance.is_running else None
+                query_or_none(instance.host, instance.port, timeout, query_replication, tls=instance.tls)
+                if instance.is_running
+                else None
             )
             is_connected = replication is not None
             if not include_failed and not is_connected:
@@ -161,6 +174,7 @@ class DeploymentConnection:
                     shard_id=instance.shard_id,
                     failed=not is_connected,
                     replication=replication,
+                    tls=instance.tls,
                 )
             )
 

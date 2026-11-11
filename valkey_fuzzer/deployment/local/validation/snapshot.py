@@ -108,7 +108,7 @@ def take_snapshot(connection: DeploymentConnection, timeout: float, context: Opt
         if address in snapshot.replication:
             continue
         try:
-            with valkey_client(row.host, row.port, timeout) as client:
+            with valkey_client(row.host, row.port, timeout, tls=row.tls) as client:
                 snapshot.replication[address] = query_replication(client)
                 if cluster:
                     snapshot.cluster_info[address] = query_cluster_info(client)
@@ -148,7 +148,7 @@ def _catch_up(snapshot: Snapshot, read_at: dict[str, int], timeout: float, conte
         offset = info.replica_offset if read_at.get(address, -1) > read_at.get(primary_address, -1) else None
         while (offset is None or offset < primary_info.offset) and time.monotonic() < deadline:
             try:
-                with valkey_client(row.host, row.port, timeout) as client:
+                with valkey_client(row.host, row.port, timeout, tls=row.tls) as client:
                     offset = query_replication(client).replica_offset
             except (valkey.ValkeyError, OSError) as exc:
                 logger.debug("%s did not answer a re-read: %s", address, exc)

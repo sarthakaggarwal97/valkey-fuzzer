@@ -510,7 +510,7 @@ def test_a_replica_is_in_a_sync_only_while_its_link_is_down_and_its_primary_answ
         11963: info(11999, "down"),
         11967: info(0, "", "master"),
     }
-    connection = SimpleNamespace(instances=[SimpleNamespace(host="127.0.0.1", port=port) for port in answers])
+    connection = SimpleNamespace(instances=[SimpleNamespace(host="127.0.0.1", port=port, tls=None) for port in answers])
     with patch(f"{CHECK}.valkey_client", side_effect=_by_port(answers)):
         assert syncing_replicas(connection) == ["127.0.0.1:11961"]
 
@@ -544,7 +544,7 @@ def test_a_migrated_and_promoted_replica_is_checked_against_its_live_shard(broke
     diverged = next(key for key in sorted(_KEYS) if _owner(key) == 7011)
     wrong = {(7002, lost): None, (7010, diverged): "stale"} if broken else {}
 
-    def connect(host, port, timeout=None):
+    def connect(host, port, timeout=None, tls=None):
         def read(key):  # a replica answers MOVED for a key outside its primary's slots, as Valkey does
             if _owner(key) != replica_of[port]:
                 return ResponseError("MOVED")
@@ -1266,7 +1266,7 @@ def test_an_instance_that_did_not_answer_is_retried_and_inconclusive_not_a_failu
     connection = DeploymentConnection([primary, replica], "d", mode=DeploymentMode.STANDALONE)
     timeouts = []
 
-    def query(host, port, timeout, query):
+    def query(host, port, timeout, query, tls=None):
         timeouts.append(timeout)
         return None if port == 7001 else Replication(role="primary", offset=10, connected_replicas=1)
 
