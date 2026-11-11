@@ -21,7 +21,7 @@ from valkey_fuzzer.deployment.local.models import (
 from valkey_fuzzer.deployment.local.planner import plan_deployment
 from valkey_fuzzer.deployment.local.processes import ProcessManager
 from valkey_fuzzer.deployment.local.provider import LocalDeploymentProvider
-from valkey_fuzzer.deployment.local.queries import query_replication, valkey_client
+from valkey_fuzzer.deployment.local.queries import query_replication, valkey_client, wait_until
 from valkey_fuzzer.deployment.local.service import ValkeyDeploymentService
 from valkey_fuzzer.deployment.local.tls import TlsFiles, client_options, create_tls_files, supports_tls
 from valkey_fuzzer.deployment.local.topology import DeploymentConnection
@@ -193,8 +193,13 @@ def test_a_real_tls_cluster_forms_gossips_replicates_and_restarts_over_tls_only(
         assert all(_refuses_plain_text(node) for node in cluster.nodes)
 
         cluster.processes.restart_instance(replica, wait_ready=True, ready_timeout=30.0)
-        with valkey_client(replica.host, replica.port, timeout=2.0, tls=replica.tls) as client:
-            assert query_replication(client).link_up
+
+        def linked() -> bool:
+            with valkey_client(replica.host, replica.port, timeout=2.0, tls=replica.tls) as client:
+                return query_replication(client).link_up
+
+        # A restarted cluster replica is ready once the cluster takes it back; it then resyncs, over TLS.
+        assert wait_until(linked, timeout=30.0, interval=0.2, what="the restarted replica's link")
 
 
 @pytest.mark.slow
