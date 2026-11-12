@@ -12,8 +12,9 @@ summary: >-
   whose snapshot finishes loading before +CONTINUE keeps its old ID and
   offset, and promoted then, it continues a former replica on data that is
   not that history (fuzzer issue #133, negative control keep_old_id_on_load).
-# Written by hand; a maintainer has not approved these claims yet.
-status: draft
+# Written by hand; approved by the maintainer on 2026-11-12.
+status: approved
+approved_by: sarthakaggarwal97
 scope:
   - file: src/replication.c
     functions:
