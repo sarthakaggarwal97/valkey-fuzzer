@@ -454,28 +454,35 @@ them: the `command` as sent, the `reply` (up to 4 KB of its JSON text), the
 
 Changes `changes` configs with `CONFIG SET` on the running instances, one
 every `interval_s`, beside the other workloads and the faults until teardown.
-Each change picks an instance, a config of its build's config space (the
-configs [random scenarios](scenarios-and-experiments.md#declaring-what-may-be-randomized)
+Each change picks an instance, then a config: one of its build's config
+space (the configs [random scenarios](scenarios-and-experiments.md#declaring-what-may-be-randomized)
 draw from the build's own config table, `valkey.pool.config-space`) that can
 change at run time (neither `IMMUTABLE_CONFIG` nor `PROTECTED_CONFIG`) and
 that the instance's planned config leaves to Valkey's default, so it never
-undoes what the experiment, a pool, or the table draw set; and a value drawn
-as the generator draws one. A change lasts until the deployment is removed
+undoes what the experiment, a pool, or the table draw set; or one of `keys`,
+the keys a hand-written pool drew at the start, even though the planned config
+sets them. A table config's value is drawn as the generator draws one, a key's
+uniformly from its values. A change lasts until the deployment is removed
 (no undo obligation), and a restarted instance starts with its planned config
 again. What Valkey answers is recorded, not judged: an error reply (a value a
-validator refuses, a config refused while loading) is a refusal Valkey
-declares, which explains the error replies it counts
+validator refuses, such as `forkless-policy prefer-forkless` on a server
+started without `forkless-infrastructure-enabled`, or a config refused while
+loading) is a refusal Valkey declares, which explains the error replies it counts
 ([`valkey.oracle.error-counters`](#valkeyoracleerror-counters)), and a
 connection that fails meets an instance a fault stopped. The experiment's
 oracles judge what the changes do: no acknowledged write lost, no crash,
 replication intact, replies only as Valkey declares. The
 [`valkey.config-churn`](scenarios-and-experiments.md#fragments) fragment adds
 it to every shipped experiment with `changes` from the `config_changes` input,
-which random scenarios draw from 0 to 20.
+which random scenarios draw from 0 to 20, and `keys` from the
+`config_churn_keys` input: in a random scenario, the keys it drew from the
+encoding, memory (eviction policy, lazy freeing, defragmentation) and cron
+pools, each with its pool's values.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `changes` | integer, 0 to 1000 | 0 | How many changes; 0 makes none. |
+| `keys` | mapping of config key to a list of values | `{}` | Keys to change besides the table's, where the planned config sets them too. |
 | `interval_s` | number, 0.05 to 600 | 1 | The wait before each change. |
 | `op_timeout_s` | number, 0.05 to 60 | 2 | Each `CONFIG SET`'s timeout. |
 

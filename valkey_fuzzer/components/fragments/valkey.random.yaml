@@ -95,9 +95,15 @@ metadata:
       # scenario, each a value of its type. The configs that change what the
       # oracles judge, or that the harness owns, are left out
       # (EXCLUDED in components/config_space.py, with the reason for each).
-      # A build without its config.c beside it draws none.
+      # A build without its config.c beside it draws none. A value the server
+      # accepts at its start only with another config set takes that config
+      # too (requires): prefer-forkless needs forkless-infrastructure-enabled,
+      # which config.c checks once the whole config is read.
       valkey.pool.config-space:
         default: true
         scope: [deployment, role]
         hook: valkey.generator.config-space
         share: 0.125
+        requires:
+          forkless-policy:
+            prefer-forkless: {forkless-infrastructure-enabled: "yes"}

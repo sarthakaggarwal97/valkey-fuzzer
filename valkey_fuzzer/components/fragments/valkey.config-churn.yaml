@@ -1,11 +1,18 @@
 # The config-churn workload: CONFIG SET of configs the scenario left to
-# Valkey's default, drawn from each instance's build (its config table), one a
-# second beside the other workloads and the faults, config_changes times. A
-# change must not lose an acknowledged write, crash a server, break
-# replication, or change a reply outside the ways Valkey declares, which the
-# experiment's oracles judge as they are. Every shipped Valkey experiment
-# extends this; it changes nothing unless config_changes is set, which random
-# scenarios draw.
+# Valkey's default, drawn from each instance's build (its config table), and
+# of the keys the scenario drew from the hand-written pools named below, to
+# values of those pools, one a second beside the other workloads and the
+# faults, config_changes times. A change must not lose an acknowledged write,
+# crash a server, break replication, or change a reply outside the ways
+# Valkey declares, which the experiment's oracles judge as they are. Every
+# shipped Valkey experiment extends this; it changes nothing unless
+# config_changes is set, which random scenarios draw.
+#
+# The pools whose keys change at run time: the encoding thresholds, the
+# eviction policy, lazy freeing and active defragmentation, and the cron's
+# frequency (valkey.random). The IO-thread pool is left out: an always-active
+# IO thread spins through every event, about 0.4 of a core, and the start
+# already bounds how many a node has.
 inputs:
   properties:
     config_changes:
@@ -14,8 +21,19 @@ inputs:
       maximum: 20
       default: 0
       description: how many configs valkey.workload.config-churn changes during the run (0 none)
+    config_churn_keys:
+      type: object
+      default: {}
+      description: >-
+        server config keys valkey.workload.config-churn also changes, each with the values it may take (random
+        scenarios: the keys drawn from the pools below)
+metadata:
+  generator:
+    inputs:
+      config_churn_keys: {pools: [valkey.pool.memory, valkey.pool.encodings, valkey.pool.cron]}
 components:
   - use: valkey.workload.config-churn
     id: config-churn
     config:
       changes: {$ref: inputs.config_changes}
+      keys: {$ref: inputs.config_churn_keys}
