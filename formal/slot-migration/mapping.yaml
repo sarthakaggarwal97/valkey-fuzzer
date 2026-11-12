@@ -1,0 +1,133 @@
+# Implementation evidence for model.tla: the log lines that show the steps of
+# an atomic slot migration (CLUSTER MIGRATESLOTS). An experiment publishes
+# them with valkey.observer.log-trigger (spec: slot-migration). The claims
+# need each node's view of the slot's owner and the writes it holds, which a
+# run does not observe in the model's terms, so `spec conform` checks no
+# property of this bundle: it reports which steps real runs took.
+evidence:
+  started:
+    # On the source.
+    event: slot-migration.started
+    log: 'Slot migration initiated through CLUSTER MIGRATESLOTS command'
+    fields: {instance_id: node}
+    action: Start
+  established:
+    # On the target; its replica's tracking job names no source.
+    event: slot-migration.import.created
+    log: 'New slot import job created: \{name: [0-9a-f]{40}, operation: import, source_node_id: [0-9a-f]{40}'
+    fields: {instance_id: node}
+    action: TEstablish
+  tracking:
+    event: slot-migration.tracking.created
+    log: 'New slot import job created: \{name: [0-9a-f]{40}, operation: import, source_node_id: unknown'
+    fields: {instance_id: node}
+    action: RApply
+  forked:
+    event: slot-migration.snapshot.started
+    log: 'Beginning snapshot of slot migration'
+    fields: {instance_id: node}
+    action: SFork
+  snapshot:
+    event: slot-migration.snapshot.received
+    log: 'successfully received slot snapshot\. Beginning incremental stream'
+    fields: {instance_id: node}
+    action: TApply
+  paused:
+    event: slot-migration.paused
+    log: 'Pausing writes \(remaining_repl_size is -?\d+\) to allow slot migration'
+    fields: {instance_id: node}
+    action: SPause
+  requested:
+    event: slot-migration.failover.requested
+    log: 'operation: import, .*state transition: waiting-for-paused -> failover-requested'
+    fields: {instance_id: node}
+    action: TPaused
+  granted:
+    event: slot-migration.failover.granted
+    log: 'operation: export, .*state transition: failover-paused -> failover-granted'
+    fields: {instance_id: node}
+    action: SGrant
+  claimed:
+    event: slot-migration.claimed
+    log: 'completed successfully\. This node is now the owner of the slots'
+    fields: {instance_id: node}
+    action: TClaim
+  learned:
+    # The source reads the target's claim on the bus.
+    event: slot-migration.owner.learned
+    log: 'slots are now owned by target node\.'
+    fields: {instance_id: node}
+    action: Deliver
+  cleanup:
+    event: slot-migration.import.cleanup
+    log: 'Cleaning up slot migration .* after '
+    fields: {instance_id: node}
+    action: TCleanup
+  cancelled:
+    event: slot-migration.cancelled
+    log: 'Canceled all in progress slot migrations'
+    fields: {instance_id: node}
+    action: Cancel
+    updates:
+      - {incr: faults}
+  pause-ended:
+    event: slot-migration.pause.ended
+    log: 'timed out during slot failover|Write loss risk!'
+    fields: {instance_id: node}
+    action: PauseExpires
+    updates:
+      - {incr: faults}
+  link-lost:
+    # The source's side; a cancel closes the connection without this line.
+    event: slot-migration.link.lost
+    log: 'operation: export, .* connection lost'
+    fields: {instance_id: node}
+    action: DropLink
+    updates:
+      - {incr: faults}
+  promoted:
+    event: slot-migration.replica.promoted
+    log: 'Setting myself to primary in shard'
+    fields: {instance_id: node}
+    action: Promote
+  crash:
+    # valkey.fault.process-signal on the target.
+    event: '*.injected'
+    where: {signal: SIGKILL, applied: true}
+    fields: {target: node}
+    action: CrashT
+    updates:
+      - {incr: faults}
+
+unobservable:
+  Write: Client writes are not logged.
+  TClose: >-
+    The target logs the close of a connection only while its import is in
+    progress, as the cleanup that follows (TCleanup) shows.
+  LoseBus: A bus message that never arrives leaves no line.
+  Idle: A step in which nothing happens.
+
+state:
+  faults: {init: 0}
+  role: {hidden: '[n \in {"S", "T", "R"} |-> "primary"]', why: "Which run node plays S, T or R is not in the mapped lines."}
+  view: {hidden: '[n \in {"S", "T", "R"} |-> [owner |-> "S", epoch |-> 1]]', why: "Slot owners are in CLUSTER samples, not these lines."}
+  epoch: {hidden: '1', why: "As view."}
+  data: {hidden: '[n \in {"S", "T", "R"} |-> <<>>]', why: "A run does not observe which writes a node holds."}
+  hidden: {hidden: '[n \in {"S", "T", "R"} |-> FALSE]', why: "Importing slots are not logged per key."}
+  exp: {hidden: '"none"', why: "The jobs' states are in CLUSTER GETSLOTMIGRATIONS, which no observer samples yet."}
+  imp: {hidden: '"none"', why: "As exp."}
+  track: {hidden: '"none"', why: "As exp."}
+  toT: {hidden: '<<>>', why: "Messages in flight are not observed."}
+  toS: {hidden: '<<>>', why: "As toT."}
+  repl: {hidden: '<<>>', why: "As toT."}
+  bus: {hidden: '{}', why: "As toT."}
+  paused: {hidden: 'FALSE', why: "The pause is in INFO samples (paused_reason), which these lines do not carry."}
+  acked: {hidden: '{}', why: "As data."}
+  writes: {hidden: '0', why: "As data."}
+
+constants:
+  MaxWrites: {value: 3, why: "No property is checked on observed states; the model's bound."}
+  MaxFaults: {max_of: [faults], at_least: 3}
+  CancelKeepsPause: {value: "FALSE", why: "Valkey as it is: a cancel after the grant unpauses."}
+  ExpiryAfterClaim: {value: "TRUE", why: "Valkey as it is: the pause ends at its timeout."}
+  ClaimReachesReplica: {value: "FALSE", why: "Valkey as it is: the replica learns the claim on the bus."}

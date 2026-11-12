@@ -5,8 +5,10 @@ name: TLA+ Model Check
 # control (must find its named violation, or the claim is vacuous), model
 # coverage, and mapping completeness. Each bundle's assurance report is
 # uploaded. The spec bridge's own TLC tests (a toy bundle built from
-# fixtures, the cluster-election claims on canned traces, and the replication
-# model's counterexample of fuzzer issue #133) run here too,
+# fixtures, the cluster-election claims on canned traces, the replication
+# model's counterexample of fuzzer issue #133, the slot migration model's
+# cancel after the grant, and the persistence model's manifest written before
+# its base) run here too,
 # since they need java and tla2tools.jar. It runs on every change: the
 # experiment gate compiles the Valkey experiments with the core compiler, so a
 # change almost anywhere can break the translated scenarios.
@@ -83,6 +85,7 @@ jobs:
           TLA2TOOLS_JAR: ${{ runner.temp }}/tla2tools.jar
         run: |
           python -m pytest -q -m "" tests/test_spec_bridge.py tests/test_replication_model.py \
+            tests/test_slot_migration_model.py tests/test_persistence_model.py \
             tests/test_cluster_election.py::test_conform_checks_the_election_claims_with_tlc
 
       - name: Upload assurance reports

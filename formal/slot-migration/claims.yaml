@@ -1,0 +1,109 @@
+# What formal/slot-migration/model.tla claims about Valkey's atomic slot
+# migration (CLUSTER MIGRATESLOTS), under which assumptions and bounds, and
+# what it leaves out.
+protocol: slot-migration
+summary: >-
+  A slot moves from its source primary to a target primary with one replica
+  without two nodes ever taking writes to it and without losing an
+  acknowledged write, through link drops, cancels, the source's pause
+  timeout, a crash of the target and the promotion of its replica, under
+  three conditions Valkey does not meet: a cancel after the grant keeps the
+  source paused until it learns the owner (Valkey unpauses: negative control
+  cancel_unpauses), the source's pause outlasts the target's claim (Valkey
+  logs "Write loss risk!" when it does not: pause_expires_after_claim), and
+  the target's replica learns the claim before the target acts on it (Valkey
+  sends it on the cluster bus only: replica_misses_claim).
+# Written by hand; a maintainer has not approved these claims yet.
+status: draft
+scope:
+  - file: src/cluster_migrateslots.c
+    functions:
+      - clusterCommandMigrateSlots
+      - clusterCommandSyncSlotsEstablish
+      - slotMigrationJobReadEstablishResponse
+      - slotExportJobBeginSnapshotToTargetSocket
+      - clusterFeedSlotExportJobs
+      - clusterCommandSyncSlotsSnapshotEof
+      - clusterCommandSyncSlotsRequestPause
+      - slotExportTryDoPause
+      - clusterCommandSyncSlotsPaused
+      - clusterCommandSyncSlotsRequestFailover
+      - clusterCommandSyncSlotsFailoverGranted
+      - performSlotImportJobFailover
+      - proceedWithSlotMigration
+      - finishSlotMigrationJob
+      - clusterHandleSlotMigrationClientClose
+      - clusterCommandCancelSlotMigrations
+      - clusterUpdateSlotExportsOnOwnershipChange
+      - clusterCleanSlotImportsOnPromotion
+      - delKeysNotOwnedByMyself
+      - createSlotImportJob
+      - clusterCommandSyncSlotsFinish
+  - file: src/cluster_legacy.c
+    functions:
+      - clusterBumpConfigEpochWithoutConsensus
+      - clusterUpdateSlotsConfigWith
+      - clusterFailoverReplaceYourPrimary
+      - verifyClusterConfigWithData
+properties:
+  - name: OneWriter
+    kind: invariant
+    statement: >-
+      At most one node takes client writes to the slot: a primary that owns
+      it in its own view and is not paused.
+    holds_when: {CancelKeepsPause: true, ExpiryAfterClaim: false}
+    negative_controls: [cancel_unpauses, pause_expires_after_claim, grant_without_pause, grant_after_pause_ends,
+                        drop_unpauses_after_grant]
+    conform:
+      excluded: >-
+        It needs each node's view of the slot's owner and the source's pause at
+        every step; a run's log lines show the migration's steps, not when a
+        node takes writes.
+  - name: NoAckedWriteLost
+    kind: invariant
+    statement: >-
+      Every write acknowledged to a client is held by a live node, or is on
+      its way to the target's replica in the target's replication stream.
+    holds_when: {CancelKeepsPause: true, ExpiryAfterClaim: false, ClaimReachesReplica: true}
+    negative_controls: [replica_misses_claim, feed_after_fork]
+    conform:
+      excluded: >-
+        It is a statement about which writes each node holds, which a run does
+        not observe in the model's terms; the ledger oracle checks acknowledged
+        writes after a run.
+assumptions:
+  - >-
+    A cancel after the source granted the failover keeps the source paused
+    until it learns the slot's owner, or until the target can no longer claim
+    it (CancelKeepsPause = TRUE). Valkey unpauses (finishSlotMigrationJob),
+    though FAILOVER-GRANTED has left and the target claims the slot when it
+    reads it; upstream PR valkey-io/valkey#5327 (open) fixes it this way.
+  - >-
+    The source's pause outlasts the target's claim: it ends only while the
+    target can no longer claim the slot (ExpiryAfterClaim = FALSE). Valkey
+    ends it at cluster-manual-failover-timeout, renewed to
+    CLUSTER_OPERATION_TIMEOUT by the grant, and logs "Write loss risk!".
+  - >-
+    The target's replica learns the target's claim before the target acts on
+    it (ClaimReachesReplica = TRUE), as legacy CLUSTER SETSLOT replicates to
+    the replicas first. Valkey sends the claim to the replica on the cluster
+    bus only; SYNCSLOTS FINISH in the replication stream shows the keys but
+    does not change the replica's view of the owner.
+  - >-
+    The target's replica receives everything the target wrote to it before
+    the target crashed, and reads every bus message that reaches it before it
+    is promoted (the node timeout outlasts delivery).
+  - A bus message is lost only when its sender died; a live sender repeats its view in every ping.
+  - The migration connection delivers in order; it may drop at any time, losing what is in flight.
+  - Clients write to the node that takes writes to the slot; a write elsewhere is redirected, not applied.
+bounds:
+  MaxWrites: 3
+  MaxFaults: 3
+exclusions:
+  - One slot, one migration attempt; slot ranges, several jobs at once, and a retry after a failure.
+  - The source's replicas and a failover of the source; a failover of the target while it lives (CLUSTER FAILOVER).
+  - A restart of a crashed node from its RDB file, AOF or nodes.conf.
+  - "Asynchronous replication loss: a target that crashes before its replica received its stream."
+  - Expiry, eviction, FLUSHALL, OOM on the target, and module commands during the migration.
+  - "The handshake's AUTH, the ACKs and their timeout, and the output buffer limits."
+  - Legacy migration (CLUSTER SETSLOT MIGRATING/IMPORTING and MIGRATE).

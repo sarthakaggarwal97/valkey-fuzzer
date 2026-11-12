@@ -1,0 +1,100 @@
+# What formal/persistence/model.tla claims about the order in which one Valkey
+# server writes its AOF files, manifest and RDB file, under which assumptions
+# and bounds, and what it leaves out.
+protocol: persistence
+summary: >-
+  A process killed at any step of an AOF rewrite, of CONFIG SET appendonly in
+  either direction, or of an RDB save restarts from files it can load: the
+  manifest names only files that exist, the AOF holds a prefix of the data
+  set with no write twice, and while appendonly is yes no write replied to
+  while the AOF was on is lost. Writes replied to while appendonly yes waits
+  for its first rewrite are not promised.
+# Written by hand; a maintainer has not approved these claims yet.
+status: draft
+scope:
+  - file: src/aof.c
+    functions:
+      - feedAppendOnlyFile
+      - flushAppendOnlyFile
+      - rewriteAppendOnlyFileBackground
+      - openNewIncrAofForAppend
+      - backgroundRewriteDoneHandler
+      - markRewrittenIncrAofAsHistory
+      - persistAofManifest
+      - writeAofManifestFile
+      - aofDelHistoryFiles
+      - aofDelTempIncrAofFile
+      - startAppendOnly
+      - stopAppendOnly
+      - loadAppendOnlyFiles
+      - aofOpenIfNeededOnServerStart
+  - file: src/rdb.c
+    functions:
+      - rdbSave
+      - rdbSaveInternal
+      - backgroundSaveDoneHandler
+  - file: src/server.c
+    functions:
+      - loadDataFromDisk
+properties:
+  - name: ManifestFilesExist
+    kind: invariant
+    statement: With appendonly yes, every file the manifest on disk names exists, so a restart can load the AOF.
+    holds_when: {}
+    negative_controls: [manifest_before_base, delete_history_first]
+    conform:
+      excluded: >-
+        It needs the AOF directory's files and the manifest at each step, which
+        no observer reads yet; a restart that cannot load its AOF exits, which
+        the liveness oracle fails.
+  - name: AofIsPrefix
+    kind: invariant
+    statement: >-
+      With the AOF on, the files the manifest names hold a prefix of the data
+      set: no write twice, none out of order, none missing before one that is
+      there.
+    holds_when: {}
+    negative_controls: [no_flush_before_rewrite, feed_while_waiting]
+    conform:
+      excluded: >-
+        It compares the AOF's writes with the data set's, which a run does not
+        observe in the model's terms; the ledger and data-consistency oracles
+        compare data after a restart.
+  - name: AckedRestored
+    kind: invariant
+    statement: >-
+      While appendonly is yes, a restart loads every write replied to while
+      the AOF was on since it was last turned on.
+    holds_when: {}
+    negative_controls: [ack_before_flush, current_incr_to_history]
+    conform:
+      excluded: >-
+        It is a statement about which writes the files hold; the ledger oracle
+        checks acknowledged writes after a kill and restart.
+assumptions:
+  - >-
+    A kill keeps what the process wrote with write(2) (the page cache), and
+    the system call that renames or writes a file completes or does not
+    happen; fsync matters only for power loss, which is not modeled.
+  - >-
+    The server restarts with the appendonly it had when it was killed (its
+    config file says so, as after CONFIG REWRITE).
+  - >-
+    backgroundRewriteDoneHandler, rewriteAppendOnlyFileBackground and
+    stopAppendOnly each run within one event-loop pass: no client command
+    interleaves with their steps, though a kill may land between them.
+  - Writing the manifest (temporary file, fsync, rename, directory fsync) replaces it atomically.
+  - The RDB file is written to a temporary file, fsynced, and renamed (rdbSave), so it changes atomically.
+bounds:
+  MaxWrites: 3
+  MaxFiles: 9
+  MaxCrashes: 2
+  MaxSwitches: 2
+  MaxRewrites: 2
+exclusions:
+  - "Power loss: unfsynced writes, appendfsync, no-appendfsync-on-rewrite, and the directory fsyncs."
+  - A write torn by a kill (a short write) and aof-load-truncated; the AOF's write errors and ENOSPC.
+  - Replication's use of the files (a replica's full sync, restartAOFWithSyncRdb, the RDB's replication ID).
+  - Forkless saves, the RDB preamble's format, and expiry while loading.
+  - A save or rewrite that fails to fork, and SAVE (the foreground save).
+  - The upgrade from a single-file AOF (aofUpgradePrepare).
