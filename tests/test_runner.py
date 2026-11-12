@@ -104,6 +104,24 @@ def _plan(components, *, deployment_mode="standalone", **requirements):
     )
 
 
+def test_what_runs_beside_the_actions_starts_before_them_unless_it_depends_on_one():
+    """A workload declared after the actions (a default fragment's, such as config-churn) still runs beside them;
+    one that depends on an action waits for it."""
+
+    components = (
+        _spec(ACTION, "first"),
+        _spec(ACTION, "second"),
+        _spec(OBSERVER, "after-first", depends_on=("first",)),
+        _spec(FAULT, "fault"),
+        _spec(ORACLE, "check"),
+        _spec(WORKLOAD, "late"),
+    )
+    plan = _plan(components)
+    assert [item.id for item in plan.ordered_components] == [
+        "fault", "late", "first", "after-first", "second", "check"
+    ]  # fmt: skip
+
+
 @pytest.mark.parametrize("mode", ("standalone", "cluster"))
 def test_every_role_runs_in_dependency_order_on_any_deployment_mode(mode, tmp_path):
     calls, seen, folders = [], [], []

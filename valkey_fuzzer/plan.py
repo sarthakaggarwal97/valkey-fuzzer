@@ -380,6 +380,12 @@ class ExecutionPlan:
         if unassigned:
             raise ValueError(f"execution plan components need a role: {unassigned}")
         _check_stages(self.components)
+        # The components that run beside the others (observers, workloads, faults) start before the actions,
+        # which the runner calls one after another, unless they depend on one.
+        beside = sorted(ordered, key=lambda component: ROLES[component.role].teardown is None)
+        edges = {component.id: component.depends_on for component in ordered}
+        by_id = {component.id: component for component in ordered}
+        ordered = tuple(by_id[item] for item in stable_order([item.id for item in beside], edges, "component"))
         # Not a field: never serialized or compared, and rebuilt whenever the plan is.
         object.__setattr__(self, "_ordered_components", ordered)
         if self.mode is RunMode.EXPERIMENT and not any(
@@ -451,7 +457,8 @@ class ExecutionPlan:
 
     @property
     def ordered_components(self) -> tuple[ComponentSpec, ...]:
-        """The components in the order the runner starts them: after their dependencies, else as declared."""
+        """The components in the order the runner starts them: after their dependencies; the observers,
+        workloads, and faults, which run beside the rest until teardown, before the actions; else as declared."""
 
         return self._ordered_components
 

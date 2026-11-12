@@ -32,7 +32,9 @@ in [Base contracts](contracts.md), and the file formats in
    2. its **deployment provider** starts the deployment (for the built-in
       local provider, `valkey-server` processes on this host);
    3. it starts the observers, workloads, faults, and actions in dependency
-      order, then tears the long-running ones down in reverse;
+      order (the long-running ones before the actions that do not depend on
+      them, since it runs the actions one after another), then tears the
+      long-running ones down in reverse;
    4. it evaluates the **oracles** against all the evidence recorded;
    5. it cleans up the deployment and releases the artifacts and resources.
 4. The **verdict** turns the component results, events, evidence, and any
