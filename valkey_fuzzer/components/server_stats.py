@@ -314,6 +314,18 @@ def _spinning_threads(plan: ExecutionPlan, instance_id: str) -> int:
         return 1
 
 
+def _defragmenting(info: Mapping[str, Any]) -> bool:
+    """Whether active defragmentation runs, as INFO reports it (``active_defrag_running``, the CPU percentage it is
+    set to, 0 when it does not run): it then uses what its cycle settings give it, ``active-defrag-cycle-min`` to
+    ``-max`` of a core in duty cycles of ``active-defrag-cycle-us``, and a duty cycle shorter than the event
+    loop's millisecond timeouts leaves the loop polling between them."""
+
+    try:
+        return float(info.get("active_defrag_running", 0)) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def _busy(info: Mapping[str, Any]) -> list[str]:
     """What one INFO reply shows the server still doing: clients blocked, a child process or a load in progress."""
 
@@ -343,7 +355,8 @@ class QuietEndOracle:
     At rest an instance has no blocked client, no child process (a save, an AOF rewrite, a module's fork) and no
     load in progress, its replication link is up unless its primary is down, in cluster mode it sees every
     running node connected and none failed, and its main thread used at most ``max_cpu`` of a core over the
-    last ``cpu_window_s``: a server that keeps a core busy with nothing to do is spinning. The oracle reads
+    last ``cpu_window_s`` unless its active defragmentation runs: a server that keeps a core busy with nothing
+    to do is spinning. The oracle reads
     every instance once per window until all are at rest at once; what is left when the time is up fails the
     run. An instance that did not answer then, or whose CPU use had no full window, makes it ERROR, unless
     another is a finding.
@@ -385,7 +398,7 @@ class QuietEndOracle:
                         unseen[instance_id] = "its CPU use was not measured over a window"
                     else:
                         cpu[instance_id] = round((used - before[1]) / (now - before[0]), 3)
-                        if cpu[instance_id] > config["max_cpu"]:
+                        if cpu[instance_id] > config["max_cpu"] and not _defragmenting(info):
                             reasons.append(f"used {cpu[instance_id]:.2f} of a core over {now - before[0]:.1f}s")
                 if reasons:
                     unquiet[instance_id] = reasons
