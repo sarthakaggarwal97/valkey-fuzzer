@@ -1,0 +1,98 @@
+# What formal/replication/model.tla claims about Valkey's primary-replica
+# replication, under which assumptions and bounds, and what it leaves out.
+protocol: replication
+summary: >-
+  A replication ID with an offset names one data set: two nodes, or a node
+  and an RDB file, that could continue the same replication ID agree on the
+  data at every offset both reach, and a streaming replica holds a prefix of
+  its primary's history at the same offsets. This holds through partial and
+  full resyncs over one channel or two, backlog trimming and freeing,
+  promotion and REPLICAOF in any order, failed loads, and a restart from an
+  RDB file, with one exception Valkey does not handle: a dual-channel replica
+  whose snapshot finishes loading before +CONTINUE keeps its old ID and
+  offset, and promoted then, it continues a former replica on data that is
+  not that history (fuzzer issue #133, negative control keep_old_id_on_load).
+# Written by hand; a maintainer has not approved these claims yet.
+status: draft
+scope:
+  - file: src/replication.c
+    functions:
+      - primaryTryPartialResynchronization
+      - syncCommand
+      - replicationSetupReplicaForFullResync
+      - feedReplicationBuffer
+      - incrementalTrimReplicationBacklog
+      - replicationCron
+      - shiftReplicationId
+      - replicationUnsetPrimary
+      - replicationSetPrimary
+      - replicationCachePrimary
+      - replicationCachePrimaryUsingMyself
+      - replicationAttachToNewPrimary
+      - replicaProcessPsyncReply
+      - replicaAfterLoadPrimaryRDB
+      - dualChannelReplHandleEndOffsetResponse
+      - dualChannelSyncHandlePsync
+      - dualChannelSyncHandleRdbLoadCompletion
+      - dualChannelSyncSuccess
+      - replicationResurrectProvisionalPrimary
+  - file: src/rdb.c
+    functions:
+      - rdbPopulateSaveInfo
+  - file: src/server.c
+    functions:
+      - loadDataFromDisk
+properties:
+  - name: OneHistoryPerId
+    kind: invariant
+    statement: >-
+      Any two claims on one replication ID (a primary with a backlog, a
+      replica streaming or holding a cached primary, a secondary ID with a
+      backlog to serve it, an RDB file with replication info) name the same
+      data set at every offset both reach.
+    holds_when: {AdoptOnLoad: true}
+    negative_controls: [keep_old_id_on_load, keep_id_without_backlog, no_shift_on_promotion, save_info_without_primary]
+    conform:
+      excluded: >-
+        It is a statement about data sets, and a run's events and INFO samples
+        show replication IDs and offsets, not which writes a node holds. The
+        ledger and data-consistency oracles compare data after a run.
+  - name: ReplicaIsPrefix
+    kind: invariant
+    statement: >-
+      A replica streaming from its primary holds a prefix of the primary's
+      history, at the same offsets.
+    holds_when: {AdoptOnLoad: true}
+    negative_controls: [no_second_offset_check]
+    conform:
+      excluded: >-
+        Like OneHistoryPerId, it compares data sets, which a run does not
+        observe in the model's terms; the data-consistency and ledger oracles
+        compare a replica's data with its primary's after the run.
+assumptions:
+  - >-
+    A replica that loaded a dual-channel snapshot before +CONTINUE takes the
+    snapshot's replication ID and offset when the load ends (AdoptOnLoad =
+    TRUE). Valkey does not: replicaAfterLoadPrimaryRDB skips that step while
+    the main channel has no answer, yet creates the backlog after the old
+    offset, so a promotion in that window, or after the sync then fails,
+    shifts the old ID onto the new data (fuzzer issue #133).
+  - The network may drop a link at any time but does not corrupt or reorder the bytes of one link.
+  - A crash loses memory and links; the RDB file survives, and the node restarts in its role.
+  - An operator may promote any replica and re-point any node to any primary, in any order.
+  - Every write is acknowledged by a primary and changes its data set; replicas are read-only.
+bounds:
+  Nodes: "{n1, n2, n3}"
+  MaxWrites: 2
+  MaxIds: 5
+  MaxCrashes: 1
+  MaxSwitches: 2
+exclusions:
+  - Chained replication (a replica of a replica) and its disconnectReplicas calls.
+  - Writable replicas, and writes that a module or an expiry makes on a replica.
+  - AOF; a restart from it restores no replication ID, as a save without replication info does here.
+  - Expired keys deleted while loading an RDB file, which a primary feeds into its new backlog.
+  - "The stream's bytes, SELECT and PING: one write is one offset."
+  - PSYNC FAILOVER (the FAILOVER command) and cluster-bus failover, for which Promote stands.
+  - The forkless (socket) full sync and its offset in the RDB file.
+  - The timing of the backlog's TTL, the replication timeout, and repl-diskless-sync-delay.

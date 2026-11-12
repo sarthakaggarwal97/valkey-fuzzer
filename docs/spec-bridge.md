@@ -55,6 +55,9 @@ and fixtures. Name a bundle's directory after its protocol.
 
 [`formal/cluster-election/`](../formal/cluster-election/README.md) is the
 failover election; its experiment ships with the Valkey experiments.
+[`formal/replication/`](../formal/replication/README.md) is primary-replica
+replication (PSYNC, full and dual-channel sync, promotion, restarts); its
+claims compare data sets, so `conform` reports only which steps a run took.
 `tests/fixtures/spec/register/` is a toy register that brings its own
 experiment and runs on Valkey (see
 [Onboarding a protocol with data only](#onboarding-a-protocol-with-data-only)).

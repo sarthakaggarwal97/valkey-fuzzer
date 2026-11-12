@@ -1,0 +1,135 @@
+# Implementation evidence for model.tla: the log lines that show the model's
+# replication steps. An experiment publishes them with
+# valkey.observer.log-trigger (spec: replication). The claims compare data
+# sets, which a run does not observe in the model's terms, so `spec conform`
+# checks no property of this bundle: it reports which steps real runs took.
+evidence:
+  partial:
+    event: replication.partial.continued
+    log: 'Successful partial resynchronization with primary\.'
+    fields: {instance_id: node}
+    action: PartialSync
+    updates:
+      - {set: link, key: $instance_id@Nodes, value: up}
+  full:
+    # Logged when +FULLRESYNC arrives; the model's FullSync runs from the
+    # fork to the end of the load in one step.
+    event: replication.full.started
+    log: 'Full resync from primary: (?P<replid>[0-9a-f]{40}):(?P<offset>-?\d+)'
+    fields: {instance_id: node, replid: str, offset: int}
+    action: FullSync
+    updates:
+      - {set: link, key: $instance_id@Nodes, value: up}
+  dual:
+    event: replication.dual.started
+    log: 'Dual channel replication: PSYNC is not possible, initialize RDB channel\.'
+    fields: {instance_id: node}
+    action: DualFork
+    updates:
+      - {set: link, key: $instance_id@Nodes, value: rdb}
+  load-failed:
+    event: replication.load.failed
+    log: 'PRIMARY <-> REPLICA sync: Discarding the half-loaded data'
+    fields: {instance_id: node}
+    action: LoadFails
+    updates:
+      - {set: link, key: $instance_id@Nodes, value: down}
+  lost:
+    event: replication.link.lost
+    log: 'Connection with primary lost\.'
+    fields: {instance_id: node}
+    action: Disconnect
+    updates:
+      - {set: link, key: $instance_id@Nodes, value: down}
+  promoted:
+    # shiftReplicationId, from replicationUnsetPrimary: REPLICAOF NO ONE, a
+    # FAILOVER, or a cluster failover.
+    event: replication.promoted
+    log: 'Setting secondary replication ID to (?P<old>[0-9a-f]{40}), valid up to offset: (?P<offset>-?\d+)\. New replication ID is (?P<new>[0-9a-f]{40})'
+    fields: {instance_id: node, old: str, offset: int, new: str}
+    action: Promote
+    updates:
+      - {set: role, key: $instance_id@Nodes, value: primary}
+      - {set: link, key: $instance_id@Nodes, value: none}
+      - {incr: switches}
+  replicaof:
+    # REPLICAOF host port; a cluster node that follows a new primary does not
+    # log this line.
+    event: replication.replicaof
+    log: 'REPLICAOF (?P<host>\S+):(?P<port>\d+) enabled'
+    fields: {instance_id: node, host: str, port: int}
+    action: Follow
+    updates:
+      - {set: role, key: $instance_id@Nodes, value: replica}
+      - {set: link, key: $instance_id@Nodes, value: down}
+      - {incr: switches}
+  backlog-freed:
+    event: replication.backlog.freed
+    log: 'Replication backlog freed after \d+ seconds without connected replicas'
+    fields: {instance_id: node}
+    action: FreeBacklog
+  saved:
+    event: replication.rdb.saved
+    log: 'DB saved on disk|Background saving terminated with success'
+    fields: {instance_id: node}
+    action: Save
+  crash:
+    # valkey.fault.process-signal; the node restarts from its RDB file.
+    event: '*.injected'
+    where: {signal: SIGKILL, applied: true}
+    fields: {target: node}
+    action: Crash
+    updates:
+      - {incr: crashes}
+
+unobservable:
+  Write: Client writes are not logged; INFO offsets in samples count them.
+  Stream: Applying the stream is not logged.
+  Trim: Trimming the backlog is not logged.
+  DualContinueEarly: >-
+    Valkey logs +CONTINUE on the main channel ("Primary accepted a Partial
+    Resynchronization") and the end of the load ("Done loading RDB"); which
+    of the four dual-channel steps a line shows depends on which came first,
+    and the mapping maps one line to one action.
+  DualLoadContinued: As DualContinueEarly.
+  DualLoadFirst: As DualContinueEarly.
+  DualContinueLate: As DualContinueEarly.
+  Idle: A step in which nothing happens.
+
+processes:
+  Nodes:
+    prefix: node
+    members:
+      - {evidence: partial, field: instance_id}
+      - {evidence: full, field: instance_id}
+      - {evidence: dual, field: instance_id}
+      - {evidence: promoted, field: instance_id}
+      - {evidence: replicaof, field: instance_id}
+      - {evidence: lost, field: instance_id}
+      - {evidence: crash, field: target}
+
+state:
+  role: {over: [Nodes], init: unknown}
+  link: {over: [Nodes], init: unknown}
+  switches: {init: 0}
+  crashes: {init: 0}
+  primaryOf: {hidden: '[n \in Nodes |-> n]', why: "The primary a replica follows is not in the mapped lines."}
+  cached: {hidden: '[n \in Nodes |-> FALSE]', why: "A cached primary is not logged."}
+  data: {hidden: '[n \in Nodes |-> <<>>]', why: "A run does not observe which writes a node holds."}
+  off: {hidden: '[n \in Nodes |-> 0]', why: "Offsets are in INFO samples, which these lines do not carry."}
+  replid: {hidden: '[n \in Nodes |-> 0]', why: "The model numbers replication IDs; Valkey's are random hex."}
+  replid2: {hidden: '[n \in Nodes |-> 0]', why: "As replid."}
+  secondOff: {hidden: '[n \in Nodes |-> 0]', why: "As off."}
+  backlog: {hidden: '[n \in Nodes |-> 0]', why: "The backlog's range is in INFO samples only."}
+  rdb: {hidden: '[n \in Nodes |-> [data |-> <<>>, id |-> 0, off |-> 0]]', why: "An RDB file's contents are not observed."}
+  snap: {hidden: '[n \in Nodes |-> [data |-> <<>>, id |-> 0, off |-> 0]]', why: "A snapshot's contents are not observed."}
+  nextId: {hidden: '0', why: "As replid."}
+  writes: {hidden: '0', why: "As data."}
+
+constants:
+  MaxWrites: {value: 2, why: "No property is checked on observed states; the model's bound."}
+  MaxIds: {value: 5, why: "As MaxWrites."}
+  MaxCrashes: {max_of: [crashes], at_least: 1}
+  MaxSwitches: {max_of: [switches], at_least: 1}
+  DualChannel: {value: "TRUE", why: "No property is checked on observed states."}
+  AdoptOnLoad: {value: "FALSE", why: "Valkey as it is (fuzzer issue #133)."}
