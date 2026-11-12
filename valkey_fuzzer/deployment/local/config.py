@@ -49,6 +49,7 @@ def _schema(mode: DeploymentMode) -> ConfigSchema:
         "instance_data_roots": _PATHS,
         "addressing": ConfigField(str, choices=ADDRESSING_MODES, required=False),
         "loopback_block": ConfigField(int, minimum=0, maximum=MAX_LOOPBACK_BLOCK, required=False),
+        "syscall_faults": ConfigField(bool, required=False),
     }
     if mode is DeploymentMode.CLUSTER:
         fields["primaries"] = ConfigField(int, minimum=3, maximum=MAX_CLUSTER_PRIMARIES, default=defaults["primaries"])

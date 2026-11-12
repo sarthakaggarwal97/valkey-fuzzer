@@ -36,9 +36,10 @@ import json
 import os
 import random
 import string
+import subprocess
 import threading
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from typing import Any, Optional
 
 import valkey
@@ -50,10 +51,10 @@ from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
 from valkey_fuzzer.schema import ConfigError, ConfigField, ConfigSchema
 
 from .files import write_jsonl
-from .instances import close_quietly, deployment, is_cluster
+from .instances import close_quietly, deployment, is_cluster, select_instances
 from .polling import StoppableThread, poll_until
 from .registration import component_registration
-from .schemas import FLAG, INTEGER, NUMBER, TEXT, declared, mapping_of, nullable, optional
+from .schemas import FLAG, INTEGER, LIST, MAPPING, NUMBER, TEXT, declared, mapping_of, nullable, optional
 
 LEDGER_EVIDENCE = "valkey.workload.ledger"
 OPERATIONS = ("set", "del", "get", "rename", "lrange", "lindex")
@@ -664,6 +665,104 @@ _WORKLOAD_DECLARES = Declarations(
     },
 )
 
+# ---------------------------------------------------------------------------
+# valkey.workload.benchmark
+# ---------------------------------------------------------------------------
+
+BENCHMARK_EVIDENCE = "valkey.workload.benchmark"
+# How often the workload looks for a benchmark that exited.
+_BENCHMARK_POLL_S = 0.2
+
+
+class BenchmarkWorkload:
+    """Each target's own ``valkey-benchmark`` (beside its ``valkey-server``) against it, from start to stop.
+
+    ``clients`` connections each send ``command`` (``pipeline`` at a time) again as soon as it is answered, so the
+    server's event loop wakes with many ready connections at once: the load under which Valkey's preemptive poll
+    of priority events (``priority-preemptive-poll-interval-us``) runs within one pass. A benchmark that exits
+    (its instance was killed) starts again. Nothing it sees is judged: the oracles judge what the load does.
+    """
+
+    def __init__(self) -> None:
+        self._thread: Any = None
+        self._processes: dict[str, Any] = {}
+        self._starts: dict[str, int] = {}
+
+    def _command(self, handle: Any, instance: Any, config: Mapping[str, Any]) -> list[str]:
+        tool = os.path.join(os.path.dirname(handle.binary(instance.instance_id)), "valkey-benchmark")
+        return [
+            tool, "-h", instance.host, "-p", str(instance.port), "-c", str(config["clients"]),
+            "-P", str(config["pipeline"]), "-l", "-q", *[str(item) for item in config["command"]],
+        ]  # fmt: skip
+
+    def start(self, context: Any, spec: ComponentSpec):
+        config = spec.config
+        handle = deployment(context)
+        targets = set(select_instances(handle, config["instances"]))
+        instances = [instance for instance in handle.instances if instance.instance_id in targets]
+        if not instances:
+            return make_result(spec, ComponentStatus.ERROR, f"no live instance matches {config['instances']!r}")
+        commands = {instance.instance_id: self._command(handle, instance, config) for instance in instances}
+        missing = sorted({command[0] for command in commands.values() if not os.access(command[0], os.X_OK)})
+        if missing:
+            # The load never ran, so the run tested nothing of it.
+            return make_result(spec, ComponentStatus.ERROR, f"no valkey-benchmark beside the build: {missing}")
+
+        def spawn(instance_id: str) -> None:
+            self._processes[instance_id] = subprocess.Popen(
+                commands[instance_id], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            self._starts[instance_id] = self._starts.get(instance_id, 0) + 1
+
+        def loop(stop_event: Any) -> None:
+            while not stop_event.wait(_BENCHMARK_POLL_S):
+                for instance_id, process in list(self._processes.items()):
+                    if process.poll() is not None:
+                        spawn(instance_id)
+
+        for instance_id in commands:
+            spawn(instance_id)
+        self._thread = StoppableThread(f"workload-{spec.id}", loop)
+        self._thread.start()
+        return make_result(
+            spec,
+            ComponentStatus.PASS,
+            f"{config['clients']} benchmark clients on each of {', '.join(sorted(commands))}",
+        )
+
+    def stop(self, context: Any, spec: ComponentSpec):
+        problem = self._thread.stop(timeout=30.0) if self._thread is not None else None
+        for process in self._processes.values():
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+        summary = {"targets": sorted(self._processes), "command": list(spec.config["command"]), "starts": self._starts}
+        evidence = (make_evidence(spec, BENCHMARK_EVIDENCE, "workload.quiesced", summary),)
+        if problem is not None:
+            return make_result(spec, ComponentStatus.ERROR, f"workload {problem}", evidence=evidence)
+        restarts = sum(self._starts.values()) - len(self._starts)
+        return make_result(spec, ComponentStatus.PASS, f"benchmark stopped; {restarts} restart(s)", evidence=evidence)
+
+
+_BENCHMARK_FIELDS = {
+    "instances": ConfigField(str, default="primary"),
+    "clients": ConfigField(int, default=32, minimum=1, maximum=1000),
+    "pipeline": ConfigField(int, default=1, minimum=1, maximum=1000),
+    "command": ConfigField(list, default=lambda: ["PING"], items=ConfigField(str)),
+}
+
+
+def _validate_benchmark(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -> None:
+    if not config["command"]:
+        raise ConfigError("command must not be empty")
+
+
+_BENCHMARK_DECLARES = Declarations(
+    evidence={
+        BENCHMARK_EVIDENCE: declared(mapping_of({"targets": LIST, "command": LIST, "starts": MAPPING})),
+    },
+)
+
 REGISTRATIONS = (
     component_registration(
         "valkey.workload.key-value",
@@ -671,5 +770,13 @@ REGISTRATIONS = (
         _WORKLOAD_FIELDS,
         check=_validate_workload,
         declares=_WORKLOAD_DECLARES,
+    ),
+    component_registration(
+        "valkey.workload.benchmark",
+        BenchmarkWorkload,
+        _BENCHMARK_FIELDS,
+        check=_validate_benchmark,
+        selectors={"instances": ()},
+        declares=_BENCHMARK_DECLARES,
     ),
 )

@@ -31,6 +31,7 @@ from ...hoststate import (
     untag_directory,
 )
 from ...protocols import RunContext
+from . import syscall_faults
 from .cluster_nodes import parse_cluster_nodes
 from .models import (
     DEFAULT_BASE_DATA_DIR,
@@ -373,7 +374,7 @@ class ProcessManager:
                 )
                 process = None
                 try:
-                    process = self._start_process(cmd, log_file)
+                    process = self._start_process(cmd, log_file, self._server_env(instance_data_dir))
 
                     info = InstanceInfo(
                         **asdict(plan),
@@ -422,7 +423,17 @@ class ProcessManager:
         names = ", ".join(instance.instance_id for instance in instances)
         ensure_ports_free(instances, cluster=self.config.mode is DeploymentMode.CLUSTER, action=f"start {names}")
 
-    def _start_process(self, cmd: list[str], log_file: str) -> subprocess.Popen:
+    def _server_env(self, data_dir: str) -> Optional[dict[str, str]]:
+        """The environment of the server whose data directory is ``data_dir``: None (this process's) unless the
+        deployment loads the syscall fault library, built into the instance's deployment directory."""
+        if not self.config.syscall_faults:
+            return None
+        rules = syscall_faults.rule_dir(data_dir)
+        os.makedirs(rules, exist_ok=True)
+        library = syscall_faults.build_library(os.path.dirname(os.path.dirname(rules)))
+        return syscall_faults.server_environment(library, rules)
+
+    def _start_process(self, cmd: list[str], log_file: str, env: Optional[dict[str, str]] = None) -> subprocess.Popen:
         """Start valkey-server with stdout/stderr appended to a per-instance file.
 
         Output is never left in an unread pipe, which could block the server
@@ -431,7 +442,7 @@ class ProcessManager:
         output_path = process_output_path(log_file)
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         with open(output_path, "ab") as output:
-            return subprocess.Popen(cmd, stdout=output, stderr=subprocess.STDOUT)
+            return subprocess.Popen(cmd, stdout=output, stderr=subprocess.STDOUT, env=env)
 
     def _process_output_tail(self, log_file: str, lines: int = 20) -> str:
         """Return a short suffix with the last process output lines, for error messages."""
@@ -525,7 +536,7 @@ class ProcessManager:
         process = None
         try:
             # Start new process
-            process = self._start_process(cmd, instance.log_file)
+            process = self._start_process(cmd, instance.log_file, self._server_env(instance.data_dir))
 
             # Update instance info with new process
             instance.process = process

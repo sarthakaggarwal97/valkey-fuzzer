@@ -144,6 +144,7 @@ deployment as `valkey-server` processes on this host. It handles both
 | `instance_data_roots` | `{}` | Where an instance's RDB, AOF, and `nodes.conf` live, by role or instance ID. Logs stay under `base_data_dir`. |
 | `addressing` | `shared_loopback` | `per_instance_loopback` makes `valkey-N` bind `127.0.B.(N+2)` (`B` is `loopback_block`) and connect from it, so network faults can match instance pairs (at most 253 instances). |
 | `loopback_block` | 0 | `B` above, 0 to 255. A [batch](cli.md#isolation-deadlines-and-leaks) sets it per worker. A per-instance deployment holds its block host-wide (a lock under `/tmp/valkey-fuzzer-locks`) until it is cleaned up, since a partition's rules match addresses only; a run whose block another run holds is an `ERROR` before anything starts. |
+| `syscall_faults` | `false` | Start every server with the syscall fault library in `LD_PRELOAD`, each with its own rule directory beside its data directory, for [`valkey.fault.syscall`](components.md#valkeyfaultsyscall). The deployment builds the library into its own directory with the host's C compiler (`$CC`, else `cc`); a build that fails is an `ERROR`. Without a rule the library passes every call through. |
 
 The execution plan records `primaries` and `replicas_per_primary` with their
 defaults; the other defaults apply when the deployment is planned. Unknown
@@ -507,12 +508,14 @@ scenario for each.
 | `valkey.bgsave-disk-full` | standalone | Linux, root, a `valkey.resource.tmpfs` resource holding the primary's data | On a full data filesystem, AOF writes and BGSAVE fail with errors, rejected writes are never applied, and after space is freed AOF writes recover and the next BGSAVE reloads. |
 | `valkey.cluster-chaos` | cluster, replicas ≥ 1 | | After every wave of failovers with process kills, replication, cluster state, slot coverage, roles, views, test keys, and failover log lines validate. `run --random --experiment valkey.cluster-chaos` generates its scenarios; see [Cluster chaos and CI](cluster-chaos-and-ci.md). |
 | `valkey.cluster-election-durability` | cluster, replicas ≥ 1 | Valkey 9.2.0 or later, with `cluster-config-save-behavior` | Kills a primary right after it grants a failover vote, restarts it, runs a second election, and checks one winner per epoch, one vote per primary per epoch, a quorum of votes for every winner, and no split primary; under `sync`, also that no vote left before it was saved ([TLA+ model](../formal/cluster-election/README.md)). |
+| `valkey.cluster-vote-save-crash` | cluster, replicas ≥ 1, `syscall_faults: true` | Valkey 9.2.0 or later, a C compiler | Keeps the first primary busy (`valkey.workload.benchmark`: `DEBUG SLEEP 0.001` from many clients), kills it at the first write of the `nodes.conf` save that holds the failover vote it just granted ([`valkey.fault.syscall`](components.md#valkeyfaultsyscall)), restarts it, runs a second election, and checks what `valkey.cluster-election-durability` checks. Under `sync`, a vote that reached its candidate before it was saved fails the run. Fork issue #120 is that failure, which the preemptive poll of priority events causes. |
 | `valkey.cluster-partition` | cluster, replicas ≥ 1, `addressing: per_instance_loopback` | Linux, root, iptables | A primary cut off from the cluster bus is replaced by its replica and rejoins as a replica after the partition heals; no acknowledged write is lost, except writes the isolated primary itself acknowledged in the partition window. |
 | `valkey.mixed-version-cluster` | cluster, replicas ≥ 1 | two different builds | A cluster that mixes two builds fails over under writes, and every instance runs its assigned binary. A graceful failover loses nothing; with `force_failover`, only the old primary's last writes may be lost. |
 | `valkey.replication-chaos` | standalone, replicas ≥ 1 | partitions: Linux, root, iptables, `addressing: per_instance_loopback` | Seeded `waves` of kills, restarts, graceful (`FAILOVER TO`) and forced (`REPLICAOF NO ONE`, optionally with a split brain) promotions, repoints, stalls, backlog pressure, and partitions under writes ([`valkey.action.replication-chaos`](components.md#valkeyactionreplication-chaos)). After every wave the deployment is healed and must have one primary, every replica linked to it, equal offsets, and equal test keys; at the end no acknowledged write is lost outside a forced promotion's window (below). |
 | `valkey.replication-full-resync` | standalone or cluster, replicas ≥ 1 | | A replica stalled with `SIGSTOP` while writes overflow the backlog is refused a partial resync, completes a full resync, and converges. |
 | `valkey.replication-partial-resync` | standalone or cluster, replicas ≥ 1 | | After the primary drops every replica link, the replicas resume with a partial resync (PSYNC), no full sync happens, and they converge. |
 | `valkey.rolling-upgrade` | standalone or cluster, replicas ≥ 1 | two different builds, the target as an artifact | Every instance moves to the new build under writes, replicas first with graceful failovers, and no acknowledged write is lost. |
+| `valkey.save-crash-points` | standalone or cluster, `syscall_faults: true` | a C compiler | Kills a server at the nth system call (`write`, `fsync`, `fdatasync`, `rename`) of one save in its data directory, before or after the call: `BGSAVE`, `BGREWRITEAOF`, or a `nodes.conf` save that a peer's new `cluster-announce-human-nodename` starts. The preload, acknowledged under `appendfsync always`, must survive the restart. A sweep runs `nth` 1, 2, and so on until the fault no longer fires. |
 | `valkey.snapshot-equivalence` | standalone, cluster | | A fixed number of seeded operations, then a BGSAVE of the quiesced dataset that must reload; records dataset, RDB, and reply digests for [differential runs](cli.md#diff). |
 
 An experiment can also compare one command sequence across two builds, the
@@ -565,7 +568,20 @@ survive.
 model in [`formal/cluster-election/`](../formal/cluster-election/README.md). Its batch reproduced the
 sequence the model flags as risky under `best-effort` (a vote delivered before
 it was saved, then a crash that loses it); no run produced a second winner in
-one epoch.
+one epoch. `valkey.cluster-vote-save-crash` places the kill in the vote's
+own save with [`valkey.fault.syscall`](components.md#valkeyfaultsyscall).
+Under its load, Valkey 9.2's preemptive poll of priority events sends the
+vote before the save even under `sync`: 3 of 4 runs on `unstable` failed,
+and every run passed with `priority-preemptive-poll-interval-us 0` (fork
+issue #120 has the reproduction of two winners in one epoch).
+
+A sweep of `valkey.save-crash-points` on `unstable` ran every crash point of
+the three saves, before and after each call, and every one recovered every
+acknowledged write: `BGSAVE` 2 calls (the child's `fsync` of its temporary
+file and its `rename`), `BGREWRITEAOF` 16 (manifest writes, `fdatasync`s and
+`rename`s before the fork and after the rewrite, the child's `fsync` and
+`rename`, and the parent's `rename` of the new base file), and a `nodes.conf`
+save 2 (`write` and `rename`).
 
 ## Declaring what may be randomized
 
@@ -743,12 +759,14 @@ Inputs not listed use the `valkey.writes` ranges.
 | `valkey.bgsave-disk-full` | standalone, tmpfs 16-64 MB | stable keys 100-2000, mutable keys up to 500, rate 50-1000, value size 64 B-1 kB | |
 | `valkey.cluster-chaos` | 3-16 primaries, 1-5 replicas | `waves` | |
 | `valkey.cluster-election-durability` | 3-5 primaries, 1-2 replicas | `save_behavior`, `election`, `second_election`, `shard` 0-2, `vote_occurrence` 1-2, restart and second-election delays | |
+| `valkey.cluster-vote-save-crash` | 3-5 primaries, 1-2 replicas | `shard` 0-2, `clients` 8, 32 or 64, restart and second-election delays | |
 | `valkey.cluster-partition` | 3-5 primaries, 1 replica, per-instance loopback | `hold_after_failover_s` 0-3 | |
 | `valkey.mixed-version-cluster` | 3 primaries, 1-2 replicas | `failover_shard` 0-2, `force_failover` | |
 | `valkey.replication-chaos` | standalone, 1-4 replicas | `waves`, `wait_replicas`, stable keys up to 5000, rate 50-1000, value size 16 B-16 kB | |
 | `valkey.replication-full-resync` | standalone 1-3 or cluster 1-2 replicas | rate 1000-3000, mutable keys 100-1000, value size 16 or 64 kB, `pause_s` 3-5 | replication |
 | `valkey.replication-partial-resync` | standalone 1-3 or cluster 1-2 replicas | rate up to 2000, value size up to 1 kB, `disconnect_after_s` 0.5-3 | replication |
 | `valkey.rolling-upgrade` | standalone or cluster, 1-2 replicas | | |
+| `valkey.save-crash-points` | standalone, or 3 primaries, no replicas | `BGREWRITEAOF` (the save with the most calls), `nth` 1-12, `when` | |
 | `valkey.snapshot-equivalence` | standalone or cluster, 0-2 replicas | `operations` 1-3000, rate 500-5000, value size up to 8 kB | persistence, replication |
 
 Durability windows (`loss_window_s`, `loss_window_after_s`) are never drawn

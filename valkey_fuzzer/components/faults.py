@@ -202,10 +202,17 @@ class EventFault:
         self._event_sequence = event.sequence
         with self._lock:
             self._record = record
-        payload = {"applied": record["applied"], "trigger": event.name, "applied_at": fired_at}
+        if not record.pop("lands_later", False):
+            self._announce(record)
+        self._after_fire(self._context, self._spec, record)
+
+    def _announce(self, record: dict[str, Any]) -> None:
+        """Publish ``<id>.injected`` for ``record``. A fault whose ``_fire`` only arms it (its record has
+        ``lands_later``) calls this itself once the fault took effect, with ``applied_at`` set to that time."""
+
+        payload = {"applied": record["applied"], "trigger": record["event"], "applied_at": record["applied_at"]}
         payload.update({key: record[key] for key in _EVENT_RECORD_KEYS if key in record})
         self._context.event_bus.publish(f"{self._spec.id}.injected", source=self._spec.id, payload=payload)
-        self._after_fire(self._context, self._spec, record)
 
     def _after_fire(self, context: Any, spec: ComponentSpec, record: dict[str, Any]) -> None:
         """Follow-up work that must come after ``<id>.injected`` (a restart)."""

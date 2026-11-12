@@ -39,6 +39,7 @@ from . import (
     server_stats,
     snapshots,
     storage,
+    syscall_faults,
     tools,
     workloads,
 )
@@ -59,6 +60,7 @@ _MODULES = (
     cluster_chaos,
     faults,
     network,
+    syscall_faults,
     observers,
     oracles,
     server_stats,

@@ -18,6 +18,7 @@ from valkey.retry import Retry
 
 from ..._data import to_plain_data
 from ...protocols import RunContext
+from . import syscall_faults
 from .cluster_nodes import slot_hash_tags
 from .failover import failover_shard
 from .models import (
@@ -369,6 +370,14 @@ class ValkeyDeploymentService:
     def data_dir(self, instance_id: str) -> str:
         with self._operation():
             return self._info(instance_id).data_dir
+
+    def syscall_fault_dir(self, instance_id: str) -> Optional[str]:
+        """The instance's rule directory for ``valkey.fault.syscall``; None unless the deployment sets
+        ``syscall_faults``."""
+        with self._operation():
+            if not self._deployment.config.syscall_faults:
+                return None
+            return syscall_faults.rule_dir(self._info(instance_id).data_dir)
 
     def binary(self, instance_id: str) -> str:
         """Return the valkey-server binary the instance's next (re)start uses."""

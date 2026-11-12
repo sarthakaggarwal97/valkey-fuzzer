@@ -472,11 +472,17 @@ def test_actions_report_what_they_did_to_the_deployment(component_id, config, st
     ],
     ids=["no-reply", "no-reply-and-a-wrong-one", "wrong-reply"],
 )
-def test_a_command_with_no_reply_leaves_the_run_untested_and_only_a_wrong_reply_fails_it(errors, status):
+@pytest.mark.parametrize("allow_unanswered", [False, True])
+def test_a_command_with_no_reply_leaves_the_run_untested_and_only_a_wrong_reply_fails_it(
+    errors, status, allow_unanswered
+):
     handle = FakeHandle()
     for instance_id, error in errors.items():
         handle.clients[instance_id] = FakeClient(error=error)
-    spec = _spec("valkey.action.command", "act", command=["PING"], instances="all")
+    if allow_unanswered and status == "ERROR":
+        # A command that may kill its server (a crash point inside it) is answered or not: both pass.
+        status = "PASS"
+    spec = _spec("valkey.action.command", "act", command=["PING"], instances="all", allow_unanswered=allow_unanswered)
     result = actions.CommandAction().run(fake_context(handle, spec), spec)
     assert result.status.value == status, result.summary
     replies = {reply["instance_id"]: reply for reply in result.evidence[0].value}

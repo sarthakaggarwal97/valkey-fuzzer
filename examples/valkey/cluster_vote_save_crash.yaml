@@ -1,0 +1,16 @@
+# Kill the first primary at the nodes.conf save of the failover vote it grants,
+# with 32 benchmark clients keeping it busy, restart it, elect again, and check
+# that the vote was saved before it left (fork issue #120).
+scenario_id: cluster-vote-save-crash
+seed: 41
+experiment:
+  id: valkey.cluster-vote-save-crash
+  inputs:
+    shard: 1
+    clients: 32
+deployment:
+  mode: cluster
+  primaries: 3
+  replicas_per_primary: 1
+  base_port: 7800
+  syscall_faults: true

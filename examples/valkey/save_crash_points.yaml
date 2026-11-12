@@ -1,0 +1,15 @@
+# Crash the primary at the first system call of a BGREWRITEAOF in its data
+# directory (the manifest it writes before the fork), restart it, and check
+# that every acknowledged write survived. Raise nth to move the crash through
+# the rewrite; valkey.save-crash-points lists its calls.
+scenario_id: save-crash-points
+seed: 5
+experiment:
+  id: valkey.save-crash-points
+  inputs:
+    trigger_command: [BGREWRITEAOF]
+    nth: 1
+deployment:
+  mode: standalone
+  base_port: 7900
+  syscall_faults: true
