@@ -42,7 +42,7 @@ a data set, and PSYNC trusts that naming. The model checks that Valkey's rules k
 | `negative-controls/no_shift_on_promotion.tla` | a promoted replica keeps its ID: must violate `OneHistoryPerId` |
 | `negative-controls/save_info_without_primary.tla` | an RDB file always records the ID: must violate `OneHistoryPerId` |
 | `negative-controls/no_second_offset_check.tla` | PSYNC on replid2 ignores `second_replid_offset`: must violate `ReplicaIsPrefix` |
-| `claims.yaml` | the properties, scope, assumptions, bounds and exclusions (status `draft`) |
+| `claims.yaml` | the properties, scope, assumptions, bounds and exclusions (status `approved`) |
 | `mapping.yaml` | the log lines that show each step |
 
 Each `.tla` control `EXTENDS model` and replaces one action, so it checks the model's own property.

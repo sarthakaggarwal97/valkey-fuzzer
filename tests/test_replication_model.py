@@ -17,7 +17,7 @@ ID_B = "b" * 40
 def test_every_guard_the_model_relies_on_has_a_control_that_breaks_it():
     bundle = load_bundle("replication")
 
-    assert bundle.claims.status == "draft"
+    assert (bundle.claims.status, bundle.claims.approved_by) == ("approved", "sarthakaggarwal97")
     assert bundle.safe_configs == ("dual-channel.cfg", "model.cfg")
     assert {control.name: control.violates for control in bundle.controls} == {
         # Valkey as it is (fuzzer issue #133): the safe configs assume the fix.
