@@ -21,26 +21,33 @@ fragments it extends merge into it like the rest of ``metadata``::
 A rule is ``fixed``, a list or ``{values: [...]}`` (drawn uniformly, the first and
 last value twice as often), ``{minimum, maximum}`` (40% of draws are the edges
 min, min+1, max-1, max, and 0 or 1 when in range; the rest uniform, or
-log-uniform when max/min exceeds 1000), ``{hook: <id>}``, or a scalar (that
-value). Enums and booleans an experiment declares are drawn uniformly.
+log-uniform when max/min exceeds 1000), the same with a ``default`` (one more
+edge), ``{hook: <id>}``, or a scalar (that value). Enums and booleans an
+experiment declares are drawn uniformly.
 
 A pool maps server config keys to value lists; its optional ``scope:
 [deployment, role]`` draws whether every instance shares one value
 (``deployment.server_config``) or the primary and the replicas each draw their
 own (``deployment.instance_configs``). A pool with ``default: true`` is drawn
 by every experiment without being listed, after the pools the experiment
-lists. A key one of the experiment's startup overlays sets is never drawn,
-since the overlay would override it, and neither is a key an earlier pool of
-the block already drew, so an experiment's listed pools win over the default
-ones; when the overlay sets it from an input (``{$ref: inputs.<name>}``), an
-exclusion of a ``server_config.<key>`` value also excludes it from that
-input's draws.
+lists. A pool may name a ``hook`` instead of listing its keys: the hook
+returns the keys it offers for the scenario drawn so far, each with a rule
+(a value list is drawn uniformly), and the pool's ``share`` of them is drawn
+(the dimension ``pools.<id>.keys``, each key chosen by its name alone, so a
+key the hook adds changes no other key's draws); such a pool comes after the
+pools that list their keys. A key one of the experiment's startup overlays
+sets is never drawn, since the overlay would override it, and neither is a
+key an earlier pool of the block already drew, so an experiment's listed
+pools win over the default ones; when the overlay sets it from an input
+(``{$ref: inputs.<name>}``), an exclusion of a ``server_config.<key>`` value
+also excludes it from that input's draws.
 
 Hooks are the catalog's generator registrations
 (:class:`~valkey_fuzzer.registrations.GeneratorRegistration`), each a
-``hook(rng, scenario)``: an input hook returns the input's value, and the
-scenario hook returns a partial scenario merged over the draws. Each sees a
-copy of the scenario drawn so far.
+``hook(rng, scenario)``: an input hook returns the input's value, a pool hook
+its keys and their rules, and the scenario hook returns a partial scenario
+merged over the draws. Each sees a copy of the scenario drawn so far, with
+the Valkey binary it runs.
 
 Every dimension draws from its own random stream
 ``sha256("gen", seed, experiment, dimension, attempt)``, so adding an input
@@ -100,7 +107,7 @@ _BLOCK_FIELDS = ("hook", "deployment", "inputs", "server_config", "reject", "poo
 _PATH_NAMESPACES = ("experiment", "inputs", "deployment", "server_config")
 _SCOPES = ("deployment", "role")
 # Pool keys that configure the pool instead of naming a server config.
-_POOL_RESERVED = ("scope", "default")
+_POOL_RESERVED = ("scope", "default", "hook", "share")
 
 
 class GeneratorError(ValueError):
@@ -219,6 +226,8 @@ class _Rule:
     minimum: Optional[float] = None
     maximum: Optional[float] = None
     integer: bool = False
+    # A range's default, an edge besides its bounds.
+    default: Optional[float] = None
     hook: Optional[str] = None
     # Explicit value lists and ranges have edges that count toward the drawn scenario's boundary.
     edges_count: bool = False
@@ -250,14 +259,16 @@ class _Rule:
             return cls.listed(value["values"], where)
         if keys == {"hook"} and isinstance(value["hook"], str):
             return cls(hook=value["hook"])
-        if keys == {"minimum", "maximum"}:
-            low, high = value["minimum"], value["maximum"]
+        if keys in ({"minimum", "maximum"}, {"minimum", "maximum", "default"}):
+            low, high, default = value["minimum"], value["maximum"], value.get("default")
             if not all(is_number(bound) for bound in (low, high)) or low > high:
                 raise GeneratorError(f"{where} needs numeric minimum <= maximum, got {dict(value)}")
-            return cls(minimum=low, maximum=high, integer=integer, edges_count=True)
+            if default is not None and not (is_number(default) and low <= default <= high):
+                raise GeneratorError(f"{where} needs a numeric default within [minimum, maximum], got {dict(value)}")
+            return cls(minimum=low, maximum=high, integer=integer, default=default, edges_count=True)
         raise GeneratorError(
-            f"{where} must be fixed, a value, a list, {{values: [...]}}, {{minimum, maximum}}, or {{hook: <id>}}; "
-            f"got {to_plain_data(value)!r}"
+            f"{where} must be fixed, a value, a list, {{values: [...]}}, {{minimum, maximum[, default]}}, or "
+            f"{{hook: <id>}}; got {to_plain_data(value)!r}"
         )
 
     def draw(
@@ -281,19 +292,26 @@ class _Rule:
             return value, self.edges_count and value in (self.values[0], self.values[-1])
         # A range: an excluded number is redrawn from the same stream.
         for _ in range(100):
-            value, edge = _number(rng, self.minimum, self.maximum, self.integer, edge_probability)
+            value, edge = _number(rng, self.minimum, self.maximum, self.integer, edge_probability, self.default)
             if not any(item.matches(value) for item in excludes):
                 return value, edge
         raise GeneratorError(f"{where}: every draw from [{self.minimum}, {self.maximum}] was excluded")
 
 
 def _number(
-    rng: random.Random, low: float, high: float, integer: bool, edge_probability: float = EDGE_PROBABILITY
+    rng: random.Random,
+    low: float,
+    high: float,
+    integer: bool,
+    edge_probability: float = EDGE_PROBABILITY,
+    default: Optional[float] = None,
 ) -> tuple[Any, bool]:
-    """A number in [low, high]: an edge with ``edge_probability``, otherwise uniform or log-uniform."""
+    """A number in [low, high]: an edge (a bound, its neighbour, 0, 1, or ``default``) with ``edge_probability``,
+    otherwise uniform or log-uniform."""
 
     cast: Callable[[float], Any] = int if integer else float
-    edges = sorted({cast(edge) for edge in (low, low + 1, high - 1, high, 0, 1) if low <= edge <= high})
+    candidates = (low, low + 1, high - 1, high, 0, 1) + (() if default is None else (default,))
+    edges = sorted({cast(edge) for edge in candidates if low <= edge <= high})
     if rng.random() < edge_probability:
         return rng.choice(edges), True
     floor = max(low, 1)
@@ -327,11 +345,25 @@ def _pool(pool_id: str, document: Any) -> dict[str, Any]:
             if not isinstance(values, bool):
                 raise GeneratorError(f"{where}.default must be true or false")
             continue
+        if key == "hook":
+            if not isinstance(values, str) or not values:
+                raise GeneratorError(f"{where}.hook must be a generator ID")
+            continue
+        if key == "share":
+            if not is_number(values) or not 0 < values <= 1:
+                raise GeneratorError(f"{where}.share must be a number in (0, 1]")
+            continue
         if not isinstance(values, (list, tuple)) or not values:
             raise GeneratorError(f"{where}.{key} must be a non-empty list")
         if key == "scope" and not set(values) <= set(_SCOPES):
             raise GeneratorError(f"{where}.scope must list {list(_SCOPES)}, got {values!r}")
-    if not set(document) - set(_POOL_RESERVED):
+    listed = set(document) - set(_POOL_RESERVED)
+    if "hook" in document:
+        if listed or "share" not in document:
+            raise GeneratorError(f"{where} names a hook, so it lists no keys and needs a share")
+    elif "share" in document:
+        raise GeneratorError(f"{where}.share needs a hook")
+    elif not listed:
         raise GeneratorError(f"{where} must map server config keys to value lists")
     return dict(document)
 
@@ -516,6 +548,7 @@ class GeneratorBlock:
     @property
     def hook_ids(self) -> list[str]:
         ids = [rule.hook for rule in self.inputs.values() if rule is not None and rule.hook]
+        ids += [pool["hook"] for _, pool in self.pools if "hook" in pool]
         return ([self.hook] if self.hook else []) + ids
 
     @classmethod
@@ -555,8 +588,10 @@ class GeneratorBlock:
         missing = [pool_id for pool_id in selected if pool_id not in experiment_pools]
         if missing:
             raise GeneratorError(f"{where}.server_config names unknown pools {missing}")
+        defaults = [pool_id for pool_id, pool in experiment_pools.items() if pool.get("default")]
         selected = list(selected) + sorted(
-            pool_id for pool_id, pool in experiment_pools.items() if pool.get("default") and pool_id not in selected
+            (pool_id for pool_id in defaults if pool_id not in selected),
+            key=lambda pool_id: ("hook" in experiment_pools[pool_id], pool_id),
         )
 
         reject = document.get("reject") or []
@@ -637,19 +672,39 @@ class GeneratorBlock:
         for name in sorted(rules):
             if rules[name] is not None:
                 deployment[name] = draw(rules[name], f"deployment.{name}")
-        self._draw_pools(deployment, draw)
-
-        inputs = {
-            name: draw(rule, f"inputs.{name}")
-            for name, rule in sorted(self.inputs.items())
-            if rule is not None and not rule.hook
-        }
+        inputs: dict[str, Any] = {}
         scenario = {
             "scenario_id": f"{self.experiment_id}-seed{seed}",
             "seed": seed,
             "experiment": {"id": self.experiment_id, "inputs": inputs},
             "deployment": deployment,
         }
+
+        def offered(pool_id: str, pool: Mapping[str, Any], taken: set[str]) -> dict[str, _Rule]:
+            """The pool's keys this scenario draws, with their rules, leaving out the keys ``taken`` already."""
+
+            if "hook" not in pool:
+                return {key: _Rule.uniform(pool[key]) for key in set(pool) - set(_POOL_RESERVED) - taken}
+            where = f"pool {pool_id!r} (hook {pool['hook']!r})"
+            documents = hooks[pool["hook"]](stream(f"pools.{pool_id}.hook"), with_binary(merge(scenario, base or {})))
+            if not isinstance(documents, Mapping):
+                raise GeneratorError(f"{where} must return a mapping of server config keys to rules")
+            documents = {key: document for key, document in documents.items() if key not in taken}
+            dimension = f"pools.{pool_id}.keys"
+            if dimension in pinned:
+                keys = set(pinned[dimension]) & set(documents)
+            else:
+                salt = stream(dimension).getrandbits(64)
+                keys = {key for key in documents if _chosen(salt, key, pool["share"])}
+            draws[dimension] = sorted(keys)
+            return {key: _hook_rule(documents[key], f"{where}.{key}") for key in keys}
+
+        self._draw_pools(deployment, draw, offered)
+        inputs.update(
+            (name, draw(rule, f"inputs.{name}"))
+            for name, rule in sorted(self.inputs.items())
+            if rule is not None and not rule.hook
+        )
         visible = with_binary(merge(scenario, base or {}))
         for name, rule in sorted(self.inputs.items()):
             if rule is not None and rule.hook:
@@ -688,14 +743,20 @@ class GeneratorBlock:
             if name != dimension and not (index > after and name in hooked)
         }
 
-    def _draw_pools(self, deployment: dict[str, Any], draw: Callable[[_Rule, str], Any]) -> None:
+    def _draw_pools(
+        self,
+        deployment: dict[str, Any],
+        draw: Callable[[_Rule, str], Any],
+        offered: Callable[[str, Mapping[str, Any], set[str]], Mapping[str, _Rule]],
+    ) -> None:
         roles = ["primary"] + (["replica"] if deployment.get("replicas_per_primary", 0) else [])
         drawn: set[str] = set()
         for pool_id, pool in self.pools:
             scope = draw(_Rule.uniform(pool.get("scope", ["deployment"])), f"pools.{pool_id}.scope")
-            for key in sorted(set(pool) - set(_POOL_RESERVED) - self.overlay_keys - drawn):
+            rules = offered(pool_id, pool, self.overlay_keys | drawn)
+            for key in sorted(rules):
                 drawn.add(key)
-                rule = _Rule.uniform(pool[key])
+                rule = rules[key]
                 if scope == "deployment":
                     targets = [(deployment.setdefault("server_config", {}), f"server_config.{key}")]
                 else:
@@ -720,6 +781,27 @@ class GeneratorBlock:
             ):
                 return f"matches the reject rule {rule}"
         return None
+
+
+def _hook_rule(document: Any, where: str) -> _Rule:
+    """The rule of a key a pool hook offers: a value list is drawn uniformly, a range as integers."""
+
+    if isinstance(document, (list, tuple)):
+        return _Rule.uniform(document)
+    return _Rule.parse(document, where, integer=True)
+
+
+def draw_rule(document: Any, rng: random.Random, where: str) -> Any:
+    """One value of ``document``, a rule a pool hook gives a key, drawn as the generator draws the key."""
+
+    return _hook_rule(document, where).draw(rng, (), where)[0]
+
+
+def _chosen(salt: int, key: str, share: float) -> bool:
+    """Whether a hook pool's ``key`` joins the scenario whose ``pools.<id>.keys`` stream gave ``salt``."""
+
+    digest = hashlib.sha256(f"{salt}\0{key}".encode()).digest()
+    return int.from_bytes(digest[:8], "big") < share * 2**64
 
 
 def _rules(document: Any, where: str) -> dict[str, Optional[_Rule]]:

@@ -81,3 +81,15 @@ metadata:
         list-compress-depth: ["0", "1", "3"]
         stream-node-max-entries: ["1", "2", "100"]
         stream-node-max-bytes: ["64", "4096"]
+      # Every other config the scenario's builds have, read from their own
+      # config tables (src/config.c beside each binary), so a config a change
+      # adds is drawn as soon as the build has it: an eighth of them a
+      # scenario, each a value of its type. The configs that change what the
+      # oracles judge, or that the harness owns, are left out
+      # (EXCLUDED in components/config_space.py, with the reason for each).
+      # A build without its config.c beside it draws none.
+      valkey.pool.config-space:
+        default: true
+        scope: [deployment, role]
+        hook: valkey.generator.config-space
+        share: 0.125

@@ -18,6 +18,7 @@ from valkey_fuzzer.schema import ConfigField
 
 from . import checks
 from .command_table import EVIDENCE as COMMAND_TABLE
+from .config_space import CHURN_EVIDENCE
 from .faults import FAULT_INJECTED
 from .instances import EXPECTED_DOWN, deployment, instance_at, is_cluster
 from .ledger import FAILOVER_RESULT
@@ -145,6 +146,8 @@ def _got_errors(evidence: Sequence[Evidence]) -> list[str]:
     for item in evidence_of(evidence, "valkey.command.replies"):
         if any("error" in record and not record.get("unanswered") for record in item.value):
             sources.append(item.source)
+    # A CONFIG SET of the config-churn workload that Valkey refused.
+    sources += [item.source for item in evidence_of(evidence, CHURN_EVIDENCE) if item.value["errors"]]
     # A BGSAVE refused while another child ran (sent again), or for any other reason.
     for item in evidence_of(evidence, "valkey.bgsave.result"):
         if item.value.get("refusals") or item.value.get("status") == "rejected":
@@ -166,7 +169,7 @@ def scenario_causes(context: Any, evidence: Sequence[Evidence]) -> dict[str, lis
       configured with a command that does (``REPLICAOF``, ``FAILOVER``, ``CLIENT KILL``, ``DEBUG``, ...).
     - ``storage``: it made writes to disk fail: a filled disk or a read-only directory (an undo obligation).
     - ``commands``: Valkey answered one of its own commands with an error reply: the command-table workload's,
-      a configured command's, or a BGSAVE of ``valkey.action.bgsave``.
+      the config-churn workload's, a configured command's, or a BGSAVE of ``valkey.action.bgsave``.
     - ``memory``: it set a ``maxmemory`` itself, in its server settings or with ``CONFIG SET``; the deployment
       provider's default is one no experiment's dataset reaches.
     """

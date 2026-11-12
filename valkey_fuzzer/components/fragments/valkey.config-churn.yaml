@@ -1,0 +1,21 @@
+# The config-churn workload: CONFIG SET of configs the scenario left to
+# Valkey's default, drawn from each instance's build (its config table), one a
+# second beside the other workloads and the faults, config_changes times. A
+# change must not lose an acknowledged write, crash a server, break
+# replication, or change a reply outside the ways Valkey declares, which the
+# experiment's oracles judge as they are. Every shipped Valkey experiment
+# extends this; it changes nothing unless config_changes is set, which random
+# scenarios draw.
+inputs:
+  properties:
+    config_changes:
+      type: integer
+      minimum: 0
+      maximum: 20
+      default: 0
+      description: how many configs valkey.workload.config-churn changes during the run (0 none)
+components:
+  - use: valkey.workload.config-churn
+    id: config-churn
+    config:
+      changes: {$ref: inputs.config_changes}
