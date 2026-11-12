@@ -1484,7 +1484,12 @@ adds it to every experiment. An instance is at rest when:
   `used_cpu_user` plus `used_cpu_sys`, the whole process's, divided by
   `io-threads` when the instance's planned config sets
   `io-threads-always-active yes`: those IO threads spin whenever the main
-  thread handles an event, by design.
+  thread handles an event, by design. An instance whose active
+  defragmentation runs (`active_defrag_running` above 0) is not held to
+  `max_cpu`: defragmentation uses what its cycle settings give it
+  (`active-defrag-cycle-min` to `-max` of a core, in duty cycles of
+  `active-defrag-cycle-us`), and a duty cycle shorter than the event loop's
+  millisecond timeouts leaves the loop polling between them.
 
 The oracle reads every instance once per window until all are at rest in the
 same round, so work that ends within the bound (a rewrite finishing, a

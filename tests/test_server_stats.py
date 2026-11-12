@@ -329,6 +329,16 @@ def test_cpu_use_is_the_main_threads_where_info_reports_it_else_shared_among_alw
     assert _quiet(clock, _Handle({"valkey-0": list(process)}), plan=plans["on-demand"]).status.value == "FAIL"
 
 
+def test_a_server_whose_active_defragmentation_runs_is_not_held_to_the_cpu_limit(clock):
+    # Defragmentation always due (threshold 0) at active-defrag-cycle-min 48 in 20 us duty cycles: INFO reports
+    # 48%, and the event loop polls between the cycles, a whole core (the batch's cluster-partition seed 1690732814).
+    defragging = [_cpu(second * 1.0, active_defrag_running=48) for second in range(40)]
+    assert _quiet(clock, _Handle({"valkey-0": defragging})).status.value == "PASS"
+    # A server that uses a core while its defragmentation does not run is spinning.
+    idle = [_cpu(second * 1.0, active_defrag_running=0) for second in range(40)]
+    assert _quiet(clock, _Handle({"valkey-0": idle})).summary.startswith("valkey-0: used 1.00 of a core")
+
+
 def test_a_restarted_process_starts_a_new_cpu_window(clock):
     # Its CPU time went down: the first read after the restart measures nothing.
     result = _quiet(clock, _Handle({"valkey-0": [_cpu(50.0), _cpu(0.1), _cpu(0.11)]}))
