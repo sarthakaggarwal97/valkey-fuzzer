@@ -26,6 +26,7 @@ from . import (
     cluster_trace,
     command_metadata,
     command_table,
+    config_space,
     election_safety,
     faults,
     history,
@@ -52,6 +53,7 @@ _MODULES = (
     storage,
     workloads,
     command_table,
+    config_space,
     actions,
     tools,
     cluster_chaos,
@@ -96,7 +98,7 @@ def experiments(fragments: Optional[Mapping[str, Any]] = None) -> tuple[Any, ...
             path.read_text(encoding="utf-8"),
             source_name=str(path),
             fragments=fragments,
-            default_extends=("valkey.liveness",),
+            default_extends=("valkey.liveness", "valkey.config-churn"),
         )
         for path in sorted(EXPERIMENT_DIRECTORY.glob("*.yaml"))
     )

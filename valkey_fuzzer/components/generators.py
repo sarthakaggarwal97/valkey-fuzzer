@@ -19,6 +19,10 @@ Each hook is a :class:`~valkey_fuzzer.registrations.GeneratorRegistration`
 ``valkey.generator.aof-loss-window``
     The least crash loss window the drawn ``appendfsync`` allows
     (:func:`aof_loss_window`).
+``valkey.generator.config-space``
+    The keys of the pool ``valkey.pool.config-space``: every config the
+    scenario's builds have that the config space draws, from their own config
+    tables (:mod:`.config_space`).
 """
 
 import random
@@ -28,6 +32,7 @@ from typing import Any
 from valkey_fuzzer.registrations import GeneratorRegistration
 from valkey_fuzzer.schema import plain_config
 
+from .config_space import config_space_pool
 from .ledger import EVERYSEC_LOSS_WINDOW_S
 
 
@@ -201,4 +206,5 @@ GENERATORS = (
     GeneratorRegistration("valkey.generator.upgrade-target", upgrade_target),
     GeneratorRegistration("valkey.generator.wait-replicas", wait_replicas),
     GeneratorRegistration("valkey.generator.aof-loss-window", aof_loss_window),
+    GeneratorRegistration("valkey.generator.config-space", config_space_pool),
 )

@@ -7,7 +7,9 @@ import pytest
 import yaml
 
 from valkey_fuzzer.catalog import Catalog, register_valkey_components
-from valkey_fuzzer.components import EXPERIMENT_DIRECTORY, experiments
+from valkey_fuzzer.components import EXPERIMENT_DIRECTORY, config_space, experiments
+from valkey_fuzzer.components.config_space import build_config_table
+from valkey_fuzzer.deployment.local import processes
 from valkey_fuzzer.deployment.local.provider import local_deployment_provider_registrations
 from valkey_fuzzer.documents import merge
 from valkey_fuzzer.generator import MAX_ATTEMPTS, Exclusion, GeneratorBlock, GeneratorError, generate, installed_pools
@@ -17,6 +19,7 @@ from valkey_fuzzer.schema import ScenarioCompileError
 from valkey_fuzzer.service import RunService
 
 from .generator_support import CLUSTER_EXPERIMENT, SMALL_CLUSTER_SEEDS, generate_scenario, generator_service
+from .test_config_space import stand_in_build
 from .valkey_experiments_support import valkey_service
 
 NO_ZSTD = (Exclusion.parse("server_config.rdbcompression=zstd"),)
@@ -195,10 +198,72 @@ def test_a_default_pool_is_drawn_without_being_listed_and_yields_to_listed_pools
     assert hz == {"11", "12"}
 
 
+def test_a_hook_pool_draws_its_share_of_the_keys_its_hook_offers_each_chosen_by_its_name(tmp_path, monkeypatch):
+    monkeypatch.setattr(processes, "installed_valkey_binary", lambda: None)
+    offered = {f"tests-key-{n}": ["a", "b"] for n in range(64)}
+    offered["tests-range"] = {"minimum": 1, "maximum": 500, "default": 10}
+    seen = []
+
+    def hook(rng, scenario):
+        seen.append(scenario["deployment"].get("valkey_binary"))
+        return dict(offered)
+
+    pools = {
+        "tests.pool.hooked": {"default": True, "hook": "tests.generator.keys", "share": 0.25},
+        "tests.pool.listed": {"default": True, "tests-key-0": ["listed"]},
+    }
+    overlay = {"overlay_id": "one", "server_config": {"tests-key-1": "set"}}
+    runtime = _runtime(tmp_path, {"pools": pools}, hooks={"keys": hook}, startup_overlays=[overlay])
+    counts, ranges = [], set()
+    for seed in range(40):
+        generated = _generate(runtime, seed, valkey_binary="/tests/src/valkey-server")
+        config = generated.scenario["deployment"]["server_config"]
+        chosen = generated.draws["pools.tests.pool.hooked.keys"]
+        # A listed pool comes before a hook pool, and an overlay's key is never drawn: neither is chosen.
+        assert config["tests-key-0"] == "listed" and "tests-key-1" not in config
+        assert chosen == sorted(key for key in config if key in offered and key != "tests-key-0")
+        counts.append(len(chosen))
+        ranges |= {config["tests-range"]} if "tests-range" in config else set()
+    # The hook sees the scenario's binary; a quarter of the 63 keys it leaves, on average.
+    assert set(seen) == {"/tests/src/valkey-server"} and 10 <= sum(counts) / len(counts) <= 22
+    assert all(1 <= value <= 500 for value in ranges) and ranges
+    before = {seed: _generate(runtime, seed).scenario["deployment"]["server_config"] for seed in range(10)}
+    # A key the hook adds changes no other key's draw.
+    offered["tests-key-new"] = ["x"]
+    for seed, config in before.items():
+        after = _generate(runtime, seed).scenario["deployment"]["server_config"]
+        assert {key: value for key, value in after.items() if key != "tests-key-new"} == config
+    # A derived scenario keeps the keys it pins, whatever its seed draws.
+    pinned = {"pools.tests.pool.hooked.keys": ["tests-key-5", "tests-range"]}
+    derived = _generate(runtime, 99, pinned=pinned)
+    assert derived.draws["pools.tests.pool.hooked.keys"] == ["tests-key-5", "tests-range"]
+
+
+def test_every_shipped_experiment_draws_the_config_space_of_its_build_after_the_hand_written_pools(tmp_path):
+    binary = stand_in_build(tmp_path / "tree")
+    service = generator_service()
+    pools = installed_pools(service.catalog)
+    listed = {key for pool in pools.values() if "hook" not in pool for key in pool} - {"default", "scope"}
+    table_only = set(config_space.config_space([build_config_table(binary)])) - listed
+    assert table_only == {"hz", "lfu-log-factor", "commandlog-request-larger-than"}
+    drawn = set()
+    for experiment in EXPERIMENTS:
+        spec = service.catalog.experiments.resolve(experiment)
+        overlaid = {key for overlay in spec.startup_overlays for key in overlay.server_config}
+        for seed in range(8):
+            generated = service.generate(seed, experiment=experiment, valkey_binary=binary)
+            keys = set(generated.draws["pools.valkey.pool.config-space.keys"])
+            assert keys <= table_only - overlaid, experiment
+            drawn |= keys
+    assert drawn == table_only
+
+
 def test_every_shipped_experiment_draws_every_key_of_the_default_pools_its_overlays_leave():
     service = generator_service()
-    defaults = {pool_id: pool for pool_id, pool in installed_pools(service.catalog).items() if pool.get("default")}
+    pools = installed_pools(service.catalog)
+    defaults = {pool_id: pool for pool_id, pool in pools.items() if pool.get("default") and "hook" not in pool}
     assert set(defaults) == {"valkey.pool.io-threads", "valkey.pool.memory", "valkey.pool.encodings"}
+    assert pools["valkey.pool.config-space"]["default"] and pools["valkey.pool.config-space"]["hook"]
     keys = {key for pool in defaults.values() for key in pool} - {"default", "scope"}
     for experiment in EXPERIMENTS:
         spec = service.catalog.experiments.resolve(experiment)
@@ -228,6 +293,14 @@ def test_every_shipped_experiment_draws_every_key_of_the_default_pools_its_overl
         ({"pools": {"tests.pool": {"scope": ["everywhere"]}}}, r"scope must list"),
         ({"pools": {"tests.pool": {"default": "yes", "hz": ["11"]}}}, r"default must be true or false"),
         ({"pools": {"tests.pool": {"default": True, "scope": ["role"]}}}, r"must map server config keys"),
+        (
+            {"pools": {"tests.pool": {"hook": "tests.generator.x"}}},
+            r"names a hook, so it lists no keys and needs a share",
+        ),
+        ({"pools": {"tests.pool": {"hook": "tests.generator.x", "share": 0.5, "hz": ["1"]}}}, r"lists no keys"),
+        ({"pools": {"tests.pool": {"share": 0.5, "hz": ["1"]}}}, r"share needs a hook"),
+        ({"pools": {"tests.pool": {"hook": "tests.generator.x", "share": 2}}}, r"share must be a number in \(0, 1\]"),
+        ({"inputs": {"count": {"minimum": 0, "maximum": 5, "default": 9}}}, r"default within \[minimum, maximum\]"),
     ],
 )
 def test_malformed_blocks_are_rejected(tmp_path, generator, message):

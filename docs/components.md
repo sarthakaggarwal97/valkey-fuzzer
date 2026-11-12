@@ -101,6 +101,7 @@ a retry succeeded makes the fault, and the run, `ERROR`.
 | [`valkey.capability.host-probe`](#valkeycapabilityhost-probe) | capability | any | checks the host (Linux, root, tmpfs, iptables) |
 | [`valkey.workload.key-value`](#valkeyworkloadkey-value) | workload | any | writes keys and records every client-visible result |
 | [`valkey.workload.command-table`](#valkeyworkloadcommand-table) | workload | any | sends commands drawn from the whole command table |
+| [`valkey.workload.config-churn`](#valkeyworkloadconfig-churn) | workload | any | changes configs with `CONFIG SET` during the run |
 | [`valkey.action.command`](#valkeyactioncommand) | action | any | sends a command and checks the reply |
 | [`valkey.action.commands`](#valkeyactioncommands) | action | any | sends a command sequence on one connection, and compares the replies of two builds |
 | [`valkey.action.tools`](#valkeyactiontools) | action | any | runs a Valkey tool of two builds and compares what they do |
@@ -194,6 +195,7 @@ schemas.
 | `valkey.oracle.reply-schema` | none | none | none |
 | `valkey.oracle.search-results` | none | `valkey.search.results-verified` | none |
 | `valkey.workload.command-table` | none | `valkey.workload.command-table` | none |
+| `valkey.workload.config-churn` | none | `valkey.workload.config-churn` | none |
 | `valkey.workload.key-value` | `<id>.drained`<br>`<id>.seeded` | `valkey.workload.ledger` | none |
 <!-- END declarations -->
 
@@ -444,6 +446,41 @@ whose reply the client could not parse, with the parser's error),
 match, its `name`, `resp`, the `count` of such replies, and the first of
 them: the `command` as sent, the `reply` (up to 4 KB of its JSON text), the
 `problem` (where in the reply, and why), and the `schema`.
+
+### `valkey.workload.config-churn`
+
+Changes `changes` configs with `CONFIG SET` on the running instances, one
+every `interval_s`, beside the other workloads and the faults until teardown.
+Each change picks an instance, a config of its build's config space (the
+configs [random scenarios](scenarios-and-experiments.md#declaring-what-may-be-randomized)
+draw from the build's own config table, `valkey.pool.config-space`) that can
+change at run time (neither `IMMUTABLE_CONFIG` nor `PROTECTED_CONFIG`) and
+that the instance's planned config leaves to Valkey's default, so it never
+undoes what the experiment, a pool, or the table draw set; and a value drawn
+as the generator draws one. A change lasts until the deployment is removed
+(no undo obligation), and a restarted instance starts with its planned config
+again. What Valkey answers is recorded, not judged: an error reply (a value a
+validator refuses, a config refused while loading) is a refusal Valkey
+declares, which explains the error replies it counts
+([`valkey.oracle.error-counters`](#valkeyoracleerror-counters)), and a
+connection that fails meets an instance a fault stopped. The experiment's
+oracles judge what the changes do: no acknowledged write lost, no crash,
+replication intact, replies only as Valkey declares. The
+[`valkey.config-churn`](scenarios-and-experiments.md#fragments) fragment adds
+it to every shipped experiment with `changes` from the `config_changes` input,
+which random scenarios draw from 0 to 20.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `changes` | integer, 0 to 1000 | 0 | How many changes; 0 makes none. |
+| `interval_s` | number, 0.05 to 600 | 1 | The wait before each change. |
+| `op_timeout_s` | number, 0.05 to 60 | 2 | Each `CONFIG SET`'s timeout. |
+
+Evidence: `valkey.workload.config-churn`: `changes` (each with `at`,
+`instance`, `config`, `value`, and its `reply` or `error`, `unanswered` when
+the instance did not answer; or `skipped` when its build has no config table
+or no config left to change), `errors` (how many Valkey refused), and
+`unanswered`.
 
 ## Actions
 
@@ -1401,7 +1438,7 @@ scenario did:
 | --- | --- |
 | `links` | broke replication or cluster links: a component stopped, paused, or partitioned an instance (an [undo obligation](contracts.md#fault-ownership) of kind `process.stopped`, `process.paused`, or `network.partition`), killed one for good or moved a role (`valkey.instances.expected-down` naming an instance, `valkey.chaos.schedule`, `valkey.failover.result`, or `valkey.replication.replicaof` evidence), or is configured with a command that does (`REPLICAOF`, `SLAVEOF`, `FAILOVER`, or any `CLIENT`, `CLUSTER`, or `DEBUG` command of a [`valkey.action.command`](#valkeyactioncommand) or [`valkey.fault.command`](#valkeyfaultcommand)) |
 | `storage` | made writes to disk fail: an undo obligation of kind `disk.filled` or `directory.read-only` |
-| `commands` | sent a command that Valkey answered with an error reply: the [`valkey.workload.command-table`](#valkeyworkloadcommand-table) workload counted one, a configured command's recorded reply is one, or a [`valkey.action.bgsave`](#valkeyactionbgsave) was refused (`refusals`, or status `rejected`) |
+| `commands` | sent a command that Valkey answered with an error reply: the [`valkey.workload.command-table`](#valkeyworkloadcommand-table) workload counted one, [`valkey.workload.config-churn`](#valkeyworkloadconfig-churn) had a `CONFIG SET` refused, a configured command's recorded reply is one, or a [`valkey.action.bgsave`](#valkeyactionbgsave) was refused (`refusals`, or status `rejected`) |
 | `memory` | set a `maxmemory` itself, in the deployment's server config, a startup overlay, or a configured `CONFIG SET`; the deployment provider's default is one no experiment's dataset reaches |
 
 Which causes explain which counter:

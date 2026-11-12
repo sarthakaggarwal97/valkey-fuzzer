@@ -459,7 +459,7 @@ loaded with `--experiment-dir` can extend them. Merge rules:
 - `required_events`, `required_evidence`, and `inputs.required` are unions.
 - Every other field is replaced.
 
-The Valkey components ship eleven fragments:
+The Valkey components ship twelve fragments:
 
 | Fragment | Adds |
 | --- | --- |
@@ -472,12 +472,14 @@ The Valkey components ship eleven fragments:
 | `valkey.psync` | `valkey.base` and a partial resync: writes for `disconnect_after_s` (input, default 1), then `valkey.reconnect-replicas` after `run-then-disconnect`, the `info` observer requiring `sync_partial_ok` to advance and `sync_full` not to, and the `logs` observer requiring both sides' PSYNC lines and forbidding a full resync; standalone or cluster with replicas |
 | `valkey.full-sync` | `valkey.base` and a forced full sync: writes for `run_before_sync_s` (input, default 1), then `change-replid` (`DEBUG CHANGE-REPL-ID`, which the `full-sync` startup overlay enables) and `valkey.reconnect-replicas` |
 | `valkey.command-table` | the `commands` workload ([`valkey.workload.command-table`](components.md#valkeyworkloadcommand-table)) at the input `command_rate` (default 0, which sends none); the `reply-schemas` oracle ([`valkey.oracle.reply-schema`](components.md#valkeyoraclereply-schema)), which holds its replies to Valkey's reply schemas; and the `command-metadata` oracle ([`valkey.oracle.command-metadata`](components.md#valkeyoraclecommand-metadata)), which holds the workload's first 1000 commands to the build's command metadata on private servers; random scenarios keep the default, so a batch turns them on for an experiment with a base (`experiment: {inputs: {command_rate: 200}}`). `valkey.cluster-chaos`, `valkey.replication-chaos`, and `valkey.cluster-partition` extend it |
+| `valkey.config-churn` | the `config-churn` workload ([`valkey.workload.config-churn`](components.md#valkeyworkloadconfig-churn)), which changes `config_changes` configs (input, 0 to 20, default 0) with `CONFIG SET` during the run; random scenarios draw how many |
 | `valkey.random` | only the server config pools of [random scenarios](#declaring-what-may-be-randomized) |
 | `valkey.profiles` | only the [search profiles](#legal-space-and-search-profiles); no experiment extends it |
 
-Every shipped Valkey experiment extends `valkey.liveness`. An experiment
-loaded with `--experiment-dir` gets it only by extending it, directly or
-through `valkey.writes` or `valkey.base`.
+Every shipped Valkey experiment extends `valkey.liveness` and
+`valkey.config-churn`. An experiment loaded with `--experiment-dir` gets them
+only by extending them, `valkey.liveness` directly or through `valkey.writes`
+or `valkey.base`.
 
 ## The Valkey experiments
 
@@ -621,10 +623,11 @@ A pool with `default: true` is drawn by every experiment without being
 listed, after the pools it lists; a key a listed pool or a startup overlay
 already sets is not drawn again. The default pools change how the server runs,
 never what it stores or replies, so every oracle stays valid under them; all
-three are scoped:
+four are scoped:
 
 | Pool | Keys |
 | --- | --- |
+| `valkey.pool.config-space` | every other config the scenario's builds have, read from their own config table (see below): an eighth of them a scenario |
 | `valkey.pool.io-threads` | `io-threads` (1, 2, 4), `io-threads-always-active` and `events-per-io-thread 0` (which keep the threads busy at fuzzing load: on 9.1 and later they otherwise start only once the main thread is 30% busy), `io-threads-do-reads`, the copy-avoiding replies (`min-io-threads-avoid-copy-reply`, `min-string-size-avoid-copy-reply`, `-threaded`), `prefetch-batch-max-size` |
 | `valkey.pool.memory` | every `maxmemory-policy`, each `lazyfree-lazy-*` and `replica-lazy-flush`, `activedefrag` with thresholds low enough that it runs on a small dataset |
 | `valkey.pool.encodings` | the `hash`, `set`, `zset`, `list` and `stream` encoding thresholds and `list-compress-depth`: a value that never or soon leaves the compact encoding (converted as the workload writes), and Valkey's default |
@@ -640,6 +643,41 @@ refuses `activedefrag yes` (no jemalloc defrag hints, as a `MALLOC=libc` build),
 starts without it, or with `activedefrag no`
 (`UNOBSERVABLE_CONFIGS` in `valkey_fuzzer/deployment/local/server_config.py`);
 the plan records the value drawn.
+
+A pool may name a `hook` instead of listing its keys, with the `share` of the
+keys it offers that a scenario draws: the hook returns the keys and a rule for
+each (a value list, drawn uniformly, or `{minimum, maximum, default}`), the
+generator draws which keys join (the dimension `pools.<id>.keys`, each key
+chosen by its name alone, so a key the hook adds changes no other key's draw),
+and such a pool comes after the pools that list their keys.
+`valkey.pool.config-space` names `valkey.generator.config-space`, which reads
+Valkey's own config table, `static_configs[]` in the `src/config.c` beside each
+binary the scenario runs (where `make` leaves `valkey-server`), so a config a
+change adds is drawn as soon as the build has it:
+
+- a boolean draws `yes` or `no`, an enum one of its values, a number a value
+  of its range (40% of draws its bounds, their neighbours, 0, 1 and its
+  default; the rest log-uniform over a wide range), capped at `LLONG_MAX`
+  unless the config is flagged `UNSIGNED_CONFIG` (Valkey reads it as a long
+  long otherwise);
+- strings, special configs (`save`, `client-output-buffer-limit`, ...),
+  configs of several arguments, protected ones, and a number whose bound names
+  a constant the parser cannot evaluate are not drawn, nor an entry inside an
+  `#if` block (whether a build has it depends on how it was built);
+- a scenario that runs several builds (`deployment.valkey_binary`,
+  `instance_binaries`, its `valkey.artifact.local-binary` artifacts) draws what
+  all of them have, an enum's common values and a number's common range; one
+  whose build has no `config.c` beside it (a binary copied out of its tree)
+  draws none;
+- the options the local deployment sets itself (ports, addresses, paths, the
+  provider's defaults), and `EXCLUDED` in
+  `valkey_fuzzer/components/config_space.py`, are left out. `EXCLUDED` gives
+  each its reason: configs the harness relies on (the log format, signals'
+  shutdown, the clients' limits and timeouts), configs that change what the
+  oracles judge in a way Valkey declares (refused writes, keyspace
+  notifications, collation, durability, who is primary), test knobs that stall
+  the server (`rdb-key-save-delay`, `watchdog-period`), and configs a
+  hand-written pool or an experiment draws with values chosen for it.
 
 Always-active IO threads spin through every event: on unstable, a primary and
 two replicas under 100 writes a second take 1.2 cores with `io-threads 2`, 3.7
@@ -678,14 +716,16 @@ generator registry as a `GeneratorRegistration`
 `valkey_fuzzer/components/generators.py`); it is
 not a component and never appears in a plan. `valkey-fuzzer list generators`
 prints the installed hooks. An
-input hook returns the input's value; the scenario hook (`hook:` at the top
-of the block) returns a partial scenario merged over the draws. Both get a
-copy of the scenario drawn so far, base included; the base then overrides
-what they return. The Valkey hooks:
+input hook returns the input's value; a pool hook the keys of its pool with
+their rules; the scenario hook (`hook:` at the top of the block) returns a
+partial scenario merged over the draws. Each gets a copy of the scenario drawn
+so far, base included, with the Valkey binary it runs; the base then
+overrides what they return. The Valkey hooks:
 
 | Hook | Used by | Draws |
 | --- | --- | --- |
 | `valkey.generator.aof-loss-window` | `valkey.aof-durability` | `loss_window_s`: the least the drawn `appendfsync` allows, 0 for `always` and `no`, 2.5 for `everysec`. |
+| `valkey.generator.config-space` | `valkey.pool.config-space` (every experiment) | The keys the pool offers: the config space of the scenario's builds, each with its rule. |
 | `valkey.generator.waves` | `valkey.cluster-chaos`, `valkey.replication-chaos` | One to four waves of one to three operations of the drawn deployment mode, with kills that always have a target. Standalone: a `restart` after half the kills, partitions only with per-instance loopback addresses, repoints to another replica only with two replicas or more, at most `replicas_per_primary` kills per wave, only replicas after the first. Cluster: one to three failovers of distinct shards per wave, four in five with a kill before, with, or after it, and fewer kills in the run than there are replicas. |
 | `valkey.generator.tmpfs-data` | `valkey.bgsave-disk-full` | A 16, 32, or 64 MB tmpfs resource holding the primary's data, passed as `disk`. |
 | `valkey.generator.upgrade-target` | `valkey.rolling-upgrade` | `to_binary` as the deployment's own build (the two-build probe then skips the run) unless the scenario sets it. |
