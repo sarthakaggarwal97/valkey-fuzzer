@@ -13,8 +13,9 @@ import subprocess
 import pytest
 
 from tests import live_support as live
-from tests.live_support import BINARY, OLD_BINARY, check, evidence, run_scenario, scenario
+from tests.live_support import BINARY, OLD_BINARY, check, evidence, explain, run_scenario, scenario
 from tests.valkey_experiments_support import valkey_service
+from valkey_fuzzer._data import to_plain_data
 from valkey_fuzzer.components import capabilities, providers
 
 pytestmark = [pytest.mark.live, pytest.mark.slow]
@@ -74,6 +75,9 @@ _WAVES = [
                      _every_wave_validated, id="cluster-chaos-cluster"),
         pytest.param(lambda: scenario(ELECTION, "cluster", {"save_behavior": "best-effort", "election": "kill_primary"}, primaries=3, replicas=2),
                      {"valkey.cluster.election-safety.verified": {"require_durable_votes": "never"}}, None, id="election-best-effort-cluster"),
+        pytest.param(lambda: scenario("valkey.save-crash-points", inputs={"trigger_command": ["BGREWRITEAOF"], "nth": 8},
+                                      syscall_faults=True),
+                     {"valkey.fault.injected": {"call": "rename"}}, None, id="save-crash-points-rewrite-rename"),
         pytest.param(lambda: _two_builds("valkey.mixed-version-cluster", "cluster", on="candidate"),
                      {"valkey.binary.verified": {"mixed": True}}, None, marks=live.needs_old_binary, id="mixed-version-cluster"),
         pytest.param(lambda: _two_builds("valkey.rolling-upgrade", "standalone", {"to_binary": {"$ref": "artifacts.candidate.binary"}},
@@ -169,6 +173,21 @@ def test_cluster_partition_fails_over_heals_and_bounds_loss(runtime):
         run_scenario(runtime, _partition()), fields={"valkey.data.ledger-verified": {"loss_scope_slots": [[0, 5460]]}}
     )
     assert "VF-" not in subprocess.run(["iptables", "-S"], capture_output=True, text=True).stdout, "chains removed"
+
+
+def test_a_kill_in_the_save_of_a_granted_vote_lands_before_the_vote_is_on_disk(runtime):
+    # Whether the vote also left first depends on the build (fork issue #120): only the crash point is checked.
+    outcome = run_scenario(runtime, scenario("valkey.cluster-vote-save-crash", "cluster", primaries=3, replicas=1,
+                                             syscall_faults=True))  # fmt: skip
+    (result,) = [item for item in outcome.component_results if item.component_id == "election-safety"]
+    if result.status.value == "FAIL":
+        assert "vote_left_before_save" in to_plain_data(result.diagnostics)["violations"], explain(outcome)
+        safety = to_plain_data(result.diagnostics)
+    else:
+        safety = evidence(outcome, "valkey.cluster.election-safety.verified")
+    assert safety["unsaved_votes_at_crash"], safety
+    killed = evidence(outcome, "valkey.fault.injected")
+    assert killed["call"] == "write" and "nodes.conf.tmp-" in killed["path"], killed
 
 
 def test_cluster_election_with_sync_saves_every_vote_before_it_leaves_and_conforms_to_the_model(runtime):

@@ -31,6 +31,13 @@ def test_the_data_files_of_the_components_ship_with_them():
         assert any(path.match(pattern) for pattern in patterns), path
 
 
+def test_the_syscall_fault_library_source_ships_with_the_deployment():
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    shipped = re.search(r'^"valkey_fuzzer\.deployment\.local" = \[(.*)\]$', text, flags=re.MULTILINE).group(1)
+    sources = [path.name for path in (ROOT / "valkey_fuzzer" / "deployment" / "local").glob("*.c")]
+    assert sources == ["syscall_faults.c"] and re.findall(r'"([^"]+)"', shipped) == sources
+
+
 def test_bundles_are_found_by_directory_or_by_protocol_name_on_the_spec_path(tmp_path, monkeypatch):
     fixtures = ROOT / "tests" / "fixtures" / "spec"
     monkeypatch.delenv("VALKEY_FUZZER_SPEC_PATH", raising=False)

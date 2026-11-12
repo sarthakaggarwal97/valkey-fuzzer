@@ -72,6 +72,9 @@ _COMMAND_FIELDS = {
     "repeat": ConfigField(int, default=1, minimum=1, maximum=100_000),
     "interval_s": ConfigField(float, default=0.0, minimum=0, maximum=3600),
     "timeout_s": ConfigField(float, default=10.0, minimum=0.1, maximum=3600),
+    # The command may set off a fault that kills the server before it replies (a crash point in the work the
+    # command does): a reply that never came is recorded, not an ERROR.
+    "allow_unanswered": ConfigField(bool, default=False),
 }
 
 
@@ -125,7 +128,7 @@ class CommandAction:
     An experiment drives Valkey with it where no dedicated action exists (DEBUG, CLIENT KILL, CONFIG SET); the
     replies are evidence, and a reply ``expect`` rejects fails the run. A command that got no reply (the
     connection failed, or the reply timed out) leaves the run untested (ERROR), unless a reply that did come
-    back was wrong.
+    back was wrong, or ``allow_unanswered`` says the command may kill the server it is sent to.
     """
 
     def run(self, context: Any, spec: ComponentSpec):
@@ -133,7 +136,12 @@ class CommandAction:
         all_ok, replies = run_command_on_instances(context, spec, config)
         unanswered = sum(bool(item.get("unanswered")) for item in replies)
         wrong = sum(not item["matched"] and not item.get("unanswered") for item in replies)
-        status = ComponentStatus.PASS if all_ok else ComponentStatus.FAIL if wrong else ComponentStatus.ERROR
+        if wrong:
+            status = ComponentStatus.FAIL
+        elif all_ok or config["allow_unanswered"]:
+            status = ComponentStatus.PASS
+        else:
+            status = ComponentStatus.ERROR
         return make_result(
             spec,
             status,

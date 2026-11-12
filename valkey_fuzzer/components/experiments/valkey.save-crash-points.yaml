@@ -1,0 +1,114 @@
+# Crash a server at one system call of a save, restart it, and check that it
+# comes back with every acknowledged write.
+#
+# The writes are the preload (mutation_rate 0 by default), acknowledged under
+# appendfsync always, so none may be lost. Then valkey.fault.syscall is armed
+# on `instance`: SIGKILL at the nth matching call (write, fsync, fdatasync,
+# rename) on a path under its data directory, `before` or `after` the call,
+# counted from when trigger_command is sent to trigger_instance. With nothing
+# else writing there, the calls are the save's own, in order:
+#
+#   BGSAVE on the instance           the child's fsync of temp-<pid>.rdb and
+#                                    its rename to dump.rdb (the child writes
+#                                    the file through stdio, which the library
+#                                    does not see)
+#   BGREWRITEAOF on the instance     the manifest written before the fork,
+#                                    the child's fsync of its temp file, and
+#                                    the parent's rename of it into
+#                                    appendonlydir, the new manifest, and the
+#                                    fsync of appendonlydir
+#   CONFIG SET cluster-announce-     (cluster) a nodes.conf save of the
+#   human-nodename on another node   instance when the new name reaches it
+#
+# A kill in a fork child takes the server down too. `valkey-fuzzer` runs one
+# point per run; scripts/crash_points.py sweeps a save's points, nth 1, 2, ...
+# both before and after each call, until the rule no longer acts. A nth past
+# the save's last call leaves the fault unfired, and the run is ERROR.
+extends: [valkey.base]
+id: valkey.save-crash-points
+deployment:
+  modes: [standalone, cluster]
+  syscall_faults: {type: boolean, enum: [true]}
+metadata:
+  description: Crash a server at the nth system call of a save and check it recovers every acknowledged write
+  generator:
+    deployment:
+      syscall_faults: true
+      replicas_per_primary: 0
+      cluster:
+        primaries: 3
+        replicas_per_primary: 0
+    inputs:
+      mutation_rate: fixed
+      # A rewrite has the most points (16 on unstable; a nth past the last
+      # leaves the run untested). BGSAVE's 2 and nodes.conf's 2 are swept.
+      trigger_command: {values: [[BGREWRITEAOF]]}
+      nth: {minimum: 1, maximum: 12}
+      when: {values: [before, after]}
+inputs:
+  properties:
+    mutable_keys: {default: 500}
+    mutation_rate: {default: 0}
+    instance: {type: string, default: primary, description: the server that crashes}
+    trigger_instance: {type: string, default: primary}
+    trigger_command: {type: array, default: [BGSAVE], description: the command that starts the save}
+    calls: {type: array, default: [write, fsync, fdatasync, rename], description: the calls that count}
+    path: {type: string, default: "*", description: fnmatch pattern under the instance's data directory}
+    nth: {type: integer, minimum: 1, maximum: 10000000, default: 1}
+    when: {type: string, enum: [before, after], default: before}
+startup_overlays:
+  - overlay_id: aof-always
+    server_config:
+      appendonly: "yes"
+      appendfsync: always
+components:
+  - use: valkey.observer.log
+    id: logs
+    config:
+      instances: all
+      forbidden:
+        - {pattern: "Bad file format reading the append only file"}
+        - {pattern: "Unrecoverable error reading the append only file"}
+        - {pattern: "Short read or OOM loading DB"}
+        - {pattern: "Unrecoverable error: corrupted cluster config file"}
+
+  - use: valkey.fault.syscall
+    id: crash
+    config:
+      when_event: save.started
+      instance: {$ref: inputs.instance}
+      calls: {$ref: inputs.calls}
+      path: {$ref: inputs.path}
+      nth: {$ref: inputs.nth}
+      when: {$ref: inputs.when}
+      action: kill
+
+  - use: valkey.action.command
+    id: save
+    depends_on: [writes, logs, crash]
+    config:
+      instances: {$ref: inputs.trigger_instance}
+      command: {$ref: inputs.trigger_command}
+      # BGREWRITEAOF writes a manifest before it replies: a kill there leaves it unanswered.
+      allow_unanswered: true
+
+  - use: valkey.action.wait-event
+    id: recovered
+    depends_on: [save]
+    config: {event: crash.recovered, timeout_s: 30}
+
+  - use: valkey.action.sleep
+    id: after-recovery
+    depends_on: [recovered]
+    config: {seconds: 1}
+
+  - use: valkey.oracle.ledger
+    id: data
+    config:
+      acknowledged: must_survive
+      loss_window_s: 0
+      loss_window_faults: [crash]
+      converge_timeout_s: 60
+required_events: [crash.recovered]
+required_evidence:
+  - {evidence_id: valkey.fault.injected, source: crash}

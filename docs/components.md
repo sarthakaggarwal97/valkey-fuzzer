@@ -102,6 +102,7 @@ a retry succeeded makes the fault, and the run, `ERROR`.
 | [`valkey.workload.key-value`](#valkeyworkloadkey-value) | workload | any | writes keys and records every client-visible result |
 | [`valkey.workload.command-table`](#valkeyworkloadcommand-table) | workload | any | sends commands drawn from the whole command table |
 | [`valkey.workload.config-churn`](#valkeyworkloadconfig-churn) | workload | any | changes configs with `CONFIG SET` during the run |
+| [`valkey.workload.benchmark`](#valkeyworkloadbenchmark) | workload | any | keeps instances busy with their build's `valkey-benchmark` |
 | [`valkey.action.command`](#valkeyactioncommand) | action | any | sends a command and checks the reply |
 | [`valkey.action.commands`](#valkeyactioncommands) | action | any | sends a command sequence on one connection, and compares the replies of two builds |
 | [`valkey.action.tools`](#valkeyactiontools) | action | any | runs a Valkey tool of two builds and compares what they do |
@@ -118,6 +119,7 @@ a retry succeeded makes the fault, and the run, `ERROR`.
 | [`valkey.action.replicaof`](#valkeyactionreplicaof) | action | standalone | points an instance at a primary, or makes it one |
 | [`valkey.fault.process-signal`](#valkeyfaultprocess-signal) | fault | any | kills, stops, or pauses an instance |
 | [`valkey.fault.command`](#valkeyfaultcommand) | fault | any | runs a command at an event |
+| [`valkey.fault.syscall`](#valkeyfaultsyscall) | fault | any (needs `syscall_faults`) | kills, delays, or fails an instance at its nth matching system call |
 | [`valkey.fault.network-partition`](#valkeyfaultnetwork-partition) | fault | any (needs per-instance addresses) | drops traffic between instances |
 | [`valkey.fault.disk-fill`](#valkeyfaultdisk-fill) | fault | any | fills the run's tmpfs |
 | [`valkey.fault.deny-writes`](#valkeyfaultdeny-writes) | fault | any | makes data directories read-only |
@@ -176,6 +178,7 @@ schemas.
 | `valkey.fault.disk-fill` | `<id>.injected`<br>`<id>.released` | `valkey.fault.injected` | `disk.filled` |
 | `valkey.fault.network-partition` | `<id>.healed`<br>`<id>.injected`<br>`<id>.partitioned` | `valkey.fault.injected` | `network.partition` |
 | `valkey.fault.process-signal` | `<id>.injected`<br>`<id>.recovered` | `valkey.fault.injected`<br>`valkey.instances.expected-down` | `process.paused`<br>`process.stopped` |
+| `valkey.fault.syscall` | `<id>.injected`<br>`<id>.recovered` | `valkey.fault.injected`<br>`valkey.instances.expected-down` | `process.stopped`<br>`syscall.rule` |
 | `valkey.observer.cluster-trace` | none | `valkey.cluster.trace.recorded` | none |
 | `valkey.observer.info` | none | `{config.expectations[].evidence_id}` | none |
 | `valkey.observer.log` | none | `valkey.log.forbidden-match`<br>`{config.expect[].evidence_id}` | none |
@@ -194,10 +197,10 @@ schemas.
 | `valkey.oracle.rdb-snapshot` | none | `valkey.rdb.reload-verified` | `process.private-server` |
 | `valkey.oracle.reply-schema` | none | none | none |
 | `valkey.oracle.search-results` | none | `valkey.search.results-verified` | none |
+| `valkey.workload.benchmark` | none | `valkey.workload.benchmark` | none |
 | `valkey.workload.command-table` | none | `valkey.workload.command-table` | none |
 | `valkey.workload.config-churn` | none | `valkey.workload.config-churn` | none |
-| `valkey.workload.key-value` | `<id>.drained`<br>`<id>.seeded` | `valkey.workload.ledger` | none |
-<!-- END declarations -->
+| `valkey.workload.key-value` | `<id>.drained`<br>`<id>.seeded` | `valkey.workload.ledger` | none |<!-- END declarations -->
 
 ## Capabilities
 
@@ -487,6 +490,28 @@ or no config left to change), `errors` (how many Valkey refused), and
 Actions run once, in dependency order, and judge what they did: a `FAIL` from
 an action is a finding about the system under test.
 
+### `valkey.workload.benchmark`
+
+Runs each selected instance's own `valkey-benchmark` (beside its
+`valkey-server`) against it from start to teardown: `clients` connections,
+each sending `command` again as soon as it is answered (`-l`). The server's
+event loop then wakes with many ready connections at once, which is the
+load under which Valkey (9.2 and later) polls its priority connections
+(cluster bus, replication) again within one event-loop pass
+(`priority-preemptive-poll-interval-us`). A benchmark that exits, because a
+fault killed its instance, starts again. Nothing it sees is judged.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `instances` | selector | `primary` | |
+| `clients` | integer, 1 to 1000 | 32 | Connections per instance (`-c`). |
+| `pipeline` | integer, 1 to 1000 | 1 | Commands in flight per connection (`-P`). |
+| `command` | list of strings | `[PING]` | For example `[DEBUG, SLEEP, "0.001"]`, which needs `enable-debug-command yes`. |
+
+`ERROR` when no instance matches or a build has no `valkey-benchmark`.
+Evidence: `valkey.workload.benchmark` (`targets`, `command`, and `starts` per
+instance).
+
 ### `valkey.action.command`
 
 Sends `command` to each selected instance `repeat` times and checks each reply.
@@ -499,6 +524,7 @@ Sends `command` to each selected instance `repeat` times and checks each reply.
 | `repeat` | integer, 1 to 100,000 | 1 | |
 | `interval_s` | number, 0 to 3600 | 0 | Pause between repeats. |
 | `timeout_s` | number, 0.1 to 3600 | 10 | Client timeout, and how long to keep trying to open a connection. |
+| `allow_unanswered` | boolean | `false` | The command may set off a fault that kills the server before it replies, as a crash point inside `BGREWRITEAOF` does: a reply that never came is recorded, not an `ERROR`. |
 
 Each command is sent once. A connection that could not be opened sent
 nothing (under load the host can run out of local ports), so opening it is
@@ -1180,6 +1206,54 @@ and keeps trying to open a connection for up to 10 seconds.
 
 Events: `<id>.injected`. Evidence: `valkey.fault.injected` (targets and
 replies).
+
+### `valkey.fault.syscall`
+
+Kills, delays, or fails one instance at the nth system call that matches a
+filter. A kill from outside lands wherever the process happens to be, while
+this one lands between two calls of one event-loop pass, or between the
+writes and the rename of a save. It needs a deployment with
+`syscall_faults: true`, whose servers start with the syscall fault library
+(`valkey_fuzzer/deployment/local/syscall_faults.c`, built with the host's C
+compiler, `$CC` or `cc`) in `LD_PRELOAD`. When the trigger fires, the fault
+writes a rule to the instance's rule directory. From then on the library
+counts the matching calls of the server and of its fork children (an RDB or
+AOF rewrite child) and acts on the nth. A kill takes the server down, with the
+child that made the call. It is a process crash: what the kernel already
+holds of the server's writes survives, as it does after any `SIGKILL`. The
+library wraps `write`, `writev`, `fsync`, `fdatasync`, and `rename`, so
+writes through stdio (`fwrite`, which RDB and AOF-rewrite children use for
+the file itself) are not counted, while their `fsync` and `rename` are.
+
+The fault lands when the library acts, not at its trigger: `<id>.injected`
+is published then, and the record's `applied_at` is that moment. A kill
+waits for the server to exit, as `valkey.fault.process-signal` does, then
+restarts it after `restart_delay_s` and publishes `<id>.recovered`. A rule
+that never acted by teardown is removed, and the fault is `ERROR`, with the
+number of matching calls it saw.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `instance` | selector or `event` | `primary` | The first selected instance. |
+| `calls` | list of `write`, `fsync`, `fdatasync`, `rename` | | `write` covers `writev`. |
+| `path` | string or null | `null` | An `fnmatch` pattern of the file's path, in which `*` also matches `/`. A relative pattern is under the instance's data directory (`nodes.conf.tmp-*`). A `rename` matches if either path does. `null` matches any path. |
+| `peer` | selector or null | `null` | Only sockets connected to these instances' client or cluster bus port, which are the connections the server opened. `write` only. |
+| `nth` | integer, 1 to 10,000,000 | 1 | |
+| `action` | `kill`, `delay`, or `fail` | `kill` | |
+| `when` | `before` or `after` | `before` | Kill or delay before the call, or once it returned. |
+| `delay_ms` | integer, 1 to 600,000 | 1000 | For `delay`. The calling thread sleeps. |
+| `errno` | errno name | `EIO` | For `fail`: the call returns -1 with it, without being made. |
+| `restart` | boolean | `true` | Restart a killed instance. Without it the instance is `valkey.instances.expected-down`. |
+| `restart_delay_s` | number, 0 to 600 | 0 | |
+| `ready_timeout_s` | number, 1 to 600 | 30 | |
+| `capture_cluster_vars` | boolean | `false` | Cluster mode: record the `nodes.conf` vars the killed node restarts with. |
+
+Events: `<id>.injected` when the library acted (with `signal: SIGKILL` for a
+kill, and the `nodes.conf` vars when captured, so `spec conform` reads it as a
+crash), then `<id>.recovered`. Evidence: `valkey.fault.injected` (the rule,
+`armed_at`, the call and path it acted on and the PID that made it,
+`calls_matched`, and for a kill `exited_at`, `disk_vars_at_kill`, and the
+restart timing).
 
 ### `valkey.fault.network-partition`
 

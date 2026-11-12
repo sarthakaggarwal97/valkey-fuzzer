@@ -73,6 +73,7 @@ version = {attr = "valkey_fuzzer.__version__"}
 valkey_fuzzer = ["py.typed"]
 "valkey_fuzzer.formal" = ["*/*", "*/*/*"]
 "valkey_fuzzer.components" = ["experiments/*.yaml", "fragments/*.yaml", "reply_schemas.json"]
+"valkey_fuzzer.deployment.local" = ["syscall_faults.c"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

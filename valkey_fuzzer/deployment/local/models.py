@@ -65,6 +65,8 @@ class DeploymentConfig:
     # The /24 of 127.0.0.0/16 per-instance addresses come from: a batch gives each worker its own, so a
     # partition (which matches addresses) in one worker never cuts another's instances.
     loopback_block: int = 0
+    # Start every server with the syscall fault library (``syscall_faults.c``), for ``valkey.fault.syscall``.
+    syscall_faults: bool = False
 
     def __post_init__(self):
         defaults = DEFAULT_DIMENSIONS[self.mode]
