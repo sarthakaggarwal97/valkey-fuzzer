@@ -1,0 +1,83 @@
+# Implementation evidence for model.tla: the log lines that show the steps of
+# one server's AOF rewrite, RDB save and restart. An experiment publishes them
+# with valkey.observer.log-trigger (spec: persistence). The claims compare the
+# files' writes with the data set's, which a run does not observe in the
+# model's terms, so `spec conform` checks no property of this bundle: it
+# reports which steps real runs took.
+evidence:
+  rewrite-started:
+    event: persistence.rewrite.started
+    log: 'Background append only file rewriting started by pid \d+'
+    fields: {instance_id: node}
+    action: StartRewrite
+  base-renamed:
+    event: persistence.rewrite.base.renamed
+    log: 'Successfully renamed the temporary AOF base file \S+ into \S+'
+    fields: {instance_id: node}
+    action: RenameBase
+  rewrite-finished:
+    # Logged after the manifest is written and the history files deleted.
+    event: persistence.rewrite.finished
+    log: 'Background AOF rewrite finished successfully'
+    fields: {instance_id: node}
+    action: DeleteHistory
+  rewrite-failed:
+    event: persistence.rewrite.failed
+    log: 'Background AOF rewrite terminated with error|Background AOF rewrite terminated by signal'
+    fields: {instance_id: node}
+    action: RewriteFails
+  save-started:
+    event: persistence.save.started
+    log: 'Background saving started by pid \d+'
+    fields: {instance_id: node}
+    action: StartSave
+  save-done:
+    event: persistence.save.done
+    log: 'Background saving terminated with success'
+    fields: {instance_id: node}
+    action: SaveDone
+  crash:
+    # valkey.fault.process-signal; the node restarts.
+    event: '*.injected'
+    where: {signal: SIGKILL, applied: true}
+    fields: {target: node}
+    action: Crash
+    updates:
+      - {incr: crashes}
+
+unobservable:
+  Write: Client writes are not logged.
+  Flush: Writing aof_buf is not logged.
+  PersistManifest: >-
+    Writing the manifest logs nothing; the history files' removal and
+    "Background AOF rewrite finished successfully" follow it in the same pass.
+  StopAof: CONFIG SET appendonly is not logged; aof_enabled in INFO persistence samples shows it.
+  StartAof: As StopAof; the rewrite it waits for logs its start.
+  Idle: A step in which nothing happens.
+
+state:
+  crashes: {init: 0}
+  data: {hidden: '<<>>', why: "A run does not observe which writes the data set holds."}
+  buf: {hidden: '<<>>', why: "As data."}
+  state: {hidden: '"on"', why: "aof_enabled and aof_rewrite_in_progress are in INFO samples, which these lines do not carry."}
+  present: {hidden: '{}', why: "No observer lists the AOF directory."}
+  content: {hidden: '[f \in 1..9 |-> <<>>]', why: "As data."}
+  man: {hidden: '[base |-> 0, incrs |-> <<>>]', why: "As present."}
+  cur: {hidden: '0', why: "As present."}
+  child: {hidden: '"none"', why: "As state."}
+  snap: {hidden: '<<>>', why: "As data."}
+  done: {hidden: '"none"', why: "The rewrite's completion steps are logged together."}
+  newBase: {hidden: '0', why: "As present."}
+  rdb: {hidden: '<<>>', why: "As data."}
+  next: {hidden: '0', why: "As present."}
+  ackedOn: {hidden: '{}', why: "As data."}
+  writes: {hidden: '0', why: "As data."}
+  switches: {hidden: '0', why: "As StopAof."}
+  rewrites: {hidden: '0', why: "Counted by the rewrite-started lines, which are not an update here."}
+
+constants:
+  MaxWrites: {value: 3, why: "No property is checked on observed states; the model's bound."}
+  MaxFiles: {value: 9, why: "As MaxWrites."}
+  MaxCrashes: {max_of: [crashes], at_least: 2}
+  MaxSwitches: {value: 2, why: "As MaxWrites."}
+  MaxRewrites: {value: 2, why: "As MaxWrites."}

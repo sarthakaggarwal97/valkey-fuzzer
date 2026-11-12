@@ -58,6 +58,14 @@ failover election; its experiment ships with the Valkey experiments.
 [`formal/replication/`](../formal/replication/README.md) is primary-replica
 replication (PSYNC, full and dual-channel sync, promotion, restarts); its
 claims compare data sets, so `conform` reports only which steps a run took.
+[`formal/slot-migration/`](../formal/slot-migration/README.md) is atomic
+slot migration (`CLUSTER MIGRATESLOTS`: the snapshot, the pause, the grant,
+the target's claim, and its replica); like replication, `conform` reports
+only which steps a run took.
+[`formal/persistence/`](../formal/persistence/README.md) is the order in
+which one server writes its AOF files, manifest and RDB file through a
+rewrite, `CONFIG SET appendonly` and a kill; `conform` reports only which
+steps a run took.
 `tests/fixtures/spec/register/` is a toy register that brings its own
 experiment and runs on Valkey (see
 [Onboarding a protocol with data only](#onboarding-a-protocol-with-data-only)).
