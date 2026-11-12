@@ -100,6 +100,84 @@ def test_a_kill_in_a_fork_child_takes_the_server_down_too(shim, tmp_path):
     assert (tmp_path / "temp-1.rdb").read_bytes() == b"snapshot"
 
 
+FORK_UNDER_RELOAD = r"""
+#include <fcntl.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+static const char *rules, *busy;
+
+/* Keeps changing the rule directory and writing, so the library keeps reloading the rules in this thread. */
+static void *churn(void *unused) {
+    char from[4096], to[4096];
+    int fd = open(busy, O_WRONLY | O_CREAT, 0644);
+    for (unsigned long n = 0;; n++) {
+        snprintf(from, sizeof(from), "%s/churn.tmp", rules);
+        snprintf(to, sizeof(to), "%s/churn-%lu.txt", rules, n % 2);
+        close(open(from, O_WRONLY | O_CREAT, 0644));
+        rename(from, to);
+        write(fd, "x", 1);
+    }
+    return unused;
+}
+
+int main(int argc, char **argv) {
+    rules = argv[1];
+    busy = argv[2];
+    pthread_t thread;
+    pthread_create(&thread, NULL, churn, NULL);
+    int hung = 0;
+    for (int i = 0; i < 3000; i++) {
+        pid_t child = fork();
+        if (child == 0) {
+            write(open(argv[3], O_WRONLY | O_CREAT | O_APPEND, 0644), "c", 1);
+            _exit(0);
+        }
+        struct timespec tick = {0, 1000000};
+        int waited = 0;
+        while (waitpid(child, NULL, WNOHANG) == 0) {
+            if (++waited > 2000) {
+                kill(child, SIGKILL);
+                waitpid(child, NULL, 0);
+                hung++;
+                break;
+            }
+            nanosleep(&tick, NULL);
+        }
+    }
+    printf("hung %d\n", hung);
+    return 0;
+}
+"""
+
+
+@needs_cc
+def test_a_fork_while_another_thread_reloads_the_rules_leaves_the_child_free_to_write(shim, tmp_path):
+    # As an IO thread can while Valkey forks an RDB child: one thread keeps the library reloading the rules while
+    # the main thread forks children that write at once. No child may hang on the rules' lock.
+    rules = tmp_path / "rules"
+    _arm(rules, "idle", "calls=fsync path=/nowhere/* nth=1 action=fail")
+    source, program = tmp_path / "fork.c", tmp_path / "fork"
+    source.write_text(FORK_UNDER_RELOAD)
+    cc = os.environ.get("CC") or "cc"
+    subprocess.run([cc, "-O2", "-o", str(program), str(source), "-lpthread"], check=True, capture_output=True)
+    env = library.server_environment(shim, str(rules))
+    run = subprocess.run(
+        [str(program), str(rules), str(tmp_path / "busy.log"), str(tmp_path / "child.log")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.split() == ["hung", "0"]
+
+
 def test_a_rename_matches_either_path_and_a_delay_holds_the_call(shim, tmp_path):
     rules = tmp_path / "rules"
     _arm(rules, "r", f"calls=rename,fdatasync path={tmp_path}/dump.rdb nth=1 action=delay delay_ms=400 when=after")
