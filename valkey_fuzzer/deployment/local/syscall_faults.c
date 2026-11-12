@@ -108,6 +108,22 @@ static void resolve(void) {
     real_rename = dlsym(RTLD_NEXT, "rename");
 }
 
+/* A fork while another thread holds rules_lock (an IO thread reloading the rules while the main thread forks an
+ * RDB or AOF-rewrite child) would leave the child a lock no thread of its own can release, and its next intercepted
+ * call would hang it. The forking thread takes the lock across the fork, so both sides start with it free. */
+static void fork_prepare(void) {
+    pthread_rwlock_wrlock(&rules_lock);
+}
+
+static void fork_parent(void) {
+    pthread_rwlock_unlock(&rules_lock);
+}
+
+/* The child's thread has a new tid, and glibc tells a writer's unlock from a reader's by the tid: start afresh. */
+static void fork_child(void) {
+    pthread_rwlock_init(&rules_lock, NULL);
+}
+
 __attribute__((constructor)) static void init(void) {
     resolve();
     const char *dir = getenv("VALKEY_FUZZ_SYSCALL_FAULTS");
@@ -122,6 +138,7 @@ __attribute__((constructor)) static void init(void) {
     strcpy(rule_dir, dir);
     server_pid = getpid();
     shared = mapped;
+    pthread_atfork(fork_prepare, fork_parent, fork_child);
 }
 
 static int parse_list(const char *value, int *out, int max) {
@@ -187,7 +204,7 @@ static void maybe_reload(void) {
     clock_gettime(CLOCK_REALTIME, &wall);
     int64_t age_ms = (wall.tv_sec - st.st_mtim.tv_sec) * 1000 + (wall.tv_nsec - st.st_mtim.tv_nsec) / 1000000;
     if (seen_settled && st.st_mtim.tv_sec == seen_mtime.tv_sec && st.st_mtim.tv_nsec == seen_mtime.tv_nsec) return;
-    /* A fork child may inherit the lock held by a thread it does not have: it then keeps the rules it has. */
+    /* Another thread holds the rules: keep the ones this call has, and read the directory at a later check. */
     if (pthread_rwlock_trywrlock(&rules_lock) != 0) return;
     seen_mtime = st.st_mtim;
     seen_settled = age_ms > 50;
