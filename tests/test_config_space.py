@@ -91,10 +91,12 @@ def test_the_space_leaves_out_what_it_cannot_draw_and_what_is_excluded():
     # Excluded (rdbchecksum, acl-pubsub-default, maxmemory, ...), the deployment's own (unixsocketperm), protected,
     # a string, multi-argument, special, or a number without known bounds (watchdog-period) are not in it.
     assert set(space) == {
-        "lazyfree-lazy-eviction", "io-threads-always-active", "maxmemory-policy", "io-threads", "hz",
+        "lazyfree-lazy-eviction", "io-threads-always-active", "maxmemory-policy", "io-threads",
         "list-max-listpack-size", "commandlog-request-larger-than", "lfu-log-factor",
     }  # fmt: skip
     assert not set(space) & set(EXCLUDED)
+    # A hand-written pool draws hz, with values chosen for it.
+    assert "hz" in EXCLUDED
     assert {"rdbchecksum", "acl-pubsub-default", "maxmemory", "maxmemory-clients"} <= set(EXCLUDED)
     # The deployment sets unixsocketperm itself, and gives every instance its own maxmemory.
     assert {"unixsocketperm", "maxmemory", "port", "dir"} <= config_space._deployment_owned()
@@ -104,14 +106,14 @@ def test_a_scenario_of_several_builds_draws_what_every_one_of_them_has():
     table = _table()
     older = [
         replace(config, values=("volatile-lru", "noeviction")) if config.name == "maxmemory-policy" else
-        replace(config, maximum=500) if config.name == "hz" else config
+        replace(config, maximum=500) if config.name == "lfu-log-factor" else config
         for config in table
         if config.name != "io-threads-always-active"
     ]  # fmt: skip
     space = config_space.config_space([table, older])
     assert "io-threads-always-active" not in space
     assert space["maxmemory-policy"].values == ("volatile-lru", "noeviction")
-    assert (space["hz"].minimum, space["hz"].maximum) == (0, 500)
+    assert (space["lfu-log-factor"].minimum, space["lfu-log-factor"].maximum) == (0, 500)
     assert config_space.config_space([]) == {}
 
 

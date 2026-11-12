@@ -245,7 +245,7 @@ def test_every_shipped_experiment_draws_the_config_space_of_its_build_after_the_
     pools = installed_pools(service.catalog)
     listed = {key for pool in pools.values() if "hook" not in pool for key in pool} - {"default", "scope"}
     table_only = set(config_space.config_space([build_config_table(binary)])) - listed
-    assert table_only == {"hz", "lfu-log-factor", "commandlog-request-larger-than"}
+    assert table_only == {"lfu-log-factor", "commandlog-request-larger-than"}
     drawn = set()
     for experiment in EXPERIMENTS:
         spec = service.catalog.experiments.resolve(experiment)
@@ -262,7 +262,12 @@ def test_every_shipped_experiment_draws_every_key_of_the_default_pools_its_overl
     service = generator_service()
     pools = installed_pools(service.catalog)
     defaults = {pool_id: pool for pool_id, pool in pools.items() if pool.get("default") and "hook" not in pool}
-    assert set(defaults) == {"valkey.pool.io-threads", "valkey.pool.memory", "valkey.pool.encodings"}
+    assert set(defaults) == {
+        "valkey.pool.io-threads",
+        "valkey.pool.memory",
+        "valkey.pool.encodings",
+        "valkey.pool.cron",
+    }
     assert pools["valkey.pool.config-space"]["default"] and pools["valkey.pool.config-space"]["hook"]
     keys = {key for pool in defaults.values() for key in pool} - {"default", "scope"}
     for experiment in EXPERIMENTS:
@@ -327,6 +332,9 @@ def test_every_shipped_experiment_draws_the_same_valid_bounded_scenario_from_one
             assert all(config.get("io-threads", "1") in ("1", "2") for config in configs)
             assert all(config.get("io-threads-always-active", "no") == "no" for config in configs)
             assert all(config.get("events-per-io-thread", "2") == "2" for config in configs)
+            # Nor active defragmentation above Valkey's own effort.
+            defrag = {"active-defrag-cycle-min": "1", "active-defrag-cycle-max": "25", "active-defrag-cycle-us": "500"}
+            assert all(config.get(key, value) == value for config in configs for key, value in defrag.items())
         else:
             # One host runs every instance; cluster chaos draws clusters of up to 16 shards.
             shards = plan.deployment.get("primaries", 1) if plan.deployment_mode == "cluster" else 1

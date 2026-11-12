@@ -175,6 +175,7 @@ EXCLUDED: Mapping[str, str] = {
     "repl-diskless-load": _POOL,
     "dual-channel-replication-enabled": _POOL,
     "repl-diskless-sync-delay": _POOL,
+    "hz": _POOL,
     # The codecs and forkless saves left the base (00c-base-only).
     "rdbcompression": "a build without zstd refuses zstd at the start; the base leaves the codecs out",
     "repl-compression": "a build without zstd refuses zstd at the start; the base leaves the codecs out",

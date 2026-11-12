@@ -623,13 +623,14 @@ A pool with `default: true` is drawn by every experiment without being
 listed, after the pools it lists; a key a listed pool or a startup overlay
 already sets is not drawn again. The default pools change how the server runs,
 never what it stores or replies, so every oracle stays valid under them; all
-four are scoped:
+five are scoped:
 
 | Pool | Keys |
 | --- | --- |
 | `valkey.pool.config-space` | every other config the scenario's builds have, read from their own config table (see below): an eighth of them a scenario |
 | `valkey.pool.io-threads` | `io-threads` (1, 2, 4), `io-threads-always-active` and `events-per-io-thread 0` (which keep the threads busy at fuzzing load: on 9.1 and later they otherwise start only once the main thread is 30% busy), `io-threads-do-reads`, the copy-avoiding replies (`min-io-threads-avoid-copy-reply`, `min-string-size-avoid-copy-reply`, `-threaded`), `prefetch-batch-max-size` |
 | `valkey.pool.memory` | every `maxmemory-policy`, each `lazyfree-lazy-*` and `replica-lazy-flush`, `activedefrag` with thresholds low enough that it runs on a small dataset |
+| `valkey.pool.cron` | `hz` 10 (Valkey's default), 100 or 500; never below 10, where the cluster cron, every 100 ms otherwise, runs once per cron pass and a cluster forms and fails over ten times slower than the deployment's windows allow |
 | `valkey.pool.encodings` | the `hash`, `set`, `zset`, `list` and `stream` encoding thresholds and `list-compress-depth`: a value that never or soon leaves the compact encoding (converted as the workload writes), and Valkey's default |
 
 The eviction policies run under the deployment's `maxmemory` (the local
@@ -684,9 +685,10 @@ two replicas under 100 writes a second take 1.2 cores with `io-threads 2`, 3.7
 with 4 and 7.3 with 8, and six idle cluster nodes 1.9 cores with 2 and 10.7
 with 8, since the cluster bus keeps waking them (0.15 with 8 without
 always-active). So the pool draws at most four, and `valkey.cluster-chaos`,
-whose clusters reach 96 nodes, lists `valkey.pool.cluster-io-threads`
-(`io-threads` 1 or 2, never always-active), which wins over the default
-pool's keys. A batch with the default pools needs fewer workers per core than
+whose clusters reach 96 nodes, lists `valkey.pool.cluster-cpu`
+(`io-threads` 1 or 2, never always-active, and active defragmentation at
+Valkey's own effort: a drawn `active-defrag-cycle-min` near 99 keeps every
+node's main thread busy), which wins over the default pools' keys. A batch with the default pools needs fewer workers per core than
 one without them; on a host with few cores per worker (a four-core runner, a
 soak host with as many workers as cores), `--exclude
 server_config.io-threads=4` keeps a server to one always-active IO thread.
