@@ -2,6 +2,7 @@
 only ever sees a tmpfs that a write would reach."""
 
 import os
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -40,6 +41,23 @@ def test_every_experiment_is_judged_by_liveness_and_one_without_required_inputs_
         }
         with pytest.raises(ScenarioCompileError, match=r"replicas_per_primary must be at least 1, got 0"):
             runtime.compile(scenario)
+
+
+def test_a_full_disk_is_logged_evidence_whether_the_save_forks_or_not():
+    """Known-bad: a forkless save that fails mid-keyspace on a full disk names no cause, and the run was an ERROR."""
+
+    (experiment,) = [item for item in experiments() if item.experiment_id == "valkey.bgsave-disk-full"]
+    (logs,) = [component for component in experiment.components if component.id == "logs"]
+    (rule,) = [item for item in logs.config["expect"] if item["evidence_id"] == "valkey.storage.enospc-logged"]
+    pattern = re.compile(rule["pattern"])
+    # What unstable d5763ea44 logs: a forked save's child, then a forkless save whose write of a key failed.
+    forked = "22:C 12 Nov 2026 23:24:56.748 # Write error while saving DB to the disk(fflush): No space left on device"
+    forkless = [
+        "3952:M 12 Nov 2026 23:22:48.164 # forkless-save: error writing KV pair",
+        "3952:M 12 Nov 2026 23:22:48.366 # forkless-save: forkless save failed. 0 seconds.",
+    ]
+    assert rule["required"] and pattern.search(forked) and any(pattern.search(line) for line in forkless)
+    assert not pattern.search("3952:M 12 Nov 2026 23:22:48.589 * forkless-save: forkless save complete. 0 seconds.")
 
 
 def test_mounted_tmpfs_bytes_reads_only_a_tmpfs_a_write_would_reach(tmp_path, monkeypatch):
