@@ -81,6 +81,14 @@ metadata:
         list-compress-depth: ["0", "1", "3"]
         stream-node-max-entries: ["1", "2", "100"]
         stream-node-max-bytes: ["64", "4096"]
+      # The server cron's frequency: Valkey's default and faster. Below 10 the
+      # cluster cron, which runs every 100 ms otherwise, runs once per cron
+      # pass: a cluster at hz 1 forms and fails over ten times slower than the
+      # deployment's formation and validation windows allow.
+      valkey.pool.cron:
+        default: true
+        scope: [deployment, role]
+        hz: ["10", "100", "500"]
       # Every other config the scenario's builds have, read from their own
       # config tables (src/config.c beside each binary), so a config a change
       # adds is drawn as soon as the build has it: an eighth of them a
