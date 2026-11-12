@@ -3,9 +3,11 @@
 # writes are never applied, acknowledged writes survive, and once space is
 # freed AOF writes recover and the next BGSAVE succeeds and reloads.
 #
-# Path evidence: the fault filled the disk and the server logged ENOSPC. The
-# `degraded` oracle requires INFO to report the BGSAVE and AOF write errors,
-# and the AOF writes to recover.
+# Path evidence: the fault filled the disk and the server logged the failed
+# write: ENOSPC, or the failure of a forkless save (forkless-policy
+# prefer-forkless), whose write error mid-keyspace names no cause
+# ("forkless-save: error writing KV pair"). The `degraded` oracle requires INFO
+# to report the BGSAVE and AOF write errors, and the AOF writes to recover.
 #
 # The scenario provisions the filesystem as a valkey.resource.tmpfs resource
 # (the only kind valkey.fault.disk-fill fills), places instance data on it with
@@ -63,7 +65,9 @@ components:
     config:
       instances: primary
       expect:
-        - {evidence_id: valkey.storage.enospc-logged, pattern: "No space left on device", required: true}
+        - evidence_id: valkey.storage.enospc-logged
+          pattern: "No space left on device|forkless-save: forkless save failed"
+          required: true
         - {evidence_id: valkey.storage.aof-recovery-logged, pattern: "AOF write error looks solved"}
 
   - use: valkey.fault.disk-fill
