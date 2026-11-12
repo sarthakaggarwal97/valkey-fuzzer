@@ -42,7 +42,8 @@ Both hold only under three constants that are not Valkey as it is (`claims.yaml`
 - `ClaimReachesReplica`: R learns T's claim before T acts on it, as legacy `CLUSTER SETSLOT` replicates to the
   replicas first. Valkey sends the claim to R only on the bus, and `SYNCSLOTS FINISH` does not change R's view of
   the owner, so R promoted after T crashed without that message deletes the slot's keys
-  (`replica_misses_claim`, a crash and a lost message).
+  (`replica_misses_claim`, a crash and a lost message). The voters refuse R, and send it an UPDATE with the claim,
+  only when its request claims another slot of T whose config epoch the claim raised; T here owns no other slot.
 
 ## Files
 
@@ -66,9 +67,11 @@ Both hold only under three constants that are not Valkey as it is (`claims.yaml`
 distinct states and no error, every action fires, and each control's counterexample is 10 to 17 states long.
 
 `cancel_unpauses` is a known bug: upstream PR valkey-io/valkey#5327 (open) reports it, with a reproduction, and
-fixes it as `CancelKeepsPause` models, by leaving exports in `failover-granted` running. `replica_misses_claim`
-comes from the model and the code (a crash and a lost bus message); it is not reproduced, and no upstream issue or
-PR mentions it.
+fixes it as `CancelKeepsPause` models, by leaving exports in `failover-granted` running. `replica_misses_claim` is
+a bug reproduced on unstable d5763ea44 as the control's trace (sarthakaggarwal97/valkey-fuzzer#140): with T's bus
+messages to R dropped, R applies `SYNCSLOTS FINISH`, T is killed, and R, elected with no slots, deletes the imported
+keys, a write `WAIT` confirmed on R included. valkey-io/valkey#2724 (open) reports that the promoted replica does not
+claim the slot, but not that it deletes the keys.
 
 ## Checking runs
 

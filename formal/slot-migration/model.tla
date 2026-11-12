@@ -360,7 +360,9 @@ LoseBus(n) ==
 \* T is marked FAIL and R, having applied T's stream and read every bus message
 \* that reaches it (node timeout outlasts delivery), wins the election
 \* (clusterFailoverReplaceYourPrimary): it claims the slots T owns in R's view
-\* under a new epoch. A tracking job fails (clusterCleanSlotImportsOnPromotion),
+\* under a new epoch. Voters refuse R only for a slot its request claims whose
+\* owner they hold at a higher epoch than R's view of T; T owns no other slot,
+\* so a stale view of this one never stops R. A tracking job fails (clusterCleanSlotImportsOnPromotion),
 \* and the keys of a slot R does not own are deleted (delKeysNotOwnedByMyself,
 \* verifyClusterConfigWithData).
 Promote ==
