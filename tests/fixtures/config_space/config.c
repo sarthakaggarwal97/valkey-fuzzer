@@ -14,6 +14,10 @@ configEnum acl_pubsub_default_enum[] = {
     {"resetchannels", 0},
     {NULL, 0}};
 
+configEnum forkless_policy_enum[] = {{"require-fork", FORKLESS_POLICY_REQUIRE_FORK},
+                                     {"prefer-forkless", FORKLESS_POLICY_PREFER_FORKLESS},
+                                     {NULL, 0}};
+
 configEnum shutdown_on_sig_enum[] = {{"default", 0}, {"save", SHUTDOWN_SAVE}, {"nosave", SHUTDOWN_NOSAVE}, {NULL, 0}};
 
 #define createBoolConfig(name, alias, flags, config_addr, default, is_valid, apply) \
@@ -25,6 +29,7 @@ standardConfig static_configs[] = {
     createBoolConfig("lazyfree-lazy-eviction", NULL, DEBUG_CONFIG | MODIFIABLE_CONFIG, server.lazyfree_lazy_eviction, 1, NULL, NULL),
     createBoolConfig("io-threads-always-active", NULL, MODIFIABLE_CONFIG | HIDDEN_CONFIG, server.io_threads_always_active, 0, NULL, NULL), /* comma, in a comment */
     createBoolConfig("lua-enable-insecure-api", "lua-enable-deprecated-api", MODIFIABLE_CONFIG | HIDDEN_CONFIG | PROTECTED_CONFIG, server.lua_enable_insecure_api, 0, NULL, NULL),
+    createBoolConfig("forkless-infrastructure-enabled", NULL, IMMUTABLE_CONFIG, server.forkless_infrastructure_enabled, 0, NULL, NULL),
 #ifdef LOG_REQ_RES
     createBoolConfig("req-res-logfile-on", NULL, IMMUTABLE_CONFIG | HIDDEN_CONFIG, server.req_res_on, 0, NULL, NULL),
 #endif
@@ -35,6 +40,7 @@ standardConfig static_configs[] = {
     /* Enum Configs */
     createEnumConfig("maxmemory-policy", NULL, MODIFIABLE_CONFIG, maxmemory_policy_enum, server.maxmemory_policy, MAXMEMORY_NO_EVICTION, NULL, NULL),
     createEnumConfig("acl-pubsub-default", NULL, MODIFIABLE_CONFIG, acl_pubsub_default_enum, server.acl_pubsub_default, 0, NULL, NULL),
+    createEnumConfig("forkless-policy", NULL, MODIFIABLE_CONFIG, forkless_policy_enum, server.forkless_policy, FORKLESS_POLICY_REQUIRE_FORK, isValidForklessPolicy, updateForklessPolicy),
     createEnumConfig("shutdown-on-sigterm", NULL, MODIFIABLE_CONFIG | MULTI_ARG_CONFIG, shutdown_on_sig_enum, server.shutdown_on_sigterm, 0, isValidShutdownOnSigFlags, NULL),
 
     /* Integer configs */

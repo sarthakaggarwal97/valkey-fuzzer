@@ -739,6 +739,20 @@ def _drawn(runner, job_id):
     return json.loads(Path(runner.folder, "runs", job_id, "report.json").read_text())["reproducer"]["generated"]
 
 
+def _kept(draws, changed):
+    """The draws a derivation keeps: every one but ``changed``, and but the config churn's keys when they come after
+    it, since they are taken anew from the pools drawn (snapshot-equivalence has no hooks)."""
+
+    order = list(draws)
+    after = order.index(changed) if changed in order else len(order)
+    derived = "inputs.config_churn_keys"
+    return {
+        name: draws[name]
+        for index, name in enumerate(order)
+        if name != changed and not (name == derived and index > after)
+    }
+
+
 def test_a_guided_batch_derives_its_runs_from_those_that_reached_new_code(tmp_path, workers, stub, coverage):
     runner = _batch(tmp_path, [_random(3, guided=6)])
     summary = runner.run()
@@ -756,9 +770,9 @@ def test_a_guided_batch_derives_its_runs_from_those_that_reached_new_code(tmp_pa
         parent, changed = job["guided"]["parent"], job["guided"]["mutation"]
         assert parent in entries and results[job["id"]]["guided"] == job["guided"]
         before, after = _drawn(runner, parent), _drawn(runner, job["id"])
-        # A new seed, and every draw but the one it changes kept (snapshot-equivalence has no hooks).
+        # A new seed, and every draw but the one it changes, and what derives from it, kept.
         assert after["seed"] == job["generate"]["seed"] != before["seed"]
-        assert job["generate"]["pinned"] == {name: value for name, value in before["draws"].items() if name != changed}
+        assert job["generate"]["pinned"] == _kept(before["draws"], changed)
         assert all(after["draws"][name] == value for name, value in job["generate"]["pinned"].items())
         assert changed == "seed" or changed in before["draws"]
     # Only the job lines: without root the host sweep logs an "unchecked" line first (iptables needs root).
@@ -838,7 +852,7 @@ def test_a_guided_batch_starts_from_an_earlier_batchs_corpus_and_adds_only_what_
     parent, changed = first["guided"]["parent"], first["guided"]["mutation"]
     assert parent in {entry["run"] for entry in seeded["entries"]}
     drawn = _drawn(earlier, os.path.basename(parent))["draws"]
-    assert first["generate"]["pinned"] == {name: value for name, value in drawn.items() if name != changed}
+    assert first["generate"]["pinned"] == _kept(drawn, changed)
     assert results[first["id"]]["guided"] == first["guided"]
     # The earlier batch is only read.
     assert _files(earlier.folder) == before

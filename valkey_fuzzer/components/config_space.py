@@ -176,11 +176,9 @@ EXCLUDED: Mapping[str, str] = {
     "dual-channel-replication-enabled": _POOL,
     "repl-diskless-sync-delay": _POOL,
     "hz": _POOL,
-    # The codecs and forkless saves left the base (00c-base-only).
+    # The codecs left the base (00c-base-only).
     "rdbcompression": "a build without zstd refuses zstd at the start; the base leaves the codecs out",
     "repl-compression": "a build without zstd refuses zstd at the start; the base leaves the codecs out",
-    "forkless-policy": "prefer-forkless needs forkless-infrastructure-enabled at the start; the base leaves forkless "
-    "saves out (and #5 fails every one under lz4)",
 }
 
 # The C limits a bound may name, as a 64-bit Linux build has them.
@@ -608,13 +606,16 @@ CHURN_EVIDENCE = "valkey.workload.config-churn"
 class ConfigChurnWorkload:
     """``CONFIG SET`` of the config space on running instances, ``changes`` times, one every ``interval_s``.
 
-    Each change picks an instance, a config of its build's space (:func:`config_space`) that can change at run
-    time (not ``IMMUTABLE`` or ``PROTECTED``) and that the instance's planned config leaves to Valkey's default,
-    so it never undoes what the experiment, a pool, or the table draw set; and a value drawn as the generator draws
-    one. It runs beside the other workloads and the faults until teardown. A change lasts until the deployment is
-    removed, and a restarted instance starts again with its planned config. What Valkey answers is recorded, not
-    judged: an error reply (a value a validator refuses, a config refused while loading) is a refusal Valkey
-    declares, a connection that fails meets an instance a fault stopped. The oracles judge what the changes do.
+    Each change picks an instance, then a config: one of its build's space (:func:`config_space`) that can change
+    at run time (not ``IMMUTABLE`` or ``PROTECTED``) and that the instance's planned config leaves to Valkey's
+    default, so it never undoes what the experiment, a pool, or the table draw set; or one of ``keys``, server
+    config keys a pool drew at the start (the generator's ``{pools: [...]}`` input), each with the values it may
+    take. A table config's value is drawn as the generator draws one, a key's from its values. It runs beside the
+    other workloads and the faults until teardown. A change lasts until the deployment is removed, and a restarted
+    instance starts again with its planned config. What Valkey answers is recorded, not judged: an error reply (a
+    value a validator refuses, such as a value that needs a config the server did not start with, or a config
+    refused while loading) is a refusal Valkey declares, a connection that fails meets an instance a fault
+    stopped. The oracles judge what the changes do.
     """
 
     def __init__(self) -> None:
@@ -631,30 +632,34 @@ class ConfigChurnWorkload:
             for instance_id, instance in to_plain_data(context.plan.instances).items()
         }
         rng = context.rng(spec.id, "changes")
+        keys = {name: list(values) for name, values in config["keys"].items() if values}
 
-        def space(instance_id: str) -> list[ServerConfig]:
+        def candidates(instance_id: str) -> list[tuple[str, Any]]:
+            """Each config the instance may change, with the rule its value is drawn from."""
+
             table = build_config_table(handle.binary(instance_id))
             configs = config_space([table]) if table else {}
-            return [
-                item
-                for name, item in sorted(configs.items())
-                if item.mutable and name not in planned.get(instance_id, ())
-            ]
+            found = {
+                name: rule(item)
+                for name, item in configs.items()
+                if item.mutable and name not in planned.get(instance_id, ()) and name not in keys
+            }
+            return sorted({**found, **keys}.items())
 
         def change() -> None:
             instance_id = rng.choice(sorted(instance.instance_id for instance in handle.instances))
-            candidates = space(instance_id)
+            offered = candidates(instance_id)
             record: dict[str, Any] = {"at": time.time(), "instance": instance_id}
-            if not candidates:
+            if not offered:
                 self._changes.append({**record, "skipped": "its build has no config table, or none left to change"})
                 return
-            item = rng.choice(candidates)
-            value = draw_rule(rule(item), rng, item.name)
-            record.update(config=item.name, value=str(value))
+            name, document = rng.choice(offered)
+            value = draw_rule(document, rng, name)
+            record.update(config=name, value=str(value))
             client = None
             try:
                 client = handle.new_client(instance_id, timeout=config["op_timeout_s"])
-                client.config_set(item.name, value)
+                client.config_set(name, value)
                 record["reply"] = "OK"
             except valkey.exceptions.ResponseError as exc:
                 record["error"] = str(exc)
@@ -694,6 +699,9 @@ class ConfigChurnWorkload:
 _CHURN_FIELDS = {
     # 0 changes nothing (an experiment's input turns the workload on).
     "changes": ConfigField(int, default=0, minimum=0, maximum=1000),
+    # Server config keys to change besides the table's, even where the planned config sets them: each to values
+    # drawn uniformly from its list.
+    "keys": mapping_of(additional=ConfigField(list), default=dict),
     "interval_s": ConfigField(float, default=1.0, minimum=0.05, maximum=600),
     "op_timeout_s": ConfigField(float, default=2.0, minimum=0.05, maximum=60),
 }

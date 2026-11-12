@@ -56,8 +56,9 @@ def test_the_table_holds_every_entry_with_its_type_flags_bounds_and_default():
     configs = {config.name: config for config in _table()}
     # An entry inside #ifdef depends on how the build was made; the comma in a comment splits nothing.
     assert list(configs) == [
-        "rdbchecksum", "lazyfree-lazy-eviction", "io-threads-always-active", "lua-enable-insecure-api", "dbfilename",
-        "maxmemory-policy", "acl-pubsub-default", "shutdown-on-sigterm", "io-threads", "hz", "list-max-listpack-size",
+        "rdbchecksum", "lazyfree-lazy-eviction", "io-threads-always-active", "lua-enable-insecure-api",
+        "forkless-infrastructure-enabled", "dbfilename", "maxmemory-policy", "acl-pubsub-default", "forkless-policy",
+        "shutdown-on-sigterm", "io-threads", "hz", "list-max-listpack-size",
         "unixsocketperm", "commandlog-request-larger-than", "maxmemory", "maxmemory-clients", "repl-backlog-ttl",
         "lfu-log-factor", "watchdog-period", "save",
     ]  # fmt: skip
@@ -91,8 +92,8 @@ def test_the_space_leaves_out_what_it_cannot_draw_and_what_is_excluded():
     # Excluded (rdbchecksum, acl-pubsub-default, maxmemory, ...), the deployment's own (unixsocketperm), protected,
     # a string, multi-argument, special, or a number without known bounds (watchdog-period) are not in it.
     assert set(space) == {
-        "lazyfree-lazy-eviction", "io-threads-always-active", "maxmemory-policy", "io-threads",
-        "list-max-listpack-size", "commandlog-request-larger-than", "lfu-log-factor",
+        "lazyfree-lazy-eviction", "io-threads-always-active", "forkless-infrastructure-enabled", "maxmemory-policy",
+        "forkless-policy", "io-threads", "list-max-listpack-size", "commandlog-request-larger-than", "lfu-log-factor",
     }  # fmt: skip
     assert not set(space) & set(EXCLUDED)
     # A hand-written pool draws hz, with values chosen for it.
@@ -248,7 +249,7 @@ def _spec(**config):
         "valkey.workload.config-churn",
         "config-churn",
         ComponentRole.WORKLOAD,
-        config={"changes": 0, "interval_s": 0.05, "op_timeout_s": 1.0, **config},
+        config={"changes": 0, "keys": {}, "interval_s": 0.05, "op_timeout_s": 1.0, **config},
     )
 
 
@@ -281,6 +282,26 @@ def test_the_churn_sets_only_mutable_configs_of_the_space_the_planned_config_lea
     (evidence,) = result.evidence
     assert evidence.evidence_id == CHURN_EVIDENCE and evidence.value["errors"] == 0
     assert len(evidence.value["changes"]) == 40 and evidence.value["changes"][0]["reply"] == "OK"
+
+
+def test_the_churn_changes_the_keys_a_pool_drew_to_that_pools_values_where_the_plan_sets_them(tmp_path):
+    handle = _Deployment(stand_in_build(tmp_path / "tree"))
+    keys = {"maxmemory-policy": ["allkeys-lru", "volatile-lru"], "hash-max-listpack-entries": ["0", "512"]}
+    planned = {"valkey-0": {"maxmemory-policy": "noeviction", "hash-max-listpack-entries": "2"}, "valkey-1": {}}
+    result = _churn(_Context(handle, planned), _spec(changes=60, keys=keys))
+    assert result.status.value == "PASS" and len(handle.sets) == 60, result.summary
+    space = config_space.config_space([_table()])
+    pooled = [(instance_id, name, value) for instance_id, name, value in handle.sets if name in keys]
+    # A key comes from its pool's values, never from the table's rule, on every instance.
+    assert {instance_id for instance_id, _, _ in pooled} == {"valkey-0", "valkey-1"}
+    assert all(value in keys[name] for _, name, value in pooled)
+    assert {name for _, name, _ in pooled} == set(keys)
+    assert all(name in space and name not in planned[instance] for instance, name, _ in handle.sets if name not in keys)
+    # A build without a table still changes the keys.
+    handle = _Deployment(str(tmp_path / "nope"))
+    handle.binaries = {"valkey-0": str(tmp_path / "nope"), "valkey-1": str(tmp_path / "nope")}
+    _churn(_Context(handle, planned), _spec(changes=5, keys=keys))
+    assert len(handle.sets) == 5 and all(name in keys for _, name, _ in handle.sets)
 
 
 def test_the_churn_records_what_valkey_refused_and_what_did_not_answer_without_judging_it(tmp_path):

@@ -473,7 +473,7 @@ The Valkey components ship twelve fragments:
 | `valkey.psync` | `valkey.base` and a partial resync: writes for `disconnect_after_s` (input, default 1), then `valkey.reconnect-replicas` after `run-then-disconnect`, the `info` observer requiring `sync_partial_ok` to advance and `sync_full` not to, and the `logs` observer requiring both sides' PSYNC lines and forbidding a full resync; standalone or cluster with replicas |
 | `valkey.full-sync` | `valkey.base` and a forced full sync: writes for `run_before_sync_s` (input, default 1), then `change-replid` (`DEBUG CHANGE-REPL-ID`, which the `full-sync` startup overlay enables) and `valkey.reconnect-replicas` |
 | `valkey.command-table` | the `commands` workload ([`valkey.workload.command-table`](components.md#valkeyworkloadcommand-table)) at the input `command_rate` (default 0, which sends none); the `reply-schemas` oracle ([`valkey.oracle.reply-schema`](components.md#valkeyoraclereply-schema)), which holds its replies to Valkey's reply schemas; and the `command-metadata` oracle ([`valkey.oracle.command-metadata`](components.md#valkeyoraclecommand-metadata)), which holds the workload's first 1000 commands to the build's command metadata on private servers; random scenarios keep the default, so a batch turns them on for an experiment with a base (`experiment: {inputs: {command_rate: 200}}`). `valkey.cluster-chaos`, `valkey.replication-chaos`, and `valkey.cluster-partition` extend it |
-| `valkey.config-churn` | the `config-churn` workload ([`valkey.workload.config-churn`](components.md#valkeyworkloadconfig-churn)), which changes `config_changes` configs (input, 0 to 20, default 0) with `CONFIG SET` during the run; random scenarios draw how many |
+| `valkey.config-churn` | the `config-churn` workload ([`valkey.workload.config-churn`](components.md#valkeyworkloadconfig-churn)), which changes `config_changes` configs (input, 0 to 20, default 0) with `CONFIG SET` during the run; random scenarios draw how many. Its `config_churn_keys` input (`{pools: [valkey.pool.memory, valkey.pool.encodings, valkey.pool.cron]}`) gives it the keys the scenario drew from those pools, so it changes them too, to values of the same pools; the IO-thread pool is left out (an always-active IO thread costs about 0.4 of a core) |
 | `valkey.random` | only the server config pools of [random scenarios](#declaring-what-may-be-randomized) |
 | `valkey.profiles` | only the [search profiles](#legal-space-and-search-profiles); no experiment extends it |
 
@@ -615,6 +615,7 @@ metadata:
 | `[a, b, c]` or `{values: [a, b, c]}` | One of them, the first and last twice as often as the others. |
 | `{minimum: a, maximum: b}` | 40% of the time an edge (a, a+1, b-1, b, and 0 or 1 when in range), otherwise uniform, or log-uniform when b/a exceeds 1000. Integers for an `integer` input and for deployment fields. |
 | `{hook: <id>}` | Whatever the generator hook returns (inputs only). |
+| `{pools: [<pool id>, ...]}` | Nothing drawn (inputs only): each server config key the scenario drew from those pools (pools that list their keys), mapped to the values its pool lists, less the excluded ones. |
 
 An input the block does not name is drawn when it declares an `enum`
 (uniformly), is a `boolean`, or has both `minimum` and `maximum`; every other
@@ -667,6 +668,24 @@ each (a value list, drawn uniformly, or `{minimum, maximum, default}`), the
 generator draws which keys join (the dimension `pools.<id>.keys`, each key
 chosen by its name alone, so a key the hook adds changes no other key's draw),
 and such a pool comes after the pools that list their keys.
+
+A pool's `requires` names the values a server accepts at its start only with
+other configs set, and what each needs. Once every pool is drawn, an instance
+config that drew such a value takes what it needs, whatever was drawn for it
+(an exclusion of what it needs then excludes the value too):
+
+```yaml
+requires:
+  forkless-policy: {prefer-forkless: {forkless-infrastructure-enabled: "yes"}}
+```
+
+`valkey.pool.config-space` declares that one: Valkey refuses to start with
+`forkless-policy prefer-forkless` unless `forkless-infrastructure-enabled` is
+`yes` (`config.c` checks it once the whole config is read), so a scenario that
+draws `prefer-forkless` also starts with the forkless infrastructure, and one
+that draws the infrastructure alone lets the config churn turn forkless saves
+on at run time.
+
 `valkey.pool.config-space` names `valkey.generator.config-space`, which reads
 Valkey's own config table, `static_configs[]` in the `src/config.c` beside each
 binary the scenario runs (where `make` leaves `valkey-server`), so a config a

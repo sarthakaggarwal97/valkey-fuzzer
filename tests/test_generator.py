@@ -6,6 +6,7 @@ import random
 import pytest
 import yaml
 
+from valkey_fuzzer._data import to_plain_data
 from valkey_fuzzer.catalog import Catalog, register_valkey_components
 from valkey_fuzzer.components import EXPERIMENT_DIRECTORY, config_space, experiments
 from valkey_fuzzer.components.config_space import build_config_table
@@ -54,6 +55,12 @@ def _runtime(tmp_path, generator, *, inputs=_INPUTS, hooks=None, **experiment):
     catalog.load_experiment_directories([directory])
     catalog.freeze()
     return RunService(catalog=catalog)
+
+
+def _configs(deployment):
+    """The server config mappings of a generated deployment: the shared one and each role's."""
+
+    return [deployment.get("server_config") or {}, *(deployment.get("instance_configs") or {}).values()]
 
 
 def _generate(runtime, seed, **kwargs):
@@ -239,14 +246,92 @@ def test_a_hook_pool_draws_its_share_of_the_keys_its_hook_offers_each_chosen_by_
     assert derived.draws["pools.tests.pool.hooked.keys"] == ["tests-key-5", "tests-range"]
 
 
+def test_a_drawn_value_takes_the_configs_its_pool_requires_with_it(tmp_path):
+    """Known-bad: a value drawn without what the server needs at the start with it, which a server refuses."""
+
+    requires = {"tests-policy": {"needs": {"tests-base": "on", "tests-other": "1"}}}
+    pools = {
+        "tests.pool.required": {
+            "default": True,
+            "scope": ["deployment", "role"],
+            "tests-base": ["off", "on"],
+            "tests-policy": ["plain", "needs"],
+            "requires": requires,
+        }
+    }
+    runtime = _runtime(tmp_path, {"pools": pools}, inputs={"properties": {}})
+    seen = collections.Counter()
+    for seed in range(60):
+        generated = _generate(runtime, seed)
+        for config in _configs(generated.scenario["deployment"]):
+            if "tests-policy" not in config:
+                continue
+            seen[config["tests-policy"], config["tests-base"]] += 1
+            if config["tests-policy"] == "needs":
+                assert config["tests-base"] == "on" and config["tests-other"] == "1"
+            else:
+                assert "tests-other" not in config
+    # Whatever was drawn for tests-base, the value that needs it takes it; the other value leaves it as drawn.
+    assert seen.keys() == {("plain", "off"), ("plain", "on"), ("needs", "on")}
+    # An exclusion of what a value requires excludes the value too.
+    for seed in range(20):
+        generated = _generate(runtime, seed, excludes=(Exclusion.parse("server_config.tests-base=on"),))
+        assert all(config.get("tests-policy") != "needs" for config in _configs(generated.scenario["deployment"]))
+
+
+def test_a_pools_input_takes_the_keys_the_scenario_drew_from_those_pools_with_their_values(tmp_path):
+    pools = {
+        "tests.pool.churned": {
+            "default": True,
+            "scope": ["deployment", "role"],
+            "tests-a": ["1", "2", "3"],
+            "tests-b": ["x", "y"],
+            "tests-c": ["c"],
+            "tests-d": ["d"],
+        },
+        "tests.pool.listed": {"tests-b": ["listed"]},
+        "tests.pool.other": {"default": True, "tests-e": ["e"]},
+    }
+    inputs = {"properties": {"churned": {"type": "object", "default": {}}, "count": _INPUTS["properties"]["count"]}}
+    overlay = {"overlay_id": "c", "server_config": {"tests-c": "set"}}
+    block = {
+        "server_config": ["tests.pool.listed"],
+        "pools": pools,
+        "inputs": {"churned": {"pools": ["tests.pool.churned"]}},
+    }
+    runtime = _runtime(tmp_path, block, inputs=inputs, startup_overlays=[overlay])
+    excludes = (Exclusion.parse("server_config.tests-a=2"),)
+    for seed in range(10):
+        generated = _generate(runtime, seed, excludes=excludes)
+        # Not tests-b (the listed pool drew it), tests-c (the overlay sets it), or tests-e (another pool's).
+        churned = generated.scenario["experiment"]["inputs"]["churned"]
+        assert churned == generated.draws["inputs.churned"] == {"tests-a": ["1", "3"], "tests-d": ["d"]}
+    # A scenario derived from it takes the input anew when it draws an earlier dimension anew.
+    block = GeneratorBlock.parse(runtime.catalog.experiments.resolve("tests.random"), installed_pools(runtime.catalog))
+    kept = block.kept(generated.draws, "deployment.mode")
+    assert "inputs.churned" not in kept and "inputs.count" in kept
+    unknown = {"inputs": {"churned": {"pools": ["tests.pool.nope"]}}}
+    hooked = {"inputs": {"churned": {"pools": ["valkey.pool.config-space"]}}}
+    for generator, message in (
+        (unknown, r"names unknown pools \['tests.pool.nope'\]"),
+        (hooked, r"names pools \['valkey.pool.config-space'\] that list no keys"),
+        ({"inputs": {"churned": {"pools": []}}}, r"must list pool IDs"),
+        ({"inputs": {"absent": {"pools": ["valkey.pool.memory"]}}}, r"does not declare: \['absent'\]"),
+    ):
+        with pytest.raises(GeneratorError, match=message):
+            _generate(_runtime(tmp_path / message[:8], generator, inputs=inputs), 1)
+
+
 def test_every_shipped_experiment_draws_the_config_space_of_its_build_after_the_hand_written_pools(tmp_path):
     binary = stand_in_build(tmp_path / "tree")
     service = generator_service()
     pools = installed_pools(service.catalog)
     listed = {key for pool in pools.values() if "hook" not in pool for key in pool} - {"default", "scope"}
     table_only = set(config_space.config_space([build_config_table(binary)])) - listed
-    assert table_only == {"lfu-log-factor", "commandlog-request-larger-than"}
-    drawn = set()
+    assert table_only == {
+        "lfu-log-factor", "commandlog-request-larger-than", "forkless-infrastructure-enabled", "forkless-policy",
+    }  # fmt: skip
+    drawn, preferred = set(), 0
     for experiment in EXPERIMENTS:
         spec = service.catalog.experiments.resolve(experiment)
         overlaid = {key for overlay in spec.startup_overlays for key in overlay.server_config}
@@ -255,7 +340,12 @@ def test_every_shipped_experiment_draws_the_config_space_of_its_build_after_the_
             keys = set(generated.draws["pools.valkey.pool.config-space.keys"])
             assert keys <= table_only - overlaid, experiment
             drawn |= keys
-    assert drawn == table_only
+            # Valkey refuses to start with prefer-forkless unless forkless-infrastructure-enabled is yes.
+            for config in _configs(generated.scenario["deployment"]):
+                if config.get("forkless-policy") == "prefer-forkless":
+                    assert config["forkless-infrastructure-enabled"] == "yes", experiment
+                    preferred += 1
+    assert drawn == table_only and preferred
 
 
 def test_every_shipped_experiment_draws_every_key_of_the_default_pools_its_overlays_leave():
@@ -279,6 +369,25 @@ def test_every_shipped_experiment_draws_every_key_of_the_default_pools_its_overl
             for config in (deployment.get("server_config") or {}, *(deployment.get("instance_configs") or {}).values()):
                 drawn |= set(config) & keys
         assert drawn == keys - overlaid, experiment
+
+
+def test_every_shipped_experiment_churns_the_keys_it_drew_from_the_pools_but_the_io_threads():
+    service = generator_service()
+    pools = installed_pools(service.catalog)
+    churned = {
+        key: pools[pool_id][key]
+        for pool_id in ("valkey.pool.memory", "valkey.pool.encodings", "valkey.pool.cron")
+        for key in set(pools[pool_id]) - {"default", "scope"}
+    }
+    for experiment in EXPERIMENTS:
+        spec = service.catalog.experiments.resolve(experiment)
+        overlaid = {key for overlay in spec.startup_overlays for key in overlay.server_config}
+        for seed in range(3):
+            plan = service.generate(seed, experiment=experiment).plan
+            (churn,) = [component for component in plan.components if component.use == "valkey.workload.config-churn"]
+            keys = to_plain_data(churn.config["keys"])
+            assert keys == {key: values for key, values in churned.items() if key not in overlaid}, experiment
+            assert not set(keys) & set(pools["valkey.pool.io-threads"]), experiment
 
 
 @pytest.mark.parametrize(
@@ -305,6 +414,8 @@ def test_every_shipped_experiment_draws_every_key_of_the_default_pools_its_overl
         ({"pools": {"tests.pool": {"hook": "tests.generator.x", "share": 0.5, "hz": ["1"]}}}, r"lists no keys"),
         ({"pools": {"tests.pool": {"share": 0.5, "hz": ["1"]}}}, r"share needs a hook"),
         ({"pools": {"tests.pool": {"hook": "tests.generator.x", "share": 2}}}, r"share must be a number in \(0, 1\]"),
+        ({"pools": {"tests.pool": {"hz": ["1"], "requires": {"hz": ["1"]}}}}, r"requires must map a key"),
+        ({"pools": {"tests.pool": {"hz": ["1"], "requires": {"hz": {"1": {}}}}}}, r"requires must map a key"),
         ({"inputs": {"count": {"minimum": 0, "maximum": 5, "default": 9}}}, r"default within \[minimum, maximum\]"),
     ],
 )

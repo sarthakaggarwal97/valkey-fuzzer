@@ -35,12 +35,25 @@ returns the keys it offers for the scenario drawn so far, each with a rule
 (a value list is drawn uniformly), and the pool's ``share`` of them is drawn
 (the dimension ``pools.<id>.keys``, each key chosen by its name alone, so a
 key the hook adds changes no other key's draws); such a pool comes after the
-pools that list their keys. A key one of the experiment's startup overlays
+pools that list their keys. A pool's ``requires`` names the values a server
+accepts at its start only with other configs set, and what they need::
+
+    requires:
+      forkless-policy: {prefer-forkless: {forkless-infrastructure-enabled: "yes"}}
+
+once every pool is drawn, an instance config that drew such a value takes what
+it needs, whatever was drawn for it. A key one of the experiment's startup overlays
 sets is never drawn, since the overlay would override it, and neither is a
 key an earlier pool of the block already drew, so an experiment's listed
 pools win over the default ones; when the overlay sets it from an input
 (``{$ref: inputs.<name>}``), an exclusion of a ``server_config.<key>`` value
 also excludes it from that input's draws.
+
+An input written ``{pools: [<pool id>, ...]}`` is not drawn: it maps each
+server config key the scenario drew from those pools (pools that list their
+keys) to the values its pool lists, less the excluded ones. The config-churn
+workload takes it, to change those keys at run time to values the start could
+have drawn.
 
 Hooks are the catalog's generator registrations
 (:class:`~valkey_fuzzer.registrations.GeneratorRegistration`), each a
@@ -107,7 +120,7 @@ _BLOCK_FIELDS = ("hook", "deployment", "inputs", "server_config", "reject", "poo
 _PATH_NAMESPACES = ("experiment", "inputs", "deployment", "server_config")
 _SCOPES = ("deployment", "role")
 # Pool keys that configure the pool instead of naming a server config.
-_POOL_RESERVED = ("scope", "default", "hook", "share")
+_POOL_RESERVED = ("scope", "default", "hook", "share", "requires")
 
 
 class GeneratorError(ValueError):
@@ -353,6 +366,9 @@ def _pool(pool_id: str, document: Any) -> dict[str, Any]:
             if not is_number(values) or not 0 < values <= 1:
                 raise GeneratorError(f"{where}.share must be a number in (0, 1]")
             continue
+        if key == "requires":
+            _check_requires(values, f"{where}.requires")
+            continue
         if not isinstance(values, (list, tuple)) or not values:
             raise GeneratorError(f"{where}.{key} must be a non-empty list")
         if key == "scope" and not set(values) <= set(_SCOPES):
@@ -366,6 +382,20 @@ def _pool(pool_id: str, document: Any) -> dict[str, Any]:
     elif not listed:
         raise GeneratorError(f"{where} must map server config keys to value lists")
     return dict(document)
+
+
+def _check_requires(document: Any, where: str) -> None:
+    """A pool's ``requires``: config key to value to the configs that value needs set with it."""
+
+    problem = f"{where} must map a key to its values, each to the configs it needs set with it"
+    if not isinstance(document, Mapping) or not document:
+        raise GeneratorError(problem)
+    for values in document.values():
+        if not isinstance(values, Mapping) or not values:
+            raise GeneratorError(problem)
+        for needs in values.values():
+            if not isinstance(needs, Mapping) or not needs:
+                raise GeneratorError(problem)
 
 
 def _fragment_tables(catalog: Catalog, key: str, what: str) -> dict[str, Any]:
@@ -544,6 +574,8 @@ class GeneratorBlock:
     overlay_keys: frozenset = field(default_factory=frozenset)
     # Input name to the server_config.<key> paths its value sets through an overlay.
     input_configs: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    # Input name to the pools whose drawn keys, with their values, it takes ({pools: [...]}).
+    pool_inputs: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
     @property
     def hook_ids(self) -> list[str]:
@@ -594,6 +626,29 @@ class GeneratorBlock:
             key=lambda pool_id: ("hook" in experiment_pools[pool_id], pool_id),
         )
 
+        inputs = document.get("inputs") or {}
+        pool_inputs: dict[str, tuple[str, ...]] = {}
+        if isinstance(inputs, Mapping):
+            declared = to_plain_data(spec.inputs).get("properties") or {}
+            for name, rule in inputs.items():
+                if not (isinstance(rule, Mapping) and set(rule) == {"pools"}):
+                    continue
+                location = f"{where}.inputs.{name}.pools"
+                pool_ids = rule["pools"]
+                if not isinstance(pool_ids, (list, tuple)) or not pool_ids:
+                    raise GeneratorError(f"{location} must list pool IDs")
+                unknown = [pool_id for pool_id in pool_ids if pool_id not in experiment_pools]
+                if unknown:
+                    raise GeneratorError(f"{location} names unknown pools {unknown}")
+                hooked = [pool_id for pool_id in pool_ids if "hook" in experiment_pools[pool_id]]
+                if hooked:
+                    raise GeneratorError(f"{location} names pools {hooked} that list no keys")
+                if name in declared:
+                    pool_inputs[name] = tuple(pool_ids)
+            inputs = {name: rule for name, rule in inputs.items() if name not in pool_inputs}
+        input_rules = _input_rules(spec, inputs, f"{where}.inputs")
+        input_rules.update(dict.fromkeys(pool_inputs))
+
         reject = document.get("reject") or []
         if not isinstance(reject, (list, tuple)) or not all(isinstance(rule, Mapping) and rule for rule in reject):
             raise GeneratorError(f"{where}.reject must be a list of non-empty {{path: value}} mappings")
@@ -614,12 +669,13 @@ class GeneratorBlock:
             modes=mode_rule,
             deployment=_rules(deployment, f"{where}.deployment"),
             mode_deployment=mode_deployment,
-            inputs=_input_rules(spec, document.get("inputs") or {}, f"{where}.inputs"),
+            inputs=input_rules,
             pools=tuple((pool_id, experiment_pools[pool_id]) for pool_id in selected),
             reject=tuple(dict(rule) for rule in reject),
             hook=hook,
             overlay_keys=overlay_keys,
             input_configs=input_configs,
+            pool_inputs=pool_inputs,
         )
 
     # -- drawing --------------------------------------------------------------
@@ -699,7 +755,23 @@ class GeneratorBlock:
             draws[dimension] = sorted(keys)
             return {key: _hook_rule(documents[key], f"{where}.{key}") for key in keys}
 
-        self._draw_pools(deployment, draw, offered)
+        sources = self._draw_pools(deployment, draw, offered)
+        pools = dict(self.pools)
+        for name, pool_ids in sorted(self.pool_inputs.items()):
+            dimension = f"inputs.{name}"
+            if dimension in pinned:
+                inputs[name] = copy.deepcopy(pinned[dimension])
+            else:
+                inputs[name] = {
+                    key: [
+                        value
+                        for value in pools[pool_id][key]
+                        if not any(item.matches(value) for item in _excluded(f"server_config.{key}", excludes))
+                    ]
+                    for key, pool_id in sorted(sources.items())
+                    if pool_id in pool_ids
+                }
+            draws[dimension] = copy.deepcopy(inputs[name])
         inputs.update(
             (name, draw(rule, f"inputs.{name}"))
             for name, rule in sorted(self.inputs.items())
@@ -736,6 +808,7 @@ class GeneratorBlock:
             return dict(draws)
         order = list(draws)
         hooked = {"hook"} | {f"inputs.{name}" for name, rule in self.inputs.items() if rule is not None and rule.hook}
+        hooked |= {f"inputs.{name}" for name in self.pool_inputs}
         after = order.index(dimension) if dimension in order else len(order)
         return {
             name: draws[name]
@@ -748,9 +821,14 @@ class GeneratorBlock:
         deployment: dict[str, Any],
         draw: Callable[[_Rule, str], Any],
         offered: Callable[[str, Mapping[str, Any], set[str]], Mapping[str, _Rule]],
-    ) -> None:
+    ) -> dict[str, str]:
+        """Draws every pool's keys into ``deployment``, then what the drawn values require; returns the pool each
+        drawn key came from."""
+
         roles = ["primary"] + (["replica"] if deployment.get("replicas_per_primary", 0) else [])
         drawn: set[str] = set()
+        sources: dict[str, str] = {}
+        required: list[tuple[dict[str, Any], Mapping[str, Any]]] = []
         for pool_id, pool in self.pools:
             scope = draw(_Rule.uniform(pool.get("scope", ["deployment"])), f"pools.{pool_id}.scope")
             rules = offered(pool_id, pool, self.overlay_keys | drawn)
@@ -768,6 +846,13 @@ class GeneratorBlock:
                     except GeneratorError:
                         # Every value excluded: the server's own default applies.
                         continue
+                    sources[key] = pool_id
+                    needs = (pool.get("requires") or {}).get(key, {}).get(str(config[key]))
+                    if needs:
+                        required.append((config, needs))
+        for config, needs in required:
+            config.update(copy.deepcopy(dict(needs)))
+        return sources
 
     def rejected(self, plan: ExecutionPlan, excludes: Sequence[Exclusion]) -> Optional[str]:
         """Why the compiled candidate is not acceptable, or None."""
