@@ -88,7 +88,8 @@ assumptions:
     it (ClaimReachesReplica = TRUE), as legacy CLUSTER SETSLOT replicates to
     the replicas first. Valkey sends the claim to the replica on the cluster
     bus only; SYNCSLOTS FINISH in the replication stream shows the keys but
-    does not change the replica's view of the owner.
+    does not change the replica's view of the owner. Reproduced as a bug:
+    sarthakaggarwal97/valkey-fuzzer#140.
   - >-
     The target's replica receives everything the target wrote to it before
     the target crashed, and reads every bus message that reaches it before it

@@ -133,3 +133,23 @@ def test_a_cancel_after_the_grant_leaves_two_writers():
     steps = [state.action for state in result.trace]
     # The target claimed the slot when it read FAILOVER-GRANTED; the cancel then unpaused the source.
     assert steps[-3:] == ["SGrant", "TClaim", "Cancel"]
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not _tla_jar() or not shutil.which("java"), reason="needs java and TLA2TOOLS_JAR")
+def test_a_replica_promoted_without_the_claim_deletes_the_imported_slot():
+    from valkey_fuzzer.spec import TlaTools
+    from valkey_fuzzer.spec.check import run_control
+
+    bundle = load_bundle("slot-migration")
+    result, _ = run_control(bundle, bundle.control("replica_misses_claim"), TlaTools.locate(_tla_jar(), workers="1"))
+
+    assert (result.violation, result.violated) == ("invariant", "NoAckedWriteLost")
+    steps = [state.action for state in result.trace]
+    # The trace issue #140 reproduces on unstable: the source learned the claim and deleted its keys, the target
+    # died, its claim to the replica was lost, and the replica, promoted with the source as owner in its view,
+    # deleted the keys it had applied.
+    assert "TClaim" in steps and "RApply" in steps[steps.index("TClaim") :]
+    assert steps[-3:] == ["CrashT", "LoseBus", "Promote"]
+    last = result.trace[-1].values
+    assert last["view"]["R"]["owner"] == "S" and last["data"]["S"] == () and last["data"]["R"] == ()
