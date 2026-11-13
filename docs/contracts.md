@@ -87,6 +87,19 @@ The rules behind them:
   A forbidden log pattern matched by `valkey.observer.log` is no crash: the
   observer records it as evidence, and `valkey.oracle.liveness` fails the run
   on it.
+- **A crash is a finding even when the run failed before its oracles.** A
+  run that failed from its provision on (an exception, a component that
+  returned `ERROR`, an oracle that could not tell) gets a post-mortem before
+  the deployment is cleaned up: each oracle without a verdict that
+  implements `post_mortem` judges the log files of every process the
+  deployment provider started in the run (its `log_files` hook), a failed
+  provision's included. A `FAIL` that reports a crash then makes the run
+  `FAIL`, with the run's error kept in the diagnostics, and its failure
+  signature is the crash; `valkey.oracle.liveness` reports a crash or
+  sanitizer report exactly as it does after a run. Logs without one leave
+  the `ERROR` as it was: a port in use or a timeout is the host's error, not
+  the server's. A crash an action reported stands over a later failure of
+  the run in the same way.
 - **A failed cleanup after the oracles** (the deployment's or the
   environment's) cannot change what an oracle saw: a trusted `FAIL` stays
   `FAIL` with the cleanup error in the diagnostics, and any other run is

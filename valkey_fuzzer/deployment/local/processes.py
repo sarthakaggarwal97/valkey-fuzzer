@@ -259,6 +259,8 @@ class ProcessManager:
         self._extra_deployment_dirs: set[str] = set()
         # Deployment directories that hold this process's owner tag.
         self._tagged_dirs: set[str] = set()
+        # The log file of every instance this manager created one for, whether or not it is still running.
+        self.log_files: dict[str, str] = {}
 
     @property
     def spawned_instances(self) -> list[InstanceInfo]:
@@ -310,6 +312,7 @@ class ProcessManager:
 
         # One file per deployment: concurrent runs of one seed must not share a log.
         log_file = os.path.join(log_dir, f"{self.seed}-{self.deployment_id}-{instance_id}.log")
+        self.log_files[instance_id] = log_file
         return instance_data_dir, log_file
 
     def build_instance_command(

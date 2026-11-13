@@ -14,6 +14,7 @@ from valkey_fuzzer import deadlines
 from valkey_fuzzer import runner as runner_module
 from valkey_fuzzer.catalog import ComponentRegistry
 from valkey_fuzzer.declarations import Declarations, EvidenceDeclaration
+from valkey_fuzzer.minimize import failure_signature
 from valkey_fuzzer.plan import ComponentSpec, EvidenceRequirement, ExecutionPlan, ExperimentSpec, RunMode
 from valkey_fuzzer.protocols import ComponentRole, component_artifact_dir
 from valkey_fuzzer.results import ComponentResult, ComponentStatus, Evidence, OutcomeStatus
@@ -383,6 +384,89 @@ def test_a_failed_provision_is_rolled_back_and_a_failed_rollback_does_not_hide_i
     assert outcome.diagnostics["error"]["phase"] == "deployment.provision"
     phases = [item["phase"] for item in outcome.diagnostics.get("cleanup_errors", ())]
     assert phases == (["rollback"] if rollback else [])
+
+
+class _Judges:
+    """Oracles that pass, but ``data`` raises; a post-mortem finds a crash when a log file the provider lists is
+    named "crashed"."""
+
+    def __init__(self, calls):
+        self.calls = calls
+
+    def evaluate(self, context, spec, evidence):
+        self.calls.append(f"{spec.id}.evaluate")
+        if spec.id == "data":
+            raise RuntimeError("cannot read the dataset")
+        return ComponentResult(spec.id, PASS, "alive")
+
+    def post_mortem(self, context, spec, logs):
+        self.calls.append(f"{spec.id}.post_mortem")
+        if any("crashed" in files for files in logs.values()):
+            crashes = {"valkey-0": "server.c:4334:5: runtime error: signed integer overflow"}
+            return ComponentResult(
+                spec.id, FAIL, "valkey-0: crash report", diagnostics={"crashes": crashes}, crash=True
+            )
+        return None
+
+
+@pytest.mark.parametrize("failed", ["provision", "action", "oracle"])
+@pytest.mark.parametrize("logs", ["crashed", "clean", "unreadable"])
+def test_a_crash_the_post_mortem_finds_in_a_failed_run_is_its_verdict(failed, logs):
+    """A run that failed before its oracles judged it (a server that crashed while it was provisioned or
+    restarted) is judged from the provider's log files by the oracles that could not judge it: a crash is a
+    trusted FAIL whose signature is the crash; without one, or when the logs cannot be listed, the error stands."""
+
+    calls = []
+    provider = _provider(
+        calls, **({"provision": RuntimeError("valkey-0 failed to start")} if failed == "provision" else {})
+    )
+
+    def log_files(context):
+        calls.append("standalone.log_files")
+        if logs == "unreadable":
+            raise OSError("no logs")
+        return {"valkey-0": (logs, f"{logs}.stdio")}
+
+    provider.log_files = log_files
+    oracles = (_spec(ORACLE, "data"),) if failed == "oracle" else ()
+    plan = _plan((_spec(ACTION, "act"), *oracles, _spec(ORACLE, "liveness")))
+    action = _Component(calls, error=RuntimeError("restart of valkey-0 failed") if failed == "action" else None)
+
+    outcome = _execute(plan, (ACTION, lambda: action), (ORACLE, lambda: _Judges(calls)), provider=provider)
+
+    # Only the oracles without a verdict are asked, after the teardown and before the deployment's cleanup.
+    judged = "data" if failed == "oracle" else "liveness"
+    tail = ["standalone.log_files"] + ([] if logs == "unreadable" else [f"{judged}.post_mortem"])
+    if failed != "provision":  # a failed provision was rolled back: there is no deployment to clean up
+        tail.append("standalone.cleanup")
+    assert calls[-len(tail) :] == tail
+    assert outcome.diagnostics["error"]["phase"] == {
+        "provision": "deployment.provision", "action": "action.run", "oracle": "oracle.evaluate"
+    }[failed]  # fmt: skip
+    signature = failure_signature(outcome)
+    if logs == "crashed":
+        assert outcome.status is OutcomeStatus.FAIL and outcome.summary == f"{TRUSTED}: {judged}"
+        assert signature["crashes"] == ["server.c:N:N: runtime error: signed integer overflow"]
+    else:
+        assert outcome.status is OutcomeStatus.ERROR and outcome.summary.startswith("runner execution failed")
+        assert signature["error_type"] and not signature["crashes"]
+        owners = [(item["owner"], item["phase"]) for item in outcome.diagnostics.get("cleanup_errors", ())]
+        assert owners == ([("deployment", "log files")] if logs == "unreadable" else [])
+
+
+def test_a_crash_an_action_found_stands_when_the_run_fails_after_it():
+    class Actions:
+        def run(self, context, spec):
+            if spec.id == "after":
+                raise RuntimeError("the next action could not reach the server")
+            return ComponentResult(
+                spec.id, FAIL, "valkey-0 crashed", diagnostics={"crashes": {"valkey-0": "x"}}, crash=True
+            )
+
+    outcome = _execute(_plan((_spec(ACTION, "crash"), _spec(ACTION, "after"))), (ACTION, Actions))
+
+    assert outcome.status is OutcomeStatus.FAIL and outcome.summary == f"{TRUSTED}: crash"
+    assert outcome.diagnostics["error"]["phase"] == "action.run"
 
 
 @pytest.fixture

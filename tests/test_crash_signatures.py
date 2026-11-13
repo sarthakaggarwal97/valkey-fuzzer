@@ -1,10 +1,12 @@
 """One server crash is one failure signature: the liveness oracle names the crash cause, and batches and the
 minimizer group runs by it whatever experiment hit it and whatever failed after it."""
 
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from valkey_fuzzer.batch import signature_key, signature_label
 from valkey_fuzzer.components.oracles import LivenessOracle
@@ -13,7 +15,8 @@ from valkey_fuzzer.plan import ComponentSpec, DeploymentProviderIdentity, Eviden
 from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.results import ComponentResult, ComponentStatus, Evidence, OutcomeStatus, RunOutcome
 
-from .valkey_experiments_support import fake_context, resolved
+from .live_support import BINARY, explain, free_base_port
+from .valkey_experiments_support import fake_context, resolved, valkey_service
 
 CRASHES = Path(__file__).resolve().parent / "fixtures" / "crashes"
 ASSERTION = "bgiteration.c:2699 'wasAdded' is not true"
@@ -180,3 +183,101 @@ def test_one_crash_is_one_signature_whatever_experiment_hit_it_and_whatever_fail
     )[1]
     assert len({signature_key(experiment, item) for item in (reference, plain, elsewhere)}) == 3
     assert not same_failure(reference, plain) and not same_failure(plain, reference)
+
+
+# UBSan's report of fuzzer issue #148 at startup (a build with -fno-sanitize-recover exits on it), on stderr.
+OVERFLOW = (
+    "cluster_legacy.c:1136:20: runtime error: signed integer overflow: 9223372036854775807 * 1000 cannot be "
+    "represented in type 'long long int'"
+)
+OVERFLOW_CAUSE = (
+    "cluster_legacy.c:N:N: runtime error: signed integer overflow: N * N cannot be represented in type 'long long int'"
+)
+# A server that cannot start, as Valkey logs it before exit(1): an error of the host, not of the server.
+PORT_IN_USE = "# Failed listening on port 40000 (tcp), aborting."
+
+
+def _fake_server(path, real_start, *, real=None):
+    """A valkey-server at ``path``: a real start (one with ``--logfile``) runs the shell ``real_start``; a config
+    probe (``--port -1``) and ``--version`` go to the ``real`` binary, or are answered as Valkey answers them."""
+
+    if real:
+        other = f'exec {real} "$@"'
+    else:
+        other = r'''case " $* " in *" --port -1 "*) echo ">>> 'port \"-1\"'"; exit 1;; esac; echo "v=9.1.0 sha=0:0"'''
+    path.write_text(f'#!/bin/sh\ncase " $* " in *" --logfile "*) {real_start};; esac\n{other}\n')
+    path.chmod(0o755)
+    return str(path)
+
+
+def _run_crash_experiment(tmp_path, binary):
+    """A run of an experiment that restarts valkey-0 and then judges liveness, on a standalone deployment of
+    ``binary``."""
+
+    directory = tmp_path / "experiments"
+    directory.mkdir()
+    experiment = {
+        "id": "tests.crash-before-ready",
+        "mode": "smoke",
+        "deployment": {"modes": ["standalone"]},
+        "components": [
+            {"use": "valkey.action.restart-instance", "id": "restart", "config": {"instance": "valkey-0"}},
+            {"use": "valkey.oracle.liveness", "id": "liveness"},
+        ],
+    }
+    (directory / "tests.crash-before-ready.yaml").write_text(yaml.safe_dump(experiment))
+    runtime = valkey_service(experiment_directories=(str(directory),), artifact_dir=str(tmp_path / "artifacts"))
+    scenario = {
+        "scenario_id": "crash-before-ready",
+        "seed": 7,
+        "experiment": {"id": "tests.crash-before-ready", "inputs": {}},
+        "deployment": {
+            "mode": "standalone",
+            "base_port": free_base_port(),
+            "valkey_binary": binary,
+            "base_data_dir": str(tmp_path / "data"),
+        },
+    }
+    return runtime.runner.run(runtime.compile(scenario), deadline=time.monotonic() + 120)
+
+
+@pytest.mark.parametrize(
+    ("real_start", "crashed"),
+    [
+        (f'echo "{OVERFLOW}" >&2; exit 1', True),
+        # The log file is the argument after --logfile.
+        (f'while [ "$1" != --logfile ]; do shift; done; echo "{PORT_IN_USE}" >> "$2"; exit 1', False),
+    ],
+    ids=["sanitizer-report", "port-in-use"],
+)
+def test_a_server_that_crashes_while_the_deployment_is_provisioned_fails_the_run_with_its_crash(
+    tmp_path, real_start, crashed
+):
+    # The provision raised "Instance valkey-0 failed to start": the run was an ERROR, every crash at startup one
+    # signature with every port in use. Now the liveness oracle's post-mortem finds the crash report.
+    outcome = _run_crash_experiment(tmp_path, _fake_server(tmp_path / "valkey-server", real_start))
+
+    assert outcome.diagnostics["error"]["phase"] == "deployment.provision"
+    signature = failure_signature(outcome)
+    if crashed:
+        assert outcome.status is OutcomeStatus.FAIL, explain(outcome)
+        (liveness,) = (item for item in outcome.component_results if item.component_id == "liveness")
+        assert liveness.crash and liveness.summary == f"valkey-0: crash report ({OVERFLOW})"
+        assert signature["crashes"] == [OVERFLOW_CAUSE]
+    else:
+        assert outcome.status is OutcomeStatus.ERROR, explain(outcome)
+        assert not signature["crashes"] and signature["error_type"].endswith(".LocalDeploymentError")
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not BINARY, reason="needs valkey-server (VALKEY_FUZZER_BINARY or on PATH)")
+def test_a_server_that_crashes_when_an_action_restarts_it_fails_the_run_with_its_crash(tmp_path):
+    # rolling-upgrade and restart-instance returned ERROR ("failed to restart instance"), and the run never
+    # reached its oracles. The server starts for real the first time and reports a crash the second.
+    started = tmp_path / "started"
+    real_start = f'if [ -e {started} ]; then echo "{OVERFLOW}" >&2; exit 1; fi; touch {started}'
+    outcome = _run_crash_experiment(tmp_path, _fake_server(tmp_path / "valkey-server", real_start, real=BINARY))
+
+    assert outcome.status is OutcomeStatus.FAIL, explain(outcome)
+    assert outcome.diagnostics["error"]["phase"] == "action.run"
+    assert failure_signature(outcome)["crashes"] == [OVERFLOW_CAUSE]

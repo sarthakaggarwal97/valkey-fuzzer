@@ -6,7 +6,7 @@ The workload-ledger oracle lives in :mod:`.ledger` and the dataset oracles in
 
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, Optional
 
 from valkey_fuzzer.declarations import Declarations
@@ -165,6 +165,17 @@ def fatal_exit(path: str) -> Optional[str]:
     return last
 
 
+def _crash_reports(files: Mapping[str, Sequence[Optional[str]]], patterns: Sequence[str]) -> dict[str, list[str]]:
+    """Each instance's crash report lines (:func:`scan_for_crashes`) in its ``files``: its log, then its process
+    output, where sanitizers report (stderr)."""
+
+    crashes: dict[str, list[str]] = {}
+    for instance_id, paths in files.items():
+        for lines in scan_for_crashes({path: path for path in paths if path}, patterns).values():
+            crashes.setdefault(instance_id, []).extend(lines)
+    return crashes
+
+
 _HEALTHY = ("ok", "stopped on purpose")
 
 
@@ -183,7 +194,27 @@ class LivenessOracle:
     teardown before the oracles failed. A ``valkey.log.forbidden-match`` from a
     ``valkey.observer.log`` observer fails the run too, naming the patterns and
     the instances that logged them; on its own that is no crash.
+
+    A run that failed before the oracles judged it (a server that crashed while the deployment was provisioned or
+    an action restarted it) still gets its crash reports judged: :meth:`post_mortem`.
     """
+
+    def post_mortem(self, context: Any, spec: ComponentSpec, logs: Mapping[str, Sequence[str]]):
+        """The crash reports in the files each instance of a run that failed wrote (``logs``, from the deployment
+        provider), as :meth:`evaluate` reports them: a FAIL marked ``crash``. None without one: a server that
+        is gone without a crash report (a port in use, a fatal exit) leaves the run's error to stand."""
+
+        crashes = _crash_reports(logs, CRASH_PATTERNS + tuple(spec.config["extra_crash_patterns"]))
+        if not crashes:
+            return None
+        causes = {instance_id: crash_cause(lines) for instance_id, lines in crashes.items()}
+        return make_result(
+            spec,
+            ComponentStatus.FAIL,
+            "; ".join(f"{instance_id}: crash report ({cause})" for instance_id, cause in causes.items()),
+            diagnostics={"crash_reports": crashes, "crashes": causes},
+            crash=True,
+        )
 
     def evaluate(self, context: Any, spec: ComponentSpec, evidence: Sequence[Evidence]):
         config = spec.config
@@ -215,17 +246,16 @@ class LivenessOracle:
             else "process not running"
             for item in ids
         }
-        patterns = CRASH_PATTERNS + tuple(config["extra_crash_patterns"])
-        crashes = scan_for_crashes(
-            {instance.instance_id: handle.log_file(instance.instance_id) for instance in handle.instances}, patterns
+        crashes = _crash_reports(
+            {
+                instance.instance_id: (
+                    handle.log_file(instance.instance_id),
+                    handle.process_output_file(instance.instance_id),
+                )
+                for instance in handle.instances
+            },
+            CRASH_PATTERNS + tuple(config["extra_crash_patterns"]),
         )
-        # Sanitizers report on stderr, which the deployment captures separately.
-        outputs = {
-            instance.instance_id: handle.process_output_file(instance.instance_id) for instance in handle.instances
-        }
-        found = scan_for_crashes({key: path for key, path in outputs.items() if path}, patterns)
-        for instance_id, lines in found.items():
-            crashes.setdefault(instance_id, []).extend(lines)
         problems = [f"{instance_id}: {reason}" for instance_id, reason in status.items() if reason not in _HEALTHY]
         causes = {instance_id: crash_cause(lines) for instance_id, lines in crashes.items()}
         problems += [f"{instance_id}: crash report ({cause})" for instance_id, cause in causes.items()]
