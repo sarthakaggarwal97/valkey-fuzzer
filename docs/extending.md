@@ -185,7 +185,7 @@ method returns a `ComponentResult`, usually built with `make_result`.
 | observer | `start(context, spec)`, `stop(context, spec)` | from start until teardown |
 | fault | `inject(context, spec)`, `recover(context, spec)` | `inject` installs the trigger and the fault is injected when it fires; `recover` undoes it at teardown and fails if it never fired |
 | action | `run(context, spec)` | once, in dependency order |
-| oracle | `evaluate(context, spec, evidence)` | after teardown, with all evidence recorded so far |
+| oracle | `evaluate(context, spec, evidence)`, optionally `post_mortem(context, spec, logs)` | after teardown, with all evidence recorded so far; `post_mortem` instead when the run failed before the oracles judged it (or this one could not tell): `logs` maps each process the deployment provider started to its log files, and the result, or None, is its verdict ([Base contracts](contracts.md#outcomes-and-verdicts)) |
 
 This action increments a key and records the result; the oracle checks it:
 
@@ -468,6 +468,7 @@ A deployment provider starts the system under test for one deployment mode:
 | `provision(context)` | Start the deployment and return a `ProvisionedDeployment` with its `services` (what components see under `context.services["deployment"]`), report-safe `metadata`, and optionally `valkey_sha`. |
 | `rollback(context)` | Clean up after a failed `provision`. |
 | `cleanup(context, deployment)` | Clean up after a successful one. |
+| `log_files(context)` | Optional: each process the provider started in the run, a failed provision's included, to the files it logged to, which outlive the rollback and cleanup; the oracles' post-mortem reads them. |
 
 A `DeploymentProviderRegistration` has `deployment_mode`, `provider_id`, and
 `factory`, plus an optional `implementation_digest`, an optional pure

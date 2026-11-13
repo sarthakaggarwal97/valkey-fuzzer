@@ -909,7 +909,7 @@ fails.
 | `wait_ready` | boolean | `true` | Wait until the instance is ready for its role. |
 
 `FAIL` when the instance does not exit; `ERROR` when it does not come back
-(`valkey.oracle.liveness` judges a server that crashed) or the selector
+(the post-mortem of `valkey.oracle.liveness` judges a server that crashed) or the selector
 matches no live instance. Evidence: `valkey.instance.restarted`
 (instance ID and new PID).
 
@@ -1482,6 +1482,14 @@ oracles failed (see [Base contracts](contracts.md#outcomes-and-verdicts)).
 And it fails when a [`valkey.observer.log`](#valkeyobserverlog) in the run
 recorded `valkey.log.forbidden-match`, naming each pattern, the instances
 that logged it, and the observer; that alone is no crash.
+
+A run that failed before the oracles judged it, such as one whose server
+crashed while the deployment was provisioned or an action restarted it, gets
+a post-mortem (see [Base contracts](contracts.md#outcomes-and-verdicts)):
+the same scan of every instance's log and output, the failed provision's
+included, and the same crash `FAIL` with the same causes. A server gone
+without a crash report (a port in use, a fatal exit, a timeout) leaves the
+run's `ERROR` as it was.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |

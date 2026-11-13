@@ -4,9 +4,11 @@ Only an oracle or action FAIL judges the system under test, and only a trusted o
 is not trusted when it depends on a component that does not judge and did not do its part (it returned ERROR
 or FAIL: a fault not injected, an observer that could not read the server), nor, for an oracle, when a
 teardown before the oracles failed or left a change for the runner to undo, unless it reports a crash
-(:attr:`~valkey_fuzzer.results.ComponentResult.crash`). Without a trusted FAIL, anything else that went
-wrong makes the run ERROR: a required component that failed or was skipped, a missing required event or
-evidence item (the run did not reach what it tests), or a failed teardown or cleanup. :func:`decide`
+(:attr:`~valkey_fuzzer.results.ComponentResult.crash`). A trusted crash stands even when the runner itself
+failed afterwards, as when the oracles' post-mortem finds the crash that made a provision or an action fail.
+Without a trusted FAIL, anything else that went wrong makes the run ERROR: a required component that failed or
+was skipped, a missing required event or evidence item (the run did not reach what it tests), or a failed
+teardown or cleanup. :func:`decide`
 applies the precedence that picks which of several problems names the outcome, and
 :func:`environment_status` the one environment teardown adds on top.
 """
@@ -153,7 +155,9 @@ def decide(run: RunState) -> Verdict:
     )
     missing_events = tuple(name for name in plan.required_events if not committed(name))
     missing = missing_evidence(plan, evidence)
-    found = bool(findings) and terminal is None and runner_failure is None
+    # A crash is a finding whatever failed after it, the runner included (its post-mortem found it).
+    crashed = any(results[spec_id].crash for spec_id in findings)
+    found = bool(findings) and terminal is None and (runner_failure is None or crashed)
 
     diagnostics: dict[str, Any] = {}
     if violations:
@@ -180,7 +184,7 @@ def decide(run: RunState) -> Verdict:
         more = f" (and {len(open_obligations) - 1} more)" if len(open_obligations) > 1 else ""
         status = OutcomeStatus.ERROR
         summary = f"component {first['owner']!r} did not undo its {first['kind']} on {first['target']}: it {how}{more}"
-    elif runner_failure is not None:
+    elif runner_failure is not None and not found:
         status, summary = OutcomeStatus.ERROR, f"runner execution failed during {runner_failure}"
     elif terminal is not None and terminal[0] is OutcomeStatus.ERROR:
         status, summary = OutcomeStatus.ERROR, terminal[1]

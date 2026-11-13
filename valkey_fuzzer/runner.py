@@ -18,7 +18,9 @@ actions in dependency order, tear them down in reverse, evaluate oracles, clean
 up the deployment, and release the environment. Capability probes run before
 the environment is acquired when the plan holds no environment references, and
 otherwise right after references are resolved; either way before the
-deployment is provisioned.
+deployment is provisioned. A run that failed from its provision on, before
+its oracles could judge it, gets a post-mortem before the deployment is
+cleaned up (:meth:`_Execution.post_mortem`).
 """
 
 import functools
@@ -766,6 +768,42 @@ class _Execution:
         self.error_phase = "validation"
         self.emit(VALIDATION_COMPLETED, source="runner")
 
+    def post_mortem(self) -> None:
+        """Let each oracle that could not judge the failed run (it has no result, or ERROR) and implements
+        ``post_mortem(context, spec, logs)`` judge it from the log files of every process the deployment
+        provider started in the run (its optional ``log_files(context)``), a failed provision's included. What
+        it returns (None when the logs show nothing) is its result: a crash it reports is a finding whatever
+        failed after it (:func:`~valkey_fuzzer.verdict.decide`). A post-mortem that raises is a cleanup error;
+        the run's own error stands."""
+
+        log_files = getattr(self.provider, "log_files", None)
+        judges = [
+            spec
+            for spec in self.ordered
+            if spec.role is ComponentRole.ORACLE
+            and callable(getattr(self.objects.get(spec.id), "post_mortem", None))
+            and (spec.id not in self.results or self.results[spec.id].status is ComponentStatus.ERROR)
+        ]
+        if log_files is None or not judges:
+            return
+        try:
+            logs = log_files(self.context)
+        except Exception as exc:
+            self.record_cleanup_error("deployment", "log files", exc)
+            return
+        for spec in judges:
+            started = time.time()
+            try:
+                result = self.objects[spec.id].post_mortem(self.context, spec, logs)
+                if result is not None:
+                    self.check_result(spec, result, "post-mortem of oracle")
+            except Exception as exc:
+                self.record_cleanup_error(spec.id, "post_mortem", exc)
+                continue
+            if result is not None:
+                self.results[spec.id] = _timed(result, started, time.time())
+                self.invoked.add(spec.id)
+
     def clean_up_deployment(self) -> None:
         if self.deployment is not None:
             self.release_deployment("cleanup", self.provider.cleanup, self.deployment)
@@ -874,6 +912,8 @@ class _Execution:
         self.teardown_errors = len(self.cleanup_errors)
         if self.ok:
             self.guard(self.evaluate_oracles)
+        if self.error is not None and self.interrupt is None:
+            self.post_mortem()
         self.clean_up_deployment()
         self.tear_down_deferred()
         return self.finish()

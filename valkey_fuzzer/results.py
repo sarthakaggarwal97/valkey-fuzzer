@@ -84,7 +84,7 @@ class ComponentResult:
     ``crash`` marks a FAIL that reports a server process that crashed or
     stopped answering without the fuzzer stopping it. Such a FAIL stands even
     when the teardown before the oracles failed, since the crash may be why it
-    failed.
+    failed, and when the run failed after it.
     """
 
     component_id: str

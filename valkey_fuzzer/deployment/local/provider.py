@@ -30,7 +30,7 @@ from .models import (
 )
 from .planner import plan_deployment
 from .ports import PortUnavailableError, claim_loopback_block, ensure_ports_free, ephemeral_overlap
-from .processes import BUILD_TIMEOUT_S, ProcessManager, detect_valkey_sha
+from .processes import BUILD_TIMEOUT_S, ProcessManager, detect_valkey_sha, process_output_path
 from .server_config import effective_server_config
 from .service import VALKEY_DEPLOYMENT_SERVICE, ValkeyDeploymentService
 
@@ -90,6 +90,8 @@ class LocalDeploymentProvider:
         self._pending: Optional[ProcessManager] = None
         # The descriptor holding this deployment's loopback block (per-instance addressing).
         self._block: Optional[int] = None
+        # The processes of this run's provision attempt, kept after it is rolled back or cleaned up for their logs.
+        self._launched: Optional[ProcessManager] = None
 
     @staticmethod
     def _prepare(plan: ExecutionPlan) -> tuple[DeploymentConfig, tuple[InstancePlan, ...]]:
@@ -128,7 +130,7 @@ class LocalDeploymentProvider:
             config.replicas_per_primary,
         )
         processes = ProcessManager(config, context.plan.seed)
-        self._pending = processes
+        self._pending = self._launched = processes
 
         build_timeout = BUILD_TIMEOUT_S
         if context.deadline is not None:
@@ -206,6 +208,17 @@ class LocalDeploymentProvider:
         self._active_deployment = deployment
         self._pending = None
         return deployment
+
+    def log_files(self, context: RunContext) -> dict[str, tuple[str, ...]]:
+        """Each instance's log and process output file, of every instance this provider started in the run, a
+        failed provision's included: the runner's post-mortem reads them (docs/contracts.md)."""
+        del context
+        if self._launched is None:
+            return {}
+        return {
+            instance_id: (log_file, process_output_path(log_file))
+            for instance_id, log_file in self._launched.log_files.items()
+        }
 
     def rollback(self, context: RunContext) -> None:
         """Best-effort, idempotent cleanup of a failed provision attempt."""
