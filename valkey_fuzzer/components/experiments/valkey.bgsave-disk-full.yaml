@@ -42,6 +42,10 @@ startup_overlays:
     server_config:
       appendonly: "yes"
       appendfsync: everysec
+      # No automatic rewrite, whatever the config space draws: a finished one
+      # drops the old AOF files, which frees the filled disk and lets AOF writes
+      # recover before the full-disk BGSAVE and the INFO observer see the error.
+      auto-aof-rewrite-percentage: "0"
 components:
   - use: valkey.capability.host-probe
     id: host
