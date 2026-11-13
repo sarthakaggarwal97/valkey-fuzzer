@@ -1,16 +1,17 @@
 """Outcome calculation: how a run's results, events, evidence, and errors become its verdict.
 
-Only an oracle or action FAIL judges the system under test, and only a trusted one makes the run FAIL. A FAIL
-is not trusted when it depends on a component that does not judge and did not do its part (it returned ERROR
-or FAIL: a fault not injected, an observer that could not read the server), nor, for an oracle, when a
-teardown before the oracles failed or left a change for the runner to undo, unless it reports a crash
+Only an oracle or action FAIL judges the system under test, and so does a FAIL any component reports as a crash
+(a capability probe whose private server crashed); only a trusted one makes the run FAIL. A FAIL is not trusted
+when it depends on a component that does not judge and did not do its part (it returned ERROR or FAIL: a fault
+not injected, an observer that could not read the server), nor, for an oracle, when a teardown before the
+oracles failed or left a change for the runner to undo, unless it reports a crash
 (:attr:`~valkey_fuzzer.results.ComponentResult.crash`). A trusted crash stands even when the runner itself
-failed afterwards, as when the oracles' post-mortem finds the crash that made a provision or an action fail.
-Without a trusted FAIL, anything else that went wrong makes the run ERROR: a required component that failed or
-was skipped, a missing required event or evidence item (the run did not reach what it tests), or a failed
-teardown or cleanup. :func:`decide`
-applies the precedence that picks which of several problems names the outcome, and
-:func:`environment_status` the one environment teardown adds on top.
+failed afterwards, as when the oracles' post-mortem finds the crash that made a provision or an action fail, or
+stopped the run for it, as after a required capability probe's crash. Without a trusted FAIL, anything else that
+went wrong makes the run ERROR: a required component that failed or was skipped, a missing required event or
+evidence item (the run did not reach what it tests), or a failed teardown or cleanup. :func:`decide` applies the
+precedence that picks which of several problems names the outcome, and :func:`environment_status` the one
+environment teardown adds on top.
 """
 
 from collections.abc import Callable, Collection, Mapping, Sequence
@@ -115,8 +116,8 @@ def decide(run: RunState) -> Verdict:
         and results[spec.id].status in (ComponentStatus.FAIL, ComponentStatus.SKIP)
     )
     # Root causes are required components that ran and did not pass; blocked
-    # components are their consequences. Only a verdict-role FAIL is
-    # evidence about the system under test.
+    # components are their consequences. Only a verdict-role FAIL, or a
+    # crash, is evidence about the system under test.
     invoked_failures = [spec for spec in ordered if spec.id in required_failures and spec.id in invoked]
     # A component that does not judge and did not pass (a fault not injected,
     # a workload that stopped, an observer that could not read the server)
@@ -139,7 +140,8 @@ def decide(run: RunState) -> Verdict:
 
     def trusted(spec: Any) -> bool:
         result = results[spec.id]
-        if not ROLES[spec.role].judges or result.status is not ComponentStatus.FAIL:
+        # A crash is about the system under test whichever component saw it: a capability probe's private server.
+        if result.status is not ComponentStatus.FAIL or not (ROLES[spec.role].judges or result.crash):
             return False
         if plan.dependencies(spec.id) & unestablished_setup:
             return False
@@ -157,12 +159,14 @@ def decide(run: RunState) -> Verdict:
     missing = missing_evidence(plan, evidence)
     # A crash is a finding whatever failed after it, the runner included (its post-mortem found it).
     crashed = any(results[spec_id].crash for spec_id in findings)
-    found = bool(findings) and terminal is None and (runner_failure is None or crashed)
+    # The runner ends a run early as a FAIL only for a finding: a required capability probe's crash.
+    stopped = terminal is not None and terminal[0] is not OutcomeStatus.FAIL
+    found = bool(findings) and not stopped and (runner_failure is None or crashed)
 
     diagnostics: dict[str, Any] = {}
     if violations:
         diagnostics["contract_violations"] = tuple(violations)
-    if terminal is None:
+    if not stopped:
         for key, value in (
             ("missing_required_events", missing_events),
             ("missing_required_evidence", missing),

@@ -581,6 +581,11 @@ class _Execution:
                     OutcomeStatus.SKIP_UNSUPPORTED,
                     f"required capability {spec.id!r} is unsupported: {result.summary}",
                 )
+            if spec.id in required and result.status is ComponentStatus.FAIL and result.crash:
+                # A build that crashed when the probe started it: a finding, which a deployment would only repeat.
+                raise _EarlyTerminalError(
+                    OutcomeStatus.FAIL, f"required capability {spec.id!r} crashed the build: {result.summary}"
+                )
             if spec.id in required and result.status is ComponentStatus.FAIL:
                 raise _EarlyTerminalError(
                     OutcomeStatus.ERROR,

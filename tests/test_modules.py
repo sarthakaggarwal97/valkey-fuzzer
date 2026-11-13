@@ -279,6 +279,7 @@ class _ModuleProbeServer:
     def __init__(self, binary, arguments, **_):
         self.modules = [value for name, value in zip(arguments[::2], arguments[1::2]) if name == "--loadmodule"]
         self.workdir = "/nonexistent/probe"
+        self.log_path = self.output_path = "/nonexistent/probe/server.log"
         commands = {"json.get": [], "get": []} if "/m/libjson.so" in self.modules else {"get": []}
 
         def execute_command(*args):
