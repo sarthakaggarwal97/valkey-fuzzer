@@ -112,7 +112,7 @@ def test_the_worker_isolates_its_run_keeps_a_zoo_build_and_refuses_a_scenario_to
         (tmp_path / job["id"]).mkdir()
         (tmp_path / f"{job['id']}.json").write_text(json.dumps({
             "job": job, "report_dir": str(tmp_path / job["id"]), "base_port": 40000, "loopback_block": 1,
-            "data_dir": str(tmp_path / "data"), "artifact_dir": str(tmp_path), "timeout_s": 5,
+            "data_dir": str(tmp_path / "data"), "artifact_dir": str(tmp_path), "timeout_s": 5, "cores": None,
             "valkey_binary": "/default/valkey-server", "experiment_directories": [],
         }))  # fmt: skip
         return batch.run_worker(str(tmp_path / f"{job['id']}.json"))
@@ -573,6 +573,23 @@ def test_a_profile_sets_the_seeds_and_deadline_and_pruning_keeps_a_passing_runs_
     assert _batch(tmp_path, sources, name="explicit", profile="pr-quick", timeout_s=30).timeout_s == 30
     assert {item.name for item in Path(runner.folder, "runs", _id(0)).iterdir()} == {"report.json", "scenario.yaml"}
     assert "plan.json" in {item.name for item in Path(runner.folder, "runs", _id(1)).iterdir()}
+
+
+def test_each_run_draws_for_its_workers_share_of_the_cores_the_batch_was_created_with(
+    tmp_path, workers, stub, monkeypatch
+):
+    monkeypatch.setattr(batch, "usable_cores", lambda: 6.0)
+    sources = [normalize_source({"random": {"experiments": [SNAPSHOT], "seeds": 3, "first_seed": 0,
+                                            "excludes": EXCLUDES}}, "/")]  # fmt: skip
+    runner = _batch(tmp_path, sources, workers=3)
+    # The cores are the creating host's, kept for a resume elsewhere.
+    monkeypatch.setattr(batch, "usable_cores", lambda: 48.0)
+    runner.run()
+    assert json.loads(Path(runner.folder, "batch.json").read_text())["cores"] == 6.0
+    assert [run["cores"] for run in stub.runs()] == [2.0, 2.0, 2.0]
+    assert any("each run may use 2.0 of the batch's 6 cores (3 worker(s))" in line for line in _log(runner))
+    reports = [json.loads(Path(runner.folder, "runs", _id(seed), "report.json").read_text()) for seed in range(3)]
+    assert {report["reproducer"]["generated"]["cores"] for report in reports} == {2.0}
 
 
 def test_the_command_runs_a_batch_and_exits_with_its_worst_result(tmp_path, workers, stub, capsys):

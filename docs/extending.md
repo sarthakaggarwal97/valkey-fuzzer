@@ -495,6 +495,7 @@ without one goes without:
 | `binary_drift(plan, recorded, *, override, replayed=None)` | `replay` and `minimize`: how the binaries a replay runs differ from the recorded ones; without it they are reported as not verified. |
 | `reductions(deployment, requirements)` | `minimize`: smaller deployment sections to try; without it only the inputs shrink. |
 | `host_fields` | the coverage tuple: the deployment fields that only place the deployment on a host. |
+| `core_demand(plan)` | random draws: the cores the plan's deployment needs for its validators to read every instance in time; a draw that needs more than the run may use is drawn again (`valkey_fuzzer/capacity.py`). Without it every draw fits. |
 
 Several providers may implement one mode. A scenario then selects one with
 `deployment.provider`, and may leave it out when only one is registered.

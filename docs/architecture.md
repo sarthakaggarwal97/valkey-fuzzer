@@ -102,6 +102,7 @@ they use directly (see [The Valkey components](#the-valkey-components)).
 | `valkey_fuzzer/commands/`, `valkey_fuzzer/cli.py` | The command handlers; `cli.py` only builds the parser and dispatches. |
 | `valkey_fuzzer/minimize.py`, `valkey_fuzzer/coverage.py`, `valkey_fuzzer/differential.py` | Failure signatures and minimization; a run's coverage tuple and its Valkey code coverage (gcov); differential runs. |
 | `valkey_fuzzer/generator.py` | Random scenarios for experiments that declare `metadata.generator`, and the search profiles that sample them. |
+| `valkey_fuzzer/capacity.py` | The cores a run may use (CPU affinity, cgroup quota, a batch worker's share), and whether a drawn deployment fits them. |
 | `valkey_fuzzer/hoststate.py` | Host-state owner tags and `valkey-fuzzer sweep`; run folders under the shared artifact root; SIGTERM as an interrupt. |
 | `valkey_fuzzer/zoo.py`, `zoo/` | The [bug zoo](bug-zoo.md): its cases and how a case is judged. |
 | `valkey_fuzzer/testing.py` | In-process test helpers: `run_experiment`, `FakeContext`, `resolved_spec`, and the fake deployment provider. |

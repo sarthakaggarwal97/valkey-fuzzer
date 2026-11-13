@@ -245,6 +245,32 @@ def plan_instances(document: Mapping[str, Any], overlays: Sequence[StartupOverla
     }
 
 
+# What an instance's threads take of a core, for the validators to read every instance within their window (30 s in
+# cluster chaos). A main thread takes a sixteenth: GitHub's 4-core runners validated 60- to 96-node clusters of
+# single-threaded nodes in 6 to 7 s. An IO thread (each io-threads above 1) takes half: a node's load activates its
+# IO threads, a busy cluster bus included, and an active one spins. An idle 84-node cluster formed at a load of 9 on
+# 24 cores with one thread a node, and of 51 with two (its first read of every node took 4.5 s, not 0.06). On 24
+# cores, every 60- to 84-node cluster with two threads a node missed the window (10 runs) and every 30- to 35-node
+# one met it (5), as did every 60- to 84-node cluster with one thread a node (3); on 4 cores, a 96-node cluster
+# with two threads on its 16 primaries missed it (31 to 34 s).
+MAIN_THREAD_CORES = 1 / 16
+IO_THREAD_CORES = 1 / 2
+
+
+def core_demand(plan: ExecutionPlan) -> float:
+    """The cores the plan's instances need, from the ``io-threads`` each starts with."""
+
+    demand = 0.0
+    for instance in plan.instances.values():
+        try:
+            threads = int(instance["server_config"].get("io-threads", 1))
+        except (TypeError, ValueError):
+            # A value the server refuses at its start.
+            threads = 1
+        demand += MAIN_THREAD_CORES + IO_THREAD_CORES * max(0, threads - 1)
+    return demand
+
+
 def local_deployment_provider_registrations() -> dict[str, DeploymentProviderRegistration]:
     """Return replay-identifiable registrations for local Valkey deployments."""
 
@@ -261,6 +287,7 @@ def local_deployment_provider_registrations() -> dict[str, DeploymentProviderReg
             binary_drift=rerun.binary_drift,
             reductions=rerun.deployment_reductions,
             host_fields=rerun.HOST_FIELDS,
+            core_demand=core_demand,
         )
         for mode in DeploymentMode
     }

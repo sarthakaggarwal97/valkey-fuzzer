@@ -28,9 +28,15 @@ whose sweep cannot remove one runs no more jobs (the batch stops once none is le
 Before its first job a batch removes the servers, chains, and mounts of every
 fuzzer process that is gone, and refuses to start if one stays.
 
+A random job's deployment is drawn to fit its worker's share of the batch's
+cores: the cores the process that created the batch may use (its CPU affinity
+and cgroup quota, recorded as ``cores`` in ``batch.json``) over ``workers``
+(:mod:`~valkey_fuzzer.capacity`). So a large run neither misses its own
+validation window nor slows the runs beside it.
+
 The batch folder::
 
-    batch.json          options, sources, and the zoo cases, as resolved (written once)
+    batch.json          options, sources, the zoo cases, and the cores, as resolved (written once)
     jobs.json           every job, in order (a guided job is added when it is drawn)
     workers.json        the jobs running now and their worker processes (for resume)
     results/<id>.json   one finished job: status, failure signature, leaks, zoo observation
@@ -82,6 +88,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from ._data import canonical_json, error_record, exception_type
+from .capacity import usable_cores
 from .catalog import Catalog
 from .compiler import with_valkey_binary
 from .corpus import CORPUS_FILE, Corpus, mutation, parent
@@ -583,6 +590,7 @@ def run_worker(task_path: str) -> int:
     service = RunService(
         experiment_directories=task["experiment_directories"],
         artifact_dir=task["artifact_dir"],
+        cores=task["cores"],
     )
     try:
         if "generate" in job:
@@ -932,6 +940,7 @@ class BatchRunner:
             "zoo": expansion.zoo,
             "profile_timeout_s": expansion.profile_timeout_s,
             "catalog_digest": expansion.catalog_digest,
+            "cores": usable_cores(),
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
         # jobs.json and corpus.json first: a folder with batch.json is complete.
@@ -971,6 +980,12 @@ class BatchRunner:
     def timeout_s(self) -> float:
         return float(self.options.timeout_s or self.spec["profile_timeout_s"] or DEFAULT_TIMEOUT_S)
 
+    @property
+    def run_cores(self) -> float:
+        """The cores each run may use: its worker's share of the batch's."""
+
+        return self.spec["cores"] / self.options.workers
+
     # -- the run ---------------------------------------------------------------
 
     def run(self) -> dict[str, Any]:
@@ -1002,6 +1017,10 @@ class BatchRunner:
         try:
             self._recover()
             self._sweep_host()
+            self.log(
+                f"each run may use {self.run_cores:.1f} of the batch's {self.spec['cores']:g} cores "
+                f"({self.options.workers} worker(s)); random draws fit their deployments to it"
+            )
             done = _results(self.folder)
             self._run_pool(
                 [job for job in self.jobs if job["id"] not in done], self.options.workers, more=self._next_guided
@@ -1169,6 +1188,7 @@ class BatchRunner:
             "data_dir": os.path.join(work, "data"),
             "artifact_dir": os.path.join(work, "providers"),
             "timeout_s": self.timeout_s,
+            "cores": self.run_cores,
             "valkey_binary": self.options.valkey_binary,
             "experiment_directories": list(self.options.experiment_directories),
         }

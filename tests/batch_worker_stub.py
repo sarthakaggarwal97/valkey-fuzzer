@@ -46,7 +46,8 @@ def run_plan(self, plan, *, timeout=None, run_dir=None):
     build = os.path.basename(os.path.dirname(os.path.dirname(binary))) if binary else ""
     behavior = behaviors.get(build) or behaviors.get(str(plan.seed)) or "pass"
     record = {"pid": os.getpid(), "seed": plan.seed, "base_port": plan.deployment["base_port"], "timeout": timeout,
-              "data_dir": plan.deployment["base_data_dir"], "tmpdir": os.environ.get("TMPDIR"), "start": time.time()}  # fmt: skip
+              "data_dir": plan.deployment["base_data_dir"], "tmpdir": os.environ.get("TMPDIR"), "start": time.time(),
+              "cores": self._cores}  # fmt: skip
     if behavior.startswith("sleep:"):
         time.sleep(float(behavior.split(":", 1)[1]))
     elif behavior in ("hang", "crash"):

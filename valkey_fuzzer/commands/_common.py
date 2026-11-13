@@ -7,6 +7,7 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+from ..capacity import usable_cores
 from ..generator import Exclusion, GeneratorError
 from ..reports import InputError
 from ..service import RunService
@@ -121,12 +122,14 @@ def add_common_options(
 
 
 def service_for(args: argparse.Namespace) -> RunService:
-    """A run service for the options in ``args``; its catalog is built on first use."""
+    """A run service for the options in ``args``, whose runs may use the cores this process may; its catalog is
+    built on first use."""
 
     return RunService(
         experiment_directories=tuple(args.experiment_dirs),
         # Commands without --artifact-dir use the default root.
         artifact_dir=getattr(args, "artifact_dir", ""),
+        cores=usable_cores(),
     )
 
 

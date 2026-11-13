@@ -746,6 +746,40 @@ input or a pool key never changes another dimension's draw for the same seed,
 and one seed draws differently for each experiment. Without `--experiment`
 the experiment itself comes from `sha256("gen", seed, "experiment", 0)`.
 
+### Host-sized draws
+
+A deployment whose threads oversubscribe the host's cores misses its
+validators' window (30 s in cluster chaos), and the run is an `ERROR` that
+says nothing about Valkey; in a batch it slows the runs beside it too. So a
+random draw fits the cores its run may use: `run --random` and `--seed`, the
+cores this process may use (its CPU affinity, that is its cpuset, or its
+cgroup's CPU quota when that is lower); a batch's random job, its worker's
+share, the cores of the process that created the batch over `workers`. A
+candidate whose deployment needs more is redrawn like a rejected one, so any
+experiment with a node count or IO threads to draw draws them to the host's
+size. The local deployment's need is a sixteenth of a core for each
+instance's main thread and half a core for each IO thread (`io-threads`
+above 1): a node's load, a busy cluster bus included, activates its IO
+threads, and an active one spins. Measured on cluster chaos: GitHub's 4-core
+runners validated 60- to 96-node clusters of single-threaded nodes in 6 to
+7 s; on 24 cores, every 60- to 84-node cluster with two threads a node missed
+the window (10 runs), and every 30- to 35-node one met it (5).
+
+| Cores a run may use | Cluster chaos draws (200 seeds) |
+| --- | --- |
+| 2 (a 4-core runner, 2 workers) | up to 32 nodes, at most 3 with an IO thread |
+| 4 | up to 64 nodes, at most 6 with an IO thread |
+| 12 (24 cores, 2 workers) | up to 96 nodes, at most 21 with an IO thread |
+| 24 | up to 96 nodes, at most 40 with an IO thread |
+| 48 | up to 96 nodes, at most 80 with an IO thread |
+
+When no attempt fits, the run is the first attempt's scenario, recorded
+with its `shortfall`, and it is `SKIP_UNSUPPORTED` without starting. A
+scenario file, a matrix case, a replay, and a batch's re-run of a failure run
+as written: whoever wrote them chose their size. A deployment provider says
+what a plan needs with its registration's `core_demand` hook
+([extending](extending.md)).
+
 ### Generator hooks
 
 A hook is a function `hook(rng, scenario)` registered in the catalog's
