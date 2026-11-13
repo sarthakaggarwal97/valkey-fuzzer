@@ -196,7 +196,15 @@ Every candidate is compiled and statically preflighted (what `validate`
 checks) before it runs. A candidate that is invalid, matches one of the
 experiment's `reject` rules, or holds an excluded value is redrawn from the
 next attempt's streams, up to 50 attempts; then the run is a harness error
-(exit 2) naming the last reason. A scenario whose planned ports are in use,
+(exit 2) naming the last reason. So is a candidate whose deployment needs
+more cores than this process may use (its CPU affinity, or its cgroup's CPU
+quota when that is lower), so a small host draws smaller deployments: the
+local deployment counts a sixteenth of a core for each instance's main thread
+and half a core for each IO thread (`io-threads` above 1), which a busy node
+spins (see [Host-sized draws](scenarios-and-experiments.md#host-sized-draws)).
+When no attempt fits, the run is the first attempt's scenario, and it is
+`SKIP_UNSUPPORTED` (exit 3), saying how many cores it needed. A scenario
+file runs as written, whatever it needs. A scenario whose planned ports are in use,
 or reach the host's ephemeral port range, moves to free ones below that
 range, and the scenario records the port it ran on.
 
@@ -207,7 +215,8 @@ with a header naming its seed and experiment; `valkey-fuzzer run
 <folder>/scenario.yaml` runs it again without the generator. The run report's
 `reproducer.generated` records `seed`, `experiment`, `attempt`,
 `excludes`, `boundary` (how many drawn values were a
-range edge or the first or last listed value), and `profile`.
+range edge or the first or last listed value), `profile`, `cores` (what the
+deployment had to fit), and `shortfall` (why none fit, or null).
 
 ## batch
 
@@ -278,7 +287,7 @@ run names its build.
 | --- | --- | --- |
 | `batch_id` | `--batch-id` | Name of the default folder; default `batch`. |
 | `profile` | `--profile NAME` | The [search profile](scenarios-and-experiments.md#legal-space-and-search-profiles) every random job is drawn under, and the budgets. |
-| `workers` | `--workers N` | Parallel workers; default 1. On resume, the only option that may change. |
+| `workers` | `--workers N` | Parallel workers; default 1. On resume, the only option that may change. A random job's deployment is drawn to fit its worker's share of the batch's cores: the cores the creating process may use, over `workers`. |
 | `timeout_s` | `--timeout SECONDS` | The deadline of each run. |
 | `port_base` | `--port-base PORT` | The first client port of worker 0; default 11000. |
 | `valkey_binary` | `--valkey-binary PATH` | See above. |
@@ -348,7 +357,7 @@ removed, the batch refuses to start. Dead runs' directories stay.
 
 ```text
 <batch folder>/
-  batch.json          options, sources, invalid matrix cases, zoo cases (written once)
+  batch.json          options, sources, invalid matrix cases, zoo cases, the cores (written once)
   jobs.json           every job, in order (a guided job is added when it is drawn)
   results/<id>.json   one finished job
   corpus.json         a guided batch's corpus (see Coverage-guided batches)

@@ -260,7 +260,9 @@ class RunService:
     and ``deployment_providers``. Report folders go under ``report_root``: the
     absolute ``artifact_dir``, or ``<tmp>/valkey-fuzzer`` without one (see the
     module docstring), and each run's components write their artifacts into
-    its report folder.
+    its report folder. ``cores`` is how many cores a run may use, which a
+    random draw's deployment must fit (:mod:`~valkey_fuzzer.capacity`); None
+    for any number. A scenario read from a file runs as written.
     """
 
     def __init__(
@@ -270,12 +272,14 @@ class RunService:
         deployment_providers: Optional[Sequence[DeploymentProviderRegistration]] = None,
         catalog: Optional[Catalog] = None,
         artifact_dir: str = "",
+        cores: Optional[float] = None,
     ):
         self._catalog_options = {
             "experiment_directories": tuple(experiment_directories),
             "deployment_providers": deployment_providers,
         }
         self._artifact_dir = normalize_artifact_root(artifact_dir)
+        self._cores = cores
         self._catalog = catalog
         self._compiler: Optional[ScenarioCompiler] = None
         self._runner: Optional[Runner] = None
@@ -353,6 +357,7 @@ class RunService:
             valkey_binary=valkey_binary,
             keep_own_binary=keep_own_binary,
             pinned=pinned,
+            cores=self._cores,
         )
 
     def _checked_plan(self, scenario: Mapping[str, Any]) -> ExecutionPlan:
@@ -466,6 +471,8 @@ class RunService:
         its own, and is also written as ``scenario.yaml``, which ``run`` runs
         again (without the generator, for a generated scenario: ``generated``
         says how it was drawn). Without ``report_dir``, a new folder is made under ``runs``.
+        A draw none of whose attempts fit the cores the run may use (its ``shortfall``) is
+        ``SKIP_UNSUPPORTED``, saying why, and does not run.
         """
 
         if report_dir is None:
@@ -473,7 +480,12 @@ class RunService:
         write_plan(report_dir, plan)
         if scenario is not None:
             export_scenario(scenario, os.path.join(report_dir, SCENARIO_FILE), generated=generated)
-        outcome = self.run_plan(plan, timeout=timeout, run_dir=report_dir)
+        shortfall = (generated or {}).get("shortfall")
+        if shortfall:
+            summary = f"no draw fits the cores this run may use: {shortfall}"
+            outcome = RunOutcome(plan=plan, status=OutcomeStatus.SKIP_UNSUPPORTED, summary=summary)
+        else:
+            outcome = self.run_plan(plan, timeout=timeout, run_dir=report_dir)
         return self.write_run_report(report_dir, outcome, scenario=scenario, generated=generated)
 
     def write_run_report(

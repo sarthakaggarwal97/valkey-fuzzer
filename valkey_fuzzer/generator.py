@@ -68,7 +68,11 @@ never shifts another draw and one seed draws differently for each experiment;
 the experiment itself is drawn from ``sha256("gen", seed, "experiment", 0)``.
 Each candidate is compiled; one that fails to compile, matches a
 ``reject`` rule, or holds an excluded value is redrawn with the next attempt,
-up to :data:`MAX_ATTEMPTS`.
+up to :data:`MAX_ATTEMPTS`. So is one whose deployment needs more cores than
+the run may use (``cores``, :mod:`~valkey_fuzzer.capacity`), so a host draws
+deployments of its size; when no attempt fits, the first that needed more is
+the scenario, with its ``shortfall``, and its run is skipped, saying why
+(:meth:`~valkey_fuzzer.service.RunService.execute`).
 
 The block above is the experiment's legal space. A **search profile**
 (:class:`Profile`, declared under ``metadata.generator.profiles`` of a fragment
@@ -100,6 +104,7 @@ from typing import Any, Callable, Optional
 
 import yaml
 
+from . import capacity
 from ._data import to_plain_data
 from .catalog import Catalog
 from .compiler import with_valkey_binary
@@ -960,6 +965,9 @@ class Generated:
     profile: Optional[str] = None
     # Every drawn value by dimension, in draw order: what a coverage-guided batch pins to derive another scenario.
     draws: Mapping[str, Any] = field(default_factory=dict)
+    # The cores the draw's deployment had to fit (None: any number), and why it does not when no attempt did.
+    cores: Optional[float] = None
+    shortfall: Optional[str] = None
 
     @property
     def provenance(self) -> dict[str, Any]:
@@ -972,6 +980,8 @@ class Generated:
             "excludes": [str(item) for item in self.excludes],
             "boundary": self.boundary,
             "profile": self.profile,
+            "cores": self.cores,
+            "shortfall": self.shortfall,
             "draws": to_plain_data(self.draws),
         }
 
@@ -1018,13 +1028,16 @@ def generate(
     valkey_binary: Optional[str] = None,
     keep_own_binary: bool = False,
     pinned: Optional[Mapping[str, Any]] = None,
+    cores: Optional[float] = None,
 ) -> Generated:
     """A valid scenario for ``experiment`` (drawn from the opted-in ones when None) from ``seed``.
 
     ``base`` is a partial scenario merged over every draw and hook; ``profile``
     is the search profile that samples the experiment's legal space; ``pinned``
     holds values of an earlier scenario's draws (:attr:`Generated.draws`) that
-    this one keeps, every other dimension drawn from ``seed``;
+    this one keeps, every other dimension drawn from ``seed``; ``cores``
+    is how many cores the run may use, which its deployment must fit (None:
+    any number);
     ``valkey_binary`` is the binary the deployment runs, set before the hooks
     run (:func:`~valkey_fuzzer.compiler.with_valkey_binary`); with
     ``keep_own_binary``, only when the base names none.
@@ -1044,6 +1057,8 @@ def generate(
         return with_valkey_binary(catalog, scenario, valkey_binary, override=not keep_own_binary)
 
     last = "no attempt was made"
+    # The first candidate that needed more cores than the run may use: the scenario when none fits.
+    oversized: Optional[Generated] = None
     for attempt in range(MAX_ATTEMPTS):
         scenario, boundary, draws = block.draw(
             seed,
@@ -1068,9 +1083,23 @@ def generate(
         if reason is not None:
             last = reason
             continue
-        return Generated(
-            scenario, plan, seed, attempt, boundary, tuple(excludes), None if profile is None else profile.name, draws
+        drawn = Generated(
+            scenario,
+            plan,
+            seed,
+            attempt,
+            boundary,
+            tuple(excludes),
+            None if profile is None else profile.name,
+            draws,
+            cores,
         )
+        reason = capacity.shortfall(plan, catalog, cores)
+        if reason is None:
+            return drawn
+        oversized = oversized or replace(drawn, shortfall=reason)
+    if oversized is not None:
+        return oversized
     raise GeneratorError(
         f"no valid {experiment} scenario from seed {seed} in {MAX_ATTEMPTS} attempts; the last one {last}"
     )

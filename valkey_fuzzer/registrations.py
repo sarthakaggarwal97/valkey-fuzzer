@@ -133,6 +133,9 @@ class DeploymentProviderRegistration:
       minimizer tries them.
     - ``host_fields``: the deployment fields that only place the deployment
       on a host (ports, folders), which a run's coverage leaves out.
+    - ``core_demand(plan)``: the cores the plan's deployment needs for its
+      validators to read every instance in time. A random draw that needs
+      more than the run may use is drawn again (:mod:`~valkey_fuzzer.capacity`).
     """
 
     deployment_mode: str
@@ -149,6 +152,7 @@ class DeploymentProviderRegistration:
         None
     )
     host_fields: tuple[str, ...] = ()
+    core_demand: Optional[Callable[[ExecutionPlan], float]] = None
 
     def __post_init__(self) -> None:
         require_name(self.deployment_mode, "deployment_mode")
