@@ -11,7 +11,9 @@
 # stopped acknowledging (the action publishes each such window as
 # valkey.data.loss-window evidence, scoped to the old primary); a write WAIT
 # confirmed on every replica (inputs.wait_replicas) is never lost.
-extends: [valkey.writes, valkey.history, valkey.command-table]
+# `replication-steps` publishes the replication model's steps from the logs
+# (valkey.replication-steps).
+extends: [valkey.writes, valkey.history, valkey.command-table, valkey.replication-steps]
 id: valkey.replication-chaos
 deployment:
   modes: [standalone]
@@ -53,8 +55,10 @@ components:
       op_timeout_s: 1.0
       wait_replicas: {$ref: inputs.wait_replicas}
 
-  # Listed, so that it starts before the chaos: a fragment's other components start after the experiment's own.
+  # Listed, so that they start before the chaos: a fragment's other components start after the experiment's own.
   - id: commands
+
+  - id: replication-steps
 
   - use: valkey.action.replication-chaos
     id: chaos

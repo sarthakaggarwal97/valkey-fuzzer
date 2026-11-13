@@ -12,7 +12,7 @@ from ..outcomes import EXIT_FAILURE, EXIT_HARNESS_ERROR, EXIT_SUCCESS
 from ..reports import write_document
 from ..spec.bundle import SPEC_PATH_VARIABLE, Bundle, SpecBundleError, load_bundle
 from ..spec.check import check_bundle, run_control
-from ..spec.conform import collect_runs, conform_runs
+from ..spec.conform import collect_runs, conform_runs, needs_tlc
 from ..spec.tla import TlaError, TlaTools, read_tlc_output
 from ..spec.translate import TranslateError, bundle_service, translate_trace
 from ._common import add_common_options, positive_seconds
@@ -198,11 +198,13 @@ def translate_command(args: argparse.Namespace) -> int:
 
 def conform_command(args: argparse.Namespace) -> int:
     bundle = load_bundle(args.bundle)
-    try:
-        tools = _tools(args)
-    except TlaError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return EXIT_HARNESS_ERROR
+    tools = None
+    if needs_tlc(bundle):
+        try:
+            tools = _tools(args)
+        except TlaError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return EXIT_HARNESS_ERROR
     runs = collect_runs(args.runs)
     if not runs:
         print("Error: no runs found", file=sys.stderr)

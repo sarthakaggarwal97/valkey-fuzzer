@@ -602,6 +602,113 @@ def test_the_command_runs_a_batch_and_exits_with_its_worst_result(tmp_path, work
     assert run("--resume", str(tmp_path / "ok"), "--random", SNAPSHOT) == 2
 
 
+REPLICATION = "valkey.replication-partial-resync"
+VIOLATED = {
+    "status": "fail",
+    "properties": {
+        "OneHistoryPerId": {"status": "violated", "claimed": True, "first": {"state": 3, "why": "Promote"}},
+        "ReplicaIsPrefix": {"status": "holds", "claimed": True},
+    },
+    "actions": {"Promote": 1},
+    "targets": {},
+}
+
+
+def _seed(folder):
+    return json.loads(Path(folder, "report.json").read_text())["outcome"]["plan"]["seed"]
+
+
+def test_spec_conform_of_an_approved_bundle_decides_the_run_and_a_drafts_is_only_reported(
+    tmp_path, workers, stub, monkeypatch
+):
+    monkeypatch.setenv("VALKEY_FUZZER_SPEC_PATH", str(ROOT / "tests" / "fixtures" / "spec"))
+    canned = {
+        0: {"replication": {"approved": True, "status": "pass", "actions": {"PartialSync": 2}, "properties": {}}},
+        1: {"replication": {"approved": True, **VIOLATED}},
+        2: {"register": {"approved": False, **VIOLATED}},
+        3: {"replication": {"approved": True, "status": "error", "error": "2 mapped record(s) could not be applied"}},
+        4: {"replication": {"approved": True, "status": "skipped", "reason": "tla2tools.jar not found"}},
+    }
+    monkeypatch.setattr(batch, "conform_folder", lambda folder, tools, unavailable="": canned[_seed(folder)])
+    sources = [_random(5, experiments=[REPLICATION])]
+    runner = _batch(tmp_path, sources, prune_pass=True, serial_reruns=1)
+    summary = runner.run()
+    ids = [job["id"] for job in runner.jobs]
+    results = _results(runner)
+
+    assert [results[job_id]["status"] for job_id in ids] == ["PASS", "FAIL", "PASS", "ERROR", "PASS"]
+    failed = results[ids[1]]
+    assert failed["summary"].startswith("spec conform replication: OneHistoryPerId violated; ")
+    assert failed["signature"]["failures"]["spec-conform:replication"] == {
+        "status": "FAIL",
+        "verdict": ["OneHistoryPerId violated"],
+    }
+    assert "spec-conform:replication:FAIL | OneHistoryPerId violated" in failed["signature_label"]
+    # The draft's violation is kept with the run, not held against it.
+    assert results[ids[2]]["conformance"]["register"]["status"] == "fail" and results[ids[2]]["signature"] is None
+    assert results[ids[3]]["signature"]["failures"]["spec-conform:replication"]["status"] == "ERROR"
+    # A pruned passing run keeps what conform found.
+    kept = {item.name for item in Path(runner.folder, "runs", ids[0]).iterdir()}
+    assert kept == {"report.json", "scenario.yaml", "conform.json"}
+
+    replication = summary["conformance"]["replication"]
+    assert (replication["status"], replication["approved"]) == ("fail", True)
+    assert replication["counts"] == {"pass": 1, "fail": 1, "error": 1, "skipped": 1}
+    assert replication["violations"] == [
+        {"run": ids[1], "property": "OneHistoryPerId", "claimed": True, "first": {"state": 3, "why": "Promote"}}
+    ]
+    assert replication["errors"] == [{"run": ids[3], "error": "2 mapped record(s) could not be applied"}]
+    assert replication["skipped"] == ["tla2tools.jar not found"]
+    assert replication["action_coverage"]["PartialSync"] == 1 and "Crash" in replication["never_observed"]
+    report = json.loads(Path(runner.folder, replication["report"]).read_text())
+    assert report["kind"] == "spec-conformance" and [run["run"] for run in report["runs"]] == ids[:2] + ids[3:4]
+    # The serial re-runs of the failed and errored runs repeat them: like counts, the digest leaves them out.
+    assert {job_id for job_id in results if job_id.startswith("serial-")} == {f"serial-{ids[1]}", f"serial-{ids[3]}"}
+    assert summary["counts"] == {"PASS": 3, "FAIL": 1, "ERROR": 1} and sum(replication["counts"].values()) == 4
+    register = summary["conformance"]["register"]
+    assert (register["status"], register["approved"], register["counts"]) == ("fail", False, {"fail": 1})
+    assert summary["status"] == "FAIL"
+
+
+def test_a_worker_checks_its_run_against_the_bundles_its_plan_names(tmp_path, workers, stub, monkeypatch):
+    monkeypatch.delenv("TLA2TOOLS_JAR", raising=False)
+    stub.behave(**{"1": "skip"})
+    sources = [_random(2, experiments=[REPLICATION]), _random(1, experiments=["valkey.cluster-election-durability"])]
+    runner = _batch(tmp_path, sources)
+    summary = runner.run()
+    results = {result["experiment"] + str(result["seed"]): result for result in _results(runner).values()}
+
+    # A canned run logs no replication step: it did not exercise the protocol, which is no verdict on it.
+    replication = results[f"{REPLICATION}0"]
+    assert replication["status"] == "PASS"
+    assert replication["conformance"]["replication"]["status"] == "unexercised"
+    assert results[f"{REPLICATION}1"]["conformance"]["replication"]["status"] == "not_run"
+    assert results[f"{REPLICATION}1"]["status"] == "SKIP_UNSUPPORTED"
+    # The election model needs TLC, which this host does not have; its claims are a draft either way.
+    election = results["valkey.cluster-election-durability0"]
+    assert election["conformance"]["cluster-election"]["status"] == "skipped" and election["status"] == "PASS"
+    assert summary["conformance"]["cluster-election"]["skipped"] == [
+        "tla2tools.jar not found: pass --tla2tools or set TLA2TOOLS_JAR"
+    ]
+    assert summary["conformance"]["cluster-election"]["status"] == "skipped"
+    assert summary["conformance"]["replication"]["counts"] == {"unexercised": 1, "not_run": 1}
+    assert summary["conformance"]["replication"]["status"] == "unexercised"
+
+
+def test_a_run_whose_plan_names_a_bundle_but_whose_worker_wrote_no_conformance_is_an_error(tmp_path):
+    plan = {"components": [{"use": "valkey.observer.log-trigger", "id": "steps", "config": {"spec": "replication"}}]}
+    report = {"status": "PASS", "outcome": {"plan": plan}}
+    assert batch._conformance(str(tmp_path), report) == {
+        "replication": {
+            "status": "error",
+            "error": "no conform.json: the worker ended before spec conform checked the run",
+        }
+    }
+    assert batch._conformance(str(tmp_path), {**report, "status": "ERROR"}) == {}
+    (tmp_path / "conform.json").write_text("{")
+    assert "conform.json cannot be read" in batch._conformance(str(tmp_path), report)["replication"]["error"]
+
+
 @pytest.mark.slow
 def test_real_workers_run_in_parallel_in_isolation_and_a_leaked_or_hung_one_is_cleaned_up(tmp_path, stub, monkeypatch):
     monkeypatch.setattr(batch, "DEADLINE_GRACE_S", 0.0)

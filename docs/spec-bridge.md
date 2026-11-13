@@ -9,11 +9,14 @@ prove that Valkey implements the model.
 - [spec check](#spec-check)
 - [spec translate](#spec-translate)
 - [spec conform](#spec-conform)
+  - [In a batch](#in-a-batch)
 - [Writing a bundle](#writing-a-bundle)
 - [Onboarding a protocol with data only](#onboarding-a-protocol-with-data-only)
 
 All three tools need Java 11 or later and `tla2tools.jar` (pass
-`--tla2tools`, or set `TLA2TOOLS_JAR`; CI pins v1.7.4 with TLC 2.19). Each
+`--tla2tools`, or set `TLA2TOOLS_JAR`; CI pins v1.7.4 with TLC 2.19),
+except `conform` of a bundle that gives TLC nothing to evaluate (every
+property `conform: excluded`, and no targets). Each
 writes a JSON report with `--output`, and each takes `--timeout SECONDS`
 (default 3600, one hour): once the command has run that long, SANY or TLC is
 killed with its whole process group and that run fails. Reports and translated scenarios name the
@@ -58,6 +61,9 @@ failover election; its experiment ships with the Valkey experiments.
 [`formal/replication/`](../formal/replication/README.md) is primary-replica
 replication (PSYNC, full and dual-channel sync, promotion, restarts); its
 claims compare data sets, so `conform` reports only which steps a run took.
+The replication experiments (`valkey.replication-chaos`,
+`valkey.replication-full-resync`, `valkey.replication-partial-resync`)
+publish those steps with the `valkey.replication-steps` fragment.
 [`formal/slot-migration/`](../formal/slot-migration/README.md) is atomic
 slot migration (`CLUSTER MIGRATESLOTS`: the snapshot, the pause, the grant,
 the target's claim, and its replica); like replication, `conform` reports
@@ -241,6 +247,33 @@ The report says what this command checks: `observed-state check and action
 coverage`. It does **not** check refinement. Consecutive observed states are
 not checked against the model's `Next` with stuttering and hidden steps.
 That needs per-action guards on partial observations, and it is future work.
+
+### In a batch
+
+A [batch](cli.md#batch) checks every run against each bundle its plan
+names (a component whose config has `spec: <protocol>`), so a soak or a
+per-merge batch checks every run that exercises a protocol, and an approved
+model is checked wherever its experiments run. The run's worker does it as
+soon as the run ends, before a passing run's folder is pruned, so the trace
+is still there: the same check as `spec conform BUNDLE RUN`, written to the
+run folder's `conform.json`. TLC comes from `$TLA2TOOLS_JAR` and `java` on
+`PATH`; without them, a bundle that needs TLC is `skipped` (the summary
+says why), and one that does not is still checked. A run that ended
+`ERROR` or `SKIP_UNSUPPORTED` did not reach its verdict, and is `not_run`.
+A run that took no mapped step is `unexercised`, never a pass: its plan
+names the bundle, but nothing it did shows the protocol (a replication chaos
+wave that only stalls a replica briefly). `spec conform` itself calls such a
+run an error.
+
+| Conform result | Approved claims | Draft claims |
+| --- | --- | --- |
+| a claimed property violated | the run `FAIL`s | reported only |
+| an error (no mapped evidence, a record it cannot apply, TLC failed) | the run is an `ERROR` | reported only |
+| a violation outside the claim, a pass | reported only | reported only |
+
+The batch's `summary.json` has a `conformance` entry per bundle, and
+`conformance/<protocol>.json` holds the full report over the runs checked
+(see [the batch folder](cli.md#the-batch-folder)).
 
 ## Writing a bundle
 

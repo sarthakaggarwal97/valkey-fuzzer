@@ -33,7 +33,17 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from ..documents import ABSENT, get_path
-from .bundle import MODEL_FILE, Bundle, Evidence, SpecMapping, StateVar, field_ref, where_matches
+from .bundle import (
+    MODEL_FILE,
+    Bundle,
+    Evidence,
+    SpecBundleError,
+    SpecMapping,
+    StateVar,
+    field_ref,
+    load_bundle,
+    where_matches,
+)
 from .tla import ModelValue, TlaError, TlaFunction, TlaSet, TlaTools, print_values, render, tlc
 
 CHECKS = "observed-state check and action coverage"
@@ -44,6 +54,10 @@ REFINEMENT = (
 )
 _TAG = "spec-conform"
 TRACE_FILE = "trace.jsonl"
+# What a batch worker writes in a run folder: :func:`conform_folder` of the run.
+CONFORMANCE_FILE = "conform.json"
+# The run statuses of a run that reached its verdict: the only runs conform_folder checks.
+CHECKED_RUN_STATUSES = ("PASS", "FAIL")
 
 
 class _SkipError(Exception):
@@ -517,8 +531,14 @@ def trace_module(
     return module, cfg
 
 
-def check_run(bundle: Bundle, run: RunEvidence, tools: TlaTools) -> dict[str, Any]:
-    """Rebuild ``run``'s observed states and check the claims on them."""
+def needs_tlc(bundle: Bundle) -> bool:
+    """Whether checking a run needs TLC: the bundle has a property to check on observed states, or a target."""
+
+    return any(item.conform for item in bundle.claims.properties) or bool(bundle.claims.targets)
+
+
+def check_run(bundle: Bundle, run: RunEvidence, tools: Optional[TlaTools]) -> dict[str, Any]:
+    """Rebuild ``run``'s observed states and check the claims on them (``tools`` only when :func:`needs_tlc`)."""
 
     claims = bundle.claims
     names = [item.name for item in claims.properties if item.conform]
@@ -557,19 +577,23 @@ def check_run(bundle: Bundle, run: RunEvidence, tools: TlaTools) -> dict[str, An
     if len(observed.states) < 2 or not observed.actions:
         result["status"] = "error"
         result["error"] = "no mapped evidence in this run: nothing to check"
+        result["unexercised"] = True
         return result
+    printed: dict[tuple[str, str], list[int]] = {}
     try:
         result["constants"] = observed.constants()
-        module, cfg = trace_module(bundle, observed, result["constants"], names, targets)
-        _, run_tlc = tlc(
-            tools,
-            "ObservedTrace.tla",
-            "ObservedTrace.cfg",
-            {MODEL_FILE: bundle.model_text, "ObservedTrace.tla": module, "ObservedTrace.cfg": cfg},
-        )
-        if run_tlc.timed_out:
-            raise TlaError(run_tlc.timeout_error)
-        printed = {(item[1], item[2]): sorted(item[3]) for item in print_values(run_tlc.output, _TAG)}
+        # A bundle whose properties are all excluded and that has no targets gives TLC nothing to evaluate.
+        if needs_tlc(bundle):
+            module, cfg = trace_module(bundle, observed, result["constants"], names, targets)
+            _, run_tlc = tlc(
+                tools,
+                "ObservedTrace.tla",
+                "ObservedTrace.cfg",
+                {MODEL_FILE: bundle.model_text, "ObservedTrace.tla": module, "ObservedTrace.cfg": cfg},
+            )
+            if run_tlc.timed_out:
+                raise TlaError(run_tlc.timeout_error)
+            printed = {(item[1], item[2]): sorted(item[3]) for item in print_values(run_tlc.output, _TAG)}
     except TlaError as exc:
         result["status"] = "error"
         result["error"] = str(exc)
@@ -609,11 +633,16 @@ def check_run(bundle: Bundle, run: RunEvidence, tools: TlaTools) -> dict[str, An
 
 
 def conform_runs(
-    bundle: Bundle, runs: Sequence[RunEvidence], tools: TlaTools, *, group_by: Sequence[str] = ()
+    bundle: Bundle, runs: Sequence[RunEvidence], tools: Optional[TlaTools], *, group_by: Sequence[str] = ()
 ) -> dict[str, Any]:
     """Check every run and summarize: per-run results, live action coverage, targets reached, and groups."""
 
-    results = [check_run(bundle, run, tools) for run in runs]
+    return summarize(bundle, [check_run(bundle, run, tools) for run in runs], group_by=group_by)
+
+
+def summarize(bundle: Bundle, results: Sequence[Mapping[str, Any]], *, group_by: Sequence[str] = ()) -> dict[str, Any]:
+    """The conformance report of :func:`check_run` results: live action coverage, targets reached, and groups."""
+
     observed_in: Counter = Counter()
     for result in results:
         for action in result.get("actions", {}):
@@ -631,7 +660,7 @@ def conform_runs(
         "checks": CHECKS,
         "refinement": REFINEMENT,
         "properties_checked": [item.name for item in bundle.claims.properties if item.conform],
-        "runs": results,
+        "runs": list(results),
         "action_coverage": {
             "runs": len(results),
             "observed": {action: observed_in.get(action, 0) for action in mapped},
@@ -644,6 +673,51 @@ def conform_runs(
     if group_by:
         report["groups"] = _groups(results, group_by, [item.name for item in bundle.claims.targets])
     return report
+
+
+def plan_bundles(plan: Mapping[str, Any]) -> list[str]:
+    """The spec bundles the components of a plan (as data) name in their ``spec``: the protocols its run exercises."""
+
+    names: list[str] = []
+    for component in plan.get("components") or ():
+        name = (component.get("config") or {}).get("spec")
+        if isinstance(name, str) and name and name not in names:
+            names.append(name)
+    return names
+
+
+def conform_folder(folder: str, tools: Optional[TlaTools], unavailable: str = "") -> dict[str, dict[str, Any]]:
+    """The run in ``folder`` checked against each spec bundle its plan names, by bundle; empty when it names none.
+
+    Each entry is :func:`check_run`'s result and whether the bundle's claims are ``approved``. A run that did
+    not reach its verdict (it ended ERROR or SKIP_UNSUPPORTED) is ``not_run``, and one that took no mapped step
+    is ``unexercised``: its plan names the bundle, but nothing it did shows the protocol (a replication chaos
+    wave that only stalls a replica briefly). Without ``tools``, a bundle that :func:`needs_tlc` is
+    ``skipped``, with ``unavailable`` as the reason.
+    """
+
+    path = os.path.join(folder, "report.json")
+    report = _run_report(path)
+    if report is None:
+        return {}
+    results: dict[str, dict[str, Any]] = {}
+    for name in plan_bundles(report["outcome"]["plan"]):
+        try:
+            bundle = load_bundle(name)
+        except SpecBundleError as exc:
+            results[name] = {"status": "error", "error": str(exc)}
+            continue
+        entry: dict[str, Any] = {"approved": bundle.claims.status == "approved"}
+        if report.get("status") not in CHECKED_RUN_STATUSES:
+            entry.update(status="not_run", reason=f"the run ended {report.get('status')}, before its verdict")
+        elif tools is None and needs_tlc(bundle):
+            entry.update(status="skipped", reason=unavailable or "no java and tla2tools.jar")
+        else:
+            entry.update(check_run(bundle, _report_run(path, report), tools))
+            if entry.pop("unexercised", False):
+                entry.update(status="unexercised", reason=entry.pop("error"))
+        results[name] = entry
+    return results
 
 
 def _groups(results: Sequence[Mapping[str, Any]], keys: Sequence[str], targets: Sequence[str]) -> list[dict[str, Any]]:
@@ -672,12 +746,18 @@ def _groups(results: Sequence[Mapping[str, Any]], keys: Sequence[str], targets: 
 
 
 __all__ = [
+    "CHECKED_RUN_STATUSES",
     "CHECKS",
+    "CONFORMANCE_FILE",
     "REFINEMENT",
     "ObservedRun",
     "RunEvidence",
     "check_run",
     "collect_runs",
+    "conform_folder",
     "conform_runs",
+    "needs_tlc",
+    "plan_bundles",
+    "summarize",
     "trace_module",
 ]

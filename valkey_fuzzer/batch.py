@@ -35,10 +35,12 @@ The batch folder::
     workers.json        the jobs running now and their worker processes (for resume)
     results/<id>.json   one finished job: status, failure signature, leaks, zoo observation
     runs/<id>/          the job's run folder: plan.json, report.json, scenario.yaml,
-                        components/, logs/ (instance logs), console.log
+                        components/, logs/ (instance logs), console.log, and conform.json
+                        when its plan names a spec bundle
     corpus.json         a guided batch's corpus: the runs that reached new Valkey code, and what they reached
                         (with ``corpus_from``, an earlier batch's entries first)
-    summary.json        counts, failure signatures, serial re-runs, zoo verdicts, leaks, exit code
+    conformance/<b>.json  the spec conform report of spec bundle <b> over the runs that exercised it
+    summary.json        counts, failure signatures, serial re-runs, zoo verdicts, conformance, leaks, exit code
     batch.log           one line per finished job
 
 A batch resumes where it stopped: finished jobs keep their results, a job that
@@ -47,7 +49,15 @@ remove what it left), and a worker that outlived a killed batch is stopped
 first. Non-PASS runs are grouped by the minimizer's failure signature
 (:func:`~valkey_fuzzer.minimize.failure_signature`); with ``serial_reruns`` a
 sample of each group runs again one at a time, which separates failures that
-need load from real ones. The batch's status is the worst of its runs, its
+need load from real ones.
+
+Each run whose plan names a spec bundle (a component's ``spec``) is checked
+against it by its worker, as ``valkey-fuzzer spec conform`` would, before the
+run folder is pruned (:func:`~valkey_fuzzer.spec.conform.conform_folder`;
+TLC from ``$TLA2TOOLS_JAR``). For a bundle whose claims are approved, a
+claimed property violated on the run's observed states fails the run, and a
+check that could not decide is an ERROR; a draft's findings are only
+reported. The batch's status is the worst of its runs, its
 leaks (ERROR), its zoo cases (FAIL when one does not hold), and its matrix
 combinations that do not compile (ERROR).
 """
@@ -81,7 +91,7 @@ from .deployment.local.ports import LOCK_DIRECTORY, ephemeral_overlap
 from .documents import SCENARIO_SECTIONS, merge, set_path
 from .generator import Exclusion, GeneratorBlock, GeneratorError, find_profile, installed_pools, opted_in
 from .hoststate import Owner, interrupt_on_sigterm, open_shared_lock, owner_of, shared_directory, sweep
-from .minimize import empty_signature, failure_signature
+from .minimize import empty_signature, failure_signature, verdict_clauses
 from .ordering import DependencyCycleError
 from .outcomes import EXIT_HARNESS_ERROR, EXIT_INTERRUPTED, exit_code, print_outcome
 from .plan import ExecutionPlan
@@ -92,6 +102,9 @@ from .reports import REPORT_FILE, SCENARIO_FILE, write_document
 from .results import RunOutcome
 from .schema import ConfigError, ConfigField, ConfigSchema, ExperimentError, load_yaml_mapping
 from .service import PreparedRun, RunService
+from .spec.bundle import SpecBundleError, load_bundle
+from .spec.conform import CHECKED_RUN_STATUSES, CONFORMANCE_FILE, conform_folder, plan_bundles, summarize
+from .spec.tla import TlaError, TlaTools
 from .zoo import ZOO_DIRECTORY, ZooRun, case_report, check_build, detected, load_zoo, observe, zoo_runs
 
 # Client ports per worker: a cluster of 16 primaries with 5 replicas each is 96 instances.
@@ -120,7 +133,10 @@ FEATURES_FILE = "features.json"
 GUIDED_TRIES = 10
 CONSOLE_FILE = "console.log"
 # What a pruned PASS run keeps.
-KEPT_WHEN_PRUNED = (REPORT_FILE, SCENARIO_FILE)
+KEPT_WHEN_PRUNED = (REPORT_FILE, SCENARIO_FILE, CONFORMANCE_FILE)
+# How long a worker's spec conform may run TLC on its run's observed states.
+CONFORM_TIMEOUT_S = 300.0
+CONFORMANCE_DIRECTORY = "conformance"
 
 
 class BatchError(ValueError):
@@ -602,9 +618,29 @@ def run_worker(task_path: str) -> int:
         generated=prepared.generated,
     )
     print_outcome(record.outcome, verbose=True)
+    _conform(report_dir)
     if task.get("coverage_dir"):
         _collect_coverage(task["coverage_dir"])
     return exit_code(record.outcome.status)
+
+
+def _conform(report_dir: str) -> None:
+    """Write ``conform.json``: the run checked against every spec bundle its plan names, with TLC from
+    ``$TLA2TOOLS_JAR`` (a bundle that needs TLC is skipped without it)."""
+
+    try:
+        tools, unavailable = TlaTools.locate(None, workers="1").within(CONFORM_TIMEOUT_S), ""
+    except TlaError as exc:
+        tools, unavailable = None, str(exc)
+    results = conform_folder(report_dir, tools, unavailable)
+    if not results:
+        return
+    write_document(os.path.join(report_dir, CONFORMANCE_FILE), results)
+    for name, entry in results.items():
+        print(
+            f"spec conform {name}: {entry['status']}"
+            + (f": {entry.get('error') or entry.get('reason')}" if entry["status"] not in ("pass", "fail") else "")
+        )
 
 
 def _collect_coverage(directory: str) -> None:
@@ -719,6 +755,24 @@ def job_result(
             status, error = "ERROR", {"type": "UnreadableReport", "message": str(exc), "phase": "batch"}
     signature = _signature(outcome, error)
     summary = report["summary"] if report is not None else f"{error['type']}: {error['message']}"
+    conformance = _conformance(run_dir, report)
+    for name, entry in sorted(conformance.items()):
+        # A draft's findings are reported, not held against the run; a bundle that did not load has no claims.
+        if entry["status"] not in ("fail", "error") or not entry.get("approved", True):
+            continue
+        if entry["status"] == "fail":
+            violated = sorted(
+                prop for prop, item in entry["properties"].items() if item["status"] == "violated" and item["claimed"]
+            )
+            verdict, text = [f"{prop} violated" for prop in violated], f"{', '.join(violated)} violated"
+        else:
+            verdict, text = verdict_clauses(entry["error"]), entry["error"]
+        status = worst([status, entry["status"].upper()])
+        summary = f"spec conform {name}: {text}; {summary}"
+        if not signature["crashes"]:
+            signature["failures"][f"spec-conform:{name}"] = {"status": entry["status"].upper(), "verdict": verdict}
+            signature["failing_components"] = sorted(signature["failures"])
+            signature["status"] = status
     if leaks:
         # The run left servers, chains, mounts, or directories behind: its cleanup failed.
         kinds = ", ".join(sorted({item["kind"] for item in leaks}))
@@ -738,6 +792,7 @@ def job_result(
         "exit_code": exit_code,
         "timed_out": timed_out,
         "leaks": [dict(item) for item in leaks],
+        "conformance": conformance,
         "signature": None if status == "PASS" else signature,
         "signature_key": None if status == "PASS" else signature_key(experiment, signature),
         "signature_label": None if status == "PASS" else signature_label(experiment, signature),
@@ -750,6 +805,24 @@ def job_result(
         run = _zoo_run(job)
         result["zoo"] = {**observed, "detected": None if run.control else detected(run, observed)}
     return result
+
+
+def _conformance(run_dir: str, report: Optional[Mapping[str, Any]]) -> dict[str, Any]:
+    """The worker's ``conform.json``; for a run that reached its verdict and whose plan names spec bundles but
+    that has none, an error for each bundle."""
+
+    path = os.path.join(run_dir, CONFORMANCE_FILE)
+    if os.path.exists(path):
+        try:
+            return _read_json(path)
+        except (OSError, ValueError) as exc:
+            problem = f"{CONFORMANCE_FILE} cannot be read: {exc}"
+    else:
+        problem = f"no {CONFORMANCE_FILE}: the worker ended before spec conform checked the run"
+    if report is None or report.get("status") not in CHECKED_RUN_STATUSES:
+        return {}
+    plan = (report.get("outcome") or {}).get("plan") or {}
+    return {name: {"status": "error", "error": problem} for name in plan_bundles(plan)}
 
 
 def _zoo_run(job: Mapping[str, Any]) -> ZooRun:
@@ -1397,6 +1470,7 @@ class BatchRunner:
             ],
             "signatures": sorted(groups.values(), key=lambda group: (-group["count"], group["label"])),
             "zoo": zoo,
+            "conformance": self._conformance(main),
             "leaks": leaks,
             "invalid": self.spec["invalid"],
             "coverage": {
@@ -1407,6 +1481,61 @@ class BatchRunner:
             if self._guided
             else None,
         }
+
+    def _conformance(self, results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+        """For each spec bundle the runs' plans name (zoo runs and serial re-runs left out, as from ``counts``):
+        its conform report over the runs checked against it, written to ``conformance/<bundle>.json``, and a
+        digest of it, claimed violations first."""
+
+        by_bundle: dict[str, list[dict[str, Any]]] = {}
+        for result in results:
+            for name, entry in (result.get("conformance") or {}).items():
+                by_bundle.setdefault(name, []).append({"run": result["id"], **entry})
+        digests = {}
+        for name, entries in sorted(by_bundle.items()):
+            counts = dict(Counter(entry["status"] for entry in entries))
+            skipped = sorted({entry["reason"] for entry in entries if entry["status"] == "skipped"})
+            checked = [entry for entry in entries if entry["status"] in ("pass", "fail", "error")]
+            digest: dict[str, Any] = {"counts": counts, "skipped": skipped}
+            try:
+                bundle = load_bundle(name)
+            except SpecBundleError as exc:
+                digests[name] = {**digest, "status": "error", "error": str(exc)}
+                continue
+            report = summarize(bundle, checked)
+            path = os.path.join(CONFORMANCE_DIRECTORY, f"{name}.json")
+            write_document(self._path(path), {**report, "counts": counts})
+            if checked:
+                status = report["status"]
+            else:
+                status = next(item for item in ("skipped", "unexercised", "not_run") if item in counts)
+            digests[name] = {
+                **digest,
+                "status": status,
+                "approved": bundle.claims.status == "approved",
+                "report": path,
+                "violations": sorted(
+                    (
+                        {
+                            "run": entry["run"],
+                            "property": prop,
+                            "claimed": item["claimed"],
+                            "first": item.get("first"),
+                        }
+                        for entry in checked
+                        for prop, item in sorted((entry.get("properties") or {}).items())
+                        if item["status"] == "violated"
+                    ),
+                    key=lambda item: not item["claimed"],
+                ),
+                "errors": [
+                    {"run": entry["run"], "error": entry["error"]} for entry in checked if entry["status"] == "error"
+                ],
+                "action_coverage": report["action_coverage"]["observed"],
+                "never_observed": report["action_coverage"]["never_observed"],
+                "targets_reached": report["targets_reached"],
+            }
+        return digests
 
     def _zoo_summary(self, results: Mapping[str, Any], by_id: Mapping[str, Any]) -> Optional[dict[str, Any]]:
         zoo = self.spec.get("zoo")

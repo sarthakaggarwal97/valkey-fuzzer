@@ -29,7 +29,7 @@ from valkey_fuzzer.spec import (
     translate_trace,
 )
 from valkey_fuzzer.spec.bundle import load_spec_mapping
-from valkey_fuzzer.spec.conform import ObservedRun, check_run
+from valkey_fuzzer.spec.conform import ObservedRun, check_run, conform_folder
 from valkey_fuzzer.spec.tla import (
     ModelValue,
     TlaError,
@@ -425,6 +425,52 @@ def test_conform_reads_every_run_folder_and_reports_the_unreadable_ones(tmp_path
     assert "trace.jsonl" in collected["truncated"].problem
     result = check_run(load_bundle(str(BUNDLE)), collected["corrupt"], TlaTools(jar="unused"))
     assert (result["status"], result["error"], result["states"]) == ("error", collected["corrupt"].problem, 0)
+
+
+def _run_folder(folder, status, specs, events=()):
+    """A run folder whose report has ``status``, one component per name in ``specs``, and ``events`` committed."""
+
+    components = [{"use": "valkey.observer.log-trigger", "id": f"c{index}", "config": {"spec": name}}
+                  for index, name in enumerate(specs)] + [{"use": "valkey.oracle.liveness", "id": "liveness", "config": {}}]  # fmt: skip
+    diagnostics = {"events": [{"committed": True, "sequence": index, "timestamp": float(index), "name": name,
+                               "source": "c0", "payload": payload} for index, (name, payload) in enumerate(events)]}  # fmt: skip
+    plan = {"scenario_id": folder.name, "seed": 1, "experiment_id": "x", "inputs": {}, "components": components}
+    folder.mkdir(parents=True)
+    report = {"status": status, "outcome": {"plan": plan, "diagnostics": diagnostics}}
+    (folder / "report.json").write_text(json.dumps(report))
+    return str(folder)
+
+
+def test_conform_folder_checks_a_run_against_each_bundle_its_plan_names(tmp_path):
+    events = [
+        ("replication.link.lost", {"instance_id": "valkey-1"}),
+        ("replication.partial.continued", {"instance_id": "valkey-1"}),
+    ]
+    run = _run_folder(tmp_path / "run", "FAIL", ["replication", "register", "replication"], events)
+    checked = conform_folder(run, None, "tla2tools.jar not found")
+    assert list(checked) == ["replication", "register"]
+    # Every replication property is excluded and it has no target: TLC has nothing to evaluate, so no tools.
+    replication = checked["replication"]
+    assert (replication["status"], replication["approved"]) == ("pass", True)
+    assert replication["actions"] == {"Disconnect": 1, "PartialSync": 1} and replication["properties"] == {}
+    assert checked["register"] == {"approved": False, "status": "skipped", "reason": "tla2tools.jar not found"}
+    # Known-bad: a run that never reached its verdict, a bundle that is gone, and a run of no bundle.
+    errored = conform_folder(_run_folder(tmp_path / "errored", "ERROR", ["replication"], events), None)
+    assert errored["replication"]["status"] == "not_run" and "ended ERROR" in errored["replication"]["reason"]
+    gone = conform_folder(_run_folder(tmp_path / "gone", "PASS", ["no-such-bundle"]), None)
+    assert gone["no-such-bundle"]["status"] == "error" and "no-such-bundle" in gone["no-such-bundle"]["error"]
+    assert conform_folder(_run_folder(tmp_path / "none", "PASS", []), None) == {}
+    # A run that took no mapped step is unexercised: never a pass, and no error of the check either.
+    empty = conform_folder(_run_folder(tmp_path / "empty", "PASS", ["replication"]), None)
+    assert empty["replication"]["status"] == "unexercised" and "no mapped evidence" in empty["replication"]["reason"]
+    assert "error" not in empty["replication"]
+
+
+def test_conform_needs_no_tools_for_a_bundle_tlc_has_nothing_to_evaluate(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("TLA2TOOLS_JAR", raising=False)
+    run = _run_folder(tmp_path / "run", "PASS", ["replication"], [("replication.link.lost", {"instance_id": "v"})])
+    assert _cli("conform", "replication", run) == 0 and "Disconnect 1/1" in capsys.readouterr().out
+    assert _cli("conform", str(BUNDLE), run) == 2 and "tla2tools.jar not found" in capsys.readouterr().err
 
 
 ELECTION_OBSERVATIONS = [

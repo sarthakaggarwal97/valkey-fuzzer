@@ -701,17 +701,20 @@ def test_the_spec_check_runs_on_every_change_to_main():
     assert all("paths" not in (triggers[event] or {}) for event in ("push", "pull_request"))
 
 
-# Each job that runs tests backed by TLC, and the pytest steps in it that run them.
+# Each job that runs tests backed by TLC, or a batch that checks its runs against the spec bundles they exercise,
+# and the pytest and batch steps in it that need TLC.
 TLC_JOBS = {
     ("tla-model-check.yml", "tlc"): 1,
     ("test.yml", "server-tests"): 2,
     ("valkey-experiments-live.yml", "valkey-experiments-live"): 1,
+    ("fuzzer-pr-batch.yml", "batch"): 1,
 }
 
 
 @pytest.mark.parametrize(("name", "job"), sorted(TLC_JOBS))
 def test_every_job_with_tlc_backed_tests_has_java_and_the_pinned_tla_tools(name, job):
-    # Without them those tests skip, and CI never checks the spec bridge end to end.
+    # Without them those tests skip, a batch skips the bundles that need TLC, and CI never checks the spec bridge
+    # end to end.
     workflow = _workflow(name)
     pinned = {key: _workflow("tla-model-check.yml")["env"][key] for key in ("TLA_TOOLS_VERSION", "TLA_TOOLS_SHA256")}
     assert {key: workflow.get("env", {}).get(key) for key in pinned} == pinned
@@ -719,7 +722,7 @@ def test_every_job_with_tlc_backed_tests_has_java_and_the_pinned_tla_tools(name,
     assert any(step.get("uses", "").startswith("actions/setup-java@") for step in steps)
     (download,) = [step["run"] for step in steps if "tla2tools.jar" in step.get("run", "") and "curl" in step["run"]]
     assert "${TLA_TOOLS_SHA256}" in download and "sha256sum -c" in download
-    tests = [step for step in steps if "pytest" in step.get("run", "")]
+    tests = [step for step in steps if "pytest" in step.get("run", "") or "valkey-fuzzer batch" in step.get("run", "")]
     with_jar = [
         step for step in tests if step.get("env", {}).get("TLA2TOOLS_JAR") == "${{ runner.temp }}/tla2tools.jar"
     ]
@@ -808,8 +811,17 @@ def test_the_batch_summary_lists_every_run_with_its_report_and_the_signatures(tm
         {"id": "s7", "status": "ERROR", "seed": 7, "summary": "WorkerExit: no run report", "report": None},
     ]
     signatures = [{"count": 1, "label": "FAIL | valkey.cluster-chaos | chaos:FAIL"}]
+    conformance = {"replication": {"status": "pass", "approved": True, "counts": {"pass": 3, "unexercised": 1}}}
     (batch / "summary.json").write_text(
-        json.dumps({"status": "FAIL", "counts": {"FAIL": 1, "ERROR": 1}, "runs": runs, "signatures": signatures})
+        json.dumps(
+            {
+                "status": "FAIL",
+                "counts": {"FAIL": 1, "ERROR": 1},
+                "runs": runs,
+                "signatures": signatures,
+                "conformance": conformance,
+            }
+        )
     )
 
     summary = CI.batch_summary("Soak", str(batch), "`valkey-io/valkey` `-` `abc`")
@@ -819,6 +831,7 @@ def test_the_batch_summary_lists_every_run_with_its_report_and_the_signatures(tm
     assert f"| {folder.name} | FAIL | {plan.scenario_id} | 31 | deadbeef | x | chaos: wave 1 / lost keys |" in summary
     assert "| s7 | ERROR | - | 7 | - | WorkerExit: no run report | - |" in summary
     assert "- Signature (1 run(s)): FAIL | valkey.cluster-chaos | chaos:FAIL" in summary
+    assert "- Spec conform `replication` (approved claims): `pass` (pass 3, unexercised 1), runs by status" in summary
 
 
 def test_the_search_chaos_workflow_starts_valkey_search_with_its_index_check_on(tmp_path):

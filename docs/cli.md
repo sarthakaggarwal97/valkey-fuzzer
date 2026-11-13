@@ -353,8 +353,10 @@ removed, the batch refuses to start. Dead runs' directories stay.
   results/<id>.json   one finished job
   corpus.json         a guided batch's corpus (see Coverage-guided batches)
   runs/<id>/          the job's run folder: plan.json, report.json, scenario.yaml,
-                      components/, logs/ (instance logs), console.log (or error.json)
+                      components/, logs/ (instance logs), console.log (or error.json),
+                      conform.json (when its plan names a spec bundle)
   experiments/        a copy of every --experiment-dir's documents (only with one)
+  conformance/<b>.json  the spec conform report of bundle <b> over the runs checked against it
   summary.json        the summary, rewritten when the batch stops
   batch.log           one line per finished job
   workers.json, work/ the jobs running now and the workers' scratch (while running)
@@ -368,6 +370,19 @@ into `experiments/` (two directories holding the same file name are refused),
 so `replay runs/<id>/report.json --experiment-dir experiments` reruns a job
 from the folder alone.
 
+A run whose plan names a [spec bundle](spec-bridge.md#bundles) (a
+component's `spec`, as the election and replication experiments' observers
+do) is checked against it by its worker as soon as it ends, before the
+folder is pruned: [`spec conform`](spec-bridge.md#in-a-batch), on the
+run's report and trace, with TLC from `$TLA2TOOLS_JAR`. The result is the
+run's `conform.json` (kept when a passing run is pruned) and its result's
+`conformance`. For a bundle whose claims are approved, a claimed property
+violated on the run's observed states makes the run a `FAIL`, and a check
+that could not decide makes it an `ERROR`; either is in the run's summary
+(`spec conform replication: ...`) and failure signature (the failing
+component `spec-conform:<bundle>`). A draft bundle's findings are reported
+and change nothing.
+
 `summary.json` has:
 
 | Key | Contents |
@@ -378,6 +393,7 @@ from the folder alone.
 | `runs` | Every finished job: `id`, `source`, `status`, `summary`, `experiment`, `seed`, `report` (its run report, relative to the folder; `null` when it left none), `signature_key`, `duration_s`, `worker`, `leaks` (a count), `origin` (the job a re-run repeats). |
 | `signatures` | The non-PASS runs grouped by the minimizer's [failure signature](#minimize) and experiment (a crash by its causes alone, across experiments), most runs first: `key`, `label`, `status`, `experiment`, `signature`, `count`, `runs`, and `serial_reruns`: `runs` (each re-run's `id`, `status`, `same_signature`, and its own `signature_key` and `signature_label`), `reproduced` (how many failed the same way), and `verdict`: `reproduced` (all did), `intermittent` (some did), `failed differently` (none did, but some failed another way; the summary printout gives their signatures), or `not reproduced` (all passed, which points at load). |
 | `zoo` | `valkey_commit`, `cases` (each case's controls, per-scenario detection rates, and whether it `holds`: true, false, or null for a case with an unobserved `ERROR` or `SKIP_UNSUPPORTED` run, which `undecided` then names), `skipped` (cases this host cannot run), `held`, `not_held`, and `undecided`. |
+| `conformance` | Per spec bundle the runs' plans name: `status` (`pass`, `fail`, or `error` over the checked runs; `skipped`, `unexercised`, or `not_run` when none was checked), `approved`, `counts` (runs by conform status: `pass`, `fail`, `error`, `skipped` without TLC, `unexercised` for a run that took no mapped step, `not_run` for a run that ended `ERROR` or `SKIP_UNSUPPORTED`), `skipped` (why), `violations` (each run, property, whether it was `claimed`, and the `first` failing step), `errors`, `action_coverage` (runs observing each mapped action), `never_observed`, `targets_reached`, and `report`, the bundle's full conform report under `conformance/`. |
 | `leaks` | Every leftover the sweeps removed, with the run that left it. |
 | `invalid` | Matrix combinations that did not compile. |
 | `coverage` | Per experiment, the runs and the distinct coverage tuples they covered. |

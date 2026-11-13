@@ -139,6 +139,21 @@ def _print_summary(summary: dict[str, Any]) -> None:
             print(f"  zoo {verdict:<5} {case['case']}: control {controls}; detected {rates}")
         for item in zoo["skipped"]:
             print(f"  zoo SKIP {item['case']}: {item['reason']}")
+    for name, digest in summary["conformance"].items():
+        counts = ", ".join(f"{status} {count}" for status, count in sorted(digest["counts"].items()))
+        claims = " (approved)" if digest.get("approved") else " (draft)" if "approved" in digest else ""
+        print(f"  spec conform {name}{claims}: {digest['status']} ({counts})")
+        for item in digest.get("violations", [])[:5]:
+            outside = "" if item["claimed"] else " (outside the claim)"
+            print(f"    runs/{item['run']}: {item['property']} violated{outside}")
+        for item in digest.get("errors", [])[:5]:
+            print(f"    runs/{item['run']}: {item['error'][:200]}")
+        if digest.get("never_observed"):
+            print(f"    never observed: {', '.join(digest['never_observed'])}")
+        for reason in digest["skipped"]:
+            print(f"    skipped: {reason}")
+        if digest.get("error"):
+            print(f"    {digest['error']}")
     if summary["leaks"]:
         print(f"  Leaks: {len(summary['leaks'])}")
         for leak in summary["leaks"][:20]:

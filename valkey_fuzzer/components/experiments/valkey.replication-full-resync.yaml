@@ -8,8 +8,9 @@
 # partial resync and serve a full one, which the `full-resync` oracle checks: a
 # stall that never overflowed the limit (the writes were few) did not reach
 # that state, and the run is an ERROR, not
-# a FAIL.
-extends: [valkey.base, valkey.history]
+# a FAIL. `replication-steps` publishes the replication model's steps from
+# the logs (valkey.replication-steps).
+extends: [valkey.base, valkey.history, valkey.replication-steps]
 id: valkey.replication-full-resync
 deployment:
   modes: [standalone, cluster]
@@ -48,6 +49,8 @@ startup_overlays:
       repl-backlog-size: 16kb
       client-output-buffer-limit: "replica 64kb 0 0"
 components:
+  - id: replication-steps
+
   - use: valkey.observer.info
     id: info
     config:

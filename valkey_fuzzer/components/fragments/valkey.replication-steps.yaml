@@ -1,0 +1,25 @@
+# The replication model's steps (formal/replication), as the instances log
+# them: the `replication-steps` observer publishes every line that
+# formal/replication/mapping.yaml maps to a step, with the mapping's patterns
+# (spec: replication), so a batch checks each run against the bundle (`spec
+# conform`: which steps the run took; the claims compare data sets, which a
+# run does not observe). An experiment lists `- id: replication-steps` before
+# its actions, so the observer tails the logs before they act.
+components:
+  - use: valkey.observer.log-trigger
+    id: replication-steps
+    config:
+      instances: all
+      # Only coverage is read from these events, so their order across instances matters little.
+      poll_interval_s: 0.05
+      spec: replication
+      rules:
+        - {publish: replication.partial.continued}
+        - {publish: replication.full.started}
+        - {publish: replication.dual.started}
+        - {publish: replication.load.failed}
+        - {publish: replication.link.lost}
+        - {publish: replication.promoted}
+        - {publish: replication.replicaof}
+        - {publish: replication.backlog.freed}
+        - {publish: replication.rdb.saved}
