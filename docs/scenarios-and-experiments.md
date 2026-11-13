@@ -460,7 +460,7 @@ loaded with `--experiment-dir` can extend them. Merge rules:
 - `required_events`, `required_evidence`, and `inputs.required` are unions.
 - Every other field is replaced.
 
-The Valkey components ship twelve fragments:
+The Valkey components ship thirteen fragments:
 
 | Fragment | Adds |
 | --- | --- |
@@ -472,6 +472,7 @@ The Valkey components ship twelve fragments:
 | `valkey.reconnect-replicas` | the `drop-replica-links` action ([`valkey.action.command`](components.md#valkeyactioncommand), `CLIENT KILL TYPE replica` on the primaries), then the `links-up` poll (every replica's `master_link_status` is `up`, within 120 s), with `drop-replica-links.completed` a required event; fragments name what `drop-replica-links` follows |
 | `valkey.psync` | `valkey.base` and a partial resync: writes for `disconnect_after_s` (input, default 1), then `valkey.reconnect-replicas` after `run-then-disconnect`, the `info` observer requiring `sync_partial_ok` to advance and `sync_full` not to, and the `logs` observer requiring both sides' PSYNC lines and forbidding a full resync; standalone or cluster with replicas |
 | `valkey.full-sync` | `valkey.base` and a forced full sync: writes for `run_before_sync_s` (input, default 1), then `change-replid` (`DEBUG CHANGE-REPL-ID`, which the `full-sync` startup overlay enables) and `valkey.reconnect-replicas` |
+| `valkey.replication-steps` | the `replication-steps` observer ([`valkey.observer.log-trigger`](components.md#valkeyobserverlog-trigger), `spec: replication`), which publishes every log line [`formal/replication`](../formal/replication/README.md)'s mapping maps to a model step, so a batch checks the run against the bundle ([In a batch](spec-bridge.md#in-a-batch)); list `- id: replication-steps` before the experiment's actions. `valkey.replication-chaos`, `valkey.replication-full-resync`, and `valkey.replication-partial-resync` extend it |
 | `valkey.command-table` | the `commands` workload ([`valkey.workload.command-table`](components.md#valkeyworkloadcommand-table)) at the input `command_rate` (default 0, which sends none); the `reply-schemas` oracle ([`valkey.oracle.reply-schema`](components.md#valkeyoraclereply-schema)), which holds its replies to Valkey's reply schemas; and the `command-metadata` oracle ([`valkey.oracle.command-metadata`](components.md#valkeyoraclecommand-metadata)), which holds the workload's first 1000 commands to the build's command metadata on private servers; random scenarios keep the default, so a batch turns them on for an experiment with a base (`experiment: {inputs: {command_rate: 200}}`). `valkey.cluster-chaos`, `valkey.replication-chaos`, and `valkey.cluster-partition` extend it |
 | `valkey.config-churn` | the `config-churn` workload ([`valkey.workload.config-churn`](components.md#valkeyworkloadconfig-churn)), which changes `config_changes` configs (input, 0 to 20, default 0) with `CONFIG SET` during the run; random scenarios draw how many |
 | `valkey.random` | only the server config pools of [random scenarios](#declaring-what-may-be-randomized) |

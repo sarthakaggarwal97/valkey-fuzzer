@@ -35,7 +35,7 @@ def _masked(text: str) -> str:
     return " ".join(_RUN_DETAIL.sub("N", text).split())
 
 
-def _verdict(summary: str) -> list[str]:
+def verdict_clauses(summary: str) -> list[str]:
     """A component's summary as its sorted distinct clauses, with numbers and hex IDs masked."""
 
     clauses = (_masked(clause) for clause in summary.split(";"))
@@ -94,7 +94,7 @@ def failure_signature(outcome: RunOutcome, required_evidence: Iterable[str] = ()
         if isinstance(exception, Mapping) and exception.get("type"):
             verdict = [f"{exception['type']} during {exception.get('phase')}"]
         else:
-            verdict = _verdict(result.summary)
+            verdict = verdict_clauses(result.summary)
         failures[result.component_id] = {"status": result.status.value, "verdict": verdict}
     missing = sorted(item["evidence_id"] for item in diagnostics.get("missing_required_evidence", ()))
     observed = {item.evidence_id for item in outcome.all_evidence}

@@ -1,6 +1,7 @@
 # Implementation evidence for model.tla: the log lines that show the model's
-# replication steps. An experiment publishes them with
-# valkey.observer.log-trigger (spec: replication). The claims compare data
+# replication steps, and the faults that crash a node. The replication
+# experiments publish the lines with the valkey.replication-steps fragment
+# (valkey.observer.log-trigger, spec: replication). The claims compare data
 # sets, which a run does not observe in the model's terms, so `spec conform`
 # checks no property of this bundle: it reports which steps real runs took.
 evidence:
@@ -81,6 +82,16 @@ evidence:
     action: Crash
     updates:
       - {incr: crashes}
+  chaos-kill:
+    # A kill operation of valkey.action.replication-chaos, which a restart
+    # operation or the heal follows. A SIGTERM's shutdown save is logged
+    # first, as a Save.
+    event: '*.instance-killed'
+    where: {success: true}
+    fields: {instance_id: node}
+    action: Crash
+    updates:
+      - {incr: crashes}
 
 unobservable:
   Write: Client writes are not logged; INFO offsets in samples count them.
@@ -107,6 +118,7 @@ processes:
       - {evidence: replicaof, field: instance_id}
       - {evidence: lost, field: instance_id}
       - {evidence: crash, field: target}
+      - {evidence: chaos-kill, field: instance_id}
 
 state:
   role: {over: [Nodes], init: unknown}

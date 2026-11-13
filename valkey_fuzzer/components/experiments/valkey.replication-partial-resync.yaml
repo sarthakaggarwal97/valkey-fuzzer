@@ -2,8 +2,9 @@
 # under continuous writes and require a partial resynchronization: the primary
 # counts sync_partial_ok without any new full sync, both sides log the PSYNC
 # handshake, and every replica converges byte-for-byte with its primary (the
-# valkey.psync procedure).
-extends: [valkey.psync]
+# valkey.psync procedure). `replication-steps` publishes the replication
+# model's steps from the logs (valkey.replication-steps).
+extends: [valkey.psync, valkey.replication-steps]
 id: valkey.replication-partial-resync
 metadata:
   description: Disconnect replicas mid-stream and verify PSYNC partial resync and convergence
@@ -15,6 +16,8 @@ metadata:
       value_size: {values: [1, 64, 256, 1024]}
     server_config: [valkey.pool.replication]
 components:
+  - id: replication-steps
+
   - use: valkey.observer.info
     id: info
     config: {sections: [stats, replication]}

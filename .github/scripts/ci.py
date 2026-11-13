@@ -276,7 +276,8 @@ def summarize(env, results):
 
 
 def batch_summary(title, batch_dir, valkey="", parent="", build="", module="", module_parent=""):
-    """The job summary of one batch folder: its status, each run, and the failure signatures."""
+    """The job summary of one batch folder: its status, each run, the failure signatures, and what spec conform
+    found per bundle."""
 
     lines = [f"## {title}", ""] + ([f"- Valkey: {valkey}"] if valkey else [])
     lines += [f"- Parent commit (artifacts.parent): `{parent}`"] if parent else []
@@ -303,6 +304,10 @@ def batch_summary(title, batch_dir, valkey="", parent="", build="", module="", m
         lines.append("| - | - | - | - | - | no run finished | - |")
     lines.append("")
     lines += [f"- Signature ({group['count']} run(s)): {group['label']}" for group in summary["signatures"]]
+    for name, digest in (summary.get("conformance") or {}).items():
+        counts = ", ".join(f"{status} {count}" for status, count in sorted(digest["counts"].items()))
+        claims = "approved" if digest.get("approved") else "draft"
+        lines.append(f"- Spec conform `{name}` ({claims} claims): `{digest['status']}` ({counts}), runs by status")
     lines.append("- Rerun a run with `valkey-fuzzer run runs/<run>/scenario.yaml` in the uploaded batch folder.")
     return "\n".join(lines) + "\n"
 

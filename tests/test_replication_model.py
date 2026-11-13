@@ -7,6 +7,7 @@ import shutil
 
 import pytest
 
+from valkey_fuzzer.components import experiments
 from valkey_fuzzer.spec.bundle import load_bundle
 from valkey_fuzzer.spec.conform import ObservedRun, collect_runs
 
@@ -74,6 +75,38 @@ def test_conform_maps_a_failover_run_onto_the_replication_steps(tmp_path):
     assert final["role"] == {"node_valkey_1": "primary", "node_valkey_2": "replica", "node_valkey_0": "unknown"}
     assert final["link"]["node_valkey_2"] == "up"
     assert (final["crashes"], final["switches"]) == (1, 2)
+
+
+def test_a_replication_chaos_kill_is_a_crash():
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as folder:
+        observed = _run(
+            Path(folder),
+            [
+                ("chaos.instance-killed", {"instance_id": "valkey-0", "signal": "SIGTERM", "success": True}),
+                # Known-bad: a target that exited before the kill was not killed.
+                ("chaos.instance-killed", {"instance_id": "valkey-2", "signal": "SIGKILL", "success": False}),
+            ],
+        )
+    assert dict(observed.actions) == {"Crash": 1} and observed.members == {"Nodes": ["valkey-0"]}
+    assert observed.states[-1]["crashes"] == 1
+
+
+@pytest.mark.parametrize(
+    "experiment_id",
+    ["valkey.replication-chaos", "valkey.replication-full-resync", "valkey.replication-partial-resync"],
+)
+def test_the_replication_experiments_publish_the_models_steps_before_they_act(experiment_id):
+    (experiment,) = [item for item in experiments() if item.experiment_id == experiment_id]
+    order = [component.id for component in experiment.components]
+    (steps,) = [component for component in experiment.components if component.id == "replication-steps"]
+    assert (steps.use, steps.config["spec"]) == ("valkey.observer.log-trigger", "replication")
+    patterns = load_bundle("replication").mapping.log_patterns()
+    assert sorted(rule["publish"] for rule in steps.config["rules"]) == sorted(patterns)
+    actions = [component.id for component in experiment.components if component.use.split(".")[1] == "action"]
+    assert actions and all(order.index("replication-steps") < order.index(action) for action in actions)
 
 
 def _tla_jar():

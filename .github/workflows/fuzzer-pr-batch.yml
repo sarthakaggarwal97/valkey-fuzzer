@@ -26,6 +26,8 @@ name: Valkey Fuzzer PR Batch
 # that needs one build, but those in exclude_experiments, so the given
 # scenarios run beside a random baseline.
 # The batch runs as root, so the tmpfs and iptables experiments run too.
+# Each run whose plan names a spec bundle is checked against it (spec
+# conform), with java and the tla2tools.jar that tla-model-check.yml pins.
 # The upload leaves out the write ledgers of the runs that passed, which only
 # the data oracle reads and which can make the folder too large to triage.
 
@@ -129,6 +131,10 @@ on:
 permissions:
   contents: read
 
+env:
+  TLA_TOOLS_VERSION: v1.7.4
+  TLA_TOOLS_SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
+
 jobs:
   batch:
     runs-on: ubuntu-latest
@@ -173,6 +179,19 @@ jobs:
         run: |
           go -C porcupine build -o "${RUNNER_TEMP}/bin/porcupine"
           echo "${RUNNER_TEMP}/bin" >> "${GITHUB_PATH}"
+
+      # The batch checks each run against the spec bundles its plan names; TLC needs java and the jar.
+      - name: Set up Java
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Download tla2tools.jar
+        run: |
+          curl -fsSL --retry 3 -o "${RUNNER_TEMP}/tla2tools.jar" \
+            "https://github.com/tlaplus/tlaplus/releases/download/${TLA_TOOLS_VERSION}/tla2tools.jar"
+          echo "${TLA_TOOLS_SHA256}  ${RUNNER_TEMP}/tla2tools.jar" | sha256sum -c -
 
       # Inputs reach the scripts only through the environment, never the shell.
       - name: Check the inputs and write the scenarios and bundles
@@ -286,6 +305,7 @@ jobs:
         continue-on-error: true
         env:
           VALKEY_FUZZER_SPEC_PATH: ${{ env.SPEC_DIR }}
+          TLA2TOOLS_JAR: ${{ runner.temp }}/tla2tools.jar
           RANDOM_SEEDS: ${{ inputs.random_seeds }}
           INPUT_VALKEY_SHA: ${{ inputs.valkey_sha }}
           # Checked by check-inputs: experiment IDs separated by spaces.

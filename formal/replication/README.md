@@ -66,11 +66,15 @@ load whose main channel closes, and Valkey exits instead.
 
 ## Checking runs
 
-`spec conform replication RUN` replays a run's mapped log lines (published by `valkey.observer.log-trigger` with
-`spec: replication`) and reports which steps it took. Both properties compare data sets, which a run does not show in
-the model's terms, so conform checks neither (`conform: excluded` in `claims.yaml`); the ledger and data-consistency
-oracles compare data after a run. The four dual-channel steps are unobservable as such: Valkey logs `+CONTINUE` and the end of the
-load, and which step a line shows depends on their order.
+`spec conform replication RUN` replays a run's mapped log lines and crashes, and reports which steps it took. The
+replication experiments (`valkey.replication-chaos`, `valkey.replication-full-resync`,
+`valkey.replication-partial-resync`) publish the lines with the `valkey.replication-steps` fragment
+(`valkey.observer.log-trigger`, `spec: replication`), and a batch checks each of their runs this way (see
+[In a batch](../../docs/spec-bridge.md#in-a-batch)). A crash is a SIGKILL fault or a kill of the replication chaos
+action. Both properties compare data sets, which a run does not show in the model's terms, so conform checks neither
+(`conform: excluded` in `claims.yaml`) and needs no TLC; the ledger and data-consistency oracles compare data after a
+run. A run with no mapped step is an error. The four dual-channel steps are unobservable as such: Valkey logs
+`+CONTINUE` and the end of the load, and which step a line shows depends on their order.
 
 ## Run
 
