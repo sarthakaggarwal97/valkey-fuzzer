@@ -41,7 +41,12 @@ The rules behind them:
 
 - **Only actions and oracles can fail a run.** A capability probe, workload,
   observer, or fault that fails (returns `FAIL` or `ERROR`, or raises) did
-  not establish the conditions of the test, so the run is `ERROR`. A
+  not establish the conditions of the test, so the run is `ERROR`, unless
+  its `FAIL` reports a crash (`ComponentResult.crash`): a server it started
+  crashed, as a capability probe's private server that crashes on the
+  configuration it starts with. That is a finding like any other crash. A
+  required capability's crash ends the run before the deployment is
+  provisioned, as a `FAIL` whose failure signature is the crash. A
   required capability that returns `SKIP` makes the run `SKIP_UNSUPPORTED`;
   any other required component that returns `SKIP` makes it `ERROR`. A
   component skipped because a dependency did not pass changes nothing by

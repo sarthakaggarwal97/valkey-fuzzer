@@ -7,7 +7,10 @@ commands.  Each of these names a feature the experiment needs, so a build
 that lacks one is ``SKIP`` (unsupported). A probe that cannot run at all, a
 binary that is not the build the experiment needs (it knows a config in
 ``lacks_configs``), and fewer distinct builds than ``min_distinct_builds`` are
-setup errors: ``ERROR``.
+setup errors: ``ERROR``. A probe server that crashes (its log or output holds
+a crash or sanitizer report, read as ``valkey.oracle.liveness`` reads an
+instance's) is a finding: ``FAIL`` marked ``crash``, whatever else the probe
+could not run.
 
 With ``deployment_config`` it also starts each deployment binary with the
 configuration the deployment gives the instances that run it, and only asks
@@ -27,11 +30,13 @@ that cannot run it: not Linux, not root (or root, for permission faults), no
 tmpfs mounts, no usable iptables, or no per-instance loopback addresses.
 """
 
+import contextlib
 import functools
 import os
 import platform
 import shutil
 import socket
+import subprocess
 from collections.abc import Mapping, Sequence
 from typing import Any, Callable, Optional
 
@@ -46,6 +51,7 @@ from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
 from valkey_fuzzer.schema import ConfigError, ConfigField, plain_config
 
 from . import providers
+from .oracles import CRASH_PATTERNS, crash_cause, crash_reports
 from .registration import component_registration
 from .schemas import ANY, LIST, TEXT, declared, mapping_of
 from .server import PrivateServer, server_arguments, server_identity, version_tuple
@@ -193,6 +199,21 @@ def resolve_binary(binary: str) -> str:
 
 Probed = tuple[ComponentStatus, str, dict[str, Any]]
 
+# How long a probe server whose connection broke gets to exit and finish its crash report.
+_CRASH_EXIT_S = 10.0
+
+
+def _crashed(server: PrivateServer, facts: dict[str, Any]) -> Optional[Probed]:
+    """A crash ``FAIL`` when the probe server's log or process output (stderr, where sanitizers report) holds a
+    crash report, read as the liveness oracle reads an instance's; ``facts`` gain its lines (``crash_report``) and
+    cause (``crash``). None without one."""
+
+    report = crash_reports({"probe": (server.log_path, server.output_path)}, CRASH_PATTERNS).get("probe")
+    if report is None:
+        return None
+    facts.update(crash_report=report, crash=crash_cause(report))
+    return ComponentStatus.FAIL, f"probe server crashed: {facts['crash']}", facts
+
 
 def _run_private_server(
     context: Any,
@@ -205,7 +226,8 @@ def _run_private_server(
 ) -> Probed:
     """Start ``binary`` as a private server with ``startup_config`` (and ``files`` in its directory) and return
     ``check(client, facts)``: (status, summary, facts). A binary that is missing, or a server that cannot start or
-    exits, is that instead.
+    exits, is that instead: a crash ``FAIL`` (:func:`_crashed`) when the server crashed, at startup or on a
+    command ``check`` sent, else ``SKIP`` for a rejected startup configuration and ``ERROR`` for the rest.
 
     The private server is owned until it is stopped.
     """
@@ -221,13 +243,25 @@ def _run_private_server(
         try:
             exit_reason = server.start()
         except (OSError, TimeoutError) as exc:
-            return ComponentStatus.ERROR, f"probe server failed: {exc}", facts
+            return _crashed(server, facts) or (ComponentStatus.ERROR, f"probe server failed: {exc}", facts)
         if exit_reason is not None:
             facts["exit_output"] = exit_reason
+            crashed = _crashed(server, facts)
+            if crashed is not None:
+                return crashed
             if any(pattern.lower() in exit_reason.lower() for pattern in _UNSUPPORTED_PATTERNS):
                 return ComponentStatus.SKIP, f"build rejects startup configuration: {exit_reason[-300:]}", facts
             return ComponentStatus.ERROR, f"probe server exited: {exit_reason[-300:]}", facts
-        return check(server.client, facts)
+        try:
+            return check(server.client, facts)
+        except valkey.exceptions.ConnectionError:
+            # A command the check sent may have crashed the server: its report is whole once the process exited.
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                server.process.wait(timeout=_CRASH_EXIT_S)
+            crashed = _crashed(server, facts)
+            if crashed is None:
+                raise
+            return crashed
     finally:
         owned.discharge()
 
@@ -278,7 +312,7 @@ def starts_with_named(
 ) -> Probed:
     """Whether ``binary`` starts with ``server_config`` and then implements ``commands``: a rejection is SKIP only
     when it starts without the ``named`` settings, the ones the experiment says the build may lack, and ERROR
-    otherwise; a server that started and lacks a command is SKIP."""
+    otherwise; a server that started and lacks a command is SKIP. A crash, with or without them, is FAIL."""
 
     def implements(client: Any, facts: dict[str, Any]) -> Probed:
         missing = _missing_command(client, commands)
@@ -292,8 +326,13 @@ def starts_with_named(
         return status, summary, facts
     lacking = sorted(set(server_config) & set(named))
     without = {name: value for name, value in server_config.items() if name not in named}
-    if lacking and starts_with(context, spec, binary, without, timeout_s)[0] is ComponentStatus.PASS:
-        return ComponentStatus.SKIP, f"{summary} (it starts without {', '.join(lacking)}, which it may lack)", facts
+    if lacking:
+        retried = starts_with(context, spec, binary, without, timeout_s)
+        if retried[0] is ComponentStatus.FAIL:
+            # It crashed without them: a crash, as on any probe server.
+            return retried
+        if retried[0] is ComponentStatus.PASS:
+            return ComponentStatus.SKIP, f"{summary} (it starts without {', '.join(lacking)}, which it may lack)", facts
     return ComponentStatus.ERROR, f"{summary} (not a setting the experiment says the build may lack)", facts
 
 
@@ -410,6 +449,16 @@ class BuildProbe:
                     context, spec, binary, startup_config, named, config["timeout_s"], config["commands"]
                 )
                 record(name, probed)
+        crashes = {label: result["crash"] for label, result in results.items() if "crash" in result}
+        if crashes:
+            # A build that crashed when a probe started it is a finding, whatever else could not be probed.
+            return make_result(
+                spec,
+                ComponentStatus.FAIL,
+                "; ".join(summaries),
+                diagnostics={"binaries": results, "crashes": crashes},
+                crash=True,
+            )
         if worst is ComponentStatus.PASS:
             if len(builds) < config["min_distinct_builds"]:
                 # A second build is an input the operator gives; without it the run cannot be set up.

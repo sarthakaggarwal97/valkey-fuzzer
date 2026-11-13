@@ -37,7 +37,7 @@ from valkey_fuzzer.protocols import component_artifact_dir
 from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
 from valkey_fuzzer.schema import BASE64_KEY, ConfigError, ConfigField, ConfigSchema, plain_config
 
-from .capabilities import resolve_binary, starts_with
+from .capabilities import Probed, resolve_binary, starts_with
 from .instances import (
     check_shard,
     close_quietly,
@@ -1284,10 +1284,9 @@ class CommandsAction:
             for name, content in config["files"].items()
         }
 
-        def starts(server: _Side, options: Mapping[str, Any]) -> tuple[ComponentStatus, str]:
+        def starts(server: _Side, options: Mapping[str, Any]) -> Probed:
             probed = {**options, **server.options, **server.nodes[0].options}
-            status, summary, _ = starts_with(context, spec, server.binary, probed, _START_TIMEOUT_S, files)
-            return status, summary
+            return starts_with(context, spec, server.binary, probed, _START_TIMEOUT_S, files)
 
         # Configuration both builds accept: an option the parent rejects is dropped on both sides.
         dropped: list[str] = []
@@ -1299,13 +1298,24 @@ class CommandsAction:
             ]
             server_config = {name: value for name, value in server_config.items() if name not in dropped}
         for server in (parent, candidate):
-            status, summary = starts(server, server_config)
+            status, summary, facts = starts(server, server_config)
+            build = f"the {server.label} build ({server.binary})"
+            loaded = f" and modules {modules[server.label]}" if modules[server.label] else ""
+            if status is ComponentStatus.FAIL:
+                # The probe's server crashed: a build that crashes with the configuration it is started with is a
+                # finding, whichever side it is.
+                return make_result(
+                    spec,
+                    ComponentStatus.FAIL,
+                    f"{build} crashed when started with {server_config}{loaded}: {summary}",
+                    diagnostics={"crashes": {server.label: facts["crash"]}},
+                    crash=True,
+                )
             if status is not ComponentStatus.PASS:
                 return make_result(
                     spec,
                     ComponentStatus.ERROR,
-                    f"the {server.label} build ({server.binary}) does not start with {server_config}"
-                    + (f" and modules {modules[server.label]}" if modules[server.label] else "")
+                    f"{build} does not start with {server_config}{loaded}"
                     + ("" if status is ComponentStatus.SKIP else ": the probe could not run")
                     + (f": {summary}" if modules[server.label] else ""),
                 )

@@ -271,7 +271,9 @@ Rules:
 - **Statuses.** Only actions and oracles judge the system under test: return
   `FAIL` from them when the system misbehaved. Return `ERROR` when the harness
   could not do its job. A `FAIL` from any other role makes the run `ERROR`
-  (see [Outcomes and verdicts](contracts.md#outcomes-and-verdicts)). An
+  (see [Outcomes and verdicts](contracts.md#outcomes-and-verdicts)), unless
+  it reports a crash of a server the component started itself
+  (`make_result(..., crash=True)`, as `valkey.capability.build-probe` does). An
   observer that could not read the server when an expectation needed it
   (the server did not answer, a log could not be read) returns `ERROR`, so
   a failure that depends on it is not trusted. An oracle that reports a

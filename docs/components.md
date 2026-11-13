@@ -236,6 +236,12 @@ module is `SKIP_UNSUPPORTED` (a module that fails to load is `ERROR`). The
 `startup_config`, never on the deployment's. A scenario
 that configures a feature away therefore runs and lacks the experiment's
 required path evidence, which makes it `ERROR`; it is never hidden as unsupported.
+A probe server that crashes, when it starts or on a command the probe sends
+(its log or output holds a crash or sanitizer report, read as
+`valkey.oracle.liveness` reads an instance's), makes the probe `FAIL` marked
+as a crash, whatever else it could not probe: `crashes` in the diagnostics
+names each probe's cause, so the run `FAIL`s with the same failure signature
+the liveness oracle gives that crash in a deployment instance.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -638,6 +644,10 @@ The outcome, with `compare_with`:
 - `FAIL`: a candidate reply that violates its `expect` where the parent
   replied otherwise, or a node of the candidate exiting (a crash, a sanitizer abort);
   its cause is `crashes` in the diagnostics; or a failing check (below).
+  Also either build crashing when the action first starts it with
+  `server_config` to see that it starts (its log or output holds a crash or
+  sanitizer report, read as `valkey.oracle.liveness` reads one), before any
+  command: `crashes` names the side, `candidate` or `parent`.
   Nothing else: a difference between builds is never, by itself, a Valkey
   failure.
 - `ERROR` with `diagnostics: {reason: expect-disputed, commands: [...]}`: an
@@ -657,8 +667,9 @@ The outcome, with `compare_with`:
 - A parent that dies on a marked command, the candidate replying as
   expected, counts as reached: the bug was a crash. A parent that dies on an
   unmarked command is an unexplained difference.
-- `ERROR` for a private server that does not start, or a command with no
-  reply on the candidate (a connection lost without a crash, a timeout).
+- `ERROR` for a private server that does not start without a crash report,
+  or a command with no reply on the candidate (a connection lost without a
+  crash, a timeout).
 
 `checks` run the sequence again on fresh candidate servers once the compared
 run completed on the candidate. A check that sees Valkey do something wrong

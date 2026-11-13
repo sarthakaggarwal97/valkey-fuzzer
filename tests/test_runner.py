@@ -469,6 +469,34 @@ def test_a_crash_an_action_found_stands_when_the_run_fails_after_it():
     assert outcome.diagnostics["error"]["phase"] == "action.run"
 
 
+@pytest.mark.parametrize("role", [CAPABILITY, WORKLOAD])
+@pytest.mark.parametrize("crash", [True, False])
+def test_a_crash_any_component_reports_is_a_finding_and_a_capability_crash_ends_the_run(role, crash):
+    """A capability probe's private server that crashed is a finding, like an action's or an oracle's crash; the
+    run stops before the provision, as a FAIL. Any other FAIL of a role that does not judge leaves no verdict."""
+
+    calls = []
+
+    class Crashing(_Component):
+        def probe(self, context, spec):
+            calls.append("probe.probe")
+            return ComponentResult(
+                spec.id, FAIL, "probe server crashed", diagnostics={"crashes": {"x": "y"}}, crash=crash
+            )
+
+        start = probe
+
+    plan = _plan((_spec(role, "probe"), _spec(ORACLE, "check")))
+    outcome = _execute(plan, (role, Crashing), (ORACLE, lambda: _Component(calls)), calls=calls)
+
+    assert outcome.status is (OutcomeStatus.FAIL if crash else OutcomeStatus.ERROR), outcome.summary
+    assert outcome.summary.startswith(TRUSTED if crash else ("required capability" if role is CAPABILITY else ""))
+    assert ("standalone.provision" in calls) is (role is not CAPABILITY)
+    assert "error" not in outcome.diagnostics
+    if crash:
+        assert outcome.summary == f"{TRUSTED}: probe" and failure_signature(outcome)["crashes"] == ["y"]
+
+
 @pytest.fixture
 def short_grace(monkeypatch):
     monkeypatch.setattr("valkey_fuzzer.deadlines.CANCEL_GRACE_S", 0.1)

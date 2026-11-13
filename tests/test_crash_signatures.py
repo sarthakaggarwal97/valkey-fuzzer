@@ -6,14 +6,17 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import valkey
 import yaml
 
 from valkey_fuzzer.batch import signature_key, signature_label
+from valkey_fuzzer.components import actions, capabilities
 from valkey_fuzzer.components.oracles import LivenessOracle
 from valkey_fuzzer.minimize import failure_signature, same_failure
 from valkey_fuzzer.plan import ComponentSpec, DeploymentProviderIdentity, EvidenceRequirement, ExecutionPlan
 from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.results import ComponentResult, ComponentStatus, Evidence, OutcomeStatus, RunOutcome
+from valkey_fuzzer.testing import FakeContext
 
 from .live_support import BINARY, explain, free_base_port
 from .valkey_experiments_support import fake_context, resolved, valkey_service
@@ -210,20 +213,20 @@ def _fake_server(path, real_start, *, real=None):
     return str(path)
 
 
-def _run_crash_experiment(tmp_path, binary):
-    """A run of an experiment that restarts valkey-0 and then judges liveness, on a standalone deployment of
-    ``binary``."""
+_RESTART = {"use": "valkey.action.restart-instance", "id": "restart", "config": {"instance": "valkey-0"}}
+
+
+def _run_crash_experiment(tmp_path, binary, first=_RESTART):
+    """A run of an experiment of the component ``first`` (an action that restarts valkey-0) and then the liveness
+    oracle, on a standalone deployment of ``binary``."""
 
     directory = tmp_path / "experiments"
-    directory.mkdir()
+    directory.mkdir(parents=True)
     experiment = {
         "id": "tests.crash-before-ready",
         "mode": "smoke",
         "deployment": {"modes": ["standalone"]},
-        "components": [
-            {"use": "valkey.action.restart-instance", "id": "restart", "config": {"instance": "valkey-0"}},
-            {"use": "valkey.oracle.liveness", "id": "liveness"},
-        ],
+        "components": [first, {"use": "valkey.oracle.liveness", "id": "liveness"}],
     }
     (directory / "tests.crash-before-ready.yaml").write_text(yaml.safe_dump(experiment))
     runtime = valkey_service(experiment_directories=(str(directory),), artifact_dir=str(tmp_path / "artifacts"))
@@ -280,4 +283,175 @@ def test_a_server_that_crashes_when_an_action_restarts_it_fails_the_run_with_its
 
     assert outcome.status is OutcomeStatus.FAIL, explain(outcome)
     assert outcome.diagnostics["error"]["phase"] == "action.run"
+    assert failure_signature(outcome)["crashes"] == [OVERFLOW_CAUSE]
+
+
+# What a probe server's start leaves: a rejected startup option, as Valkey reports it before exit(1), and a
+# startup warning that names an errno ("Invalid argument") before the server crashed.
+REJECTED = (
+    ">>> 'nonsense yes'\nBad directive or wrong number of arguments\n*** FATAL CONFIG FILE ERROR (Version 9.1.0) ***"
+)
+EINVAL = "# Failed to set the CPU affinity of the IO threads: Invalid argument"
+SOCKET_IN_USE = "# Failed opening Unix socket: bind: Address already in use"
+
+
+@pytest.mark.parametrize(
+    ("real_start", "status", "summary"),
+    [
+        (f'echo "{OVERFLOW}" >&2; exit 1', "FAIL", f"probe server crashed: {OVERFLOW}"),
+        # A crash report stands over a line an unsupported option would print: this one was a SKIP.
+        (f'echo "{EINVAL}"; echo "{OVERFLOW}" >&2; exit 1', "FAIL", f"probe server crashed: {OVERFLOW}"),
+        (f'printf "{REJECTED}\\n"; exit 1', "SKIP", "build rejects startup configuration"),
+        (f'echo "{SOCKET_IN_USE}"; exit 1', "ERROR", "probe server exited"),
+        # A server that reported a crash and then hung (a crash handler stuck), and one that only hung.
+        (f'echo "{OVERFLOW}" >&2; exec sleep 5', "FAIL", f"probe server crashed: {OVERFLOW}"),
+        ("exec sleep 5", "ERROR", "probe server failed: private server did not become ready"),
+    ],
+    ids=["sanitizer-report", "after-an-errno-warning", "rejected-option", "socket-in-use", "hung-after-a-report",
+         "hung"],
+)  # fmt: skip
+def test_a_probe_server_that_crashes_as_it_starts_is_a_crash_and_one_that_cannot_start_is_not(
+    tmp_path, real_start, status, summary
+):
+    # "probe server exited: ..." was an ERROR whatever the server said, and the crash report was dropped.
+    binary = _fake_server(tmp_path / "valkey-server", real_start)
+    spec = resolved(ComponentSpec(role=ComponentRole.CAPABILITY, use="valkey.capability.build-probe", id="build"))
+
+    probed, summary_text, facts = capabilities.starts_with(FakeContext(), spec, binary, {"io-threads": 4}, 1)
+
+    assert (probed.value, summary_text[: len(summary)]) == (status, summary)
+    assert facts.get("crash") == (OVERFLOW if status == "FAIL" else None)
+
+
+@pytest.mark.parametrize("crashed", [True, False], ids=["crash-report", "no-report"])
+def test_a_probe_server_that_crashes_on_a_probe_command_is_a_crash(monkeypatch, tmp_path, crashed):
+    # The probe server started; the probe's INFO broke the connection. With a crash report in the server's output
+    # it is the crash; without one the broken connection stays the error it was.
+    output = tmp_path / "output.log"
+
+    class Server:
+        def __init__(self, binary, arguments, **_):
+            self.workdir, self.log_path, self.output_path = str(tmp_path), str(tmp_path / "server.log"), str(output)
+            self.process = SimpleNamespace(wait=lambda timeout: 1)
+            self.client = SimpleNamespace(info=self.crash)
+
+        def crash(self, section):
+            output.write_text(f"{OVERFLOW}\n" if crashed else "")
+            raise valkey.exceptions.ConnectionError("Connection closed by server.")
+
+        def start(self):
+            return None
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(capabilities, "PrivateServer", Server)
+    binary = _fake_server(tmp_path / "valkey-server", "exit 1")
+    spec = resolved(ComponentSpec(role=ComponentRole.CAPABILITY, use="valkey.capability.build-probe", id="build"))
+
+    if not crashed:
+        with pytest.raises(valkey.exceptions.ConnectionError):
+            capabilities.probe_binary(FakeContext(), spec, binary, spec.config)
+        return
+    status, summary, facts = capabilities.probe_binary(FakeContext(), spec, binary, spec.config)
+    assert (status, summary, facts["crash"]) == (ComponentStatus.FAIL, f"probe server crashed: {OVERFLOW}", OVERFLOW)
+
+
+_PROBE = {"use": "valkey.capability.build-probe", "id": "build"}
+
+
+@pytest.mark.parametrize(
+    ("real_start", "status"),
+    [
+        (f'echo "{OVERFLOW}" >&2; exit 1', OutcomeStatus.FAIL),
+        (f'printf "{REJECTED}\\n"; exit 1', OutcomeStatus.SKIP_UNSUPPORTED),
+        (f'echo "{SOCKET_IN_USE}"; exit 1', OutcomeStatus.ERROR),
+    ],
+    ids=["sanitizer-report", "rejected-option", "socket-in-use"],
+)
+def test_a_build_that_crashes_when_the_capability_probe_starts_it_fails_the_run_with_the_liveness_signature(
+    tmp_path, real_start, status
+):
+    # The capability gate's crash was "required capability 'build' failed; ... no trustworthy verdict": an ERROR.
+    binary = _fake_server(tmp_path / "valkey-server", real_start)
+    outcome = _run_crash_experiment(tmp_path / "probe", binary, _PROBE)
+
+    assert outcome.status is status, explain(outcome)
+    (probe,) = (item for item in outcome.component_results if item.component_id == "build")
+    assert probe.crash is (status is OutcomeStatus.FAIL)
+    if status is not OutcomeStatus.FAIL:
+        return
+    assert "error" not in outcome.diagnostics, "the run stopped for the finding; nothing failed"
+    assert [item.component_id for item in outcome.component_results] == ["build"], "never provisioned"
+    assert probe.summary == f"default: probe server crashed: {OVERFLOW}"
+    # The same crash in a deployment instance (the liveness post-mortem of a provision it crashed): one signature.
+    provisioned = _run_crash_experiment(tmp_path / "provision", binary)
+    assert (
+        failure_signature(outcome)
+        == failure_signature(provisioned)
+        != failure_signature(
+            _run_crash_experiment(
+                tmp_path / "other",
+                _fake_server(tmp_path / "other-server", 'echo "x.c:1:1: runtime error: y" >&2; exit 1'),
+                _PROBE,
+            )
+        )
+    )
+    assert signature_key("tests.probe", failure_signature(outcome)) == signature_key(
+        "tests.provision", failure_signature(provisioned)
+    )
+
+
+@pytest.mark.parametrize("crashed", [True, False], ids=["sanitizer-report", "socket-in-use"])
+def test_a_compared_build_that_crashes_when_the_commands_action_starts_it_is_a_crash(tmp_path, crashed):
+    # The walk's prefetch-zero-to-positive-startup on a UBSan build: the parent's start check exited on fuzzer
+    # #150, and the action said "the parent build ... does not start with {...}: the probe could not run".
+    real_start = f'echo "{OVERFLOW}" >&2; exit 1' if crashed else f'echo "{SOCKET_IN_USE}"; exit 1'
+    parent = _fake_server(tmp_path / "parent-server", real_start)
+    spec = resolved(
+        ComponentSpec(
+            role=ComponentRole.ACTION,
+            use="valkey.action.commands",
+            id="prefetch",
+            config={
+                "compare_with": parent,
+                "server_config": {"prefetch-batch-max-size": 0},
+                "commands": [{"command": ["PING"]}],
+            },
+        )
+    )
+    context = FakeContext(spec, deployment={"valkey_binary": _fake_server(tmp_path / "candidate", "exit 1")})
+
+    result = actions.CommandsAction().run(context, spec)
+
+    started = f"the parent build ({parent})"
+    if not crashed:
+        assert result.status is ComponentStatus.ERROR and not result.crash
+        assert result.summary.startswith(started) and result.summary.endswith(": the probe could not run")
+        return
+    assert result.status is ComponentStatus.FAIL and result.crash, result.summary
+    assert result.summary.startswith(f"{started} crashed when started with ")
+    assert result.summary.endswith(f": probe server crashed: {OVERFLOW}")
+    assert result.diagnostics["crashes"] == {"parent": OVERFLOW}
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not BINARY, reason="needs valkey-server (VALKEY_FUZZER_BINARY or on PATH)")
+def test_a_run_whose_commands_action_finds_its_compared_build_crashing_fails_with_the_crash(tmp_path):
+    # The deployment's instances run the real build; the compared build crashes on a private server's start
+    # (one on a Unix socket), before any command.
+    parent = tmp_path / "parent-server"
+    parent.write_text(
+        f'#!/bin/sh\ncase " $* " in *" --unixsocket "*) echo "{OVERFLOW}" >&2; exit 1;; esac\nexec {BINARY} "$@"\n'
+    )
+    parent.chmod(0o755)
+    action = {"use": "valkey.action.commands", "id": "prefetch", "config": {"compare_with": str(parent), "commands": [
+        {"command": ["SET", "k", "v"], "expect": {"equals": "OK"}}
+    ]}}  # fmt: skip
+
+    outcome = _run_crash_experiment(tmp_path, BINARY, action)
+
+    assert outcome.status is OutcomeStatus.FAIL, explain(outcome)
+    results = {item.component_id: item for item in outcome.component_results}
+    assert results["prefetch"].crash and results["liveness"].status is ComponentStatus.PASS
     assert failure_signature(outcome)["crashes"] == [OVERFLOW_CAUSE]

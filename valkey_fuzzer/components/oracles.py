@@ -165,7 +165,7 @@ def fatal_exit(path: str) -> Optional[str]:
     return last
 
 
-def _crash_reports(files: Mapping[str, Sequence[Optional[str]]], patterns: Sequence[str]) -> dict[str, list[str]]:
+def crash_reports(files: Mapping[str, Sequence[Optional[str]]], patterns: Sequence[str]) -> dict[str, list[str]]:
     """Each instance's crash report lines (:func:`scan_for_crashes`) in its ``files``: its log, then its process
     output, where sanitizers report (stderr)."""
 
@@ -204,7 +204,7 @@ class LivenessOracle:
         provider), as :meth:`evaluate` reports them: a FAIL marked ``crash``. None without one: a server that
         is gone without a crash report (a port in use, a fatal exit) leaves the run's error to stand."""
 
-        crashes = _crash_reports(logs, CRASH_PATTERNS + tuple(spec.config["extra_crash_patterns"]))
+        crashes = crash_reports(logs, CRASH_PATTERNS + tuple(spec.config["extra_crash_patterns"]))
         if not crashes:
             return None
         causes = {instance_id: crash_cause(lines) for instance_id, lines in crashes.items()}
@@ -246,7 +246,7 @@ class LivenessOracle:
             else "process not running"
             for item in ids
         }
-        crashes = _crash_reports(
+        crashes = crash_reports(
             {
                 instance.instance_id: (
                     handle.log_file(instance.instance_id),
