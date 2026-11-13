@@ -347,6 +347,21 @@ def _manages_auth(commands: Sequence[Mapping[str, Any]]) -> bool:
     )
 
 
+# The credentials a replica presents to its primary (masterauth and its primaryauth alias, with a user).
+_REPLICA_AUTH_SETTINGS = {"masterauth", "primaryauth", "masteruser", "primaryuser"}
+
+
+def _configures_replica_auth(server_config: Mapping[str, Any]) -> bool:
+    """Whether server_config sets the user or password a replica authenticates to its primary with: a replica
+    given them cannot sync with the check's own primary, which the same server_config leaves without a matching
+    user or password, so its link never comes up (fuzzer#147's replay)."""
+
+    return any(
+        str(name).lower() in _REPLICA_AUTH_SETTINGS and str(value).strip() not in ("", '""')
+        for name, value in server_config.items()
+    )
+
+
 def _opened_behind_password(commands: Sequence[Mapping[str, Any]]) -> set[int]:
     """The commands on a connection first used while the sequence had set a requirepass: a RESP3 client opens it
     with HELLO 3, which Valkey refuses before AUTH (NOAUTH), so the connection never opens (fuzzer#92). A raw
@@ -878,6 +893,8 @@ class _Checks:
             return _skipped("the sequence runs on several nodes or a cluster, whose topology it sets up itself")
         if _sets_replication(self.commands):
             return _skipped("the sequence sets its node's replication itself")
+        if _configures_replica_auth(self.server_config):
+            return _skipped("the server_config sets the credentials a replica authenticates to its primary with")
         if _writes_unreplicated(self.commands):
             return _skipped(
                 "the sequence writes keys its node does not replicate (DEBUG POPULATE, or a script's set_repl)"
@@ -1019,6 +1036,7 @@ class _Checks:
             and self.config["nodes"] == 1
             and not self.config["cluster"]
             and not _sets_replication(self.commands)
+            and not _configures_replica_auth(self.server_config)
             and not _writes_unreplicated(self.commands)
             and not _reverts_settings(self.commands)
         )
@@ -1371,6 +1389,8 @@ class _Checks:
     def compat_sync(self, parent: Any, changed: str) -> dict[str, Any]:
         if _sets_replication(self.commands):
             return _skipped("the sequence sets its node's replication itself")
+        if _configures_replica_auth(self.server_config):
+            return _skipped("the server_config sets the credentials a replica authenticates to its primary with")
         side, failed = self.start("candidate.compat-sync")
         synced, state = False, {}
         refused = None

@@ -2269,6 +2269,27 @@ def test_a_sequence_that_reverts_a_setting_runs_no_replica(builds):
     assert result.status.value != "FAIL", result.summary
 
 
+@pytest.mark.parametrize("setting", ["masterauth", "primaryauth", "masteruser", "primaryuser"])
+def test_server_config_replica_auth_runs_no_replica(builds, setting):
+    # fuzzer#147: the server_config set masterauth/masteruser, so the check's own replica, given them, could not
+    # AUTH to the check's own primary, which the same server_config left without a matching user or password; its
+    # link never came up and compat-sync wrongly reported a divergence.
+    _saving(BUILDS[builds["parent"]])
+    config = {setting: "olduser"}
+    result, value = run(
+        builds,
+        [{"command": ["SET", "k", "v"]}],
+        server_config=config,
+        checks={"replica": True, "concurrency": 2, "compat": True},
+    )
+
+    reason = "the server_config sets the credentials a replica authenticates to its primary with"
+    assert _check(value, "replica") == {"outcome": "skipped", "reason": reason}
+    assert _check(value, "compat")["sync"] == {"outcome": "skipped", "reason": reason}
+    assert _check(value, "concurrency") == {"outcome": "pass"}
+    assert result.status.value != "FAIL", result.summary
+
+
 _CATEGORIES = {"SET": [b"@write", b"@string", b"@slow"], "GET": [b"@read", b"@string", b"@fast"], "PING": [b"@fast"]}
 _ACL_SEQUENCE = [{"command": ["SET", "k", "v"]}, {"command": ["GET", "k"]}, {"command": ["PING"]}]
 
