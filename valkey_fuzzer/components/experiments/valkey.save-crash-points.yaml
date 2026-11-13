@@ -61,6 +61,9 @@ startup_overlays:
     server_config:
       appendonly: "yes"
       appendfsync: always
+      # No automatic rewrite, whatever the config space draws: one would refuse
+      # BGREWRITEAOF ("already in progress") and its calls would count as the save's.
+      auto-aof-rewrite-percentage: "0"
 components:
   - use: valkey.observer.log
     id: logs
