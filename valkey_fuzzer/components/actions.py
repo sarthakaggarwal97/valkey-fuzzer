@@ -238,6 +238,8 @@ _REFUSED = {"SHUTDOWN": "it stops the server", "MONITOR": "it holds the connecti
 # unsubscribing commands is confirmed by a reply of its own, so they take one each.
 _SUBSCRIBE = ("SUBSCRIBE", "PSUBSCRIBE", "SSUBSCRIBE")
 _UNSUBSCRIBE = ("UNSUBSCRIBE", "PUNSUBSCRIBE", "SUNSUBSCRIBE")
+# What a subscriber is delivered, by its first element and length: a message answers no command.
+_DELIVERIES = {b"message": 3, b"smessage": 3, b"pmessage": 4}
 _REFUSED_DEBUG = ("RESTART", "CRASH-AND-RECOVER", "RELOAD")
 _REFUSED_MODULE = ("LOAD", "LOADEX", "UNLOAD")
 # Refused on the deployment's instances, whose topology the deployment owns; allowed on the private servers.
@@ -511,13 +513,18 @@ class RawConnection:
         self.connection = connection
         # The database a SELECT on it chose, for a reply read again unparsed (see _unparsed).
         self.db: Any = None
+        # Once it subscribes, messages come between replies: those a command's reply came after wait for a read.
+        self.subscriber = False
+        self.delivered: list[Any] = []
 
     def send(self, command: Sequence[Any]) -> dict[str, Any]:
         """``{"reply": ...}``, the server's error as ``{"error": ...}``, a reply the client could not parse as
         ``{"protocol_error": ...}``, or a lost connection or a reply that timed out as ``{"error": ...,
         "unanswered": True}``."""
 
-        record = self._exchange(lambda: self._write(command))
+        if str(command[0]).upper() in _SUBSCRIBE:
+            self.subscriber = True
+        record = self._exchange(lambda: self._write(command), past_deliveries=self.subscriber)
         if str(command[0]).upper() == "SELECT" and record.get("reply") == "OK":
             self.db = command[1]
         return record
@@ -542,11 +549,11 @@ class RawConnection:
         return self._exchange(lambda: self.connection.send_packed_command([data]), wait_s=_NO_REPLY_S)
 
     def read_waiting(self) -> dict[str, Any]:
-        """Every reply waiting on the connection, and each that begins within a second of the last (Pub/Sub
-        messages, RESP3 pushes): ``{"reply": [...]}``, an error among them as ``{"$error": ...}``; or a lost
-        connection as :meth:`send` records it."""
+        """The messages a command's reply came after, then every reply waiting on the connection, and each that
+        begins within a second of the last (Pub/Sub messages, RESP3 pushes): ``{"reply": [...]}``, an error among
+        them as ``{"$error": ...}``; or a lost connection as :meth:`send` records it."""
 
-        replies: list[Any] = []
+        replies, self.delivered = self.delivered, []
         try:
             while self.connection.can_read(timeout=_NO_REPLY_S):
                 try:
@@ -557,13 +564,17 @@ class RawConnection:
             return _lost(exc)
         return {"reply": replies}
 
-    def _exchange(self, write: Any, wait_s: Optional[float] = None) -> dict[str, Any]:
+    def _exchange(self, write: Any, wait_s: Optional[float] = None, past_deliveries: bool = False) -> dict[str, Any]:
         try:
             write()
             if wait_s is not None and not self.connection.can_read(timeout=wait_s):
                 return {"no_reply": True}
-            # A RESP3 push (a SUBSCRIBE's confirmation) is a reply too, not one for valkey-py to handle.
-            return {"reply": raw_reply(self.connection.read_response(push_request=True))}
+            while True:
+                # A RESP3 push (a SUBSCRIBE's confirmation) is a reply too, not one for valkey-py to handle.
+                reply = self.connection.read_response(push_request=True)
+                if not (past_deliveries and _delivery(reply)):
+                    return {"reply": raw_reply(reply)}
+                self.delivered.append(raw_reply(reply))
         except valkey.exceptions.ResponseError as exc:
             return {"error": str(exc)}
         except valkey.exceptions.InvalidResponse as exc:
@@ -597,6 +608,17 @@ class RawConnection:
             self.connection.disconnect()
         except Exception:
             pass
+
+
+def _delivery(reply: Any) -> bool:
+    """Whether ``reply`` is a message delivered to a subscriber (see ``_DELIVERIES``)."""
+
+    return (
+        isinstance(reply, list)
+        and bool(reply)
+        and isinstance(reply[0], bytes)
+        and len(reply) == _DELIVERIES.get(reply[0], 0)
+    )
 
 
 def _lost(exc: BaseException) -> dict[str, Any]:
