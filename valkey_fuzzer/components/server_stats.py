@@ -314,16 +314,33 @@ def _spinning_threads(plan: ExecutionPlan, instance_id: str) -> int:
         return 1
 
 
-def _defragmenting(info: Mapping[str, Any]) -> bool:
-    """Whether active defragmentation runs, as INFO reports it (``active_defrag_running``, the CPU percentage it is
-    set to, 0 when it does not run): it then uses what its cycle settings give it, ``active-defrag-cycle-min`` to
-    ``-max`` of a core in duty cycles of ``active-defrag-cycle-us``, and a duty cycle shorter than the event
-    loop's millisecond timeouts leaves the loop polling between them."""
+def _defrag_ms(info: Mapping[str, Any]) -> Optional[float]:
+    """The time the server's finished active defragmentation cycles took so far (``total_active_defrag_time``,
+    in milliseconds), or None when INFO does not report it."""
 
     try:
-        return float(info.get("active_defrag_running", 0)) > 0
+        return float(info["total_active_defrag_time"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _defragmenting(info: Mapping[str, Any], defrag_ms_before: Optional[float]) -> bool:
+    """Whether active defragmentation ran in the window that ends with ``info``: it runs now, as INFO reports it
+    (``active_defrag_running``, the CPU percentage it is set to, 0 when it does not run), or a cycle ended since
+    the window began (``total_active_defrag_time`` grew from ``defrag_ms_before``). A cycle ends once the
+    fragmentation is below ``active-defrag-threshold-lower`` and starts again when it is above it, so a server
+    whose fragmentation sits at the threshold runs cycles between two reads that each find none running. It then
+    uses what its cycle settings give it, ``active-defrag-cycle-min`` to ``-max`` of a core in duty cycles of
+    ``active-defrag-cycle-us``, and a duty cycle shorter than the event loop's millisecond timeouts leaves the
+    loop polling between them."""
+
+    try:
+        if float(info.get("active_defrag_running", 0)) > 0:
+            return True
     except (TypeError, ValueError):
-        return False
+        pass
+    defrag_ms = _defrag_ms(info)
+    return defrag_ms is not None and defrag_ms_before is not None and defrag_ms > defrag_ms_before
 
 
 def _busy(info: Mapping[str, Any]) -> list[str]:
@@ -369,7 +386,8 @@ class QuietEndOracle:
         cluster = is_cluster(handle)
         threads = {instance_id: _spinning_threads(context.plan, instance_id) for instance_id in ids}
         deadline = time.monotonic() + remaining(context, config["timeout_s"])
-        clocks: dict[str, tuple[float, float]] = {}
+        # Per instance, when its last read was, the CPU time it reported, and its defragmentation time then.
+        clocks: dict[str, tuple[float, float, Optional[float]]] = {}
         while True:
             unquiet: dict[str, list[str]] = {}
             # Why an instance could not be judged in this round: it did not answer, or its CPU use has no window yet.
@@ -392,13 +410,13 @@ class QuietEndOracle:
                 now, used = time.monotonic(), _cpu_seconds(info, threads[instance_id])
                 before = clocks.get(instance_id)
                 if used is not None:
-                    clocks[instance_id] = (now, used)
+                    clocks[instance_id] = (now, used, _defrag_ms(info))
                     # A process that restarted counts its CPU time from zero again: its window starts over.
                     if before is None or now <= before[0] or used < before[1]:
                         unseen[instance_id] = "its CPU use was not measured over a window"
                     else:
                         cpu[instance_id] = round((used - before[1]) / (now - before[0]), 3)
-                        if cpu[instance_id] > config["max_cpu"] and not _defragmenting(info):
+                        if cpu[instance_id] > config["max_cpu"] and not _defragmenting(info, before[2]):
                             reasons.append(f"used {cpu[instance_id]:.2f} of a core over {now - before[0]:.1f}s")
                 if reasons:
                     unquiet[instance_id] = reasons

@@ -339,6 +339,19 @@ def test_a_server_whose_active_defragmentation_runs_is_not_held_to_the_cpu_limit
     assert _quiet(clock, _Handle({"valkey-0": idle})).summary.startswith("valkey-0: used 1.00 of a core")
 
 
+def test_defragmentation_cycles_that_ran_between_two_reads_count_as_running(clock):
+    # Fragmentation at active-defrag-threshold-lower: cycles at active-defrag-cycle-min 83 end and start again
+    # between reads that each find none running, and the time of the finished ones grows (the gcov batch's
+    # cluster-election-durability seed 1630287467, whose replicas used 0.8 of a core).
+    cycling = [
+        _cpu(second * 0.8, active_defrag_running=0, total_active_defrag_time=second * 700) for second in range(40)
+    ]
+    assert _quiet(clock, _Handle({"valkey-0": cycling})).status.value == "PASS"
+    # Defragmentation time that stopped growing is no excuse for a busy core.
+    stopped = [_cpu(second * 0.8, active_defrag_running=0, total_active_defrag_time=3113) for second in range(40)]
+    assert _quiet(clock, _Handle({"valkey-0": stopped})).summary.startswith("valkey-0: used 0.80 of a core")
+
+
 def test_a_restarted_process_starts_a_new_cpu_window(clock):
     # Its CPU time went down: the first read after the restart measures nothing.
     result = _quiet(clock, _Handle({"valkey-0": [_cpu(50.0), _cpu(0.1), _cpu(0.11)]}))

@@ -1585,8 +1585,11 @@ adds it to every experiment. An instance is at rest when:
   `io-threads` when the instance's planned config sets
   `io-threads-always-active yes`: those IO threads spin whenever the main
   thread handles an event, by design. An instance whose active
-  defragmentation runs (`active_defrag_running` above 0) is not held to
-  `max_cpu`: defragmentation uses what its cycle settings give it
+  defragmentation ran in the window (`active_defrag_running` above 0 at its
+  end, or `total_active_defrag_time` grown since its start: a server whose
+  fragmentation sits at `active-defrag-threshold-lower` ends and starts cycles
+  between two reads) is not held to `max_cpu`: defragmentation uses what its
+  cycle settings give it
   (`active-defrag-cycle-min` to `-max` of a core, in duty cycles of
   `active-defrag-cycle-us`), and a duty cycle shorter than the event loop's
   millisecond timeouts leaves the loop polling between them.
