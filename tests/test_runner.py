@@ -2,6 +2,7 @@
 SKIP leaves no trustworthy verdict (ERROR), and cleanup failures never hide a trustworthy FAIL."""
 
 import contextvars
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -262,6 +263,20 @@ def test_an_oracle_that_raises_does_not_stop_the_oracles_after_it(liveness):
         assert (error["type"], error["phase"], error["message"]) == (
             "RuntimeError", "oracle.evaluate", "cannot read the dataset"
         )  # fmt: skip
+
+
+def test_a_runs_error_names_where_it_was_raised():
+    # The walk's redis/redis#13004: every test dropped with "IndexError: list index out of range" and nothing
+    # said which index, so the error record keeps the deepest frame of the raise.
+    class Actions:
+        def run(self, context, spec):
+            return [][0]
+
+    outcome = _execute(_plan((_spec(ACTION, "act"),)), (ACTION, Actions))
+
+    assert outcome.status is OutcomeStatus.ERROR
+    assert outcome.summary == "runner execution failed during action.run: IndexError: list index out of range"
+    assert re.search(r"test_runner\.py:\d+ in run$", outcome.diagnostics["error"]["at"])
 
 
 @pytest.mark.parametrize(

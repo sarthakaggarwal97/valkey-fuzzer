@@ -8,6 +8,7 @@ report and plan file is written from :func:`to_plain_data`.
 import hashlib
 import json
 import math
+import traceback
 from collections.abc import Mapping, Sequence
 from dataclasses import fields, is_dataclass
 from enum import Enum
@@ -132,7 +133,9 @@ _MAX_ERROR_MESSAGE = 2000
 
 
 def error_record(error: BaseException, phase: Optional[str] = None) -> dict[str, str]:
-    """How a report records ``error``: its ``type``, its ``message`` (cut short), and the ``phase`` it ended.
+    """How a report records ``error``: its ``type``, its ``message`` (cut short), the ``phase`` it ended, and
+    where it was raised (``at``, the deepest frame of the error's own traceback, as ``file:line in function``;
+    a bare message like "list index out of range" says nothing of which index, see the walk's redis/redis#13004).
 
     Every layer that catches a run's error records it this way, so the same
     error has one failure signature whichever layer caught it.
@@ -144,4 +147,8 @@ def error_record(error: BaseException, phase: Optional[str] = None) -> dict[str,
         record["message"] = message[:_MAX_ERROR_MESSAGE] + ("..." if len(message) > _MAX_ERROR_MESSAGE else "")
     if phase is not None:
         record["phase"] = phase
+    frames = traceback.extract_tb(error.__traceback__)
+    if frames:
+        last = frames[-1]
+        record["at"] = f"{last.filename}:{last.lineno} in {last.name}"
     return record
