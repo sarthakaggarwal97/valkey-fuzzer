@@ -177,7 +177,8 @@ class FakeWire:
         return self.server.build.replies.get(self.pending) != SILENT
 
     def read_response(self, push_request=False):
-        if self.pending is None:
+        # What was delivered before the command comes first, as on a socket.
+        if self.pending is None or self.waiting:
             return self.waiting.pop(0)
         pending, self.pending = self.pending, None
         known = len(_nodes(self.server.build))
@@ -189,6 +190,9 @@ class FakeWire:
         if pending[0] == "SUBSCRIBE":
             self.channels.add(pending[1])
             defaults[pending] = [b"subscribe", pending[1].encode(), len(self.channels)]
+        if pending[0] == "UNSUBSCRIBE":
+            self.channels.discard(pending[1])
+            defaults[pending] = [b"unsubscribe", pending[1].encode(), len(self.channels)]
         if pending[0] == "PUBLISH":
             receivers = [wire for wire in self.server.wires if pending[1] in wire.channels]
             for wire in receivers:
@@ -989,6 +993,30 @@ def test_a_named_connection_opens_on_first_use_and_a_read_takes_what_waits_on_it
         main, sub, _ = server.wires
         assert sub.channels == {"news"} and not main.channels
     assert _replies(value["candidate"])[5] == {"reply": []}
+
+
+def test_a_subscribers_command_is_answered_by_its_reply_not_by_a_message_delivered_before_it(builds):
+    # The walk's test of redis#12838 took the message for the UNSUBSCRIBE's reply, so the PUBSUB NUMSUB after it
+    # could run before the server unsubscribed.
+    commands = [
+        {"command": ["SUBSCRIBE", "news"], "connection": "sub"},
+        {"command": ["PUBLISH", "news", "hi"], "expect": {"equals": 1}},
+        {"command": ["UNSUBSCRIBE", "news"], "connection": "sub", "expect": {"equals": ["unsubscribe", "news", 0]}},
+        {"read": True, "connection": "sub", "expect": {"equals": [["message", "news", "hi"]]}},
+        {"read": True, "connection": "sub", "expect": {"equals": []}},
+    ]
+    result, _ = run(builds, commands)
+
+    assert result.status.value == "PASS", result.summary
+
+
+def test_a_reply_shaped_as_a_message_is_a_reply_on_a_connection_that_never_subscribed(builds):
+    for build in BUILDS.values():
+        build.replies = {("LRANGE", "l", "0", "-1"): [b"message", b"news", b"hi"]}
+    commands = [{"command": ["LRANGE", "l", 0, -1], "expect": {"equals": ["message", "news", "hi"]}}]
+    result, _ = run(builds, commands)
+
+    assert result.status.value == "PASS", result.summary
 
 
 def test_a_summary_names_a_commands_connection_and_node(builds):

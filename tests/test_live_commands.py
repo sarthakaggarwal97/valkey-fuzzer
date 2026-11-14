@@ -183,6 +183,20 @@ def test_a_command_that_holds_its_connection_goes_raw_and_a_later_read_takes_its
 
 
 @pytest.mark.parametrize("resp", [2, 3])
+def test_a_subscriber_unsubscribes_past_a_message_it_has_not_read(resp):
+    commands = [
+        {"command": ["SUBSCRIBE", "news"], "connection": "sub"},
+        {"command": ["PUBLISH", "news", "hi"], "expect": {"equals": 1}},
+        {"command": ["UNSUBSCRIBE", "news"], "connection": "sub", "expect": {"equals": ["unsubscribe", "news", 0]}},
+        {"command": ["PUBSUB", "NUMSUB", "news"], "expect": {"equals": ["news", 0]}},
+        {"read": True, "connection": "sub", "expect": {"equals": [["message", "news", "hi"]]}},
+    ]
+    result, _ = run(BINARY, commands, compare_with=BINARY, resp=resp)
+
+    assert result.status.value == "PASS", result.summary
+
+
+@pytest.mark.parametrize("resp", [2, 3])
 def test_a_subscriber_on_its_own_connection_reads_what_was_published(resp):
     commands = [
         {"command": ["SUBSCRIBE", "news"], "connection": "sub", "expect": {"equals": ["subscribe", "news", 1]}},
