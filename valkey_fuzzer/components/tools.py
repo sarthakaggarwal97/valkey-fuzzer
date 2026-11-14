@@ -152,7 +152,14 @@ class _Side:
         self.crashes: dict[int, str] = {}
 
     def tool(self, name: str) -> str:
-        return os.path.join(os.path.dirname(self.binary), name)
+        """The path of tool ``name`` beside the build's server. A build older than the valkey rename keeps its
+        server's own prefix (redis-cli beside redis-server), so when the valkey name is not there, the name
+        with that prefix is."""
+        directory = os.path.dirname(self.binary)
+        path = os.path.join(directory, name)
+        prefix = os.path.basename(self.binary).rsplit("-", 1)[0]
+        renamed = os.path.join(directory, name.replace("valkey-", f"{prefix}-", 1))
+        return path if os.access(path, os.X_OK) or not os.access(renamed, os.X_OK) else renamed
 
     def values(self) -> dict[str, str]:
         """``{placeholder: value}`` for this side's private server."""

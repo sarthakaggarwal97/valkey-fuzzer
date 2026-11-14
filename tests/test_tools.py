@@ -295,6 +295,20 @@ def test_a_build_without_the_tool_is_untested(builds):
     assert result.summary.startswith("the parent build has no valkey-benchmark beside its valkey-server")
 
 
+def test_an_older_builds_tools_are_found_by_its_servers_prefix(builds):
+    # The walk's redis/redis#12958, #12986, #10609, #13092: a redis-era candidate ships redis-cli beside
+    # redis-server, so every tool run errored with "has no valkey-cli" and the merge was tested by nothing.
+    src = os.path.dirname(builds["candidate"])
+    for name in ("valkey-server", *tools.TOOLS):
+        os.rename(os.path.join(src, name), os.path.join(src, name.replace("valkey-", "redis-", 1)))
+    builds["candidate"] = os.path.join(src, "redis-server")
+    BUILDS[builds["candidate"]] = Build()
+    result, value, _ = run(builds, [cli("out:ok"), {"tool": "valkey-check-rdb", "args": ["out:checked"]}])
+
+    assert result.status.value == "PASS", result.summary
+    assert [record["stdout"] for record in value["candidate"]["runs"]] == ["ok\n", "checked\n"]
+
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
