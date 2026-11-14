@@ -232,6 +232,8 @@ class DeploymentStateCheck:
         self._test_keys: dict[str, str] = {}
         # The instances stopped on purpose, by address, with their role when they stopped.
         self._stopped: dict[str, str] = {}
+        # Those whose stop left their live shard a live member: a wave's kill never takes a shard's last one.
+        self._left_survivor: set[str] = set()
         self._shards_with_primary_stopped: set[int] = set()
         self._snapshot: Optional[Snapshot] = None
 
@@ -249,13 +251,18 @@ class DeploymentStateCheck:
 
         self._test_keys = {str(key): str(value) for key, value in keys.items()}
 
-    def mark_stopped(self, instance_id: str, role: str, shard: Optional[int] = None) -> None:
+    def mark_stopped(
+        self, instance_id: str, role: str, shard: Optional[int] = None, *, left_survivor: bool = False
+    ) -> None:
         """Record an instance stopped on purpose, with its role and the live shard it served when it stopped
         (its planned shard when ``shard`` is None): replica migration and failovers move instances between
-        shards, and the log check reads the shard whose primary stopped."""
+        shards, and the log check reads the shard whose primary stopped. ``left_survivor`` says the stop left
+        that shard a live member, as a wave's kill always does."""
 
         instance = self._instances[instance_id]
         self._stopped[f"{instance.host}:{instance.port}"] = role
+        if left_survivor:
+            self._left_survivor.add(f"{instance.host}:{instance.port}")
         if role == "primary":
             self._shards_with_primary_stopped.add(instance.shard_id if shard is None else shard)
 
@@ -302,12 +309,30 @@ class DeploymentStateCheck:
         planned shard can be all stopped while a migrated replica could still
         take over its slots, and a live shard can lose every member while a
         replica it gave away lives on elsewhere.
+
+        A shard whose every stop left it a live member was not stopped on
+        purpose: its survivor left afterwards (a replica that migrated away
+        from a primary that had just died), and its slots stay Valkey's to
+        serve.
         """
         members: dict[int, list[str]] = {}
         for node in snapshot.rows:
             if node.shard_id is not None:
                 members.setdefault(node.shard_id, []).append(node.address)
-        return {shard for shard, addresses in members.items() if all(address in self._stopped for address in addresses)}
+        stopped = set()
+        for shard, addresses in members.items():
+            if not all(address in self._stopped for address in addresses):
+                continue
+            if all(address in self._left_survivor for address in addresses):
+                logger.error(
+                    "Shard %s has no live member left, though every stop in it left one: a survivor left the shard "
+                    "after the stop (stopped: %s)",
+                    shard,
+                    sorted(addresses),
+                )
+                continue
+            stopped.add(shard)
+        return stopped
 
     def _snapshot_timeout(self) -> float:
         """The longest per-query timeout of the enabled checks that read the snapshot."""

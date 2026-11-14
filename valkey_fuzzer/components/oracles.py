@@ -335,7 +335,7 @@ class DeploymentStateOracle:
             for kill in item.value["kills"]:
                 if kill["success"]:
                     # The live shard it served: replica migration and failovers move nodes away from the plan.
-                    state.mark_stopped(kill["instance_id"], kill["role"], shard=kill["shard"])
+                    state.mark_stopped(kill["instance_id"], kill["role"], shard=kill["shard"], left_survivor=True)
                     killed.add(kill["instance_id"])
             # Failovers enable the log checks of the shards they touched.
             operations.extend(

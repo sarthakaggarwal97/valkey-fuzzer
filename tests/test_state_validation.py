@@ -168,6 +168,37 @@ def test_slots_on_a_stopped_shard_fail_while_a_live_member_that_migrated_into_it
     assert result.success is False and "4096 slots still assigned to stopped nodes" in result.error_message
 
 
+@pytest.mark.parametrize("left_survivor", [True, False])
+def test_a_shard_emptied_by_kills_that_each_left_it_a_member_is_not_excused_as_stopped_on_purpose(left_survivor):
+    # Soak seed 1917258071: shard 3's primary valkey-9 and replica valkey-10 were killed, each kill leaving
+    # valkey-11 alive, and valkey-11 then migrated to shard 2's primary before it flagged valkey-9 failing. No
+    # member of shard 3 is left, but the kills did not stop it whole: its slots are Valkey's to serve.
+    text = (
+        MIGRATED_TOPOLOGY.replace("master,fail - 0 0 4 disconnected", "master,fail - 0 0 4 disconnected 12288-16383")
+        .replace(
+            "n10 127.0.0.1:7010@17010 slave n11 0 0 15 connected",
+            "n10 127.0.0.1:7010@17010 slave,fail n9 0 0 4 disconnected",
+        )
+        .replace("master - 0 0 15 connected 12288-16383", "slave n6 0 0 3 connected")
+    )
+    planned = planned_cluster_instances()
+    answering = fake_client({"role": "master"}, lambda *args: text if args[1] == "NODES" else _OK)
+    with (
+        patch(f"{LOCAL}topology.query_cluster_nodes", return_value=parse_cluster_nodes(text)),
+        patch(f"{LOCAL}validation.snapshot.valkey_client", return_value=client_context(answering)),
+    ):
+        check = DeploymentStateCheck(
+            migrated_connection(), planned, {}, _only("slot_coverage", stabilization_wait=0), rng=random.Random(0)
+        )
+        for index, role in ((0, "primary"), (1, "replica"), (9, "primary"), (10, "replica")):
+            check.mark_stopped(f"valkey-{index}", role, shard=index // 3, left_survivor=left_survivor)
+        result = check._validate_once(None).slot_coverage
+
+    # Stops that did not leave the shard a member (it was stopped whole on purpose) excuse its slots.
+    assert result.success is not left_survivor, result.error_message
+    assert not left_survivor or "4096 slots still assigned to stopped nodes" in result.error_message
+
+
 def _view(me, replica_of="a", epoch_b=2, c_primary=False):
     flag = {node: "myself," if node == me else "" for node in "abc"}
     c_role = "master -" if c_primary else f"slave {replica_of}"

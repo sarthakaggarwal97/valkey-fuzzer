@@ -135,7 +135,7 @@ class ClusterWaves(WaveRun):
     def heal(self, number: int) -> None:
         for kill in self.kills:
             if kill["wave"] == number and kill["success"]:
-                self.state.mark_stopped(kill["instance_id"], kill["role"], shard=kill["shard"])
+                self.state.mark_stopped(kill["instance_id"], kill["role"], shard=kill["shard"], left_survivor=True)
 
     def validate(self, number: int, results: list[dict[str, Any]]) -> dict[str, Any]:
         done = [record for record in results if record["op"] == "failover" and record["success"]]
