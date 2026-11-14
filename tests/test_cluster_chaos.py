@@ -115,7 +115,7 @@ class FakeCluster:
     def load_test_keys(self, keys):
         self.loaded = dict(keys)
 
-    def mark_stopped(self, node_id, role, shard=None):
+    def mark_stopped(self, node_id, role, shard=None, *, left_survivor=False):
         # shard: the live shard the node served when it stopped; None keeps its planned one.
         self.stopped.append((node_id, role, shard))
 
