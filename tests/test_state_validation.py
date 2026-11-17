@@ -1231,7 +1231,8 @@ def test_a_check_that_breaks_judges_nothing_unless_another_saw_valkey_fail(other
 
 
 def test_one_validation_reads_each_node_once():
-    # Every check judges one moment: the topology is read once, and each node's CLUSTER NODES once.
+    # Every check judges one moment: the topology is read once (every answering node is asked, for the view a
+    # majority agrees on), and each node's own CLUSTER NODES once.
     fake = FakeCluster({port: (f"n{port - 7000}", port - 3 if port > 7002 else None, "") for port in range(7000, 7006)})
     for port, slots in zip(range(7000, 7003), ("0-5460", "5461-10922", "10923-16383")):
         fake.nodes[port] = (fake.nodes[port][0], None, slots)
@@ -1245,8 +1246,8 @@ def test_one_validation_reads_each_node_once():
 
     assert summary["overall_success"], summary
     reads = {port: count for (port, what), count in fake.reads.items() if what == "CLUSTER NODES"}
-    # The topology's own read is the first node's; every other node is read once.
-    assert reads == {7000: 2, 7001: 1, 7002: 1, 7003: 1, 7004: 1, 7005: 1}, reads
+    # The topology's own read is every node's, then each node is read once for the checks.
+    assert reads == dict.fromkeys(range(7000, 7006), 2), reads
 
 
 @pytest.mark.parametrize(

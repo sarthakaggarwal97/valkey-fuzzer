@@ -22,7 +22,7 @@ from typing import Any, Optional
 
 from valkey_fuzzer.schema import ConfigField
 
-from .schemas import FLAG, INTEGER
+from .schemas import FLAG, INTEGER, MAPPING
 from .wave_evidence import wave_declares
 from .wave_operations import CLUSTER
 from .wave_targets import Member
@@ -95,7 +95,7 @@ class ClusterWaves(WaveRun):
                 node["role"],
                 node["shard_id"] if node["role"] != "replica" or self._synced(node["instance_id"]) else None,
             )
-            for node in self.handle.live_instances()
+            for node in self.handle.live_instances(skip_instances=sorted(self.held_on("process.paused")))
         ]
 
     def _synced(self, instance_id: str) -> bool:
@@ -122,6 +122,7 @@ class ClusterWaves(WaveRun):
             force=config["force"],
             timeout=config["timeout_s"],
             stopped_instances=sorted(self.down()),
+            paused_instances=sorted(self.held_on("process.paused")),
             rng=self.rngs[record["index"]],
         )
         if result is None:
@@ -146,7 +147,11 @@ class ClusterWaves(WaveRun):
         return excusing_kills(record, [kill for kill in self.kills if kill["success"]])
 
     def wave_summary(self, number: int, results: list[dict[str, Any]]) -> dict[str, Any]:
-        return {"kills": sum(kill["wave"] == number and kill["success"] for kill in self.kills)}
+        return {
+            "kills": sum(kill["wave"] == number and kill["success"] for kill in self.kills),
+            # Which nodes answered the cluster view reads of the wave, and which view won.
+            "views": self.handle.drain_view_reads(),
+        }
 
 
 class ClusterChaosAction(WaveAction):
@@ -156,7 +161,7 @@ class ClusterChaosAction(WaveAction):
 
 
 # The cluster heals itself: a killed node stays down, so the action owns no change.
-_CHAOS_DECLARES = wave_declares({"kills": INTEGER}, {"slots_seeded": FLAG})
+_CHAOS_DECLARES = wave_declares({"kills": INTEGER, "views": MAPPING}, {"slots_seeded": FLAG})
 
 REGISTRATIONS = (
     wave_registration(

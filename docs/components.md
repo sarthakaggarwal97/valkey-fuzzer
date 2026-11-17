@@ -1150,7 +1150,9 @@ every kill tried; `waves`, each with its `planned`, `applied`, `healed`
 (landed, and every change it owned is undone: a held fault, or a kill the
 heal restarted), `still_active` (a change it owns is still in place: its
 obligation is open), and `skipped` operations, heal problems, validation,
-and, for replication chaos, its primary; `still_active` and
+and, for cluster chaos, `views` (the cluster view reads of the wave: `reads`, the `last`
+read, and the `disputed` ones, each with the nodes that `answered`, those that `agreed`, the
+`skipped` ones, and the winning `view` of primaries and config epochs) and, for replication chaos, its primary; `still_active` and
 `cleanup_problems` after the final cleanup, which also restarts the
 instances replication chaos killed; `heal_promotions` and `loss_windows`), `valkey.instances.expected-down`
 (still down), `valkey.chaos.test-keys`, and one `valkey.data.loss-window`

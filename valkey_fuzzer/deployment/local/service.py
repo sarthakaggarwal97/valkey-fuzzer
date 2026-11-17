@@ -505,17 +505,21 @@ class ValkeyDeploymentService:
 
     # -- Deployment operations and checks ---------------------------------------
 
-    def live_instances(self) -> list[dict[str, Any]]:
+    def live_instances(self, skip_instances: Sequence[str] = ()) -> list[dict[str, Any]]:
         """Reachable instances as ``{instance_id, role, shard_id}``, all live.
 
         In cluster mode ``shard_id`` is the shard whose slots the node (or its
         primary) owns now, which replica migration and failovers move away
         from the plan; ``None`` for a primary without slots and its replicas.
+        The view is the one a majority of the answering nodes agree on, without
+        ``skip_instances`` (paused or partitioned): see
+        :meth:`~.topology.DeploymentConnection.get_current_nodes`.
         """
+        skip_ports = {info.port for info in self._connection.instances if info.instance_id in skip_instances}
         with self._operation():
             return [
                 {"instance_id": entry.instance_id, "role": entry.role, "shard_id": entry.shard_id}
-                for entry in self._connection.get_current_nodes(include_failed=False)
+                for entry in self._connection.get_current_nodes(include_failed=False, skip_ports=skip_ports)
                 if entry.instance_id is not None
             ]
 
@@ -526,6 +530,7 @@ class ValkeyDeploymentService:
         force: bool = False,
         timeout: float,
         stopped_instances: Sequence[str] = (),
+        paused_instances: Sequence[str] = (),
         rng: random.Random,
     ) -> Optional[bool]:
         """Promote a replica of ``shard_id``'s current primary; False when Valkey did not fail the shard over,
@@ -547,9 +552,14 @@ class ValkeyDeploymentService:
                 force=force,
                 timeout=timeout,
                 stopped_instances=stopped_instances,
+                paused_instances=paused_instances,
                 rng=rng,
                 context=self._context,
             )
+
+    def drain_view_reads(self) -> dict[str, Any]:
+        """The cluster views read since the last call: which nodes answered and which view won."""
+        return self._connection.drain_view_reads()
 
     def seed_slots(self, keys_per_slot: int, *, seed: Optional[int] = None) -> bool:
         """Write ``keys_per_slot`` keys into every hash slot; True when every write succeeded."""
