@@ -400,7 +400,8 @@ class WaveRun:
         summary = (
             f"{ran} of {len(records)} operation(s) in {len(summaries)} wave(s), {len(landed)} kill(s){extra_summary}"
         )
-        evidence = wave_evidence(self.spec, value, still_down, test_keys, windows)
+        pids = {instance_id: self.handle.pid(instance_id) for instance_id in still_down}
+        evidence = wave_evidence(self.spec, value, still_down, test_keys, windows, pids)
         if self.failures or errors:
             return make_result(
                 self.spec,

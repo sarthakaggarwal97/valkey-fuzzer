@@ -1356,7 +1356,7 @@ class CommandsAction:
             for server in (candidate, parent):
                 server.finish(context, spec, commands)
 
-        reached, unexplained, unreached, uncompared = _compare(commands, candidate, parent)
+        reached, unexplained, unreached, uncompared, after_death = _compare(commands, candidate, parent)
         # Replies that differ between the two builds with no change to explain it vary between runs: the variants
         # check leaves them alone, whether or not the replies are judged.
         differing = list(unexplained)
@@ -1371,6 +1371,7 @@ class CommandsAction:
             reached,
             unexplained,
         )
+        record["uncompared"] = len(after_death)
         for server in (candidate, parent):
             if server.exited is not None:
                 record[server.label]["exited"] = server.exited
@@ -1450,6 +1451,18 @@ class CommandsAction:
         ]
         if unanswered:
             return make_result(spec, ComponentStatus.ERROR, "; ".join(unanswered), evidence=evidence)
+        # Commands after the one the parent died on were not compared. One marked expect_difference is a change
+        # that was never examined: ERROR, not a PASS on half the sequence.
+        unexamined = [index for index in after_death if commands[index]["expect_difference"]]
+        if unexamined:
+            return make_result(
+                spec,
+                ComponentStatus.ERROR,
+                "the parent died before marked commands ran on it, so they were not compared: "
+                + ", ".join(f"{index} ({_step_text(commands[index])})" for index in unexamined),
+                evidence=evidence,
+                diagnostics={"reason": "uncompared-change", "commands": unexamined},
+            )
         if disputed:
             commands_disputed = [
                 {
@@ -1501,6 +1514,12 @@ class CommandsAction:
             ComponentStatus.PASS,
             f"{len(commands)} commands on both builds, {len(reached)} marked command(s) reached the change"
             + (f", dropped {', '.join(dropped)}" if dropped else "")
+            + (
+                f", {len(after_death)} command(s) after the parent died not compared: "
+                + ", ".join(f"{index} ({_step_text(commands[index])})" for index in after_death)
+                if after_death
+                else ""
+            )
             + "".join(f", {name} {outcome['outcome']}" for name, outcome in checks.items()),
             evidence=evidence,
         )
@@ -1622,15 +1641,16 @@ def _unanswered(commands: Sequence[Mapping[str, Any]], replies: Sequence[Mapping
     ]
 
 
-def _compare(commands, candidate: _Side, parent: _Side) -> tuple[list[int], list[int], list[int], list[str]]:
+def _compare(commands, candidate: _Side, parent: _Side) -> tuple[list[int], list[int], list[int], list[str], list[int]]:
     """Judge the parent's replies against the candidate's: the marked commands that reached the change, the
-    unmarked ones that differ, the marked ones that do not, and the commands the parent did not answer
-    without dying (described)."""
+    unmarked ones that differ, the marked ones that do not, the commands the parent did not answer
+    without dying (described), and the commands after the one it died on, which it never ran."""
 
     reached: list[int] = []
     unexplained: list[int] = []
     unreached: list[int] = []
     uncompared: list[str] = []
+    after_death: list[int] = []
     # The command the parent died on: its last record (the one that got no reply, or the last it answered).
     died_at = parent.replies[-1]["index"] if parent.exited is not None and parent.replies else None
     for record in candidate.replies:
@@ -1644,6 +1664,8 @@ def _compare(commands, candidate: _Side, parent: _Side) -> tuple[list[int], list
                 (reached if item["expect_difference"] else unexplained).append(index)
             elif parent.exited is None and other is not None:
                 uncompared.append(f"command {index} ({_step_text(item)}): {other['error']}")
+            elif died_at is not None and index > died_at:
+                after_death.append(index)
             continue
         # As canonical JSON, not with ==, under which a RESP3 boolean true equals the integer 1.
         mine, theirs = _compared(record, item["compare"]), _compared({**other, "index": index}, item["compare"])
@@ -1652,7 +1674,7 @@ def _compare(commands, candidate: _Side, parent: _Side) -> tuple[list[int], list
                 unreached.append(index)
         else:
             (reached if item["expect_difference"] else unexplained).append(index)
-    return reached, unexplained, unreached, uncompared
+    return reached, unexplained, unreached, uncompared, after_death
 
 
 # ---------------------------------------------------------------------------
@@ -2544,6 +2566,8 @@ _COMMANDS_DECLARES = Declarations(
                     # Marked commands whose replies differ, and unmarked ones whose replies differ, by index.
                     "reached": ConfigField(list, items=INTEGER),
                     "unexplained": ConfigField(list, items=INTEGER),
+                    # With compare_with: how many commands ran only on the build under test, the parent having died.
+                    "uncompared": optional(int),
                     # With compare_with: the commands whose reply on the build under test violates their expect.
                     "violating": optional(list),
                     # Without compare_with: the instance the sequence ran on.

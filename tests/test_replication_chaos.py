@@ -86,6 +86,9 @@ class FakeStandalone:
     def instance(self, instance_id):
         return next(item for item in self.instances if item.instance_id == instance_id)
 
+    def pid(self, instance_id):
+        return 1
+
     def is_alive(self, instance_id):
         if self.exit_on_its_own == instance_id:
             self.alive[instance_id] = False

@@ -84,7 +84,9 @@ def wave_declares(
     )
     evidence = {
         "valkey.chaos.schedule": declared(schedule),
-        "valkey.instances.expected-down": declared(mapping_of({"instances": ConfigField(list, items=TEXT)})),
+        "valkey.instances.expected-down": declared(
+            mapping_of({"instances": ConfigField(list, items=TEXT), "pids": optional(dict)})
+        ),
         "valkey.chaos.test-keys": declared(mapping_of({"keys": mapping_of(additional=TEXT)})),
     }
     if loss_windows:
@@ -107,13 +109,20 @@ def wave_evidence(
     expected_down: Sequence[str],
     test_keys: Mapping[str, Any],
     loss_windows: Sequence[Mapping[str, Any]] = (),
+    pids: Optional[Mapping[str, int]] = None,
 ) -> tuple:
     """The evidence both actions publish: the schedule, the instances down on purpose, the test keys, and
-    one ``valkey.data.loss-window`` per window (``valkey.oracle.ledger`` reads those)."""
+    one ``valkey.data.loss-window`` per window (``valkey.oracle.ledger`` reads those). ``pids`` are the processes
+    that were stopped, so a later process of the same instance is not taken for one stopped on purpose."""
 
     return (
         make_evidence(spec, "valkey.chaos.schedule", "action.completed", schedule),
-        make_evidence(spec, "valkey.instances.expected-down", "action.completed", {"instances": list(expected_down)}),
+        make_evidence(
+            spec,
+            "valkey.instances.expected-down",
+            "action.completed",
+            {"instances": list(expected_down), **({"pids": dict(pids)} if pids else {})},
+        ),
         make_evidence(spec, "valkey.chaos.test-keys", "action.completed", {"keys": test_keys}),
         *(
             make_evidence(

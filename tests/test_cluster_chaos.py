@@ -74,6 +74,9 @@ class FakeCluster:
         self.live_instances = lambda skip_instances=(): [node for node in live() if not predicate(node)]
         return self
 
+    def pid(self, node_id):
+        return 1
+
     def is_alive(self, node_id):
         return self.alive[node_id]
 
