@@ -11,7 +11,7 @@ import yaml
 
 from valkey_fuzzer.batch import signature_key, signature_label
 from valkey_fuzzer.components import actions, capabilities
-from valkey_fuzzer.components.oracles import LivenessOracle
+from valkey_fuzzer.components.oracles import CRASH_PATTERNS, LivenessOracle, scan_for_crashes
 from valkey_fuzzer.minimize import failure_signature, same_failure
 from valkey_fuzzer.plan import ComponentSpec, DeploymentProviderIdentity, EvidenceRequirement, ExecutionPlan
 from valkey_fuzzer.protocols import ComponentRole
@@ -27,23 +27,34 @@ SHORT_READ = "Short read or OOM loading DB. Unrecoverable error, aborting now."
 DUAL_CHANNEL = "dual-channel-short-read-valkey-1.log"
 
 
+def _hang():
+    raise valkey.exceptions.TimeoutError("Timeout reading from socket")
+
+
 class _Client:
+    loading = 0
+    hangs = False
+
     def __enter__(self):
-        return SimpleNamespace(ping=lambda: True, info=lambda section: {"loading": 0})
+        return SimpleNamespace(
+            ping=_hang if self.hangs else lambda: True, info=lambda section: {"loading": self.loading}
+        )
 
     def __exit__(self, *exc_info):
         pass
 
 
-def _liveness(node, log, alive=False, evidence=()):
+def _liveness(node, log, alive=False, evidence=(), client=_Client, pid=100, exit_signal=None):
     spec = resolved(ComponentSpec(role=ComponentRole.ORACLE, use="valkey.oracle.liveness", id="liveness"))
     # One instance, ``node``, whose process is gone (unless ``alive``), whose log is ``log``, and that answers.
     handle = SimpleNamespace(
         instances=(SimpleNamespace(instance_id=node),),
         is_alive=lambda _: alive,
         log_file=lambda _: str(CRASHES / log),
-        new_client=lambda _, timeout=5.0: _Client(),
+        new_client=lambda _, timeout=5.0: client(),
         process_output_file=lambda _: None,
+        pid=lambda _: pid,
+        exit_signal=lambda _: exit_signal,
     )
     return LivenessOracle().evaluate(fake_context(handle), spec, evidence)
 
@@ -83,6 +94,78 @@ def test_the_liveness_oracle_names_what_crashed_an_instance(node, log, alive, ev
     assert (
         (result.status is ComponentStatus.PASS) if cause is None else f"{node}: {problem} ({cause})" in result.summary
     )
+
+
+class _Loading(_Client):
+    loading = 1
+
+
+class _Hung(_Client):
+    hangs = True
+
+
+@pytest.mark.parametrize(
+    ("client", "alive", "exit_signal", "problem", "crash"),
+    [
+        # A SIGSTOPped server does not answer; one still loading answers PING but not "loading 0".
+        (_Hung, True, None, "TimeoutError", False),
+        (_Loading, True, None, "still loading", False),
+        # Gone with an empty log: a crash only when a signal ended it.
+        (_Client, False, None, "process not running", False),
+        (_Client, False, 11, "process not running", True),
+    ],
+    ids=["hang", "loading", "exited-silently", "killed-by-signal"],
+)
+def test_only_a_crash_report_a_fatal_exit_or_a_signal_marks_a_liveness_fail_as_a_crash(
+    tmp_path, client, alive, exit_signal, problem, crash
+):
+    log = tmp_path / "valkey-0.log"
+    log.write_text("")
+    result = _liveness("valkey-0", str(log), alive, client=client, exit_signal=exit_signal)
+
+    assert result.status is ComponentStatus.FAIL and problem in result.summary
+    assert result.crash is crash
+
+
+def test_a_crash_report_in_the_log_of_a_hung_server_is_still_a_crash():
+    result = _liveness("valkey-0", "save-assertion-s100016-valkey-0.log", True, client=_Hung)
+
+    assert result.status is ComponentStatus.FAIL and result.crash
+
+
+@pytest.mark.parametrize(
+    ("line", "matches"),
+    [
+        ("cluster_legacy.c:1136:20: runtime error: signed integer overflow: 1 * 2 cannot be represented", True),
+        # A module's own message with the words is no UBSan report.
+        ("1:M 01 Jan 2026 00:00:00.000 * module: runtime error: x while handling a command", False),
+        ("the runtime error: x", False),
+    ],
+    ids=["ubsan", "module-line", "bare-words"],
+)
+def test_the_runtime_error_pattern_needs_ubsans_file_line_column_prefix(tmp_path, line, matches):
+    path = tmp_path / "valkey-0.log"
+    path.write_text(line + "\n")
+
+    assert bool(scan_for_crashes({"valkey-0": str(path)}, CRASH_PATTERNS)) is matches
+
+
+def test_a_stopped_instance_is_exempt_only_for_the_process_that_was_stopped(tmp_path):
+    log = tmp_path / "valkey-1.log"
+    log.write_text("")
+    stopped = Evidence(
+        "valkey.instances.expected-down",
+        "chaos",
+        "action.completed",
+        1.0,
+        {"instances": ["valkey-1"], "pids": {"valkey-1": 100}},
+    )
+    # The process stopped on purpose is still the one that is gone: exempt.
+    assert _liveness("valkey-1", str(log), evidence=(stopped,), pid=100).status is ComponentStatus.PASS
+    # Restarted since (another pid) and gone again with an empty log: a liveness FAIL.
+    result = _liveness("valkey-1", str(log), evidence=(stopped,), pid=200)
+    assert result.status is ComponentStatus.FAIL and "valkey-1: process not running" in result.summary
+    assert result.crash is False
 
 
 @pytest.mark.parametrize(

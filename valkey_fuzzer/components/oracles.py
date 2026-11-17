@@ -32,7 +32,8 @@ CRASH_PATTERNS = (
     r"ERROR: AddressSanitizer",
     r"ERROR: LeakSanitizer",
     r"WARNING: ThreadSanitizer",
-    r"runtime error: ",
+    # UBSan's "file:line:col: runtime error: ", not a log line (a module's) that has the words.
+    r"\S+:\d+:\d+: runtime error: ",
     # The report's one line that names where (":cause: in function"), so the cause can carry it.
     r"SUMMARY: \w*Sanitizer:",
 )
@@ -179,6 +180,13 @@ def crash_reports(files: Mapping[str, Sequence[Optional[str]]], patterns: Sequen
 _HEALTHY = ("ok", "stopped on purpose")
 
 
+def _exit_signal(handle: Any, instance_id: str) -> Optional[int]:
+    """The signal that ended the instance's process, if the deployment says (not every provider does)."""
+
+    reader = getattr(handle, "exit_signal", None)
+    return reader(instance_id) if reader is not None else None
+
+
 class LivenessOracle:
     """Every instance is alive and responsive, with no crash or sanitizer report.
 
@@ -267,8 +275,13 @@ class LivenessOracle:
                 crashes[instance_id] = [line]
                 causes[instance_id] = _warning(line)
                 problems.append(f"{instance_id}: fatal exit ({causes[instance_id]})")
-        # Every problem so far is a server that crashed, exited, or stopped answering.
-        crashed = bool(problems)
+        # A crash is a crash report, a fatal exit, or an exit by signal. A server that hangs, still loads, or is gone
+        # with nothing in its log is a FAIL, not a crash: a crash survives an untrusted teardown and groups
+        # batch failures.
+        crashed = bool(crashes) or any(
+            reason == "process not running" and _exit_signal(handle, instance_id)
+            for instance_id, reason in status.items()
+        )
         forbidden: dict[str, dict[str, Any]] = {}
         for item in evidence_of(evidence, FORBIDDEN_LOG_MATCH):
             forbidden[item.source] = dict(item.value)

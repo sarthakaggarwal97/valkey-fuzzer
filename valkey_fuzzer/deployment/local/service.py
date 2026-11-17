@@ -334,6 +334,13 @@ class ValkeyDeploymentService:
         with self._operation():
             return self._info(instance_id).is_running
 
+    def exit_signal(self, instance_id: str) -> Optional[int]:
+        """Return the signal that ended the instance's current server process; None if it runs or exited itself."""
+        with self._operation():
+            process = self._info(instance_id).process
+            code = None if process is None else process.poll()
+            return -code if code is not None and code < 0 else None
+
     def send_signal(self, instance_id: str, signum: int) -> None:
         """Deliver a POSIX signal to the instance's current server process."""
         with self._operation():

@@ -627,6 +627,37 @@ def test_a_parent_that_dies_on_an_unmarked_command_is_an_unexplained_difference(
     assert value["unexplained"] == [0]
 
 
+# The parent dies at command 3 of 10 (index 2): the seven after it ran on the candidate alone.
+def _die_at(builds, index, total, marked=()):
+    commands = [
+        {
+            "command": ["SET", f"k{i}", "v"],
+            **({"expect_difference": True, "expect": {"error": True}} if i in marked else {}),
+        }
+        for i in range(total)
+    ]
+    BUILDS[builds["parent"]].replies = {("SET", f"k{index}", "v"): DIE}
+    return run(builds, commands)
+
+
+def test_commands_after_the_parent_died_are_counted_and_named(builds):
+    BUILDS[builds["candidate"]].replies = {("SET", "k2", "v"): Error("ERR changed")}
+    result, value = _die_at(builds, 2, 10, marked=(2,))
+
+    assert value["uncompared"] == 7
+    assert result.status.value == "PASS", result.summary
+    assert "7 command(s) after the parent died not compared: 3 (SET k3 v), 4 (SET k4 v)" in result.summary
+
+
+def test_a_marked_command_after_the_parent_died_is_an_error(builds):
+    BUILDS[builds["candidate"]].replies = {("SET", "k1", "v"): Error("ERR x"), ("SET", "k3", "v"): Error("ERR x")}
+    result, value = _die_at(builds, 1, 5, marked=(1, 3))
+
+    assert result.status.value == "ERROR"
+    assert result.diagnostics["reason"] == "uncompared-change" and list(result.diagnostics["commands"]) == [3]
+    assert value["uncompared"] == 3
+
+
 def test_a_candidate_that_exits_cleanly_is_a_fail_but_not_a_crash(builds):
     # A commanded SHUTDOWN exits the server with status 0: a FAIL (the sequence cannot go on), but not a crash,
     # so the walk does not file it as one (fuzzer#127: a SHUTDOWN-then-SET experiment on all three builds).

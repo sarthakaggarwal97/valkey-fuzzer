@@ -226,13 +226,19 @@ def stopped_on_purpose(handle: Any, evidence: Sequence[Any]) -> set[str]:
     """The instances some component stopped on purpose (:data:`EXPECTED_DOWN` evidence) that are not running:
     ``valkey.oracle.liveness`` judges them, and no other oracle can read them."""
 
-    named = {
+    named: dict[str, Optional[int]] = {}
+    for item in evidence:
+        if item.evidence_id == EXPECTED_DOWN:
+            pids = item.value.get("pids") or {}
+            for instance in item.value.get("instances", ()):
+                named[instance] = pids.get(instance)
+    # Only the process that was stopped is exempt: one started since (a different pid) and gone again crashed.
+    # Evidence without pids names no process, so the instance alone counts.
+    return {
         instance
-        for item in evidence
-        if item.evidence_id == EXPECTED_DOWN
-        for instance in item.value.get("instances", ())
+        for instance, pid in named.items()
+        if not handle.is_alive(instance) and (pid is None or handle.pid(instance) == pid)
     }
-    return {instance for instance in named if not handle.is_alive(instance)}
 
 
 def unreachable_instances(handle: Any, stopped: Iterable[str] = ()) -> list[str]:
