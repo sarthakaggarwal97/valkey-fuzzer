@@ -136,6 +136,13 @@ def _drift(item: str, recorded: Any, replay: Any) -> dict[str, Any]:
     return {"item": item, "recorded": recorded, "replay": replay}
 
 
+def _minor(version: Any) -> Optional[str]:
+    """``major.minor`` of a Python version string, None when it is not one."""
+
+    parts = version.split(".") if isinstance(version, str) else []
+    return ".".join(parts[:2]) if len(parts) >= 2 else None
+
+
 def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
@@ -180,14 +187,23 @@ def provenance_drift(
         drift.append(_drift("plan digest", recorded["plan_digest"], current["plan_digest"]))
 
     old_digest = _mapping(recorded["experiment"]).get("digest")
-    if old_digest != current["experiment"]["digest"]:
-        label = f"experiment {plan.experiment_id} digest"
-        drift.append(_drift(label, old_digest, current["experiment"]["digest"]))
+    new_digest = current["experiment"]["digest"]
+    # A digest missing on either side proves nothing, so it is drift, even when both are missing.
+    if old_digest is None or new_digest is None or old_digest != new_digest:
+        drift.append(_drift(f"experiment {plan.experiment_id} digest", old_digest, new_digest))
+
+    # A report from an older fuzzer may not record these; that is unchecked, not drift.
+    for item, old_value, new_value in (
+        ("python", _minor(recorded.get("python")), _minor(current["python"])),
+        ("platform", recorded.get("platform"), current["platform"]),
+    ):
+        if old_value is None:
+            unchecked.append(f"{item}: the recorded run has none")
+        elif old_value != new_value:
+            drift.append(_drift(item, old_value, new_value))
 
     def compare_digest(label: str, old_code: Any, new_code: Optional[str]) -> None:
-        if old_code is None or new_code is None:
-            unchecked.append(f"{label} code: its source cannot be read")
-        elif old_code != new_code:
+        if old_code is None or new_code is None or old_code != new_code:
             drift.append(_drift(f"{label} code", old_code, new_code))
 
     def same_implementation(label: str, old_row: Any, new_row: Optional[Mapping[str, Any]]) -> bool:

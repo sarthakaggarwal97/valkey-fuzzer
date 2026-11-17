@@ -53,6 +53,8 @@ REPRODUCER_KEYS = (
 
 PLAN_FILE = "plan.json"
 REPORT_FILE = "report.json"
+# The provenance of a run, written beside its plan.json before the run starts, so a plan.json can be verified.
+REPRODUCER_FILE = "reproducer.json"
 # A generated scenario, written next to its report so it runs again without the generator.
 SCENARIO_FILE = "scenario.yaml"
 
@@ -175,10 +177,12 @@ def new_report_folder(parent: str, name: str) -> str:
         raise ReportWriteError(f"could not create a report folder under {parent}: {exc}") from exc
 
 
-def write_plan(report_dir: str, plan: ExecutionPlan) -> None:
-    """Write ``plan.json``, before the run starts."""
+def write_plan(report_dir: str, plan: ExecutionPlan, reproducer: Optional[Mapping[str, Any]] = None) -> None:
+    """Write ``plan.json`` (and ``reproducer.json``, given the run's ``reproducer``), before the run starts."""
 
     write_document(os.path.join(report_dir, PLAN_FILE), plan.to_data())
+    if reproducer is not None:
+        write_document(os.path.join(report_dir, REPRODUCER_FILE), reproducer)
 
 
 def export_scenario(scenario: Mapping[str, Any], path: str, *, generated: Optional[Mapping[str, Any]] = None) -> None:
@@ -261,13 +265,35 @@ def as_run_report(data: Any, path: str) -> Optional[Mapping[str, Any]]:
     return data
 
 
+def _beside_plan(path: str, plan: ExecutionPlan) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
+    """The scenario and recorded run a bare ``plan.json``'s folder holds: its ``report.json``, else its
+    ``reproducer.json`` (a run that did not finish); (None, None) when the folder holds neither."""
+
+    folder = os.path.dirname(os.path.abspath(path))
+    if os.path.basename(path) != PLAN_FILE:
+        return None, None
+    report_path, reproducer_path = os.path.join(folder, REPORT_FILE), os.path.join(folder, REPRODUCER_FILE)
+    if os.path.isfile(report_path):
+        report = as_run_report(load_document(report_path), report_path)
+        if report is not None:
+            return report["scenario"], {"reproducer": report["reproducer"], "outcome": report["outcome"]}
+    if os.path.isfile(reproducer_path):
+        reproducer = load_document(reproducer_path)
+        missing = _missing(reproducer, REPRODUCER_KEYS) if isinstance(reproducer, Mapping) else list(REPRODUCER_KEYS)
+        if missing:
+            raise InputError(f"{reproducer_path} is not a complete reproducer: it has no {', '.join(missing)}")
+        return None, {"reproducer": reproducer, "outcome": {"plan": plan.to_data()}}
+    return None, None
+
+
 def recorded_run(path: str) -> tuple[ExecutionPlan, Optional[dict[str, Any]], Optional[dict[str, Any]]]:
     """The plan to replay, its scenario, and the recorded reproducer and outcome (None for a bare plan)."""
 
     data = load_document(path)
     report = as_run_report(data, path)
     if report is None:
-        return ExecutionPlan.from_data(data), None, None
+        plan = ExecutionPlan.from_data(data)
+        return plan, *_beside_plan(path, plan)
     outcome = report["outcome"]
     recorded = {"reproducer": report["reproducer"], "outcome": outcome}
     return ExecutionPlan.from_data(outcome["plan"]), report["scenario"], recorded

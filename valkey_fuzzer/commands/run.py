@@ -16,7 +16,7 @@ import sys
 from typing import Any
 
 from ..deployment.local.models import DEFAULT_BASE_DATA_DIR
-from ..outcomes import EXIT_FAILURE, EXIT_HARNESS_ERROR, EXIT_SUCCESS, exit_code, print_outcome
+from ..outcomes import EXIT_FAILURE, EXIT_HARNESS_ERROR, EXIT_SUCCESS, EXIT_USAGE, exit_code, print_outcome
 from ..reports import SCENARIO_FILE, ReportWriteError, export_scenario, write_document
 from ..service import PreparedRun
 from ._common import add_common_options, artifact_paths, exclusion, print_header, service_for
@@ -109,7 +109,7 @@ def run_command(args: argparse.Namespace) -> int:
         print("  valkey-fuzzer run scenario.yaml", file=sys.stderr)
         print("  valkey-fuzzer run --random", file=sys.stderr)
         print("  valkey-fuzzer run --seed 42 --experiment valkey.aof-durability", file=sys.stderr)
-        return EXIT_HARNESS_ERROR
+        return EXIT_USAGE
 
     service = service_for(args)
     if generating:

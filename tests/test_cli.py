@@ -18,7 +18,7 @@ from valkey_fuzzer import batch
 from valkey_fuzzer.cli import main
 from valkey_fuzzer.commands._common import add_common_options
 from valkey_fuzzer.deployment.local import config as local_config
-from valkey_fuzzer.outcomes import EXIT_FAILURE, EXIT_HARNESS_ERROR, EXIT_INTERRUPTED, EXIT_UNSUPPORTED
+from valkey_fuzzer.outcomes import EXIT_FAILURE, EXIT_HARNESS_ERROR, EXIT_INTERRUPTED, EXIT_UNSUPPORTED, EXIT_USAGE
 from valkey_fuzzer.reports import SCENARIO_FILE
 from valkey_fuzzer.results import Evidence, OutcomeStatus
 from valkey_fuzzer.runner import PreflightError
@@ -82,22 +82,27 @@ USAGE_ERRORS = [("run", EXAMPLE, "--random"), ("run", EXAMPLE, "--experiment", "
 PARSER_ERRORS = [("run", "--random", "--exclude", "x"), ("batch", "--random", "all", "--workers", 0), ("run", "--timeout", "nan")]  # fmt: skip
 
 
-def test_bad_inputs_are_harness_errors_that_run_nothing(tmp_path, canned_runs):
+def test_bad_inputs_run_nothing_and_exit_with_a_usage_or_harness_code(tmp_path, canned_runs):
     for command in ("run", "validate", "diff", "batch", "minimize", "replay"):
-        assert _cli(command, tmp_path / "missing.yaml") == EXIT_HARNESS_ERROR, command
+        assert (
+            _cli(command, tmp_path / "missing.yaml") == EXIT_HARNESS_ERROR
+            if command in ("validate", "batch")
+            else EXIT_USAGE
+        ), command
     assert _cli("run", "--seed", 1, "--experiment", "valkey.no-such-experiment") == EXIT_HARNESS_ERROR
     every = tuple(arg for size in (1, 64, 1024, 8192) for arg in ("--exclude", f"inputs.value_size={size}"))
     assert _cli("run", "--seed", 1, "--experiment", "valkey.snapshot-equivalence", *every) == EXIT_HARNESS_ERROR
     base = tmp_path / "base.yaml"
     base.write_text("[1]")
-    assert _cli("run", "--seed", 1, "--experiment", "valkey.snapshot-equivalence", "--base", base) == EXIT_HARNESS_ERROR
+    assert _cli("run", "--seed", 1, "--experiment", "valkey.snapshot-equivalence", "--base", base) == EXIT_USAGE
     # Mixed-up options are usage errors (a harness error, never exit 1, a FAIL), and the parser refuses
     # malformed values.
     for argv in USAGE_ERRORS:
-        assert _cli(*argv) == EXIT_HARNESS_ERROR, argv
+        assert _cli(*argv) == EXIT_USAGE, argv
     for argv in PARSER_ERRORS:
-        with pytest.raises(SystemExit):
+        with pytest.raises(SystemExit) as raised:
             _cli(*argv)
+        assert raised.value.code == EXIT_USAGE, argv
     assert not canned_runs.plans
     # A report that cannot be written fails the run and leaves no temporary file.
     assert _cli("run", EXAMPLE, "--output", tmp_path) == EXIT_HARNESS_ERROR
@@ -124,7 +129,7 @@ def test_a_run_that_fails_its_execution_preflight_leaves_an_error_report(tmp_pat
 
 @pytest.mark.parametrize(
     ("argv", "error", "code"),
-    [((), None, EXIT_HARNESS_ERROR), (("run", "s.yaml"), KeyboardInterrupt(), EXIT_INTERRUPTED),
+    [((), None, EXIT_USAGE), (("run", "s.yaml"), KeyboardInterrupt(), EXIT_INTERRUPTED),
      (("run", "s.yaml"), RuntimeError("boom"), EXIT_HARNESS_ERROR)],
 )  # fmt: skip
 def test_main_maps_no_command_an_interrupt_and_an_unexpected_error_to_exit_codes(argv, error, code):
@@ -245,11 +250,13 @@ def test_replay_refuses_a_drifted_environment_unless_allowed_and_then_records_th
 def test_replay_runs_a_bare_plan_or_a_yaml_report_but_minimize_needs_a_run_report(tmp_path, canned_runs):
     plan = tmp_path / "plan.json"
     plan.write_text(valkey_service().compile(yaml.safe_load(Path(EXAMPLE).read_text())).to_json())
-    assert _cli("replay", plan, "--output", tmp_path / "replay.json") == 0
+    assert _cli("replay", plan, "--output", tmp_path / "replay.json") == EXIT_USAGE, "a bare plan is unverified"
+    assert not canned_runs.plans
+    assert _cli("replay", plan, "--allow-drift", "--output", tmp_path / "replay.json") == 0
     assert json.loads((tmp_path / "replay.json").read_text())["provenance"]["verified"] is False
-    assert _cli("minimize", plan) == EXIT_HARNESS_ERROR
+    assert _cli("minimize", plan) == EXIT_USAGE
     # --output-format is the --output file's; --format, in list, validate, and sweep, is stdout's.
-    assert _cli("run", EXAMPLE, "--output-format", "yaml") == EXIT_HARNESS_ERROR, "it needs --output"
+    assert _cli("run", EXAMPLE, "--output-format", "yaml") == EXIT_USAGE, "it needs --output"
     assert _cli("run", EXAMPLE, "--output", tmp_path / "r.yaml", "--output-format", "yaml") == 0
     assert yaml.safe_load((tmp_path / "r.yaml").read_text())["status"] == "PASS"
     assert _cli("replay", tmp_path / "r.yaml") == 0
@@ -264,6 +271,81 @@ def test_replay_checks_a_binary_an_environment_provider_supplies_after_the_run(t
     assert _cli("run", EXAMPLES / "mixed_version_cluster.yaml", "--output", report) == 0
     assert _cli("replay", report) == EXIT_HARNESS_ERROR
     assert _cli("replay", report, "--allow-drift") == 0
+
+
+@pytest.mark.parametrize(
+    ("status", "allow_drift", "code"),
+    [
+        # A FAIL reproduced on another binary is still a FAIL; the drift is recorded in the report.
+        (OutcomeStatus.FAIL, False, EXIT_FAILURE),
+        (OutcomeStatus.FAIL, True, EXIT_FAILURE),
+        # Anything else on another binary proves nothing about the recorded run, unless drift is allowed.
+        (OutcomeStatus.PASS, False, EXIT_HARNESS_ERROR),
+        (OutcomeStatus.PASS, True, 0),
+        (OutcomeStatus.ERROR, False, EXIT_HARNESS_ERROR),
+    ],
+)
+def test_replay_that_fails_on_a_drifted_binary_exits_fail_and_records_the_drift(
+    tmp_path, canned_runs, status, allow_drift, code
+):
+    digests = iter(["a" * 64, "b" * 64])
+    instance = {"instance_id": "valkey-0", "binary": "/opt/valkey"}
+    canned_runs.diagnostics = lambda plan: {"deployment": {"instances": [{**instance, "binary_sha256": next(digests)}]}}
+    report = tmp_path / "report.json"
+    assert _cli("run", EXAMPLES / "mixed_version_cluster.yaml", "--output", report) == 0
+    canned_runs.status = status
+    replayed = tmp_path / "replay.json"
+    assert _cli("replay", report, *(["--allow-drift"] if allow_drift else []), "--output", replayed) == code
+    saved = json.loads(replayed.read_text())
+    assert saved["status"] == status.value
+    assert saved["provenance"]["drift"], "the drift is in the replay report"
+
+
+def test_a_run_writes_a_reproducer_beside_its_plan_so_replaying_the_plan_is_verified(tmp_path, canned_runs):
+    assert _cli("run", EXAMPLE, "--artifact-dir", tmp_path / "a") == 0
+    (folder,) = (tmp_path / "a" / "runs").glob("*-snapshot-equivalence-*")
+    assert (folder / "reproducer.json").is_file()
+    replayed = tmp_path / "replay.json"
+    assert _cli("replay", folder / "plan.json", "--output", replayed) == 0
+    assert json.loads(replayed.read_text())["provenance"]["verified"] is True
+
+    # An older folder (plan.json and report.json only) is verified by its report; a bare plan is refused.
+    (folder / "reproducer.json").unlink()
+    assert _cli("replay", folder / "plan.json") == 0
+    lone = tmp_path / "lone"
+    lone.mkdir()
+    (lone / "plan.json").write_text((folder / "plan.json").read_text())
+    assert _cli("replay", lone / "plan.json") == EXIT_USAGE
+    assert _cli("replay", lone / "plan.json", "--allow-drift") == 0
+
+    # A plan whose folder records another fuzzer is drift, which --allow-drift accepts and records.
+    data = json.loads((folder / "report.json").read_text())
+    data["reproducer"]["fuzzer_digest"] = "0" * 64
+    (folder / "report.json").write_text(json.dumps(data))
+    assert _cli("replay", folder / "plan.json") == EXIT_HARNESS_ERROR
+    assert _cli("replay", folder / "plan.json", "--allow-drift", "--output", replayed) == 0
+    assert json.loads(replayed.read_text())["provenance"]["drift"]
+
+
+def test_minimize_exits_non_zero_when_no_reduction_kept_the_failure(tmp_path, canned_runs, capsys):
+    canned_runs.status = OutcomeStatus.FAIL
+    report = _run_report(tmp_path)
+    canned_runs.status = OutcomeStatus.PASS
+    assert _cli("minimize", report, "--max-attempts", 3, "--artifact-dir", tmp_path) == EXIT_HARNESS_ERROR
+    assert "no reduction kept the failure" in capsys.readouterr().err
+
+
+def test_usage_errors_exit_64_apart_from_harness_errors(tmp_path, canned_runs):
+    assert EXIT_USAGE == 64 != EXIT_HARNESS_ERROR
+    assert _cli() == EXIT_USAGE
+    assert _cli("run") == EXIT_USAGE
+    with pytest.raises(SystemExit) as raised:
+        _cli("run", "--timeout", "nan")
+    assert raised.value.code == EXIT_USAGE
+    assert _cli("run", tmp_path / "missing.yaml") == EXIT_USAGE
+    scenario = tmp_path / "scenario.yaml"
+    scenario.write_text("scenario_id: a\nscenario_id: b\nseed: 1\nexperiment: {id: valkey.snapshot-equivalence}\n")
+    assert _cli("run", scenario) == EXIT_HARNESS_ERROR, "a scenario that does not compile is not a usage error"
 
 
 def test_replay_compares_the_valkey_binary_digest_and_a_chosen_binary_is_no_drift(tmp_path, canned_runs):
@@ -353,26 +435,23 @@ def test_an_artifact_override_must_name_a_declared_local_binary_artifact_once(
 ):
     scenario = tmp_path / "upgrade.yaml"
     scenario.write_text(yaml.safe_dump(UPGRADE))
-    assert _cli("run", scenario, *options) == EXIT_HARNESS_ERROR
+    assert _cli("run", scenario, *options) == EXIT_USAGE
     assert message in capsys.readouterr().err and not canned_runs.plans
 
     other = tmp_path / "other.yaml"
     other.write_text(yaml.safe_dump({**UPGRADE, "artifacts": {"candidate": {"use": "other.artifact.kind"}}}))
-    assert _cli("run", other, "--artifact", "candidate=/x") == EXIT_HARNESS_ERROR
+    assert _cli("run", other, "--artifact", "candidate=/x") == EXIT_USAGE
     assert (
         "artifacts.candidate is not a valkey.artifact.local-binary or valkey.artifact.local-module artifact"
         in capsys.readouterr().err
     )
-    assert (
-        _cli("run", "--seed", "1", "--experiment", "valkey.snapshot-equivalence", "--artifact", "x=/y")
-        == EXIT_HARNESS_ERROR
-    )
+    assert _cli("run", "--seed", "1", "--experiment", "valkey.snapshot-equivalence", "--artifact", "x=/y") == EXIT_USAGE
     assert "--artifact needs a scenario file" in capsys.readouterr().err
     with pytest.raises(SystemExit):
         _cli("run", scenario, "--artifact", "candidate")
     report = tmp_path / "report.json"
     assert _cli("run", scenario, "--output", report) == 0
-    assert _cli("replay", report, "--artifact", "nope=/x") == EXIT_HARNESS_ERROR
+    assert _cli("replay", report, "--artifact", "nope=/x") == EXIT_USAGE
     assert "the recorded plan declares no artifact 'nope'" in capsys.readouterr().err
     assert len(canned_runs.plans) == 1, "a refused override runs nothing"
 
@@ -430,6 +509,7 @@ def test_minimize_refuses_a_drifted_environment_and_a_budget_below_one(tmp_path,
     # Reductions are judged by whether they fail the same way: on other code that proves nothing.
     assert _cli("minimize", report) == EXIT_HARNESS_ERROR
     assert "refusing to minimize" in capsys.readouterr().err and len(canned_runs.plans) == 1
+    # One candidate that does not keep the failure leaves nothing smaller: that is not a success.
     assert _cli("minimize", report, "--allow-drift", "--max-attempts", 1) == 0
     for budget in (0, -3):
         with pytest.raises(SystemExit):

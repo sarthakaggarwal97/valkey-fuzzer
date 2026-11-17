@@ -12,6 +12,7 @@ EXIT_SUCCESS = 0
 EXIT_FAILURE = 1
 EXIT_HARNESS_ERROR = 2
 EXIT_UNSUPPORTED = 3
+EXIT_USAGE = 64  # EX_USAGE: the command line or an input file is wrong; nothing was judged
 EXIT_INTERRUPTED = 130
 
 EXIT_CODES = {

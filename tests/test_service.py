@@ -228,7 +228,7 @@ def test_the_service_changes_a_deployment_only_through_its_providers_hooks(tmp_p
     plan_path = tmp_path / "plan.json"
     plan_path.write_text(prepared.plan.to_json(), encoding="utf-8")
     with pytest.raises(ScenarioCompileError, match="cannot run another Valkey binary"):
-        service.prepare_replay(str(plan_path), valkey_binary="/opt/valkey-server")
+        service.prepare_replay(str(plan_path), valkey_binary="/opt/valkey-server", allow_drift=True)
 
     prepared = draw("hooked", valkey_binary="/opt/valkey-server")
     assert prepared.scenario["deployment"] == {

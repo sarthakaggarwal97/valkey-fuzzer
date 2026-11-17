@@ -18,7 +18,8 @@ def register(subparsers: Any) -> None:
         "--allow-drift",
         action="store_true",
         help="Replay even if the fuzzer, experiment, components, or Valkey binary differ from the "
-        "recorded run; the differences are printed and recorded in the replay report",
+        "recorded run, or replay a bare plan.json that has no recorded provenance; the differences are printed "
+        "and recorded in the replay report",
     )
     replay.add_argument("--verbose", action="store_true")
     add_common_options(
@@ -67,15 +68,19 @@ def replay_command(args: argparse.Namespace) -> int:
     print(f"Report: {record.report_path}")
     code = exit_code(record.outcome.status, allow_unsupported=args.allow_unsupported)
     if result.late_drift and not args.allow_drift:
+        # A FAIL on a different binary still fails (the drift is in the report's provenance); anything else
+        # proves nothing about the recorded run.
+        failed = code == EXIT_FAILURE
         print(
             "Error: the replay ran a different Valkey binary or artifact than the recorded run, "
-            "so it does not reproduce it:",
+            + ("but it still FAILed:" if failed else "so it does not reproduce it:"),
             file=sys.stderr,
         )
         for entry in result.late_drift:
             print(f"  - {describe_drift(entry)}", file=sys.stderr)
-        print("Pass --allow-drift to accept such a replay.", file=sys.stderr)
-        code = EXIT_HARNESS_ERROR
+        if not failed:
+            print("Pass --allow-drift to accept such a replay.", file=sys.stderr)
+            code = EXIT_HARNESS_ERROR
     if args.output:
         try:
             write_document(args.output, record.report)
