@@ -55,7 +55,7 @@ import tempfile
 import time
 from collections.abc import Collection, Iterable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Optional
 
 from .deployment.local.models import DEFAULT_BASE_DATA_DIR
@@ -113,6 +113,8 @@ class Owner:
 
     pid: int
     start: str
+    # The PID namespace the owner ran in (``pid:[inode]``), when its tag recorded one.
+    namespace: Optional[str] = field(default=None, compare=False)
 
     @property
     def token(self) -> str:
@@ -123,9 +125,15 @@ class Owner:
         match = _OWNER_RE.match(text) if isinstance(text, str) else None
         return cls(int(match.group(1)), match.group(2)) if match else None
 
-    def alive(self) -> bool:
-        """Whether the owner still runs; True whenever that cannot be ruled out."""
+    def alive(self, force_foreign: bool = False) -> bool:
+        """Whether the owner still runs; True whenever that cannot be ruled out.
 
+        A PID means nothing in another PID namespace (a container sharing /tmp), so an owner recorded in
+        another one is taken to be alive, unless ``force_foreign``.
+        """
+
+        if self.namespace is not None and self.namespace != _pid_namespace("self") and not force_foreign:
+            return True
         try:
             os.kill(self.pid, 0)
         except ProcessLookupError:
@@ -172,6 +180,10 @@ def shared_directory(path: str) -> str:
     root's, mode 0755, and every later run of another user could not write
     there. Missing parents are made as usual, and an existing directory keeps
     its mode: the fuzzer changes only what it has just made.
+
+    An existing one is trusted only if it is a real directory (not a symlink) owned by the current user or
+    root, and sticky if group or others can write to it: anyone can pre-create the name under /tmp, and a
+    run as root would write wherever it points. Otherwise this raises :class:`PermissionError` naming ``path``.
     """
 
     parent = os.path.dirname(path)
@@ -180,8 +192,13 @@ def shared_directory(path: str) -> str:
     try:
         os.mkdir(path)
     except FileExistsError:
-        if not os.path.isdir(path):
-            raise
+        info = os.lstat(path)
+        if not stat.S_ISDIR(info.st_mode):
+            raise PermissionError(f"{path} is not a real directory (a symlink or a file); remove it") from None
+        if info.st_uid not in (os.geteuid(), 0):
+            raise PermissionError(f"{path} belongs to uid {info.st_uid}, not you or root; refusing to use it") from None
+        if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH) and not info.st_mode & stat.S_ISVTX:
+            raise PermissionError(f"{path} is writable by others without the sticky bit; refusing to use it") from None
         return path
     os.chmod(path, SHARED_MODE)  # mkdir's mode is masked by the umask; chmod's is not
     return path
@@ -256,7 +273,7 @@ def new_run_folder(parent: str, name: str) -> str:
     for _ in range(8):
         path = os.path.join(parent, f"{_timestamp()}-{folder_name(name)}-{secrets.token_hex(3)}")
         try:
-            os.mkdir(path)
+            os.mkdir(path, 0o700)
         except FileExistsError:
             continue
         return path
@@ -296,7 +313,14 @@ def tag_directory(path: str, kind: str, label: str = "") -> None:
     """Mark ``path`` as created by this process: the sweep removes it once this process is gone."""
 
     owner = current_owner()
-    record = {"owner": owner.token, "pid": owner.pid, "kind": kind, "label": label, "created_at": time.time()}
+    record = {
+        "owner": owner.token,
+        "pid": owner.pid,
+        "pid_ns": _pid_namespace("self"),
+        "kind": kind,
+        "label": label,
+        "created_at": time.time(),
+    }
     temporary = os.path.join(path, f"{OWNER_FILE}.{os.getpid()}.tmp")
     with open(temporary, "w", encoding="utf-8") as handle:
         json.dump(record, handle, sort_keys=True)
@@ -367,14 +391,19 @@ def mount_parent() -> str:
 
     parent = os.path.join(shared_directory(os.path.join(tempfile.gettempdir(), MOUNT_ROOT_NAME)), current_owner().token)
     os.makedirs(parent, mode=0o755, exist_ok=True)
+    # Names the PID namespace its mount points were made in (:func:`mount_owner`).
+    tag_directory(parent, "mounts")
     return parent
 
 
 def release_mount_parent(mount_point: str) -> None:
     """Remove a mount point's owner directory once its last mount point is gone."""
 
+    parent = os.path.dirname(mount_point)
     try:
-        os.rmdir(os.path.dirname(mount_point))
+        if not _subdirectories(parent):
+            untag_directory(parent)
+        os.rmdir(parent)
     except OSError:
         pass
 
@@ -568,13 +597,21 @@ def list_mounts() -> list[tuple[str, str]]:
     ]
 
 
+def _in_namespace_of(owner: Optional[Owner], directory: str) -> Optional[Owner]:
+    """``owner`` with the PID namespace ``directory``'s tag records (none if it has no tag)."""
+
+    tag = read_tag(directory) if owner is not None else None
+    namespace = tag.get("pid_ns") if tag else None
+    return replace(owner, namespace=namespace) if owner is not None and isinstance(namespace, str) else owner
+
+
 def mount_owner(mount_point: str) -> Optional[Owner]:
     """The owner of a mount point under a ``valkey-fuzzer-mounts/<owner>/`` directory, or None."""
 
     parent = os.path.dirname(mount_point)
     if os.path.basename(os.path.dirname(parent)) != MOUNT_ROOT_NAME:
         return None
-    return Owner.parse(os.path.basename(parent))
+    return _in_namespace_of(Owner.parse(os.path.basename(parent)), parent)
 
 
 def _age(now: float, since: Any) -> Optional[float]:
@@ -615,7 +652,7 @@ def _find_mount_points(roots: Iterable[str], now: float, gone: Gone) -> list[Lef
     found, seen = [], set()
     for root in roots:
         for parent in _subdirectories(os.path.join(root, MOUNT_ROOT_NAME)):
-            owner = Owner.parse(parent.name)
+            owner = _in_namespace_of(Owner.parse(parent.name), parent.path)
             try:
                 ours = parent.stat(follow_symlinks=False).st_uid == os.geteuid()
             except OSError:
@@ -658,8 +695,8 @@ def _find_directories(roots: Iterable[str], now: float, gone: Gone) -> list[Left
             if tag is None or path in seen:
                 continue
             seen.add(path)
-            owner = Owner.parse(tag["owner"])
-            if gone(owner):
+            owner = _in_namespace_of(Owner.parse(tag["owner"]), entry.path)
+            if owner is not None and gone(owner):
                 detail = f"{tag.get('kind', '')} {tag.get('label', '')}".strip()
                 found.append(Leftover("directory", entry.path, owner.token, _age(now, tag.get("created_at")), detail))
     return found
@@ -781,6 +818,7 @@ def sweep(
     older_than: Optional[float] = None,
     dry_run: bool = False,
     owners: Optional[Collection[str]] = None,
+    force_foreign_namespace: bool = False,
 ) -> SweepReport:
     """Find the leftovers of fuzzer processes that are gone and, unless ``dry_run``, remove them.
 
@@ -788,12 +826,16 @@ def sweep(
     tagged directories (default: :func:`default_roots`). ``older_than`` leaves
     anything younger than that many seconds, and anything whose age is unknown
     (a chain), alone. ``owners`` (owner tokens) limits the sweep to what those
-    processes left: the batch runner sweeps each worker after its run.
+    processes left: the batch runner sweeps each worker after its run. An owner recorded in another PID
+    namespace is kept as alive (its PID means nothing here) unless ``force_foreign_namespace``.
+    Iptables chains carry no namespace: they are judged by PID alone.
     """
 
     def gone(owner: Owner) -> bool:
         # The owners asked about first: a liveness check may spawn ps.
-        return (owners is None or owner.token in owners) and not owner.alive()
+        if owners is not None and owner.token not in owners:
+            return False
+        return not (owner.alive(force_foreign=True) if force_foreign_namespace else owner.alive())
 
     now = time.time()
     report = SweepReport(dry_run=dry_run)

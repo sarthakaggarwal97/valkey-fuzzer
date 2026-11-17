@@ -335,6 +335,10 @@ def test_two_deployments_with_the_same_seed_write_separate_logs_that_cleanup_fin
     assert paths[0] != paths[1]
     for path in paths:
         open(path, "w").close()
+    # While this process owns the deployments, cleanup keeps their logs; untagged, they are finished ones.
+    assert cleanup_logs(7, str(tmp_path), force=True) == 0 and all(os.path.exists(path) for path in paths)
+    for directory in tmp_path.glob("deployment-*"):
+        (directory / ".valkey-fuzzer-owner").unlink()
     assert cleanup_logs(7, str(tmp_path), force=True) == 0
     assert not any(os.path.exists(path) for path in paths)
 

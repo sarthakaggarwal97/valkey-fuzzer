@@ -528,7 +528,10 @@ def test_a_partition_whose_heal_fails_is_an_error_though_the_final_cleanup_remov
     monkeypatch.setattr(network, "run_iptables", iptables)
     monkeypatch.setattr(replication_chaos, "iptables_supported", lambda: (True, ""))
     waves = [[{"op": "partition", "target": "valkey-1", "duration_s": 0.05}]]
-    outcome = run_planned(FakeStandalone(), waves, addressing="per_instance_loopback")
+    handle = FakeStandalone()
+    for n, instance in enumerate(handle.instances):
+        instance.host = f"127.0.0.{n + 1}"  # per-instance addresses, which the partition requires
+    outcome = run_planned(handle, waves, addressing="per_instance_loopback")
     assert outcome.status.value == "ERROR" and not iptables.chains and not iptables.jumps
     # Another process's leaked chains are the sweep's to find and report, not this run's to delete.
     assert ("-S",) not in iptables.calls
@@ -861,3 +864,29 @@ def test_a_window_ends_at_the_exit_that_ended_its_primarys_tenure_not_an_earlier
     run.succeed("valkey-0", 38.0, forced=True, sync={"replid": "r0", "offset": 10}, reason="heal promoted valkey-0")
     (window,) = run.close_windows()
     assert (window["start"], window["end"]) == (0.0, 37.9)
+
+
+@pytest.mark.parametrize(
+    ("addresses", "isolated", "peers", "message"),
+    [
+        ({"a": "127.0.0.1", "b": "127.0.0.1", "c": "127.0.0.2"}, ["a"], ["c"], "share an address"),
+        ({"a": "127.0.0.1", "b": "127.0.0.2", "c": "10.0.0.5"}, ["a"], ["b"], "not a loopback"),
+        ({"a": "127.0.0.1", "b": "localhost"}, ["a"], ["b"], "not an IP address"),
+        ({"a": "127.0.0.1", "b": "127.0.0.2"}, ["a"], ["a"], "same address"),
+    ],
+)
+def test_a_partition_refuses_unsafe_addresses_before_any_iptables_call(
+    monkeypatch, addresses, isolated, peers, message
+):
+    iptables = Iptables()
+    monkeypatch.setattr(network, "run_iptables", iptables)
+    with pytest.raises(network.PartitionError, match=message):
+        network.drop_between("VF-chain", addresses, isolated, peers)
+    assert iptables.calls == []
+
+
+def test_a_partition_between_distinct_loopback_addresses_is_installed(monkeypatch):
+    iptables = Iptables()
+    monkeypatch.setattr(network, "run_iptables", iptables)
+    rules = network.drop_between("VF-chain", {"a": "127.0.0.2", "b": "127.0.0.3", "c": "::1"}, ["a"], ["b"])
+    assert rules == ["127.0.0.2->127.0.0.3", "127.0.0.3->127.0.0.2"] and iptables.calls[-1][0] == "-I"

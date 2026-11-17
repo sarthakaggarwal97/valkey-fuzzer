@@ -23,6 +23,7 @@ from valkey_fuzzer.deployment.local.processes import ProcessManager
 from valkey_fuzzer.deployment.local.server_config import normalize_server_option
 from valkey_fuzzer.hoststate import Owner, current_owner, sweep
 
+REAL_ALIVE = Owner.alive
 DEAD, OTHER = Owner(999_999, "0a1b2c"), Owner(999_998, "0a1b2c")
 
 
@@ -426,3 +427,63 @@ def test_a_sweep_for_some_owners_checks_no_other_owner_is_alive(tmp_path, host, 
 
     assert _found(report) == [("directory", str(tmp_path / "deployment-dead"), "removed")]
     assert set(checked) == {DEAD.token}
+
+
+def test_an_owner_in_another_pid_namespace_is_kept_unless_forced(host, tmp_path, monkeypatch):
+    # Its PID is dead here, but here is not where it lived: a container sharing /tmp looks dead from the host.
+    monkeypatch.setattr(Owner, "alive", REAL_ALIVE)
+    monkeypatch.setattr(hoststate, "_pid_namespace", lambda pid: "pid:[1]")
+    foreign = _tagged_dir(tmp_path, "foreign", DEAD)
+    tag = json.loads((foreign / hoststate.OWNER_FILE).read_text())
+    (foreign / hoststate.OWNER_FILE).write_text(json.dumps({**tag, "pid_ns": "pid:[2]"}))
+    mine = _tagged_dir(tmp_path, "mine", OTHER)
+    (mine / hoststate.OWNER_FILE).write_text(json.dumps({**tag, "owner": OTHER.token, "pid_ns": "pid:[1]"}))
+    assert _found(sweep([str(tmp_path)], dry_run=True)) == [("directory", str(mine), "would remove")]
+    assert foreign.exists()
+    forced = sweep([str(tmp_path)], dry_run=True, force_foreign_namespace=True)
+    assert _found(forced) == [("directory", str(foreign), "would remove"), ("directory", str(mine), "would remove")]
+    assert Owner(DEAD.pid, DEAD.start, "pid:[2]").alive() and not Owner(DEAD.pid, DEAD.start, "pid:[1]").alive()
+
+
+def test_a_tag_records_the_pid_namespace_of_its_writer(tmp_path):
+    hoststate.tag_directory(str(tmp_path), "deployment")
+    assert hoststate.read_tag(str(tmp_path))["pid_ns"] == hoststate._pid_namespace("self")
+
+
+def test_a_shared_directory_that_is_a_symlink_or_belongs_to_another_user_is_refused(tmp_path, monkeypatch):
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    (tmp_path / "link").symlink_to(target)
+    with pytest.raises(PermissionError, match=str(tmp_path / "link")):
+        hoststate.shared_directory(str(tmp_path / "link"))
+    # Another user's directory: the stat result says so; root's and one's own are trusted.
+    foreign = tmp_path / "foreign"
+    foreign.mkdir(mode=0o700)
+    real_lstat = os.lstat
+    uid = {"value": os.geteuid() + 1}
+
+    def lstat(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        if str(path) != str(foreign):
+            return info
+        return os.stat_result((info.st_mode, info.st_ino, info.st_dev, info.st_nlink, uid["value"], *info[5:]))
+
+    monkeypatch.setattr(hoststate.os, "lstat", lstat)
+    with pytest.raises(PermissionError, match=str(foreign)):
+        hoststate.shared_directory(str(foreign))
+    uid["value"] = 0
+    assert hoststate.shared_directory(str(foreign)) == str(foreign)
+
+
+def test_a_shared_directory_others_can_write_to_needs_the_sticky_bit(tmp_path):
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    loose.chmod(0o777)
+    with pytest.raises(PermissionError, match=str(loose)):
+        hoststate.shared_directory(str(loose))
+    loose.chmod(0o1777)
+    assert hoststate.shared_directory(str(loose)) == str(loose)
+
+
+def test_run_folders_are_private(tmp_path):
+    assert stat.S_IMODE(os.lstat(hoststate.new_run_folder(str(tmp_path / "runs"), "x")).st_mode) == 0o700

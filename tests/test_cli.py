@@ -14,10 +14,11 @@ import yaml
 
 from tests.support import sigterm_during
 from tests.valkey_experiments_support import valkey_service
-from valkey_fuzzer import batch
+from valkey_fuzzer import batch, hoststate
 from valkey_fuzzer.cli import main
 from valkey_fuzzer.commands._common import add_common_options
 from valkey_fuzzer.deployment.local import config as local_config
+from valkey_fuzzer.hoststate import Owner, current_owner
 from valkey_fuzzer.outcomes import EXIT_FAILURE, EXIT_HARNESS_ERROR, EXIT_INTERRUPTED, EXIT_UNSUPPORTED, EXIT_USAGE
 from valkey_fuzzer.reports import SCENARIO_FILE
 from valkey_fuzzer.results import Evidence, OutcomeStatus
@@ -549,6 +550,18 @@ def test_cleanup_logs_succeeds_only_when_every_log_of_the_seed_is_deleted(tmp_pa
     with patch("builtins.input", return_value=answer), patch("os.remove", side_effect=remove):
         assert _cli("cleanup-logs", 42, "--data-dir", tmp_path, *force) == code
     assert sorted(path.stem.split("-", 2)[2] for path in (tmp_path / "logs").iterdir()) == left
+
+
+def test_cleanup_logs_keeps_the_logs_of_a_live_deployment_and_removes_a_dead_ones(tmp_path, capsys):
+    (tmp_path / "logs").mkdir()
+    for deployment, owner in (("aaaa1111", current_owner()), ("bbbb2222", Owner(999_999, "0a1b2c"))):
+        (tmp_path / f"deployment-{deployment}").mkdir()
+        (tmp_path / f"deployment-{deployment}" / hoststate.OWNER_FILE).write_text(json.dumps({"owner": owner.token}))
+        (tmp_path / "logs" / f"42-{deployment}-valkey-0.log").write_text("log\n")
+    (tmp_path / "logs" / "42-cccc3333-valkey-0.log").write_text("log\n")  # no deployment directory left
+    assert _cli("cleanup-logs", 42, "--data-dir", tmp_path, "--force") == 0
+    assert [path.name for path in (tmp_path / "logs").iterdir()] == ["42-aaaa1111-valkey-0.log"]
+    assert "Skipped 42-aaaa1111-valkey-0.log" in capsys.readouterr().out
 
 
 def test_the_common_options_set_no_default_for_an_option_a_command_defines_itself():
