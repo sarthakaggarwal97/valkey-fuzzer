@@ -131,7 +131,7 @@ a retry succeeded makes the fault, and the run, `ERROR`.
 | [`valkey.oracle.error-counters`](#valkeyoracleerror-counters) | oracle | any | no error counter in INFO rose without a cause in the scenario |
 | [`valkey.oracle.quiet-end`](#valkeyoraclequiet-end) | oracle | any | every instance comes to rest: no blocked client or child process, links up, not spinning |
 | [`valkey.oracle.ledger`](#valkeyoracleledger) | oracle | any | data matches the workload ledger |
-| [`valkey.oracle.history`](#valkeyoraclehistory) | oracle | any | the workload's history is linearizable (Porcupine) |
+| [`valkey.oracle.history`](#valkeyoraclehistory) | oracle | any | the single-client history is linearizable (Porcupine) |
 | [`valkey.oracle.rdb-snapshot`](#valkeyoraclerdb-snapshot) | oracle | any | captured RDBs reload with plausible data |
 | [`valkey.oracle.deployment-state`](#valkeyoracledeployment-state) | oracle | any | the deployment's state validators pass, with a chaos action's kills and keys |
 | [`valkey.oracle.cluster-election-safety`](#valkeyoraclecluster-election-safety) | oracle | cluster | the election model's invariants hold |
@@ -1689,6 +1689,14 @@ after a failover or a restart) and an acknowledged write that a read saw and
 that later vanished, through any order of concurrent and indeterminate
 operations.
 
+**Scope of the claim.** The shipped `valkey.workload.key-value` workload is
+one sequential writer that reads only from the primary, so no two operations
+overlap. This oracle therefore proves "no stale read after a failover or a
+restart" for that one client. It does not exercise concurrency, replica reads
+(`READONLY`), `WAIT`, client tracking or multi-client visibility, and a PASS
+says nothing about them. A multi-client workload (several threads, some
+reading replicas under `READONLY`) is future work.
+
 It judges under the loss policy of the [`valkey.oracle.ledger`](#valkeyoracleledger)
 component named by `ledger` (its loss windows, scope, `window_reads`, and
 `WAIT` protection), so it never flags a loss that policy allows:
@@ -1714,7 +1722,7 @@ skips reads (`check_reads: false`), which a history check cannot honor.
 | `ledger` | string | | The `valkey.oracle.ledger` component's `id`; its `workload` and `converge_timeout_s` apply too. |
 | `timeout_s` | number, 1 to 3600 | 300 | How long Porcupine may search. |
 
-`FAIL` when a key's history is not linearizable, naming the keys
+`FAIL` when a key's single-client history is not linearizable, naming the keys
 (`illegal_keys`) and writing Porcupine's visualization of their histories
 to `illegal.html` (`visualization_path`). `ERROR` when the `porcupine`
 checker is not on `PATH`, the final read keeps failing, the check times out,
