@@ -13,9 +13,10 @@ import glob
 import os
 import shlex
 import sys
-from typing import Any
+from typing import Any, Optional
 
 from ..deployment.local.models import DEFAULT_BASE_DATA_DIR
+from ..hoststate import Owner, read_tag
 from ..outcomes import EXIT_FAILURE, EXIT_HARNESS_ERROR, EXIT_SUCCESS, EXIT_USAGE, exit_code, print_outcome
 from ..reports import SCENARIO_FILE, ReportWriteError, export_scenario, write_document
 from ..service import PreparedRun
@@ -180,6 +181,22 @@ def _reproduce_command(prepared: PreparedRun, args: argparse.Namespace) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _live_owner(base_data_dir: str, log_file: str) -> Optional[str]:
+    """The owner token if ``log_file``'s deployment is tagged with a live owner, else None.
+
+    The log is ``<seed>-<deployment id>-<instance>.log``; its deployment directory is
+    ``<base_data_dir>/deployment-<id>``. shortcut: a deployment under a separate data root is not found, so its
+    logs count as dead; upgrade when logs record their deployment directory.
+    """
+
+    parts = os.path.basename(log_file).split("-", 2)
+    tag = read_tag(os.path.join(base_data_dir, f"deployment-{parts[1]}")) if len(parts) == 3 else None
+    owner = Owner.parse(tag["owner"]) if tag else None
+    if owner is not None and isinstance(tag.get("pid_ns"), str):
+        owner = Owner(owner.pid, owner.start, tag["pid_ns"])
+    return owner.token if owner is not None and owner.alive() else None
+
+
 def cleanup_logs(seed: int, base_data_dir: str, force: bool = False) -> int:
     """Delete ``<seed>-*.log`` under ``base_data_dir/logs``, asking first unless ``force``.
 
@@ -189,6 +206,11 @@ def cleanup_logs(seed: int, base_data_dir: str, force: bool = False) -> int:
     """
 
     log_files = sorted(glob.glob(os.path.join(base_data_dir, "logs", f"{seed}-*.log")))
+    live = {log_file: _live_owner(base_data_dir, log_file) for log_file in log_files}
+    for log_file, owner in live.items():
+        if owner:
+            print(f"Skipped {os.path.basename(log_file)}: its deployment is still running (owner {owner})")
+    log_files = [log_file for log_file in log_files if not live[log_file]]
     if not log_files:
         print(f"No log files found for seed {seed}")
         return EXIT_SUCCESS

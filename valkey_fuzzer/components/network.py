@@ -21,6 +21,7 @@ probe with ``requires: [linux, root, iptables, per_instance_loopback]`` turns
 hosts that cannot do this into ``SKIP_UNSUPPORTED`` before anything starts.
 """
 
+import ipaddress
 import threading
 import time
 import uuid
@@ -49,10 +50,38 @@ def create_chain(chain: str) -> None:
         raise PartitionError(f"cannot create chain: {result.stderr.strip()}")
 
 
+def _refuse_unsafe_addresses(addresses: Mapping[str, str], isolated: Sequence[str], peers: Sequence[str]) -> None:
+    """Raise :class:`PartitionError` unless every address is loopback and distinct, and no pair is one address.
+
+    A rule between 127.0.0.1 and itself, which a provider that returns one address for every instance would
+    produce, drops all loopback traffic on the host, the operator's included.
+    """
+
+    parsed = {}
+    for name, address in addresses.items():
+        try:
+            parsed[name] = ipaddress.ip_address(address)
+        except ValueError:
+            raise PartitionError(
+                f"refusing to partition: {name!r} has address {address!r}, not an IP address"
+            ) from None
+        if not parsed[name].is_loopback:
+            raise PartitionError(f"refusing to partition: {name!r} has address {address}, not a loopback address")
+    if len(set(parsed.values())) != len(parsed):
+        raise PartitionError(f"refusing to partition: instances share an address: {dict(addresses)}")
+    for one in isolated:
+        for peer in peers:
+            if parsed[one] == parsed[peer]:
+                raise PartitionError(f"refusing to partition: {one!r} and {peer!r} are the same address")
+
+
 def drop_between(chain: str, addresses: Mapping[str, str], isolated: Sequence[str], peers: Sequence[str]) -> list[str]:
     """Add a DROP rule each way between every isolated instance and every peer to ``chain``, then jump to it
-    from INPUT; the rules (``source->destination``), or :class:`PartitionError` at the first failed step."""
+    from INPUT; the rules (``source->destination``), or :class:`PartitionError` at the first failed step.
 
+    Refuses, before any iptables call, addresses that are not all distinct loopback addresses."""
+
+    _refuse_unsafe_addresses(addresses, isolated, peers)
     rules = []
     for one in isolated:
         for peer in peers:
