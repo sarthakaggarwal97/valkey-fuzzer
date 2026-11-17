@@ -10,9 +10,18 @@ from typing import Any
 from . import __version__
 from .commands import batch, diff, listing, minimize, replay, run, spec, sweep, validate
 from .hoststate import interrupt_on_sigterm
-from .outcomes import EXIT_HARNESS_ERROR, EXIT_INTERRUPTED
+from .outcomes import EXIT_HARNESS_ERROR, EXIT_INTERRUPTED, EXIT_USAGE
+from .reports import InputError
 
 COMMAND_MODULES = (run, batch, validate, listing, replay, diff, minimize, sweep, spec)
+
+
+class _Parser(argparse.ArgumentParser):
+    """An argument parser whose usage errors exit EXIT_USAGE, not the harness error code argparse's 2 collides with."""
+
+    def error(self, message: str) -> Any:
+        self.print_usage(sys.stderr)
+        self.exit(EXIT_USAGE, f"{self.prog}: error: {message}\n")
 
 
 def register_commands(subparsers: Any) -> None:
@@ -25,7 +34,7 @@ def register_commands(subparsers: Any) -> None:
 def create_parser() -> argparse.ArgumentParser:
     """Create the public command-line parser."""
 
-    parser = argparse.ArgumentParser(
+    parser = _Parser(
         prog="valkey-fuzzer",
         description="Generic, experiment-driven fuzzing for standalone and cluster Valkey deployments",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -60,7 +69,7 @@ Examples (paths are relative to a checkout of the repository):
   # Remove what killed runs left behind (servers, iptables chains, mounts, data directories)
   valkey-fuzzer sweep --dry-run
 
-Exit codes: 0 PASS, 1 FAIL, 2 ERROR, 3 SKIP_UNSUPPORTED, 130 interrupted.
+Exit codes: 0 PASS, 1 FAIL, 2 ERROR, 3 SKIP_UNSUPPORTED, 64 usage or input error, 130 interrupted.
 Documentation: README.md and docs/cli.md.
         """,
     )
@@ -73,7 +82,7 @@ Documentation: README.md and docs/cli.md.
 
 
 def main() -> int:
-    """CLI entry point: every command's errors are reported here, as harness errors (exit 2)."""
+    """CLI entry point: every command's errors are reported here: input errors exit 64, the rest are harness errors (exit 2)."""
 
     logging.basicConfig(level=logging.INFO, format="%(message)s", handlers=[logging.StreamHandler()])
     parser = create_parser()
@@ -82,7 +91,7 @@ def main() -> int:
     if not args.command:
         print("Error: name a command, as below\n", file=sys.stderr)
         parser.print_help(sys.stderr)
-        return EXIT_HARNESS_ERROR
+        return EXIT_USAGE
 
     try:
         # SIGTERM takes Ctrl-C's path: the run cleans up, and the command exits 130.
@@ -95,7 +104,7 @@ def main() -> int:
         print(f"Error: {_message(exc)}", file=sys.stderr)
         if args.verbose:
             traceback.print_exc()
-        return EXIT_HARNESS_ERROR
+        return EXIT_USAGE if isinstance(exc, InputError) else EXIT_HARNESS_ERROR
 
 
 def _message(error: Exception) -> str:

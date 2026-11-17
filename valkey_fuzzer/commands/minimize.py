@@ -58,4 +58,7 @@ def minimize_command(args: argparse.Namespace) -> int:
         print(f"Minimized scenario written to {args.output}")
     else:
         print(text)
+    if not result.accepted:
+        print("Error: no reduction kept the failure, so the scenario is not smaller", file=sys.stderr)
+        return EXIT_HARNESS_ERROR
     return EXIT_SUCCESS

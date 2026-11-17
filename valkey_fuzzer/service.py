@@ -38,6 +38,7 @@ from .minimize import failure_signature
 from .minimize import minimize as minimize_scenario
 from .plan import ExecutionPlan
 from .provenance import replayed_drift, report_drift
+from .provenance import reproducer as provenance_reproducer
 from .registrations import DeploymentProviderRegistration
 from .reports import (
     REPORT_FILE,
@@ -477,7 +478,7 @@ class RunService:
 
         if report_dir is None:
             report_dir = new_report_folder(os.path.join(self.report_root, "runs"), plan.scenario_id)
-        write_plan(report_dir, plan)
+        write_plan(report_dir, plan, provenance_reproducer(self.catalog, plan))
         if scenario is not None:
             export_scenario(scenario, os.path.join(report_dir, SCENARIO_FILE), generated=generated)
         shortfall = (generated or {}).get("shortfall")
@@ -527,7 +528,8 @@ class RunService:
     ) -> ReplayPlan:
         """Load a run report (or a bare plan) and check it against this environment.
 
-        Raises :class:`ReplayDriftError` when the fuzzer, experiment,
+        Raises :class:`InputError` for a bare plan with no provenance beside it, unless ``allow_drift``, and
+        :class:`ReplayDriftError` when the fuzzer, experiment,
         components (their import path or code),
         deployment provider, or Valkey binary differ from the recorded run, or
         when the report's scenario does not compile to the plan it records,
@@ -540,6 +542,12 @@ class RunService:
         """
 
         plan, scenario, recorded = recorded_run(path)
+        if recorded is None and not allow_drift:
+            raise InputError(
+                f"{path} is a bare plan with no recorded provenance (no report.json or reproducer.json beside it), "
+                "so a replay cannot show it reproduces the original run; replay the run's report.json, "
+                "or pass --allow-drift to replay it unverified"
+            )
         artifacts = dict(artifacts or {})
         provenance: dict[str, Any] = {
             "source": path,
@@ -595,7 +603,7 @@ class RunService:
         override = prepared.provenance["valkey_binary_override"]
         provenance = copy.deepcopy(prepared.provenance)
         report_dir = new_report_folder(os.path.join(self.report_root, "replays"), plan.scenario_id)
-        write_plan(report_dir, plan)
+        write_plan(report_dir, plan, provenance_reproducer(self.catalog, plan))
         outcome = self.run_plan(plan, timeout=timeout, run_dir=report_dir)
         late: list[dict[str, Any]] = []
         if prepared.recorded is not None:

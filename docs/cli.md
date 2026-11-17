@@ -59,8 +59,9 @@ rejects it:
 | --- | --- |
 | `0` | `PASS`, or `SKIP_UNSUPPORTED` with `--allow-unsupported` |
 | `1` | `FAIL` |
-| `2` | `ERROR`, or the command itself failed (a usage error, a missing file, a compile error, replay drift) |
+| `2` | `ERROR`, or the command itself failed (a compile error, replay or minimize drift, `minimize` keeping no reduction, a report that cannot be written) |
 | `3` | `SKIP_UNSUPPORTED` |
+| `64` | usage or input error (`EX_USAGE`): a bad option or option mix, no command, a missing or unreadable input file, or a bare `plan.json` replayed without `--allow-drift`. Nothing was judged. |
 | `130` | interrupted (Ctrl-C or `SIGTERM`; the run is cleaned up first) |
 
 Errors and warnings go to stderr, so stdout (`--format json`, say) holds only the command's output.
@@ -74,15 +75,21 @@ These hold for `run`, `replay`, and `diff`. The other cases:
   was undecided, or the batch could not start, else `3` if any run was unsupported, a zoo case was
   skipped, or a matrix combination did not compile, else `0`; `130` when it was stopped before it finished (resume it).
   A `--dry-run` exits `0`. See [batch](#batch).
-- `validate`, `list`, and `minimize` exit `0` on success and `2` on error.
-  `minimize` also exits `0` when the run had nothing to minimize.
+- `validate` and `list` exit `0` on success and `2` on error. `minimize` exits
+  `0` when it kept a reduction or the run had nothing to minimize, and `2` when
+  no reduction kept the failure (the reference failure did not reproduce, or the
+  scenario is already minimal).
+- A `replay` that runs on another Valkey binary or artifact than the recorded run
+  keeps the outcome's code when it `FAIL`s (exit `1`, the drift recorded in the
+  report's `provenance.drift`); any other outcome exits `2`, unless `--allow-drift` was given.
+- `batch` and `validate` keep `2` for their own bad input; the `64` above is for the other commands.
 - `cleanup-logs` exits `0`, or `2` when the prompt is declined or a file could
   not be deleted.
 - `sweep` exits `2` when it could not remove something it found.
 - `spec check` and `spec conform` exit `1` when a gate failed or a claimed
   property was violated, else `2` on a harness error (a tool that did not run,
   a bundle that does not exist); see [spec](#spec).
-- `valkey-fuzzer` without a command prints its help and exits `2`.
+- `valkey-fuzzer` without a command prints its help and exits `64`.
 
 ## Report folders
 
@@ -635,11 +642,15 @@ A binary that an artifact provider supplies is only known once the replay's
 deployment runs, so it is compared after the run, and so is every artifact
 whose provider recorded a `sha256` in its provenance (such as an upgrade
 target no instance starts on); a difference makes replay exit `2` unless
-`--allow-drift` was given. When the recorded run lists no
+`--allow-drift` was given (or exit `1` when the replay `FAIL`ed). When the recorded run lists no
 instances at all, the Valkey git SHA is compared after the run instead. What
 could not be compared, such as an instance recorded without a digest, is
-printed as `Note: not verified: ...`; a bare `plan.json` has no provenance, so
-nothing is verified.
+printed as `Note: not verified: ...`. A digest missing on either side, and a
+different Python `major.minor` or platform, are drift. A run writes
+`reproducer.json` beside its `plan.json` before it starts, so `replay
+<folder>/plan.json` is verified (against the folder's `report.json` when it has
+one). A bare `plan.json` with neither beside it has no provenance: replay refuses
+it (exit `64`) unless `--allow-drift` is given, and then verifies nothing.
 
 Replay is not hermetic even when nothing drifted: the seed fixes each
 component's random choices, not timing.
