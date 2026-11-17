@@ -59,6 +59,21 @@ The rules behind them:
   failed makes the run `ERROR`: an action that failed waiting for the effect
   of a fault that never fired says nothing about Valkey. A `FAIL` that does
   not depend on it, such as a crash found before the fault fired, stands.
+  The same rule holds when a later component fails the run: a trusted `FAIL`
+  stands over the runner's error (the outcome is `FAIL`, the error stays in
+  the diagnostics) unless it depends, directly or through others, on a
+  component that returned `ERROR` or raised. An action that lost an
+  acknowledged write is `FAIL` even if a later action raises.
+- **A crash stands whatever else happened.** A `FAIL` that reports a crash is
+  a finding whether or not its component is `required`, even when the
+  component's `stop` or `recover` then returned anything but `PASS` or raised
+  (the crash is kept in the component's diagnostics as
+  `crash_before_teardown`), and even when the run also has evidence-contract
+  violations (they stay in the diagnostics). `required: false` is rejected on
+  an oracle when the plan is checked. A result a component returns just after
+  its deadline is kept, with `overran_deadline` in its diagnostics. An
+  interrupted run (Ctrl-C, SIGTERM) still writes its report: `FAIL` if a
+  crash or other trusted finding came first, `ERROR` otherwise.
 - **Path evidence and behaviour are different things.** Required events and
   required evidence are path evidence: they show the run reached what it
   claims to test, such as INFO counting a full resync rather than the stall
@@ -110,7 +125,8 @@ The rules behind them:
   `FAIL` with the cleanup error in the diagnostics, and any other run is
   `ERROR`.
 - **A contract violation makes the run `ERROR`**: evidence or an event that
-  breaks its component's declarations. No verdict can rest on it.
+  breaks its component's declarations. No verdict can rest on it, except that
+  a trusted crash stands over it.
 - **Required components** are those with `required: true` (the default), the
   sources of required evidence, and everything they depend on. A `FAIL` or
   `SKIP` from a component that is not required does not decide the outcome,

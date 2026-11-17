@@ -397,6 +397,14 @@ def check_plan(plan: ExecutionPlan, catalog: Catalog) -> ExecutionPlan:
 
     deployment_registration(plan, catalog)
     plan = resolve_components(plan, catalog.components)
+    for component in plan.components:
+        if component.role is ComponentRole.ORACLE and not component.required:
+            raise located(
+                ScenarioCompileError(
+                    f"oracle {component.id!r} is not required: an oracle that is allowed to fail silently judges nothing"
+                ),
+                f"components.{component.id}.required",
+            )
     required = derive_required_evidence(plan, catalog.components)
     if required != plan.required_evidence:
         plan = replace(plan, required_evidence=required)

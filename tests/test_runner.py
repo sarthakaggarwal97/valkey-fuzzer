@@ -220,7 +220,7 @@ OracleError = "runner execution failed during oracle.evaluate: RunnerError: orac
                      id="oracle-error-keeps-another-oracles-fail"),
         pytest.param([_c(ORACLE, "data", ERR), _c(ORACLE, "liveness")], "ERROR", OracleError, True,
                      id="oracle-error-alone"),
-        pytest.param([_c(ORACLE, "data", ERR), _c(ORACLE, "liveness", FAIL, required=False)], "ERROR",
+        pytest.param([_c(ORACLE, "data", ERR), _c(ACTION, "optional", FAIL, required=False)], "ERROR",
                      OracleError, True, id="oracle-error-and-an-optional-fail"),
     ],
 )  # fmt: skip
@@ -719,3 +719,153 @@ def test_a_thread_a_call_starts_under_a_copy_of_its_context_shares_its_cancellat
 
     assert outcome.status is OutcomeStatus.ERROR and "abandoned_calls" not in outcome.diagnostics
     assert seen == {"slept": False, "cancelled": True} and time.monotonic() - started < 5
+
+
+class _CrashingWorkload:
+    """A start that reports a crash, then a stop that returns ``stop_status`` or raises it."""
+
+    def __init__(self, stop_status):
+        self.stop_status = stop_status
+
+    def start(self, context, spec):
+        return ComponentResult(spec.id, FAIL, "server crashed", crash=True)
+
+    def stop(self, context, spec):
+        if isinstance(self.stop_status, Exception):
+            raise self.stop_status
+        return ComponentResult(spec.id, self.stop_status, "stop result")
+
+
+def _crashing_workload(stop):
+    return _CrashingWorkload(stop)
+
+
+@pytest.mark.parametrize(
+    "stop", [ERR, FAIL, SKIP, RuntimeError("stop blew up")], ids=["error", "fail", "skip", "raise"]
+)
+def test_a_crash_survives_a_stop_that_does_not_pass(stop):
+    calls = []
+    plan = _plan((_spec(WORKLOAD, "load"), _spec(ORACLE, "check")))
+    outcome = _execute(
+        plan, (WORKLOAD, lambda: _crashing_workload(stop)), (ORACLE, lambda: _Component(calls)), calls=calls
+    )
+
+    assert outcome.status is OutcomeStatus.FAIL, outcome.summary
+    assert "standalone.cleanup" in calls
+    load = next(result for result in outcome.component_results if result.component_id == "load")
+    if stop is FAIL:
+        assert load.crash  # a FAIL keeps its crash flag
+    else:
+        assert load.diagnostics["crash_before_teardown"] == "server crashed" and not load.crash
+
+
+def test_a_crash_from_a_fault_inject_survives_a_failing_recover():
+    class Fault:
+        def inject(self, context, spec):
+            return ComponentResult(spec.id, FAIL, "crashed on inject", crash=True)
+
+        def recover(self, context, spec):
+            raise RuntimeError("recover blew up")
+
+    calls = []
+    plan = _plan((_spec(FAULT, "fault"), _spec(ORACLE, "check")))
+    outcome = _execute(plan, (FAULT, Fault), (ORACLE, lambda: _Component(calls)), calls=calls)
+
+    assert outcome.status is OutcomeStatus.FAIL and "standalone.cleanup" in calls
+    assert outcome.diagnostics["cleanup_errors"][0]["owner"] == "fault"
+
+
+def test_a_failing_obligation_release_does_not_skip_the_deployment_cleanup(monkeypatch):
+    calls = []
+
+    def sweep(self):
+        raise RuntimeError("sweep blew up")
+
+    monkeypatch.setattr(runner_module._Execution, "release_obligations", lambda self, final=False: sweep(self))
+    outcome = _execute(_plan((_spec(ORACLE, "check"),)), (ORACLE, lambda: _Component(calls)), calls=calls)
+
+    assert "standalone.cleanup" in calls and outcome.status is OutcomeStatus.ERROR
+    assert {error["phase"] for error in outcome.diagnostics["cleanup_errors"]} == {"release obligations"}
+
+
+def test_a_crash_of_an_optional_component_is_a_finding():
+    plan = _plan((_spec(WORKLOAD, "load", required=False), _spec(ORACLE, "check")))
+    outcome = _execute(plan, (WORKLOAD, lambda: _crashing_workload(PASS)), (ORACLE, _Component))
+
+    assert outcome.status is OutcomeStatus.FAIL and "load" in outcome.summary
+
+
+def test_an_oracle_that_is_not_required_is_rejected_when_the_plan_is_checked():
+    plan = _plan((_spec(ORACLE, "liveness", required=False),))
+
+    with pytest.raises(PreflightError, match="oracle 'liveness' is not required"):
+        _execute(plan, (ORACLE, _Component))
+
+
+def test_an_independent_fail_stands_over_a_later_components_raise():
+    class Actions:
+        def run(self, context, spec, evidence=()):
+            if spec.id == "a1":
+                return ComponentResult(spec.id, FAIL, "acknowledged write lost")
+            raise RuntimeError("a2 blew up")
+
+    plan = _plan((_spec(ACTION, "a1"), _spec(ACTION, "a2"), _spec(ORACLE, "judge")))
+    outcome = _execute(plan, (ACTION, Actions), (ORACLE, _Component))
+
+    assert outcome.status is OutcomeStatus.FAIL, outcome.summary
+    assert outcome.diagnostics["error"]["message"] == "a2 blew up"
+
+
+def test_a_fail_that_depends_on_the_component_that_raised_is_still_an_error():
+    class Actions:
+        def run(self, context, spec, evidence=()):
+            if spec.id == "a1":
+                raise RuntimeError("a1 blew up")
+            return ComponentResult(spec.id, FAIL, "failed after a1")
+
+    plan = _plan((_spec(ACTION, "a1"), _spec(ACTION, "a2", depends_on=("a1",))))
+    assert _execute(plan, (ACTION, Actions)).status is OutcomeStatus.ERROR
+
+
+@pytest.mark.parametrize("status", [FAIL, PASS])
+def test_a_result_returned_just_past_the_deadline_is_kept(status, monkeypatch):
+    class Actions:
+        def run(self, context, spec, evidence=()):
+            return ComponentResult(spec.id, status, "returned late", crash=status is FAIL)
+
+    watch = runner_module._Execution.watch
+
+    def late(self, function, **options):
+        result = watch(self, function, **options)
+        time.sleep(0.2)  # The scheduler holds the thread past the deadline after the call returned.
+        return result
+
+    monkeypatch.setattr(runner_module._Execution, "watch", late)
+    outcome = _execute(_plan((_spec(ACTION, "act", timeout_s=0.1),)), (ACTION, Actions))
+
+    act = outcome.component_results[0]
+    assert act.status is status and act.diagnostics["overran_deadline"] is True
+    assert outcome.status is (OutcomeStatus.FAIL if status is FAIL else OutcomeStatus.PASS), outcome.summary
+
+
+def test_an_interrupt_after_a_crash_carries_the_outcome_that_found_it():
+    class Actions:
+        def run(self, context, spec, evidence=()):
+            raise KeyboardInterrupt("stop now")
+
+    plan = _plan((_spec(WORKLOAD, "load"), _spec(ACTION, "act")))
+    with pytest.raises(KeyboardInterrupt) as caught:
+        _execute(plan, (WORKLOAD, lambda: _crashing_workload(PASS)), (ACTION, Actions))
+
+    assert caught.value.partial_outcome.status is OutcomeStatus.FAIL
+
+
+def test_an_interrupt_without_a_finding_carries_an_error_outcome():
+    class Actions:
+        def run(self, context, spec, evidence=()):
+            raise KeyboardInterrupt("stop now")
+
+    with pytest.raises(KeyboardInterrupt) as caught:
+        _execute(_plan((_spec(ACTION, "act"),)), (ACTION, Actions))
+
+    assert caught.value.partial_outcome.status is OutcomeStatus.ERROR

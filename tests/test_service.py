@@ -23,7 +23,7 @@ from valkey_fuzzer.references import EnvironmentKind, parse_environment_referenc
 from valkey_fuzzer.registrations import DeploymentProviderRegistration
 from valkey_fuzzer.registry import FrozenRegistryError
 from valkey_fuzzer.reports import InputError, ReportWriteError, new_report_folder
-from valkey_fuzzer.results import ComponentResult, ComponentStatus, OutcomeStatus
+from valkey_fuzzer.results import ComponentResult, ComponentStatus, OutcomeStatus, RunOutcome
 from valkey_fuzzer.runner import RunnerError
 from valkey_fuzzer.schema import ExperimentDocumentError, ScenarioCompileError
 from valkey_fuzzer.service import RunService
@@ -341,3 +341,21 @@ def test_replay_compares_each_artifact_by_its_recorded_sha256(service, canned_ru
         "artifacts.candidate: the recorded run has no sha256 for it"
         in service.prepare_replay(record.report_path).not_verified
     )
+
+
+def test_an_interrupted_run_still_writes_the_report_of_what_it_found(service, tmp_path, monkeypatch):
+    prepared = service.prepare_run(EXAMPLE)
+    interrupt = KeyboardInterrupt("stop now")
+    interrupt.partial_outcome = RunOutcome(
+        plan=prepared.plan, status=OutcomeStatus.FAIL, summary="crashed before the interrupt"
+    )
+
+    def interrupted(*args, **kwargs):
+        raise interrupt
+
+    monkeypatch.setattr(service, "run_plan", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        service.execute(prepared.plan, scenario=prepared.scenario, report_dir=str(tmp_path / "r"))
+
+    report = json.loads((tmp_path / "r" / "report.json").read_text())
+    assert report["outcome"]["summary"] == "crashed before the interrupt"
