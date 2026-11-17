@@ -6,6 +6,7 @@ key under an explicit loss policy, and ``valkey.oracle.ledger`` checks the live
 dataset (and every replica) against it.
 """
 
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import Any, Optional
 
@@ -20,7 +21,14 @@ from valkey_fuzzer.schema import ConfigError, ConfigField, plain_config
 
 from .faults import FAULT_INJECTED
 from .files import read_jsonl
-from .instances import close_quietly, deployment, is_cluster, stopped_on_purpose, unreachable_instances
+from .instances import (
+    close_quietly,
+    deployment,
+    instance_at,
+    is_cluster,
+    stopped_on_purpose,
+    unreachable_instances,
+)
 from .polling import poll_each, read_retrying
 from .registration import component_registration
 from .schemas import INTEGER, LIST, MAPPING, TEXT, declared, mapping_of, nullable, optional
@@ -129,7 +137,8 @@ class LedgerModel:
         in_scope = lossy_key is None or lossy_key(key)
         in_window = in_scope and any(window[0] < entry["t_end"] <= window[1] for window in loss_windows)
         lossy = outcome == "ok" and _lossy(key, entry["t_end"], entry.get("instance_id"), loss_windows, lossy_key)
-        if lossy and self.wait_confirmed is not None and entry.get("wait", -1) >= self.wait_confirmed:
+        needed = wait_needed(self.wait_confirmed, entry.get("instance_id"))
+        if lossy and needed is not None and entry.get("wait", -1) >= needed:
             lossy = False
             self.wait_protected_ops += 1
         if lossy and op != "get":
@@ -199,6 +208,25 @@ def _lossy(
         and (len(window) < 3 or window[2] is None or instance_id is None or instance_id in window[2])
         for window in loss_windows
     )
+
+
+def wait_needed(wait_confirmed: Any, instance_id: Optional[str]) -> Optional[int]:
+    """The WAIT reply that proves a write ``instance_id`` acknowledged reached every replica of its shard.
+
+    ``wait_confirmed`` is one count for a deployment of one shard, or ``{instance_id: replicas of its shard}``
+    for a cluster. An acknowledger nobody could attribute needs the largest count; a shard without replicas
+    has no count (WAIT proves nothing there).
+    """
+
+    if not isinstance(wait_confirmed, Mapping):
+        return wait_confirmed
+    if instance_id is None:
+        return max(wait_confirmed.values(), default=None)
+    return wait_confirmed.get(instance_id)
+
+
+class LossScopeError(RuntimeError):
+    """The loss window's scope was requested and cannot be computed; widening it would hide a lost write."""
 
 
 def sorted_values(values: set) -> list:
@@ -293,7 +321,8 @@ def loss_policy(
 
     ``windows`` and ``lossy_key`` are :class:`LedgerModel`'s ``loss_windows``
     and ``lossy_key``, ``scope_slots`` the slot ranges ``lossy_key`` covers,
-    and ``wait_confirmed`` its ``wait_confirmed``.
+    and ``wait_confirmed`` its ``wait_confirmed``. Raises :class:`LossScopeError` when a requested scope
+    cannot be computed.
     """
 
     lossy_key = None
@@ -315,18 +344,44 @@ def loss_policy(
         else:
             windows = [(start, end) for start, end, _ in records]
         if config["loss_window_scope"] in ("fault_target_slots", "fault_targets"):
-            scope_slots = target_slot_ranges(handle, [target for _, _, targets in records for target in targets])
+            scope_slots = _scope_slots(config["loss_window_scope"], handle, records)
             if scope_slots is not None:
 
                 def lossy_key(key: str) -> bool:
                     slot = key_slot(key.encode("utf-8", errors="surrogatepass"))
                     return any(low <= slot <= high for low, high in scope_slots)
 
-    # A write WAIT confirmed on every replica survives any promotion.
+    # A write WAIT confirmed on every replica of its shard survives any promotion. WAIT counts the replicas
+    # of the shard that served the write, so a cluster needs the count per shard.
     wait_confirmed = None
     if summary.get("wait_replicas"):
-        wait_confirmed = sum(instance.role == "replica" for instance in handle.instances)
+        replicas = Counter(instance.shard_id for instance in handle.instances if instance.role == "replica")
+        if is_cluster(handle):
+            wait_confirmed = {
+                instance.instance_id: replicas[instance.shard_id]
+                for instance in handle.instances
+                if replicas[instance.shard_id]
+            }
+        else:
+            wait_confirmed = sum(replicas.values())
     return windows, lossy_key, scope_slots, wait_confirmed
+
+
+def _scope_slots(scope: str, handle: Any, records: Sequence[tuple]) -> Optional[list]:
+    """The slot ranges the faults' targets own now, for a cluster; None when every key is in scope (standalone,
+    or no fault names a target under ``fault_targets``, which then lets no write be lost).
+
+    Raises :class:`LossScopeError` when ``scope`` is requested and the ranges cannot be computed.
+    """
+
+    if not is_cluster(handle):
+        return None
+    targets = [target for _, _, names in records for target in names]
+    if scope == "fault_target_slots" and any(not names for _, _, names in records):
+        raise LossScopeError("loss_window_scope fault_target_slots: a fault recorded no target to take the slots of")
+    if not targets:
+        return None
+    return live_slot_ranges(handle, targets)
 
 
 class _Reader:
@@ -475,7 +530,10 @@ class LedgerOracle:
             preload, ledger, preload_acks, summary = load_ledger(evidence, config["workload"])
         except (LookupError, OSError, ValueError) as exc:
             return make_result(spec, ComponentStatus.ERROR, f"cannot load workload ledger: {exc}")
-        windows, lossy_key, scope_slots, wait_confirmed = loss_policy(config, evidence, handle, summary)
+        try:
+            windows, lossy_key, scope_slots, wait_confirmed = loss_policy(config, evidence, handle, summary)
+        except LossScopeError as exc:
+            return make_result(spec, ComponentStatus.ERROR, f"cannot scope the loss window: {exc}")
         model = LedgerModel(
             preload,
             ledger,
@@ -528,11 +586,21 @@ class LedgerOracle:
         if config["check_reads"] and model.read_violations:
             problems.append(f"{len(model.read_violations)} read(s) returned a value never acceptable at that time")
 
+        notes = []
+        if summary.get("wait_replicas") and not model.wait_protected_ops:
+            notes.append(
+                f"WAIT {summary['wait_replicas']} was configured and no write was protected by it: "
+                "no write got a WAIT reply covering every replica of its shard"
+            )
         replica_report: dict[str, Any] = {}
         unreadable = {}
+        uncompared = False
         if config["check_replicas"]:
-            replica_report = self._check_replicas(
-                context, handle, keys, actual, config["converge_timeout_s"], stopped_on_purpose(handle, evidence)
+            stopped = stopped_on_purpose(handle, evidence)
+            replica_report = self._check_replicas(context, handle, keys, actual, config["converge_timeout_s"], stopped)
+            # Replicas were planned (and none stopped on purpose) but none was compared: no evidence.
+            uncompared = not replica_report and any(
+                instance.role == "replica" and instance.instance_id not in stopped for instance in handle.instances
             )
             diverged = {instance: info for instance, info in replica_report.items() if info.get("diverged")}
             if diverged:
@@ -550,9 +618,12 @@ class LedgerOracle:
                 if window[0] != float("-inf")
             ],
             "loss_permitted_ops": model.loss_permitted_ops,
-            "wait_confirmed_replicas": wait_confirmed,
+            "wait_confirmed_replicas": max(wait_confirmed.values(), default=None)
+            if isinstance(wait_confirmed, Mapping)
+            else wait_confirmed,
             "wait_protected_ops": model.wait_protected_ops,
             "loss_scope_slots": scope_slots,
+            "notes": notes,
             "unchecked_reads": model.unchecked_reads,
             "window_losses": len(window_losses),
             "window_loss_examples": window_losses[:10],
@@ -568,6 +639,13 @@ class LedgerOracle:
                 ComponentStatus.ERROR,
                 "cannot read replica(s) "
                 + "; ".join(f"{instance}: {error}" for instance, error in sorted(unreadable.items())),
+                diagnostics=record,
+            )
+        if uncompared:
+            return make_result(
+                spec,
+                ComponentStatus.ERROR,
+                "check_replicas is set and replicas are planned, but no replica was compared",
                 diagnostics=record,
             )
         return make_result(
@@ -640,14 +718,53 @@ def target_slot_ranges(handle: Any, targets: Sequence[str]) -> Optional[list]:
     return sorted(set(ranges)) or None
 
 
+def live_slot_ranges(handle: Any, targets: Sequence[str]) -> list:
+    """The slot ranges the shards of ``targets`` own now, read from the first answering instance's CLUSTER NODES.
+
+    A target is found by its address, so a node that was demoted or failed since the plan still names its shard.
+    Raises :class:`LossScopeError` when no instance answers, a target is not in CLUSTER NODES, or its shard
+    owns no slots.
+    """
+
+    nodes, errors = None, []
+    for instance in handle.instances:
+        try:
+            with handle.new_client(instance.instance_id, timeout=5.0) as client:
+                nodes = parse_cluster_nodes(client.execute_command("CLUSTER", "NODES"))
+        except Exception as exc:
+            errors.append(f"{instance.instance_id}: {type(exc).__name__}: {exc}")
+            continue
+        if nodes:
+            break
+    if not nodes:
+        raise LossScopeError(f"cannot read CLUSTER NODES to find the slots of {sorted(set(targets))}: {errors[:3]}")
+    ranges = set()
+    for target in sorted(set(targets)):
+        row = next((node for node in nodes if instance_at(handle, node["host"], node["port"]) == target), None)
+        if row is None:
+            raise LossScopeError(f"fault target {target} is not in CLUSTER NODES")
+        primary_id = row["node_id"] if row["is_primary"] else row["primary_id"]
+        owned = next((parse_slot_ranges(node["slots"]) for node in nodes if node["node_id"] == primary_id), [])
+        if not owned:
+            raise LossScopeError(f"the shard of fault target {target} owns no slots in CLUSTER NODES")
+        ranges.update(owned)
+    return sorted(ranges)
+
+
 def _keys_owned_by_primary_of(handle: Any, replica_id: str, keys: list) -> list:
-    """The ``keys`` whose slots ``replica_id``'s CLUSTER NODES gives its primary (itself, if it leads)."""
+    """The ``keys`` whose slots ``replica_id``'s CLUSTER NODES gives its primary (itself, if it leads).
+
+    Raises when the node, its primary, or the primary's slots are missing while there are ``keys``: nothing
+    would be compared.
+    """
 
     with handle.new_client(replica_id, timeout=5.0) as client:
         nodes = parse_cluster_nodes(client.execute_command("CLUSTER", "NODES"))
     myself = next((node for node in nodes if node["is_myself"]), None)
     primary_id = None if myself is None else myself["node_id"] if myself["is_primary"] else myself["primary_id"]
     ranges = next((parse_slot_ranges(node["slots"]) for node in nodes if node["node_id"] == primary_id), [])
+    if keys and not ranges:
+        raise LookupError(f"CLUSTER NODES of {replica_id} gives its primary no slots (primary {primary_id})")
     return [
         key
         for key in keys
@@ -670,6 +787,7 @@ _LEDGER_DECLARES = Declarations(
                     "wait_protected_ops": INTEGER,
                     # Inclusive (low, high) hash slot ranges, or null when every key may be lost.
                     "loss_scope_slots": ConfigField(list, allow_none=True, items=ConfigField(list, items=INTEGER)),
+                    "notes": LIST,
                     "unchecked_reads": INTEGER,
                     "window_losses": INTEGER,
                     "window_loss_examples": LIST,

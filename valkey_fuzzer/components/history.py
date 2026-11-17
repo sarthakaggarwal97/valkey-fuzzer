@@ -39,7 +39,7 @@ from valkey_fuzzer.schema import ConfigError, ConfigField, plain_config
 
 from .files import write_jsonl
 from .instances import deployment
-from .ledger import _lossy, _read_keys, load_ledger, loss_policy
+from .ledger import LossScopeError, _lossy, _read_keys, load_ledger, loss_policy, wait_needed
 from .polling import read_retrying
 from .registration import component_registration
 from .schemas import INTEGER, TEXT, declared, mapping_of
@@ -55,7 +55,8 @@ def _may_be_lost(entry: Mapping[str, Any], windows: Sequence[tuple], lossy_key: 
     """Whether the policy lets write ``entry`` (acknowledged or ambiguous) be lost, as :class:`LedgerModel` rules."""
 
     if entry["outcome"] == "ok":
-        if wait_confirmed is not None and entry.get("wait", -1) >= wait_confirmed:
+        needed = wait_needed(wait_confirmed, entry.get("instance_id"))
+        if needed is not None and entry.get("wait", -1) >= needed:
             return False
         return _lossy(entry["key"], entry["t_end"], entry.get("instance_id"), windows, lossy_key)
     # An ambiguous write may be applied any time after it was sent, so it may be lost if a window ends after that.
@@ -209,7 +210,10 @@ class HistoryOracle:
             preload, ledger, preload_acks, summary = load_ledger(evidence, ledger_config["workload"])
         except (LookupError, OSError, ValueError) as exc:
             return make_result(spec, ComponentStatus.ERROR, f"cannot load workload ledger: {exc}")
-        windows, lossy_key, _, wait_confirmed = loss_policy(ledger_config, evidence, handle, summary)
+        try:
+            windows, lossy_key, _, wait_confirmed = loss_policy(ledger_config, evidence, handle, summary)
+        except LossScopeError as exc:
+            return make_result(spec, ComponentStatus.ERROR, f"cannot scope the loss window: {exc}")
         keys = sorted({entry["key"] for entry in ledger} | {key for key in preload if not is_stable_key(key)})
         read_at = time.time()
         values, error = read_retrying(
