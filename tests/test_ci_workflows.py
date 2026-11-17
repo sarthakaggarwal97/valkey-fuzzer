@@ -694,6 +694,22 @@ def test_the_scheduled_soak_runs_a_build_of_valkey_unstable():
     assert f"make -C {source} " in scripts
 
 
+def test_the_bug_zoo_runs_daily_and_on_dispatch_and_fails_a_case_below_its_rate():
+    workflow = _workflow("zoo.yml")
+    assert "workflow_dispatch" in workflow["on"] and workflow["on"]["schedule"]
+    assert workflow["permissions"] == {"contents": "read"}
+    assert workflow["concurrency"]["group"]
+    (job,) = workflow["jobs"].values()
+    # The schedule runs upstream only; a dispatch runs in any repository, so a fork can try it.
+    assert job["if"] == "github.event_name != 'schedule' || github.repository == 'valkey-io/valkey-fuzzer'"
+    assert job["timeout-minutes"]
+    scripts = "\n".join(_run_scripts(workflow))
+    assert "zoo/build.sh" in scripts and "valkey-fuzzer batch --zoo" in scripts
+    # Without these the batch would not run the zoo's builds, or would hide a bug no oracle sees.
+    assert "go -C porcupine build" in scripts and "--allow-unsupported" not in scripts
+    assert any(step.get("uses", "").startswith("actions/upload-artifact@") for step in job["steps"])
+
+
 def test_the_spec_check_runs_on_every_change_to_main():
     # Its experiment gate compiles the Valkey experiments with the core compiler: a path filter narrower than
     # the whole repository would let a change that breaks the translated scenarios pass.
