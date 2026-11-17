@@ -556,16 +556,38 @@ def _named_fresh_ids(records: Mapping[int, Any], commands: Sequence[Mapping[str,
     }
 
 
-def _shape(record: Optional[Mapping[str, Any]]) -> str:
-    """A reply record as variants compare it: an array or map reply as the sorted multiset of its values (member
-    order differs between encodings, and RESP3 nests what RESP2 flattens), any other reply by its value, and a
-    record without a reply as itself."""
+# Commands whose reply is a set or an unordered map, which the encodings order differently (a listpack by
+# insertion, a hashtable by bucket): variants compare them as sorted. Every other reply compares in order.
+# SMEMBERS, SUNION, SINTER and SDIFF reply a set's members; HKEYS and HVALS a hash's fields or values (HVALS's
+# duplicates stay, as a multiset); HGETALL a hash's field-value pairs, which compare as pairs; KEYS the keyspace's
+# keys in hashtable order. The SCAN family is not here: _varies leaves it out of variants altogether.
+_UNORDERED = ("SMEMBERS", "SUNION", "SINTER", "SDIFF", "HKEYS", "HVALS", "HGETALL", "KEYS")
+
+
+def _unordered(command: str, reply: Any) -> Any:
+    """``reply`` of the unordered ``command`` with its members (a flat HGETALL's pairs) sorted."""
+
+    if not isinstance(reply, list):
+        return reply  # a map compares by its keys, whatever their order
+    if command == "HGETALL" and len(reply) % 2 == 0:
+        reply = [reply[index : index + 2] for index in range(0, len(reply), 2)]
+    return sorted(reply, key=canonical_json)
+
+
+def _shape(record: Optional[Mapping[str, Any]], command: str = "", protocol: bool = False) -> str:
+    """A reply record as variants compare it: in order and by type, a record without a reply as itself. Only a
+    ``command`` in _UNORDERED compares its members sorted. In the ``protocol`` variant alone, the reply compares
+    as the flat list of its values (RESP3 nests and maps what RESP2 flattens), each as :func:`_scalar` makes it
+    (RESP3 replies a boolean or a double where RESP2 replies an integer or a bulk string)."""
 
     if record is None or "reply" not in record:
         return canonical_json(record)
-    if isinstance(record["reply"], (list, dict)):
-        return canonical_json(sorted(canonical_json(leaf) for leaf in _leaves(record["reply"])))
-    return canonical_json(_scalar(record["reply"]))
+    reply = record["reply"]
+    if protocol:
+        reply = _leaves(reply) if isinstance(reply, (list, dict)) else _scalar(reply)
+    if command in _UNORDERED:
+        reply = _unordered(command, reply)
+    return canonical_json(reply)
 
 
 def _fields(record: Mapping[str, Any]) -> dict[str, str]:
@@ -865,7 +887,8 @@ class _Checks:
         mines = _named_fresh_ids({index: actions._reply_at(side.replies, index) for index in compared}, self.commands)
         for index in compared:
             base, mine = bases[index], mines[index]
-            if _shape(base) != _shape(mine):
+            command = str(_words(self.commands[index])[0]).upper()
+            if _shape(base, command, name == "protocol") != _shape(mine, command, name == "protocol"):
                 differences.append(
                     {"index": index, "command": actions._step_text(self.commands[index]), "base": base, "variant": mine}
                 )
