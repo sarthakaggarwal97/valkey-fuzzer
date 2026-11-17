@@ -9,6 +9,13 @@ behaves as one register. It catches what a single final read cannot: a read
 that returned a value already overwritten (a stale read after a failover or
 a restart), or a value that later vanished.
 
+The history comes from one sequential writer thread that reads only the
+primary (see the ``valkey.workload.key-value`` docstring in ``workloads.py``,
+"One writer thread"), so no operations overlap. A PASS means "linearizable
+(single-client history)": no stale read after a failover or restart. It does
+not cover concurrency, replica reads (``READONLY``), ``WAIT`` or multi-client
+visibility; a multi-client workload is future work.
+
 It judges under the loss policy of a ``valkey.oracle.ledger`` component
 (``ledger``), so a loss that policy allows is not a violation:
 
@@ -273,7 +280,7 @@ class HistoryOracle:
         return make_result(
             spec,
             ComponentStatus.PASS,
-            f"the history of {len(keys)} keys is linearizable ({len(history)} operations)",
+            f"the history of {len(keys)} keys is linearizable (single-client history, {len(history)} operations)",
             evidence=(make_evidence(spec, "valkey.data.linearizable", "oracle.completed", record),),
         )
 
