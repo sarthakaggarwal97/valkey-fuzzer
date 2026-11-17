@@ -112,6 +112,12 @@ valkey-fuzzer batch --zoo BUILDS --zoo-case replica-skips-writes  # one case
 VALKEY_ZOO_BUILDS=BUILDS pytest -m live -k zoo tests/test_live_zoo.py
 ```
 
+[`zoo.yml`](../.github/workflows/zoo.yml) runs the whole zoo daily on
+`valkey-io/valkey-fuzzer` (and on dispatch in any repository, a fork
+included): `zoo/build.sh`, then `valkey-fuzzer batch --zoo`. A case below its
+`min_detection_rate` fails the workflow, and the batch folder is uploaded as
+`zoo-batch-<run id>`.
+
 The zoo runs through the batch runner, alone or as one source of a larger
 batch (a `zoo:` source in a [batch spec](cli.md#sources), as every soak
 does). Each control and broken run is one job; a case whose `requires` this

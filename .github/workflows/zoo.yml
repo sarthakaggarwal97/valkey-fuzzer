@@ -1,0 +1,73 @@
+name: Bug Zoo
+
+# The bug zoo end to end, once a day: every case is a Valkey build (or
+# configuration) with a known bug, and the fuzzer has to FAIL on it at the
+# case's min_detection_rate while its clean control passes. It is the only run
+# that shows the oracles still see real bugs. A case below its rate fails the
+# batch, and so this workflow. The schedule runs only on valkey-io/valkey-fuzzer;
+# any repository can dispatch it.
+on:
+  schedule:
+    - cron: '20 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zoo-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  zoo:
+    if: github.event_name != 'schedule' || github.repository == 'valkey-io/valkey-fuzzer'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      ZOO_BUILDS: /tmp/zoo-builds
+      ZOO_BATCH_DIR: /tmp/zoo-batch
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
+
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+
+      # valkey.oracle.history runs the porcupine linearizability checker from PATH.
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: porcupine/go.mod
+          cache: false
+
+      - name: Build the porcupine checker
+        run: |
+          go -C porcupine build -o "${RUNNER_TEMP}/bin/porcupine"
+          echo "${RUNNER_TEMP}/bin" >> "${GITHUB_PATH}"
+
+      # The clean build at zoo/valkey-commit and one patched build per case.
+      - name: Build the zoo
+        run: zoo/build.sh "${ZOO_BUILDS}"
+
+      # Exits 1 when a control fails or a case detects its bug below min_detection_rate.
+      - name: Run the zoo
+        run: valkey-fuzzer batch --zoo "${ZOO_BUILDS}" --workers 2 --timeout 900 --out "${ZOO_BATCH_DIR}"
+
+      - name: Upload the zoo batch report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: zoo-batch-${{ github.run_id }}
+          path: ${{ env.ZOO_BATCH_DIR }}
+          if-no-files-found: warn
+          retention-days: 30
