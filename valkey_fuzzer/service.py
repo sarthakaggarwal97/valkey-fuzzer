@@ -486,7 +486,14 @@ class RunService:
             summary = f"no draw fits the cores this run may use: {shortfall}"
             outcome = RunOutcome(plan=plan, status=OutcomeStatus.SKIP_UNSUPPORTED, summary=summary)
         else:
-            outcome = self.run_plan(plan, timeout=timeout, run_dir=report_dir)
+            try:
+                outcome = self.run_plan(plan, timeout=timeout, run_dir=report_dir)
+            except BaseException as interrupt:
+                # An interrupted run still reports what it found before it (a crash stands).
+                partial = getattr(interrupt, "partial_outcome", None)
+                if partial is not None:
+                    self.write_run_report(report_dir, partial, scenario=scenario, generated=generated)
+                raise
         return self.write_run_report(report_dir, outcome, scenario=scenario, generated=generated)
 
     def write_run_report(

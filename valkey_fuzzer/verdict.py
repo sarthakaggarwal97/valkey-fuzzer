@@ -23,6 +23,14 @@ from .plan import ExecutionPlan
 from .protocols import ROLES, ComponentRole
 from .results import ComponentResult, ComponentStatus, Evidence, OutcomeStatus, evidence_of
 
+CRASH_BEFORE_TEARDOWN = "crash_before_teardown"
+
+
+def _crashed(result: ComponentResult) -> bool:
+    """Whether ``result`` reports a crash, as a FAIL or as one the runner kept before a failed teardown."""
+
+    return (result.status is ComponentStatus.FAIL and result.crash) or CRASH_BEFORE_TEARDOWN in result.diagnostics
+
 
 def required_components(plan: ExecutionPlan) -> frozenset[str]:
     """Required components, evidence sources, and everything they depend on."""
@@ -118,7 +126,11 @@ def decide(run: RunState) -> Verdict:
     # Root causes are required components that ran and did not pass; blocked
     # components are their consequences. Only a verdict-role FAIL, or a
     # crash, is evidence about the system under test.
-    invoked_failures = [spec for spec in ordered if spec.id in required_failures and spec.id in invoked]
+    # A crash is a finding whether or not its component is required: ``required: false`` does not silence it.
+    crashes = {spec.id for spec in ordered if spec.id in results and spec.id in invoked and _crashed(results[spec.id])}
+    invoked_failures = [
+        spec for spec in ordered if spec.id in invoked and (spec.id in required_failures or spec.id in crashes)
+    ]
     # A component that does not judge and did not pass (a fault not injected,
     # a workload that stopped, an observer that could not read the server)
     # did not do its part: a finding that depends on it may be caused by that.
@@ -141,27 +153,31 @@ def decide(run: RunState) -> Verdict:
     def trusted(spec: Any) -> bool:
         result = results[spec.id]
         # A crash is about the system under test whichever component saw it: a capability probe's private server.
-        if result.status is not ComponentStatus.FAIL or not (ROLES[spec.role].judges or result.crash):
+        if spec.id not in crashes and (result.status is not ComponentStatus.FAIL or not ROLES[spec.role].judges):
             return False
         if plan.dependencies(spec.id) & unestablished_setup:
             return False
-        return not (unclean and spec.role is ComponentRole.ORACLE and not result.crash)
+        return not (unclean and spec.role is ComponentRole.ORACLE and spec.id not in crashes)
 
     findings = tuple(spec.id for spec in invoked_failures if trusted(spec))
-    untrusted = tuple(spec.id for spec in invoked_failures if spec.id not in findings)
+    untrusted = tuple(spec.id for spec in invoked_failures if spec.id not in findings and spec.id in required_failures)
     # Required components that did not do their part, besides those that failed.
     errored = tuple(
         spec.id
         for spec in ordered
         if spec.id in required and spec.id in unestablished_setup and spec.id not in required_failures
     )
+    failed = required_failures + tuple(spec_id for spec_id in findings if spec_id not in required_failures)
     missing_events = tuple(name for name in plan.required_events if not committed(name))
     missing = missing_evidence(plan, evidence)
     # A crash is a finding whatever failed after it, the runner included (its post-mortem found it).
-    crashed = any(results[spec_id].crash for spec_id in findings)
+    crashed = any(spec_id in crashes for spec_id in findings)
+    # So is a trusted FAIL that does not depend on a component that errored: the error did not cause it.
+    broken = {spec_id for spec_id, result in results.items() if result.status is ComponentStatus.ERROR}
+    independent = any(spec_id in crashes or not plan.dependencies(spec_id) & broken for spec_id in findings)
     # The runner ends a run early as a FAIL only for a finding: a required capability probe's crash.
     stopped = terminal is not None and terminal[0] is not OutcomeStatus.FAIL
-    found = bool(findings) and not stopped and (runner_failure is None or crashed)
+    found = bool(findings) and not stopped and (runner_failure is None or independent)
 
     diagnostics: dict[str, Any] = {}
     if violations:
@@ -176,7 +192,7 @@ def decide(run: RunState) -> Verdict:
             if value:
                 diagnostics[key] = value
 
-    if violations:
+    if violations and not crashed:
         more = f" (and {len(violations) - 1} more)" if len(violations) > 1 else ""
         status, summary = OutcomeStatus.ERROR, f"evidence contract violated: {violations[0]['message']}{more}"
         found = False
@@ -193,7 +209,7 @@ def decide(run: RunState) -> Verdict:
     elif terminal is not None and terminal[0] is OutcomeStatus.ERROR:
         status, summary = OutcomeStatus.ERROR, terminal[1]
     elif found:
-        status, summary = OutcomeStatus.FAIL, f"required components did not pass: {', '.join(required_failures)}"
+        status, summary = OutcomeStatus.FAIL, f"required components did not pass: {', '.join(failed)}"
     elif terminal is None and (untrusted or errored):
         status = OutcomeStatus.ERROR
         summary = (

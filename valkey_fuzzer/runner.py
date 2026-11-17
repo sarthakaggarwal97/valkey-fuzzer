@@ -100,6 +100,17 @@ def _result(spec: ComponentSpec, status: ComponentStatus, summary: str, **diagno
     return ComponentResult(spec.id, status, summary, diagnostics=diagnostics)
 
 
+def _replaced(original: ComponentResult, **changes: Any) -> ComponentResult:
+    """``original`` with ``changes``. A crash survives only as a FAIL, so a result that stops being one keeps it in
+    ``diagnostics`` for :func:`~valkey_fuzzer.verdict.decide`."""
+
+    if original.crash and changes.get("status", original.status) is not ComponentStatus.FAIL:
+        diagnostics = dict(to_plain_data(changes.get("diagnostics", original.diagnostics)))
+        diagnostics[verdict.CRASH_BEFORE_TEARDOWN] = original.summary
+        changes = {**changes, "crash": False, "diagnostics": diagnostics}
+    return replace(original, **changes)
+
+
 def _component_error(spec: ComponentSpec, exc: BaseException, phase: str) -> ComponentResult:
     summary = f"component execution failed: {type(exc).__name__}: {exc}"
     return _result(spec, ComponentStatus.ERROR, summary, exception=error_record(exc, phase))
@@ -492,9 +503,11 @@ class _Execution:
         result = self.watch(
             function, deadline=deadline, label=f"component {spec.id!r} {method}", start_of=spec.id if applying else None
         )
-        if deadline is not None and time.monotonic() > deadline:
-            raise CooperativeDeadlineError(f"component {spec.id!r} exceeded its cooperative deadline")
         self.check_result(spec, result, "component")
+        if deadline is not None and time.monotonic() > deadline:
+            # The call returned: its result, a crash included, is kept and the overrun noted.
+            diagnostics = {**to_plain_data(result.diagnostics), "overran_deadline": True}
+            result = replace(result, diagnostics=diagnostics)
         return _timed(result, started_at, time.time())
 
     def publish_result(
@@ -655,7 +668,7 @@ class _Execution:
                 # it, and whatever it created afterwards would never be released.
                 self.deferred_teardowns.append(spec)
                 continue
-            self.tear_down(spec)
+            self.cleanup_step(spec.id, "tear down", lambda spec=spec: self.tear_down(spec))
 
     def tear_down_deferred(self) -> None:
         """Tear down the components whose start outlived the teardown, once it returned; report the rest.
@@ -668,7 +681,7 @@ class _Execution:
         self.wait_for_cancelled_calls()
         for spec in self.deferred_teardowns:
             if not self.running_starts[spec.id].is_alive():
-                self.tear_down(spec)
+                self.cleanup_step(spec.id, "tear down", lambda spec=spec: self.tear_down(spec))
                 continue
             self.record_cleanup_error(
                 spec.id,
@@ -703,7 +716,7 @@ class _Execution:
             if original is not None:
                 # It did not do its part: a finding that depends on it is not trusted.
                 summary = f"{method} failed: {type(exc).__name__}: {exc}"
-                self.results[spec.id] = replace(original, status=ComponentStatus.ERROR, summary=summary)
+                self.results[spec.id] = _replaced(original, status=ComponentStatus.ERROR, summary=summary)
             return
         finally:
             self.context.cleaning_up = False
@@ -721,7 +734,7 @@ class _Execution:
             # A teardown that did not pass (a fault that never fired, an observer that could not read the
             # server at the end) is the component's result: it did not do its part.
             failed = result.status is not ComponentStatus.PASS
-            self.results[spec.id] = replace(
+            self.results[spec.id] = _replaced(
                 original,
                 status=result.status if failed else original.status,
                 summary=result.summary if failed else original.summary,
@@ -910,9 +923,10 @@ class _Execution:
             self.start_components()
 
         self.guard(setup)
-        self.tear_down_components()
+        # No teardown failure may skip the deployment's cleanup or the verdict.
+        self.cleanup_step("runner", "tear down components", self.tear_down_components)
         # What the components did not undo is undone before the oracles judge the deployment.
-        self.release_obligations()
+        self.cleanup_step("runner", "release obligations", self.release_obligations)
         # A teardown that failed so far may leave the oracles a deployment the plan does not describe.
         self.teardown_errors = len(self.cleanup_errors)
         if self.ok:
@@ -920,7 +934,7 @@ class _Execution:
         if self.error is not None and self.interrupt is None:
             self.post_mortem()
         self.clean_up_deployment()
-        self.tear_down_deferred()
+        self.cleanup_step("runner", "tear down deferred components", self.tear_down_deferred)
         return self.finish()
 
     def acquire(self) -> None:
@@ -973,12 +987,27 @@ class _Execution:
     def finish(self) -> RunOutcome:
         self.wait_for_cancelled_calls()
         # The final cleanup: retry every undo that failed, now that the deployment is gone.
-        self.release_obligations(final=True)
+        self.cleanup_step("runner", "release obligations", lambda: self.release_obligations(final=True))
         self.close_journal()
         self.release_environment()
         if self.interrupt is not None:
+            self.attach_partial_outcome(self.interrupt)
             raise self.interrupt
         return self.verdict()
+
+    def attach_partial_outcome(self, interrupt: BaseException) -> None:
+        """Give an interrupt the verdict of what ran before it, as ``partial_outcome``, so the caller can write
+        the report: a crash found before the interrupt stands, anything else is an ERROR."""
+
+        try:
+            outcome = self.verdict()
+            if outcome.status is not OutcomeStatus.FAIL:
+                outcome = replace(
+                    outcome, status=OutcomeStatus.ERROR, summary=f"interrupted ({type(interrupt).__name__})"
+                )
+            interrupt.partial_outcome = outcome  # type: ignore[attr-defined]
+        except Exception as exc:
+            logger.error("The verdict of an interrupted run could not be computed: %s", exception_type(exc))
 
     # -- verdict ---------------------------------------------------------------
 
@@ -1023,7 +1052,8 @@ class _Execution:
                 status,
                 summary,
                 trusted=decision.trusted,
-                cleaned=self.environment_error is None and self.environment_report.status == "cleaned",
+                cleaned=self.environment_error is None
+                and getattr(self.environment_report, "status", None) == "cleaned",
             )
         # Every published event, and whether its dispatch completed (only committed events count as observed).
         committed = {event.sequence for event in self.bus.committed_history()}
