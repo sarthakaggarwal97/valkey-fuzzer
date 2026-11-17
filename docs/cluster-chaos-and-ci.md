@@ -162,15 +162,24 @@ that answers with its link down while its primary is live.
 
 ## Kill safety and verdicts
 
+The live view behind these rules (and behind a failover's target and its
+settling) is the `CLUSTER NODES` that more than half of the answering nodes
+agree on, by primaries and config epochs. Nodes a wave has paused are not asked.
+Nodes with no majority (a tie, or three views) are no view: the read fails
+rather than pick one, and a state validation records the nodes as unanswered.
+Each wave's `views` evidence says which nodes answered and which view won.
+
 Kill targets are picked before the wave starts:
 
 - a kill never takes a shard's last live member. Shards are the live ones: a
   node belongs to the shard whose hash slots it (or its primary) owns now, so
   a replica that migrated to another primary counts there, and a primary
-  without slots holds no shard;
+  without slots holds no shard, so it is not shard-safe to kill (a replica
+  without a shard holds no data and is);
 - a kill takes a primary only while the other live slot-owning primaries
   still form a majority of the planned shards (a dead primary counts toward
-  that majority until a replica replaces it);
+  that majority until a replica replaces it; a replica that has no shard yet
+  is no shard);
 - a target is checked again against the live view right before the kill,
   because failovers in the same wave change roles. A failover holds its
   shard until it settled, and a kill holds the shard its target serves while

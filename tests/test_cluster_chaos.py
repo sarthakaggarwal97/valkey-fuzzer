@@ -62,13 +62,16 @@ class FakeCluster:
         self.loaded = None
         self.lock = threading.Lock()
 
-    def live_instances(self):
+    def drain_view_reads(self):
+        return {"reads": 0, "last": None, "disputed": []}
+
+    def live_instances(self, skip_instances=()):
         return [dict(vars(node)) for node in self.instances if self.alive[node.instance_id]]
 
     def hide(self, predicate):
         """Drop the nodes ``predicate`` picks from the live view."""
         live = self.live_instances
-        self.live_instances = lambda: [node for node in live() if not predicate(node)]
+        self.live_instances = lambda skip_instances=(): [node for node in live() if not predicate(node)]
         return self
 
     def is_alive(self, node_id):
@@ -86,7 +89,7 @@ class FakeCluster:
             self.alive[node_id] = False
             self.calls.append(("kill", node_id, signum))
 
-    def failover(self, shard, *, force=False, timeout=60.0, stopped_instances=(), rng=None):
+    def failover(self, shard, *, force=False, timeout=60.0, stopped_instances=(), paused_instances=(), rng=None):
         with self.lock:
             self.calls.append(("failover", shard, tuple(stopped_instances)))
             self.draws.append((shard, rng.random()))
@@ -192,12 +195,16 @@ _MIGRATED = [Member("valkey-3", "primary", 1), Member("valkey-4", "primary", 0),
         (shards(3), None, [(["valkey-1"], "valkey-1"), (["valkey-0"], "no shard-safe target"), (["valkey-2"], "valkey-2"),
                            (["valkey-4"], "no quorum-safe target")]),
         (shards(4, 3), _MIGRATED, [(["valkey-4"], "no shard-safe target"), (["valkey-3"], "valkey-3")]),
-        # valkey-6 is a live primary without slots: no quorum voter, and it empties no shard.
-        (shards(3), [*shards(3)[:4], Member("valkey-6", "primary", None)],
-         [(["valkey-0"], "no quorum-safe target"), (["valkey-6"], "valkey-6")]),
+        # valkey-6 is a live primary without slots: no quorum voter, and not shard-safe (only a replica without a
+        # shard is: it holds no data); valkey-7, an unsynced replica, is no shard either.
+        (shards(3), [*shards(3)[:4], Member("valkey-6", "primary", None), Member("valkey-7", "replica", None)],
+         [(["valkey-0"], "no quorum-safe target"), (["valkey-6"], "no shard-safe target"), (["valkey-7"], "valkey-7")]),
+        # An unsynced replica (no shard) is no planned shard: the quorum of 3 shards stays 2, not 3.
+        (shards(3), [*shards(3), Member("valkey-6", "replica", None)],
+         [(["valkey-0"], "valkey-0"), (["valkey-2"], "no quorum-safe target")]),
     ],
     ids=["last-shard-member", "offline-members-are-no-survivors", "quorum-of-planned-shards", "named-targets",
-         "no-live-role", "named-targets-shard-and-quorum", "shard-of-a-migrated-replica", "slotless-primary"],
+         "no-live-role", "named-targets-shard-and-quorum", "shard-of-a-migrated-replica", "slotless-primary", "unsynced-replica-no-quorum-inflation"],
 )  # fmt: skip
 def test_kills_never_empty_a_live_shard_or_break_the_primary_quorum(planned, live, picks):
     selector = TargetSelector(planned, quorum=True)
@@ -298,7 +305,7 @@ def test_a_primary_kill_excuses_failovers_only_in_its_own_wave():
 def _exited_by_itself():
     handle = FakeCluster(replicas=2)
     handle.alive["valkey-1"] = False  # exited on its own, but still in the live view
-    handle.live_instances = lambda: [dict(vars(node)) for node in handle.instances]
+    handle.live_instances = lambda skip_instances=(): [dict(vars(node)) for node in handle.instances]
     return handle
 
 
@@ -312,7 +319,9 @@ def _primaries_drop_out():
     """By kill time every primary has dropped out of the live view: each replica is its shard's last member."""
     handle, calls = FakeCluster(), []
     live = handle.live_instances
-    handle.live_instances = lambda: calls.append(1) or [n for n in live() if len(calls) == 1 or n["role"] == "replica"]
+    handle.live_instances = lambda skip_instances=(): calls.append(1) or [
+        n for n in live() if len(calls) == 1 or n["role"] == "replica"
+    ]
     return handle
 
 
@@ -406,7 +415,7 @@ def test_critical_or_blocking_failures_halt_after_the_wave(validation, results):
 class _SlowPromotion(FakeCluster):
     """A failover's promotion becomes visible only when it settles (gossip lags the election)."""
 
-    def failover(self, shard, *, force=False, timeout=60.0, stopped_instances=(), rng=None):
+    def failover(self, shard, *, force=False, timeout=60.0, stopped_instances=(), paused_instances=(), rng=None):
         time.sleep(0.3)
         with self.lock:
             for node in self.instances:
@@ -434,7 +443,7 @@ def test_a_kill_waits_for_its_shards_failover_and_is_judged_by_the_roles_it_left
 class _MidSwitch(_SlowPromotion):
     """While the failover runs, the live view shows the replica it promotes in no shard (its slots are moving)."""
 
-    def failover(self, shard, *, force=False, timeout=60.0, stopped_instances=(), rng=None):
+    def failover(self, shard, *, force=False, timeout=60.0, stopped_instances=(), paused_instances=(), rng=None):
         promoted = next(n for n in self.instances if n.shard_id == shard and n.role == "replica")
         promoted.shard_id = None
         time.sleep(0.3)

@@ -105,6 +105,7 @@ def failover_shard(
     force: bool = False,
     timeout: float,
     stopped_instances: Collection[str] = (),
+    paused_instances: Collection[str] = (),
     rng: random.Random,
     context: Optional[RunContext] = None,
 ) -> Optional[bool]:
@@ -116,7 +117,9 @@ def failover_shard(
     when a primary that failed (FAIL, not one node's PFAIL) or stopped
     answering is left to Valkey's own failover. Before that the harness
     waits, up to another ``timeout``, for a replica that synced with the
-    primary. ``stopped_instances`` are instance IDs stopped on purpose. The
+    primary. ``stopped_instances`` are instance IDs stopped on purpose,
+    ``paused_instances`` those paused or partitioned: they are not asked for the
+    topology (see :meth:`~.topology.DeploymentConnection.get_current_nodes`). The
     seeded ``rng`` makes the replica choice replayable. What cannot be
     observed raises instead (no node answered, no replica to promote or none
     synced within the harness's wait, a command that failed, or the run's
@@ -125,8 +128,10 @@ def failover_shard(
     """
     logger.info("Executing failover on shard %s", shard_id)
     stopped_ports = {node.port for node in connection.instances if node.instance_id in set(stopped_instances)}
+    paused_ports = {node.port for node in connection.instances if node.instance_id in set(paused_instances)}
     # One view of the topology: after a previous failover the shard's primary may be a promoted replica.
-    rows = connection.get_current_nodes(include_failed=True)
+    skip = {"skip_ports": paused_ports} if paused_ports else {}
+    rows = connection.get_current_nodes(include_failed=True, **skip)
     if not rows:
         raise LocalDeploymentError(f"no cluster node answered CLUSTER NODES; shard {shard_id} was not failed over")
     # One node's PFAIL or lost link is no failure yet: a live primary only it suspects gets the command, and one
@@ -141,6 +146,7 @@ def failover_shard(
             shard_id=shard_id,
             old_primary=old_primary,
             stopped_ports=stopped_ports,
+            paused_ports=paused_ports,
             context=context,
         )
 
@@ -199,6 +205,7 @@ def wait_until_settled(
     shard_id: int,
     old_primary: Optional[str],
     stopped_ports: Collection[int] = (),
+    paused_ports: Collection[int] = (),
     context: Optional[RunContext] = None,
 ) -> bool:
     """Wait up to ``timeout`` seconds for the shard's failover to settle; True once it has, False when it did not.
@@ -216,7 +223,7 @@ def wait_until_settled(
     def done() -> bool:
         unread.clear()
         try:
-            return _shard_settled(connection, shard_id, old_primary, stopped_ports)
+            return _shard_settled(connection, shard_id, old_primary, stopped_ports, paused_ports)
         except (valkey.ValkeyError, OSError, LocalDeploymentError) as exc:
             unread.append(f"{type(exc).__name__}: {exc}")
             return False
@@ -230,9 +237,14 @@ def wait_until_settled(
 
 
 def _shard_settled(
-    connection: DeploymentConnection, shard_id: int, old_primary: Optional[str], stopped_ports: Collection[int]
+    connection: DeploymentConnection,
+    shard_id: int,
+    old_primary: Optional[str],
+    stopped_ports: Collection[int],
+    paused_ports: Collection[int] = (),
 ) -> bool:
-    live = connection.get_current_nodes(include_failed=False)
+    skip = {"skip_ports": paused_ports} if paused_ports else {}
+    live = connection.get_current_nodes(include_failed=False, **skip)
     if not live:
         raise LocalDeploymentError("no cluster node answered CLUSTER NODES")
     members = [node for node in live if node.shard_id == shard_id and node.port not in stopped_ports]

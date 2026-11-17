@@ -14,7 +14,7 @@ import valkey
 
 from ....protocols import RunContext
 from ..cluster_nodes import parse_cluster_nodes, parse_slot_tokens
-from ..models import DeploymentMode, InstanceInfo
+from ..models import DeploymentMode, InstanceInfo, LocalDeploymentError
 from ..queries import Replication, pause, query_cluster_info, query_replication, response_text, valkey_client
 from ..topology import DeploymentConnection, TopologyNode
 
@@ -84,15 +84,20 @@ def take_snapshot(connection: DeploymentConnection, timeout: float, context: Opt
     never older than its replicas'. In standalone mode the topology itself
     holds each instance's INFO replication, so nothing is read twice. A
     running instance that did not answer, or a cluster whose topology no
-    node answered, is recorded in ``unanswered``.
+    node answered or whose nodes had no majority view, is recorded in ``unanswered``.
     """
-    rows = connection.get_current_nodes(include_failed=True, timeout=timeout)
+    split = None
+    try:
+        rows = connection.get_current_nodes(include_failed=True, timeout=timeout)
+    except LocalDeploymentError as exc:
+        # The nodes disagree on the topology: no view to check, recorded as unread rather than picked.
+        rows, split = [], str(exc)
     snapshot = Snapshot(mode=connection.mode, instances=list(connection.instances), rows=rows)
     cluster = connection.mode is DeploymentMode.CLUSTER
     running = {f"{instance.host}:{instance.port}" for instance in connection.instances if instance.is_running}
     if cluster and not rows:
         snapshot.unanswered.update(
-            dict.fromkeys(sorted(running), f"no node answered CLUSTER NODES within {timeout:g}s")
+            dict.fromkeys(sorted(running), split or f"no node answered CLUSTER NODES within {timeout:g}s")
         )
     # When each node's INFO replication was read: the topology's order in standalone mode, this loop's otherwise.
     read_at = {row.address: index for index, row in enumerate(rows) if row.replication}

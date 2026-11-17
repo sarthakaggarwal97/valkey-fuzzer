@@ -35,7 +35,9 @@ class TargetSelector:
     chaos view gives it no shard (see ``ClusterWaves.members``). With ``quorum`` it also keeps a
     majority of the planned shards' primaries live; a dead primary still
     counts toward the failover majority until a replica replaces it, so the
-    majority is of the planned shards, and only slot owners count as live.
+    majority is of the planned shards (the members' shards, a member without one is none), and only slot
+    owners count as live. A member without a shard holds no data, so a replica of none is safe to kill and a
+    primary of none (slotless) is not.
 
     ``begin_wave`` takes the members at the start of a wave and forgets the
     previous wave's picks; ``select`` resolves one operation's target in
@@ -48,7 +50,7 @@ class TargetSelector:
     """
 
     def __init__(self, members: Sequence[Member], *, quorum: bool):
-        shards = {member.shard for member in members}
+        shards = {member.shard for member in members if member.shard is not None}
         self._quorum = len(shards) // 2 + 1 if quorum else None
         self._members = list(members)
         self._reserved: set[str] = set()
@@ -99,8 +101,13 @@ class TargetSelector:
         shard_safe = [
             candidate
             for candidate in candidates
-            if candidate.shard is None
-            or any(member.shard == candidate.shard and member.instance_id != candidate.instance_id for member in alive)
+            if (
+                candidate.role != "primary"
+                if candidate.shard is None
+                else any(
+                    member.shard == candidate.shard and member.instance_id != candidate.instance_id for member in alive
+                )
+            )
         ]
         if not shard_safe:
             return [], "shard-safe"
