@@ -31,6 +31,15 @@ from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.results import Evidence
 from valkey_fuzzer.testing import resolved_spec
 
+
+def _slots(instance):
+    return (
+        ""
+        if instance.slot_start is None or instance.role != "primary"
+        else f"{instance.slot_start}-{instance.slot_end}"
+    )
+
+
 # Slots: m:2 hashes into 0-8191 (shard 0), m:0 into 8192-16383 (shard 1).
 SHARD0_KEY = "vf:writes:m:2"
 SHARD1_KEY = "vf:writes:m:0"
@@ -146,6 +155,29 @@ class _Pipe:
         return self.replies
 
 
+class _Client:
+    """What ``new_client`` returns: pipelines over the handle's values, and its CLUSTER NODES as seen from one instance."""
+
+    def __init__(self, handle, instance_id):
+        self.handle, self.instance_id = handle, instance_id
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def close(self):
+        pass
+
+    def pipeline(self, transaction=False):
+        return _Pipe(self.handle.values)
+
+    def execute_command(self, *args):
+        assert args == ("CLUSTER", "NODES")
+        return self.handle.cluster_nodes(self.instance_id)
+
+
 class _Handle:
     """Primaries holding ``values``, two per shard, and ``replicas`` replicas; in a cluster shard 0 owns slots
     0-8191. Without ``primaries`` none answers as a primary."""
@@ -161,6 +193,7 @@ class _Handle:
             for i in range(count + replicas)
         )  # fmt: skip
         self.alive = primaries
+        self.slots = {}
 
     def roles(self):
         return {instance.instance_id: instance.role for instance in self.instances} if self.alive else {}
@@ -175,10 +208,25 @@ class _Handle:
         return next(instance for instance in self.instances if instance.instance_id == instance_id)
 
     def new_client(self, instance_id, timeout=5.0):
-        return SimpleNamespace(pipeline=lambda transaction=False: _Pipe(self.values), close=lambda: None)
+        return _Client(self, instance_id)
 
     def cluster_client(self, timeout=5.0):
         return self.new_client(None)
+
+    def cluster_nodes(self, me):
+        """CLUSTER NODES as ``me`` sees it: every instance a node (replicas follow the primary of their shard)
+        owning the slots the plan gave it, unless ``slots`` overrides them: ``{instance_id: "low-high"}``."""
+
+        slots = {**{i.instance_id: _slots(i) for i in self.instances}, **self.slots}
+        rows = []
+        for instance in self.instances:
+            primary = next(i for i in self.instances if i.role == "primary" and i.shard_id == instance.shard_id)
+            flags = ("myself," if instance.instance_id == me else "") + (
+                "master" if instance.role == "primary" else "slave"
+            )
+            follows = "-" if instance.role == "primary" else f"n{primary.instance_id}"
+            rows.append(f"n{instance.instance_id} 127.0.0.1:{instance.port}@1 {flags} {follows} 0 0 1 connected {slots[instance.instance_id]}".strip())  # fmt: skip
+        return "\n".join(rows)
 
 
 @functools.cache
@@ -287,17 +335,148 @@ def test_the_ledger_oracle_fails_on_any_value_a_correct_server_could_not_hold(
         spec = _oracle(**oracle[0])
     else:
         spec = _experiment_oracle(*oracle)
-    paths = {name: os.path.join(tmp_path, f"{name}.jsonl") for name in ("preload", "ledger")}
-    write_jsonl(paths["preload"], ({"key": key, "value": value} for key, value in preload.items()))
-    write_jsonl(paths["ledger"], ledger)
-    ledger_summary = {"preload_path": paths["preload"], "ledger_path": paths["ledger"], **summary}
-    items = [Evidence(LEDGER_EVIDENCE, "writes", "workload.quiesced", 1.0, ledger_summary), *evidence]
     replicas = summary.get("wait_replicas", 0)
     deployment = _Handle(handle or {}, cluster=cluster, primaries=handle is not None, replicas=replicas)
 
-    result = LedgerOracle().evaluate(fake_context(deployment), spec, items)
+    result = _evaluate(tmp_path, spec, deployment, preload, ledger, evidence, summary)
 
     assert result.status.value == status, result.summary
+
+
+def _evaluate(tmp_path, spec, deployment, preload, ledger, evidence, summary=None):
+    paths = {name: os.path.join(tmp_path, f"{name}.jsonl") for name in ("preload", "ledger")}
+    write_jsonl(paths["preload"], ({"key": key, "value": value} for key, value in preload.items()))
+    write_jsonl(paths["ledger"], ledger)
+    ledger_summary = {"preload_path": paths["preload"], "ledger_path": paths["ledger"], **(summary or {})}
+    items = [Evidence(LEDGER_EVIDENCE, "writes", "workload.quiesced", 1.0, ledger_summary), *evidence]
+    return LedgerOracle().evaluate(fake_context(deployment), spec, items)
+
+
+class _ReplicaHandle(_Handle):
+    """A cluster with one replica per shard (valkey-4, valkey-5) that holds ``replica_values``."""
+
+    def __init__(self, values, replica_values=None, replicas=2):
+        super().__init__(values, cluster=True, replicas=replicas)
+        self.replica_values = values if replica_values is None else replica_values
+
+    def replicas(self):
+        return [i.instance_id for i in self.instances if i.role == "replica"]
+
+    def new_client(self, instance_id, timeout=5.0):
+        client = super().new_client(instance_id, timeout)
+        if instance_id in self.replicas():
+            client.handle = SimpleNamespace(values=self.replica_values, cluster_nodes=self.cluster_nodes)
+        return client
+
+
+@pytest.mark.parametrize(
+    ("nodes", "status", "summary"),
+    [
+        # Each replica follows its shard's primary and holds what that shard's slots hold.
+        (None, "PASS", "1 keys match"),
+        # A view without "myself", or whose primary owns no slots, compares nothing: unread, never converged.
+        (lambda me: _Handle({}, cluster=True).cluster_nodes("nobody"), "ERROR", "cannot read replica(s) valkey-4: LookupError"),
+        (lambda me: _Handle({}, cluster=True).cluster_nodes(me).replace("0-8191", "").replace("8192-16383", ""), "ERROR", "cannot read replica(s) valkey-4: LookupError"),
+    ],
+    ids=["slots-compared", "no-myself", "primary-without-slots"],
+)  # fmt: skip
+def test_a_replica_that_compared_no_keys_is_unread_not_converged(tmp_path, nodes, status, summary):
+    handle = _ReplicaHandle({SHARD1_KEY: "v1"})
+    if nodes is not None:
+        handle.cluster_nodes = nodes
+    spec = _oracle(check_replicas=True, converge_timeout_s=0.2)
+    result = _evaluate(tmp_path, spec, handle, {}, [_op(1, "set", SHARD1_KEY, "ok", "v1")], [])
+    assert result.status.value == status and result.summary.startswith(summary), result.summary
+
+
+@pytest.mark.parametrize(
+    ("replicas", "listed", "status", "summary"),
+    [
+        (2, False, "ERROR", "check_replicas is set and replicas are planned, but no replica was compared"),
+        (2, True, "PASS", "1 keys match"),
+        (0, False, "PASS", "1 keys match"),  # nothing planned, nothing to compare
+    ],
+    ids=["planned-but-none-compared", "compared", "none-planned"],
+)
+def test_check_replicas_with_planned_replicas_needs_a_replica_compared(tmp_path, replicas, listed, status, summary):
+    handle = _ReplicaHandle({SHARD1_KEY: "v1"}, replicas=replicas)
+    if not listed:
+        handle.replicas = lambda: []
+    spec = _oracle(check_replicas=True, converge_timeout_s=0.2)
+    result = _evaluate(tmp_path, spec, handle, {}, [_op(1, "set", SHARD1_KEY, "ok", "v1")], [])
+    assert result.status.value == status and result.summary.startswith(summary), result.summary
+
+
+_SCOPED_SLOTS = {**_CLUSTER_CRASH, "loss_window_scope": "fault_target_slots"}
+
+
+@pytest.mark.parametrize(
+    ("config", "slots", "evidence", "status", "summary"),
+    [
+        # A fault that names no target cannot be scoped to slots: ERROR, not "every key may be lost".
+        (_SCOPED_SLOTS, {}, [_crash()], "ERROR", "cannot scope the loss window: loss_window_scope fault_target_slots"),
+        # The target is in no CLUSTER NODES row, or its shard owns no slots.
+        (_SCOPED_SLOTS, {}, [_crash(target="valkey-9")], "ERROR", "fault target valkey-9 is not in CLUSTER NODES"),
+        (_SCOPED_SLOTS, {"valkey-0": "", "valkey-2": ""}, [_crash(target="valkey-0")], "ERROR", "owns no slots"),
+        # The plan gave valkey-0 slots 0-8191; the key is in the 8192-16383 range it owns now, so it may be lost.
+        (_SCOPED_SLOTS, {"valkey-0": "8192-16383", "valkey-1": "0-8191"}, [_crash(target="valkey-0")], "PASS", "1 keys match"),
+        (_SCOPED_SLOTS, {}, [_crash(target="valkey-0")], "FAIL", "1 key(s) hold a value outside"),
+    ],
+    ids=["no-target", "unknown-target", "target-owns-no-slots", "range-moved-after-the-plan", "planned-range-holds"],
+)  # fmt: skip
+def test_a_requested_loss_scope_that_cannot_be_computed_is_an_error_and_uses_live_slots(
+    tmp_path, config, slots, evidence, status, summary
+):
+    handle = _Handle({SHARD1_KEY: "v0"}, cluster=True)
+    handle.slots = slots
+    if "valkey-9" in str(evidence):  # no CLUSTER NODES row listens where valkey-9 does
+        handle.instances += (SimpleNamespace(**{**vars(handle.instances[0]), "instance_id": "valkey-9", "port": 7009}),)
+        handle.cluster_nodes = functools.partial(_Handle.cluster_nodes, SimpleNamespace(instances=handle.instances[:-1], slots={}))  # fmt: skip
+    spec = _oracle(**config)
+    # valkey-0 acknowledged a write to a slot in 8192-16383 inside its crash window, and the key reverted.
+    ledger = [_op(1, "set", SHARD1_KEY, "ok", "v1", t_end=99.5, instance_id="valkey-0")]
+    result = _evaluate(tmp_path, spec, handle, {SHARD1_KEY: "v0"}, ledger, evidence)
+    assert result.status.value == status and summary in result.summary, result.summary
+
+
+class _ThreeShards(_Handle):
+    """3 shards x 1 replica: valkey-0..2 lead shards 0..2, valkey-3..5 follow them."""
+
+    def __init__(self, values):
+        super().__init__(values, cluster=True)
+        ids = range(6)
+        self.instances = tuple(
+            SimpleNamespace(instance_id=f"valkey-{i}", role="primary" if i < 3 else "replica", host="127.0.0.1", port=7000 + i, shard_id=i % 3, slot_start=(0, 5461, 10923)[i % 3] if i < 3 else None, slot_end=(5460, 10922, 16383)[i % 3] if i < 3 else None)
+            for i in ids
+        )  # fmt: skip
+
+    def replicas(self):
+        return ["valkey-3", "valkey-4", "valkey-5"]
+
+
+@pytest.mark.parametrize(
+    ("wait", "status", "protected"),
+    [
+        # WAIT counts the replicas of the shard that served the write: 1 is all of them in a 3 x 1 cluster.
+        (1, "FAIL", 1),
+        (0, "PASS", 0),
+    ],
+    ids=["wait-covers-the-shards-replica", "wait-reached-none"],
+)
+def test_a_wait_reply_is_judged_against_the_replicas_of_the_shard_that_served_the_write(
+    tmp_path, wait, status, protected
+):
+    handle = _ThreeShards({SHARD0_KEY: "v0"})
+    spec = _oracle(**_CLUSTER_CRASH, check_replicas=False)
+    ledger = [_op(1, "set", SHARD0_KEY, "ok", "v1", t_end=99.5, instance_id="valkey-1", wait=wait)]
+    result = _evaluate(
+        tmp_path, spec, handle, {SHARD0_KEY: "v0"}, ledger, [_crash(target="valkey-1")], {"wait_replicas": 1}
+    )
+    assert result.status.value == status, result.summary
+    record = result.diagnostics if status == "FAIL" else result.evidence[0].value
+    assert record["wait_protected_ops"] == protected and record["wait_confirmed_replicas"] == 1
+    # An evidence note says so when WAIT was configured and protected nothing.
+    assert bool(record["notes"]) is (not protected)
 
 
 class _FlakyHandle(_Handle):
@@ -540,4 +719,11 @@ def test_a_replica_is_checked_for_the_keys_its_view_gives_its_primary():
 
     assert keys_of(nodes.replace("slave p1", "myself,slave p1")) == [SHARD1_KEY]
     assert keys_of(nodes.replace("7000@17000 master", "7000@17000 myself,master")) == [SHARD0_KEY], "a primary's own"
-    assert keys_of(nodes) == [], "a view without myself names no primary"
+    # S-06: nothing would be compared, so the view cannot vouch for the replica.
+    with pytest.raises(LookupError, match="no slots"):
+        keys_of(nodes)  # a view without myself names no primary
+    with pytest.raises(LookupError, match="no slots"):
+        keys_of(
+            nodes.replace("slave p1", "myself,slave p1").replace(" 8192-16383 [9000->-p0]", "")
+        )  # a primary without slots
+    assert _keys_owned_by_primary_of(SimpleNamespace(new_client=lambda *a, **k: nullcontext(SimpleNamespace(execute_command=lambda *args: ""))), "valkey-3", []) == []  # fmt: skip
