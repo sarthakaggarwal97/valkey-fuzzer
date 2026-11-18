@@ -120,6 +120,19 @@ The rules behind them:
   the `ERROR` as it was: a port in use or a timeout is the host's error, not
   the server's. A crash an action reported stands over a later failure of
   the run in the same way.
+- **A server that dies before its first successful `PING` is `ERROR`**: the
+  harness could not establish the conditions of the test, so there is no
+  verdict about the system under test. The error says what happened
+  (`exited with code N after 0.5s, before answering a PING`) and gives the last
+  five lines of the process output and log. The exception is the post-mortem
+  above: when the server's output holds a crash signature (an assertion, a
+  panic, a signal, a sanitizer report), the run is `FAIL`, and the run's
+  summary names that crash (`...; crash: valkey-0: crash report (...)`),
+  because that is evidence about the system under test. A server that only
+  says it could not start (a port in use, a rejected option) stays `ERROR`.
+  A `valkey-server` binary must run from its build tree or a full release
+  tarball: one copied elsewhere cannot find its Lua module and dies at startup
+  with a panic, which is the `FAIL` above.
 - **A failed cleanup after the oracles** (the deployment's or the
   environment's) cannot change what an oracle saw: a trusted `FAIL` stays
   `FAIL` with the cleanup error in the diagnostics, and any other run is

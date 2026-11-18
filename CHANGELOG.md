@@ -37,6 +37,12 @@
   say that only `cluster-election` is checked against live runs; `replication`, `persistence`, and `slot-migration`
   are model only.
 
+### Changed: a server that dies at startup
+
+- A server that exits before its first `PING` is `ERROR` with `exited with code N after Ts` and the last five
+  output lines (it said `failed to start within 60s` after half a second). If its output holds a crash
+  signature the run is `FAIL`, and the summary names the crash. See `docs/contracts.md`.
+
 ### Changed: exit codes and replay verification (read by `valkey-ci-agent`)
 
 - New exit code `64` (`EX_USAGE`) for usage and input errors: a bad option or option mix, no command,

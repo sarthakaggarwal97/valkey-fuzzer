@@ -210,6 +210,10 @@ def decide(run: RunState) -> Verdict:
         status, summary = OutcomeStatus.ERROR, terminal[1]
     elif found:
         status, summary = OutcomeStatus.FAIL, f"required components did not pass: {', '.join(failed)}"
+        # A crash is what the run found: name it, so the summary says what crashed and not only which oracle.
+        causes = [results[spec_id].summary for spec_id in findings if spec_id in crashes and results[spec_id].summary]
+        if causes:
+            summary += f"; crash: {'; '.join(causes)}"
     elif terminal is None and (untrusted or errored):
         status = OutcomeStatus.ERROR
         summary = (

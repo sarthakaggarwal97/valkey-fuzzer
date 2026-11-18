@@ -281,6 +281,8 @@ OVERFLOW_CAUSE = (
 )
 # A server that cannot start, as Valkey logs it before exit(1): an error of the host, not of the server.
 PORT_IN_USE = "# Failed listening on port 40000 (tcp), aborting."
+# A release binary copied out of its tree cannot find its Lua module; the panic is a crash report.
+LUA_PANIC = "Guru Meditation: Lua engine initialization failed, check the server logs. #server.c:7634"
 
 
 def _fake_server(path, real_start, *, real=None):
@@ -331,10 +333,11 @@ def _run_crash_experiment(tmp_path, binary, first=_RESTART):
     ("real_start", "crashed"),
     [
         (f'echo "{OVERFLOW}" >&2; exit 1', True),
+        (f'echo "{LUA_PANIC}" >&2; exit 1', True),
         # The log file is the argument after --logfile.
         (f'while [ "$1" != --logfile ]; do shift; done; echo "{PORT_IN_USE}" >> "$2"; exit 1', False),
     ],
-    ids=["sanitizer-report", "port-in-use"],
+    ids=["sanitizer-report", "lua-module-panic", "port-in-use"],
 )
 def test_a_server_that_crashes_while_the_deployment_is_provisioned_fails_the_run_with_its_crash(
     tmp_path, real_start, crashed
@@ -348,10 +351,14 @@ def test_a_server_that_crashes_while_the_deployment_is_provisioned_fails_the_run
     if crashed:
         assert outcome.status is OutcomeStatus.FAIL, explain(outcome)
         (liveness,) = (item for item in outcome.component_results if item.component_id == "liveness")
-        assert liveness.crash and liveness.summary == f"valkey-0: crash report ({OVERFLOW})"
-        assert signature["crashes"] == [OVERFLOW_CAUSE]
+        assert liveness.crash and liveness.summary.startswith("valkey-0: crash report (")
+        assert liveness.summary in outcome.summary, "the crash is in the run's summary"
+        assert len(signature["crashes"]) == 1
     else:
         assert outcome.status is OutcomeStatus.ERROR, explain(outcome)
+        # Not "failed to start within 60s": the exit code, when, and the last output lines.
+        error = outcome.diagnostics["error"]["message"]
+        assert "exited with code 1 after" in error and PORT_IN_USE in error and "within 60s" not in error
         assert not signature["crashes"] and signature["error_type"].endswith(".LocalDeploymentError")
 
 
