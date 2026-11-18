@@ -34,6 +34,15 @@ class CannedRuns:
         )
 
 
+@pytest.fixture(autouse=True)
+def checker_installed(monkeypatch):
+    """The host probe of ``valkey.oracle.history`` passes, so a test that validates or runs a scenario with the
+    oracle needs no Go toolchain. The tests of the probe itself (tests/test_history.py) put the real one back; the
+    tests of the checker build or find the real porcupine."""
+
+    monkeypatch.setattr("valkey_fuzzer.components.history.probe_host", lambda: None)
+
+
 @pytest.fixture
 def canned_runs(monkeypatch) -> CannedRuns:
     """The Valkey components' catalog, with canned runs; every RunService the commands build uses both."""

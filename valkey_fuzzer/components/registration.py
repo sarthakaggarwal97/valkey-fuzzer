@@ -35,6 +35,7 @@ def component_registration(
     fields: Mapping[str, ConfigField],
     *,
     check: Optional[Check] = None,
+    probe: Optional[Check] = None,
     selectors: Optional[Mapping[str, Sequence[str]]] = None,
     deployment_modes: Optional[Iterable[str]] = None,
     required_evidence: Optional[Callable[[ComponentSpec], Any]] = None,
@@ -49,6 +50,7 @@ def component_registration(
     ``selectors`` names the fields that select instances, each with the
     values it also accepts (``instance: event``); they are checked when the
     scenario compiles, before ``check``, so no component repeats it.
+    ``probe`` raises when the host cannot run the component; it runs at validate and run start, never at compile.
     ``triggered`` components take the trigger fields too: they name their
     trigger in their own config (``when_event``), optionally the nth matching
     occurrence, a payload filter, which is checked before ``check`` runs, and a
@@ -69,6 +71,7 @@ def component_registration(
         factory=factory,
         config=(SpecSchema if pins_spec else ConfigSchema)(fields),
         check=check,
+        probe=probe,
         deployment_modes=None if deployment_modes is None else tuple(deployment_modes),
         required_evidence=required_evidence,
         references_evidence=references_evidence,
