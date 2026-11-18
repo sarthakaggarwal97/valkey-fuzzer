@@ -18,7 +18,8 @@ Gates, in order (each records ``status`` pass, fail, or error and what it saw):
                       a bundle with its own experiments must be the one its protocol names
 ``mapping_complete``  every action TLC explored is mapped to evidence or declared unobservable,
                       and every mapped action exists
-``approved_claim``    the claims' approval status; a failing gate only with ``require_approved``
+``approved_claim``    the claims' approval status: ``pass`` when approved, ``skip`` for a draft,
+                      and ``fail`` for a draft only with ``require_approved``
 
 With a time limit (:meth:`TlaTools.within`), TLC and SANY are stopped (with
 their process group) when it runs out. A run cut short, or a tool that never
@@ -196,7 +197,7 @@ def check_bundle(
     # approved_claim
     approved = claims.status == "approved"
     gates["approved_claim"] = {
-        "status": "pass" if approved or not require_approved else "fail",
+        "status": "pass" if approved else ("fail" if require_approved else "skip"),
         "claims_status": claims.status,
         "approved_by": claims.approved_by,
         "required": require_approved,

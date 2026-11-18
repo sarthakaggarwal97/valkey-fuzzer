@@ -29,6 +29,14 @@
 - The deployment provider's `cleanup` and `rollback`, each obligation's `undo`, and the teardown of a
   component without `timeout_s` are cut after 60 s. The run is `ERROR` and names the wait that expired.
 
+### Changed: first-run docs, spec-bridge claims
+
+- README and getting-started state Go 1.21 and the `porcupine` build, the real Valkey build behavior (only four
+  experiments probe and report `ERROR`; the rest build Valkey on first use), and the interim clone branch. New page `docs/reading-a-fail.md`.
+- `spec check` reports the `approved_claim` gate of a draft as `skip` (`[SKIP]`), not `pass`. Docs and bundle READMEs
+  say that only `cluster-election` is checked against live runs; `replication`, `persistence`, and `slot-migration`
+  are model only.
+
 ### Changed: exit codes and replay verification (read by `valkey-ci-agent`)
 
 - New exit code `64` (`EX_USAGE`) for usage and input errors: a bad option or option mix, no command,

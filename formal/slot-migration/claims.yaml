@@ -1,6 +1,8 @@
 # What formal/slot-migration/model.tla claims about Valkey's atomic slot
 # migration (CLUSTER MIGRATESLOTS), under which assumptions and bounds, and
 # what it leaves out.
+# Model only: no property below is evaluated against a live run. A `spec check` PASS says the model
+# holds within its bounds, not that Valkey does.
 protocol: slot-migration
 summary: >-
   A slot moves from its source primary to a target primary with one replica

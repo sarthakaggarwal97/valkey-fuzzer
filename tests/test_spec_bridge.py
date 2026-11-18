@@ -680,6 +680,8 @@ def test_check_passes_the_toy_bundle_only_where_its_protocol_name_finds_it(tmp_p
     control = report["gates"]["negative_controls"]["controls"]["ack-before-save"]
     assert control["violated"] == "AckedDurable" and report["gates"]["model_coverage"]["never_fired"] == []
     # Reproducible: the bundle and the jar by name, not by a path on this host.
+    # Draft claims are not a pass: the gate is skipped, and the report still passes.
+    assert report["gates"]["approved_claim"]["status"] == "skip"
     assert report["bundle"] == "register" and "protocol" not in report and str(BUNDLE) not in json.dumps(report)
     # Known-bad: a copy elsewhere would compile its experiment against the fixture's mapping.
     copy = _copy(tmp_path)

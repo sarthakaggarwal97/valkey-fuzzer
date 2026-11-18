@@ -1,5 +1,7 @@
 # What formal/replication/model.tla claims about Valkey's primary-replica
 # replication, under which assumptions and bounds, and what it leaves out.
+# Model only: no property below is evaluated against a live run. A `spec check` PASS says the model
+# holds within its bounds, not that Valkey does.
 protocol: replication
 summary: >-
   A replication ID with an offset names one data set: two nodes, or a node
