@@ -28,12 +28,18 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
+from . import deadlines
 from ._data import error_record
 from .fields import require_name, require_text
 
 if TYPE_CHECKING:
     # The protocols module imports this one for RunContext.obligations.
     from .plan import ComponentSpec
+
+
+# How long one undo may run before the ledger stops waiting for it: a hung undo (a process in D state)
+# must not hold the run, and the obligation lock, forever.
+UNDO_TIMEOUT_S = 60.0
 
 
 @dataclass(eq=False)
@@ -52,6 +58,8 @@ class Obligation:
     # Each failed undo: who tried it (``by``) and its error, as a report records one (``error_record``).
     errors: list[Mapping[str, str]] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    # The undo call the watchdog gave up on, while it is still running: it is not started a second time.
+    stuck: Optional[threading.Thread] = field(default=None, repr=False)
 
     @property
     def open(self) -> bool:
@@ -86,8 +94,18 @@ class ObligationLedger:
     either way.
     """
 
-    def __init__(self, check: Optional[Callable[[str, str], None]] = None):
+    def __init__(
+        self,
+        check: Optional[Callable[[str, str], None]] = None,
+        *,
+        undo_timeout_s: Optional[float] = None,
+        abandoned: Callable[["deadlines.ComponentCall"], None] = lambda call: None,
+    ):
         self._check = check
+        self.undo_timeout_s = UNDO_TIMEOUT_S if undo_timeout_s is None else undo_timeout_s
+        # Told of each undo call still running after its watchdog expired (or an interrupt), so the run can
+        # wait for it and refuse later runs until it returns.
+        self._abandoned = abandoned
         self._lock = threading.Lock()
         self._obligations: list[Obligation] = []
         self._planned: dict[str, tuple[str, ...]] = {}
@@ -144,12 +162,28 @@ class ObligationLedger:
         with obligation.lock:
             if not obligation.open:
                 return
+            if obligation.stuck is not None and obligation.stuck.is_alive():
+                raise RuntimeError(
+                    f"undo of {obligation.kind} on {obligation.target} is still running: "
+                    f"it did not return within {self.undo_timeout_s:g}s, so it is not started again"
+                )
             try:
-                obligation.undo()
+                deadlines.call_with_watchdog(
+                    obligation.undo,
+                    deadline=time.monotonic() + self.undo_timeout_s,
+                    label=f"undo of {obligation.kind} on {obligation.target} (owner {obligation.owner!r})",
+                    interrupted=lambda call: self._give_up(obligation, call),
+                )
             except BaseException as exc:
+                if isinstance(exc, deadlines.ComponentTimeoutError) and exc.call is not None:
+                    self._give_up(obligation, exc.call)
                 obligation.errors.append({"by": by, **error_record(exc)})
                 raise
             obligation.undone_at, obligation.undone_by = time.time(), by
+
+    def _give_up(self, obligation: Obligation, call: "deadlines.ComponentCall") -> None:
+        obligation.stuck = call
+        self._abandoned(call)
 
     def sweep(self) -> None:
         """Undo every open obligation, newest first, as the runner, except those of a call still applying;

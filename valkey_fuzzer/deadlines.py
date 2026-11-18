@@ -74,7 +74,8 @@ def call_with_watchdog(
     label: str,
     interrupted: Callable[[ComponentCall], None] = lambda call: None,
 ) -> Any:
-    """Call ``function``; if it is still running at ``deadline``, cancel it.
+    """Call ``function``; if it is still running at ``deadline``, cancel it. With no deadline, it runs here,
+    unwatched: the runner always passes one for cleanup, rollback, undo and teardown.
 
     Components are synchronous and cannot be interrupted, so the call runs on a
     daemon thread, where ``RunContext.deadline`` is ``deadline``. At the

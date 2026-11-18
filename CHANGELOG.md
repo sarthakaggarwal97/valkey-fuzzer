@@ -22,6 +22,13 @@
 - `pytest` lists every skip and its reason (`-rs`). `test_every_excluded_config_is_one_the_build_under_test_has`
   runs only on a Valkey tree at the commit in `zoo/valkey-commit`, so another release on `PATH` no longer fails it.
 
+### Changed: every run has a deadline, every wait a watchdog
+
+- A run without `--timeout` gets a derived deadline: the search profile's `budget.timeout_s`, else 1200 s,
+  and for `run` never below the sum of the components' `timeout_s`. `run` prints it with its source.
+- The deployment provider's `cleanup` and `rollback`, each obligation's `undo`, and the teardown of a
+  component without `timeout_s` are cut after 60 s. The run is `ERROR` and names the wait that expired.
+
 ### Changed: exit codes and replay verification (read by `valkey-ci-agent`)
 
 - New exit code `64` (`EX_USAGE`) for usage and input errors: a bad option or option mix, no command,

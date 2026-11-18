@@ -108,7 +108,7 @@ from .registry import RegistrationError
 from .reports import REPORT_FILE, SCENARIO_FILE, write_document
 from .results import RunOutcome
 from .schema import ConfigError, ConfigField, ConfigSchema, ExperimentError, load_yaml_mapping
-from .service import PreparedRun, RunService
+from .service import DEFAULT_TIMEOUT_S, PreparedRun, RunService
 from .spec.bundle import SpecBundleError, load_bundle
 from .spec.conform import CHECKED_RUN_STATUSES, CONFORMANCE_FILE, conform_folder, plan_bundles, summarize
 from .spec.tla import TlaError, TlaTools
@@ -117,7 +117,6 @@ from .zoo import ZOO_DIRECTORY, ZooRun, case_report, check_build, detected, load
 # Client ports per worker: a cluster of 16 primaries with 5 replicas each is 96 instances.
 PORT_BLOCK = 120
 DEFAULT_PORT_BASE = 11000
-DEFAULT_TIMEOUT_S = 1200.0
 MAX_JOBS = 100_000
 # A run's own deadline is cooperative; the batch stops its worker this much later
 # (or a quarter of the deadline later, if that is longer) with SIGINT, then
