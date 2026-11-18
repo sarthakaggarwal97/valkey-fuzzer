@@ -18,8 +18,10 @@ without a report folder), created exclusively, so names sort by start time and
 never collide, even between processes.
 """
 
+import hashlib
 import json
 import os
+import shlex
 import tempfile
 import time
 from collections.abc import Mapping, Sequence
@@ -33,11 +35,12 @@ from .catalog import Catalog
 from .coverage import coverage_tuple
 from .hoststate import new_run_folder
 from .plan import ExecutionPlan
+from .provenance import recorded_binary
 from .provenance import reproducer as provenance_reproducer
-from .results import RunOutcome
+from .results import ComponentStatus, RunOutcome
 from .schema import load_yaml, plain_config
 
-# Every run report has these keys (see :func:`run_report`).
+# Every run report has these keys (see :func:`run_report`), and old reports without the readable ones still load.
 REPORT_KEYS = ("generated_at", "status", "summary", "scenario", "outcome", "coverage", "reproducer", "provenance")
 # What a report's reproducer records; replay compares each against this host.
 REPRODUCER_KEYS = (
@@ -50,6 +53,13 @@ REPRODUCER_KEYS = (
     "plan_digest",
     "valkey_sha",
 )
+
+# What a person reads first in a report.json, in this order, ahead of the data a tool reads (see run_report).
+READABLE_KEYS = ("status", "summary", "failed_components", "reproduce", "look_at")
+# Longest value copied into ``failed_components``; a longer one is cut and carries its length and digest.
+MAX_VALUE_CHARS = 120
+# Most evidence items listed for one failed component.
+MAX_EVIDENCE_LISTED = 5
 
 PLAN_FILE = "plan.json"
 REPORT_FILE = "report.json"
@@ -203,6 +213,53 @@ def export_scenario(scenario: Mapping[str, Any], path: str, *, generated: Option
 # ---------------------------------------------------------------------------
 
 
+def replay_command(report_path: str) -> str:
+    """The shell command that replays the run whose report is at ``report_path``."""
+
+    return shlex.join(["valkey-fuzzer", "replay", report_path])
+
+
+def shorten(value: Any, limit: int = MAX_VALUE_CHARS) -> str:
+    """``value`` as text of at most ``limit`` characters; a longer one is cut and ends with its length and SHA-256,
+    so two cut values can be told apart and the full one found in the report's ``outcome``."""
+
+    text = value if isinstance(value, str) else json.dumps(value, sort_keys=True, default=str)
+    if len(text) <= limit:
+        return text
+    digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:12]
+    return f"{text[:limit]}... [{len(text)} chars, sha256 {digest}]"
+
+
+def failed_components(outcome: RunOutcome) -> list[dict[str, Any]]:
+    """The components that did not pass, each with its summary and its first evidence values, cut short.
+
+    Only a reading aid: the full results stay in ``outcome``.
+    """
+
+    uses = {component.id: (component.role.value, component.use) for component in outcome.plan.components}
+    rows = []
+    for result in outcome.component_results:
+        if result.status not in (ComponentStatus.FAIL, ComponentStatus.ERROR):
+            continue
+        role, use = uses.get(result.component_id, (None, None))
+        rows.append(
+            {
+                "component_id": result.component_id,
+                "role": role,
+                "use": use,
+                "status": result.status.value,
+                "crash": result.crash,
+                "summary": shorten(result.summary),
+                "evidence_total": len(result.evidence),
+                "evidence": [
+                    {"evidence_id": item.evidence_id, "value": shorten(to_plain_data(item.value))}
+                    for item in result.evidence[:MAX_EVIDENCE_LISTED]
+                ],
+            }
+        )
+    return rows
+
+
 def run_report(
     catalog: Catalog,
     outcome: RunOutcome,
@@ -210,6 +267,7 @@ def run_report(
     scenario: Optional[Mapping[str, Any]] = None,
     provenance: Optional[Mapping[str, Any]] = None,
     generated: Optional[Mapping[str, Any]] = None,
+    report_path: Optional[str] = None,
 ) -> dict[str, Any]:
     """One self-contained, replayable report for a single run.
 
@@ -219,17 +277,34 @@ def run_report(
     ``generated`` (seed, experiment, attempt, exclusions, boundary)
     for a generated scenario; ``provenance`` is how a replay
     compared with the run it replayed (None for other runs).
+
+    The keys come in reading order: ``status``, ``summary``, ``failed_components`` (what did not pass, values cut to
+    :data:`MAX_VALUE_CHARS`), ``reproduce`` (the command that replays the run, given ``report_path``), ``look_at``
+    (where the files are), then the data a tool reads. ``reproducer`` also records the ``command`` and the
+    ``valkey_binary``.
     """
 
     reproducer = provenance_reproducer(catalog, outcome.plan, outcome)
+    command = replay_command(report_path) if report_path else None
+    reproducer["command"] = command
+    reproducer["valkey_binary"] = recorded_binary(catalog, outcome, scenario)
     provider = catalog.deployment_providers.of_plan(outcome.plan)
     host_fields = () if provider is None else provider.host_fields
     if generated is not None:
         reproducer["generated"] = to_plain_data(generated)
+    folder = os.path.dirname(report_path) if report_path else None
     return {
-        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "status": outcome.status.value,
         "summary": outcome.summary,
+        "failed_components": failed_components(outcome),
+        "reproduce": command,
+        "look_at": {
+            "report_folder": folder,
+            "plan": os.path.join(folder, PLAN_FILE) if folder else None,
+            "component_files": os.path.join(folder, "components") if folder else None,
+            "full_results": "outcome.component_results",
+        },
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "scenario": plain_config(scenario) if scenario is not None else None,
         "outcome": outcome.to_data(),
         "coverage": to_plain_data(coverage_tuple(outcome, host_fields)),

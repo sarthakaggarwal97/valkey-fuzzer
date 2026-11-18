@@ -215,7 +215,10 @@ file runs as written, whatever it needs. A scenario whose planned ports are in u
 or reach the host's ephemeral port range, moves to free ones below that
 range, and the scenario records the port it ran on.
 
-The run prints a `Reproduce:` command, shell-quoted, that draws the same
+Every run prints a `Reproduce:` line, and a failed or errored run a `Look at:`
+line with the report folder and the server log directory. For a scenario file
+the `Reproduce:` command is `valkey-fuzzer replay <report>`. A generated
+scenario's `Reproduce:` command, shell-quoted, draws the same
 scenario: the seed, experiment, exclusions, profile, and every option the
 draw depends on (`--base`, `--valkey-binary`, `--experiment-dir`). Each run's report folder also holds `scenario.yaml`, the generated scenario
 with a header naming its seed and experiment; `valkey-fuzzer run
@@ -850,16 +853,23 @@ has no counterexample). A failed gate outranks an error. See [Spec bridge](spec-
 
 `report.json`, `run --output`, and `replay --output` hold one run report.
 Every key below is always present, and
-`replay` and `minimize` reject a report (or a reproducer) that lacks one.
+`replay` and `minimize` reject a report (or a reproducer) that lacks one,
+except the reading aids (`failed_components`, `reproduce`, `look_at`,
+`reproducer.command`, `reproducer.valkey_binary`), which older reports lack.
+The keys come in reading order: the verdict and where to look first, then the
+data a tool reads. Tools should read keys by name, not by position.
 
 | Key | Contents |
 | --- | --- |
+| `status`, `summary` | The outcome and its one-line summary. First in the file. |
+| `failed_components` | Each component that did not pass: `component_id`, `role`, `use`, `status`, `crash`, `summary`, `evidence_total`, and the first five `evidence` items (`evidence_id`, `value`). Text longer than 120 characters is cut and ends with its length and SHA-256; the full text is in `outcome`. Empty for a pass. |
+| `reproduce` | The `valkey-fuzzer replay <report>` command that replays this run; `null` when the report was not written to a file. |
+| `look_at` | `report_folder`, `plan`, `component_files`, and where the full results are (`outcome.component_results`). |
 | `generated_at` | UTC timestamp |
-| `status`, `summary` | The outcome and its one-line summary. |
 | `scenario` | The scenario as run, including a `--valkey-binary` override. A replay records the scenario of the report it replayed with its own `--valkey-binary` applied (also under `provenance`), or `null` for a bare plan. |
 | `outcome` | The full outcome: `plan` (the execution plan), `status`, `summary`, `component_results`, `evidence`, `diagnostics`, `started_at`, `ended_at`, and `valkey_sha`. |
 | `coverage` | The run's coverage `key` (a digest of its `tuple`), the `tuple`, `status`, and the evidence IDs observed. |
-| `reproducer` | `python`, `platform`, `experiment` (`id`, `digest`), `fuzzer_digest`, `components` (`component_id`, `role`, `implementation`), `deployment_provider` (`provider_id`, `implementation`, `implementation_digest`), `plan_digest`, and `valkey_sha`; for a generated scenario also `generated` (`seed`, `experiment`, `attempt`, `excludes`, `boundary`, `profile`). |
+| `reproducer` | `python`, `platform`, `experiment` (`id`, `digest`), `fuzzer_digest`, `components` (`component_id`, `role`, `implementation`), `deployment_provider` (`provider_id`, `implementation`, `implementation_digest`), `plan_digest`, `valkey_sha`, `command` (the same as the top-level `reproduce`), and `valkey_binary` (the binary the run used, or `null` when the server came from `PATH`); for a generated scenario also `generated` (`seed`, `experiment`, `attempt`, `excludes`, `boundary`, `profile`). |
 | `provenance` | For a replay: `source`, `verified`, `drift`, `drift_allowed`, `not_verified`, `valkey_binary_override`, and `artifact_overrides` (the `--artifact` paths by artifact name). `null` otherwise. |
 
 Each entry of `outcome.component_results` has `component_id`, `status`,

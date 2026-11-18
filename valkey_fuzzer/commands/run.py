@@ -18,7 +18,8 @@ from typing import Any, Optional
 from ..deployment.local.models import DEFAULT_BASE_DATA_DIR
 from ..hoststate import Owner, read_tag
 from ..outcomes import EXIT_FAILURE, EXIT_HARNESS_ERROR, EXIT_SUCCESS, EXIT_USAGE, exit_code, print_outcome
-from ..reports import SCENARIO_FILE, ReportWriteError, export_scenario, write_document
+from ..reports import SCENARIO_FILE, ReportWriteError, export_scenario, replay_command, write_document
+from ..results import OutcomeStatus
 from ..service import PreparedRun
 from ._common import add_common_options, artifact_paths, exclusion, print_header, service_for
 
@@ -139,9 +140,18 @@ def run_command(args: argparse.Namespace) -> int:
     )
     print_outcome(record.outcome, verbose=args.verbose)
     print(f"Report: {record.report_path}")
+    replay = replay_command(record.report_path)
     if generating:
         print(f"Reproduce: {_reproduce_command(prepared, args)}")
         print(f"  or, without the generator: valkey-fuzzer run {record.report_dir}/{SCENARIO_FILE}")
+        print(f"  or, replay this exact run: {replay}")
+    else:
+        print(f"Reproduce: {replay}")
+    if record.outcome.status in (OutcomeStatus.FAIL, OutcomeStatus.ERROR):
+        print(
+            f"Look at: {record.report_dir} (plan.json, components/), report.json keys failed_components and reproduce"
+        )
+        print(f"  server logs: {DEFAULT_BASE_DATA_DIR}/logs/ (data directories are deleted after the run)")
     code = exit_code(record.outcome.status, allow_unsupported=args.allow_unsupported)
     try:
         if args.output:

@@ -127,6 +127,21 @@ def reproducer(catalog: Catalog, plan: ExecutionPlan, outcome: Optional[RunOutco
     }
 
 
+def recorded_binary(
+    catalog: Catalog, outcome: RunOutcome, scenario: Optional[Mapping[str, Any]] = None
+) -> Optional[str]:
+    """The Valkey binary the run used, as its deployment provider recorded it, else the scenario's own
+    ``deployment.valkey_binary``; None when neither names one (the server came from PATH or a build)."""
+
+    registration = catalog.deployment_providers.of_plan(outcome.plan)
+    for row in _recorded_instances(registration, to_plain_data(outcome)):
+        if isinstance(row, Mapping) and row.get("binary"):
+            return str(row["binary"])
+    deployment = scenario.get("deployment") if isinstance(scenario, Mapping) else None
+    binary = deployment.get("valkey_binary") if isinstance(deployment, Mapping) else None
+    return str(binary) if binary else None
+
+
 # ---------------------------------------------------------------------------
 # Replay drift
 # ---------------------------------------------------------------------------
