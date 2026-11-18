@@ -48,3 +48,13 @@
 - `replay` of a bare `plan.json` is refused unless `--allow-drift`; a run now writes `reproducer.json` beside
   `plan.json` so `replay <folder>/plan.json` is verified. Python `major.minor`, platform, and a digest
   missing on either side now count as drift.
+
+### Added: multi-client workload for the history oracle
+
+- `valkey.workload.key-value` takes `clients` (1 to 64, default 1): that many writer threads, each on its
+  own connection, over the same keys, so operations overlap and `valkey.oracle.history` checks a concurrent
+  history. The workload evidence records `clients`; the oracle records it too, words its verdict by it
+  ("single-client history" or "N-client history"), and takes `min_clients` to ERROR on a workload with fewer.
+- With `clients` above 1, `valkey.oracle.ledger` accepts every value an overlapping write could leave and
+  leaves reads to the history oracle; `mix.rename` and a `valkey.oracle.rdb-snapshot` `workload` need
+  `clients: 1`. Replica reads are not part of the history (they are not linearizable against the primary).

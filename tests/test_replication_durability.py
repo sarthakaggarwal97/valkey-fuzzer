@@ -639,7 +639,7 @@ def test_a_harness_bug_in_the_workload_is_an_error_not_an_ambiguous_write(tmp_pa
     workload = KeyValueWorkload()
     workload.start(context, spec)
     deadline = time.monotonic() + 5
-    while workload._thread.is_alive() and time.monotonic() < deadline:
+    while workload._threads[0].is_alive() and time.monotonic() < deadline:
         time.sleep(0.01)
     result = workload.stop(context, spec)
     assert result.status.value == "ERROR" and "TypeError: served_by bug" in result.summary, result.summary
@@ -684,10 +684,10 @@ def test_a_workload_whose_worker_did_not_stop_leaves_its_state_to_it(tmp_path):
     context = fake_context(_standalone(_StoreClient()), spec, artifact_dir=str(tmp_path))
     workload = KeyValueWorkload()
     workload.start(context, spec)
-    thread = workload._thread
-    workload._thread = SimpleNamespace(
-        stop=lambda timeout: "thread writes did not stop within 30s", is_alive=lambda: True
-    )
+    thread = workload._threads[0]
+    workload._threads = [
+        SimpleNamespace(stop=lambda timeout: "thread writes did not stop within 30s", is_alive=lambda: True)
+    ]
     try:
         result = workload.stop(context, spec)
     finally:
