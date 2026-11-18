@@ -60,7 +60,14 @@ def register(subparsers: Any) -> None:
     options = parser.add_argument_group("options (each overrides the spec's)")
     options.add_argument("--profile", help="Search profile: sampling and budgets (pr-quick, nightly-soak, ...)")
     options.add_argument("--workers", type=positive_count, help="Parallel workers (default: 1)")
-    options.add_argument("--port-base", type=int, metavar="PORT", help="First client port of worker 0 (default 11000)")
+    options.add_argument(
+        "--port-base",
+        "--base-port",
+        dest="port_base",
+        type=int,
+        metavar="PORT",
+        help="First client port of worker 0 (default 11000)",
+    )
     options.add_argument(
         "--serial-reruns", type=int, metavar="N", help="Re-run N runs of each failure signature serially"
     )
@@ -119,6 +126,11 @@ def _cli_sources(args: argparse.Namespace) -> list[dict[str, Any]]:
 
 def _print_summary(summary: dict[str, Any]) -> None:
     print(f"\nBatch {summary['batch_id']}: {summary['finished']}/{summary['jobs']} jobs, {summary['counts']}")
+    if summary["smoke"]:
+        print(f"  Smoke runs (lifecycle only, no coverage claim): {summary['smoke']}")
+    # A seed draws the same scenario only at the same cores (docs/contracts.md, Seeds).
+    print(f"  Cores per run: {summary['cores']:g}")
+    runs = {run["id"]: run for run in summary["runs"]}
     for group in summary["signatures"]:
         reruns = group.get("serial_reruns")
         rerun = f"; serial re-runs {reruns['reproduced']}/{len(reruns['runs'])} {reruns['verdict']}" if reruns else ""
@@ -126,7 +138,9 @@ def _print_summary(summary: dict[str, Any]) -> None:
             other = {run["signature_label"] for run in reruns["runs"] if run["status"] != "PASS"}
             rerun += f": {' / '.join(sorted(other))}"
         print(f"  [{group['count']:>4}] {group['label']}{rerun}")
-        print(f"         e.g. runs/{group['runs'][0]}")
+        first = runs.get(group["runs"][0], {})
+        drawn = f" (seed {first['seed']}, attempt {first['attempt']})" if first.get("attempt") is not None else ""
+        print(f"         e.g. runs/{group['runs'][0]}{drawn}")
     zoo = summary["zoo"]
     if zoo is not None:
         for case in zoo["cases"]:

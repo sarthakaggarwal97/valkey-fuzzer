@@ -43,6 +43,17 @@
   output lines (it said `failed to start within 60s` after half a second). If its output holds a crash
   signature the run is `FAIL`, and the summary names the crash. See `docs/contracts.md`.
 
+### Added: first-run gaps (read by `valkey-ci-agent`)
+
+- `--base-port` on `run` and `diff` (and as an alias of `batch --port-base`); `diff --artifact NAME=PATH`.
+- Errors that name a field, component, or experiment now offer the closest names and list the valid fields;
+  `replay` of a scenario file says to use `run`; `validate --strict` warns when no component of the experiment's
+  own is required evidence.
+- `run` prints `cores` and `attempt` beside a generated scenario's seed, and the batch summary prints the cores
+  per run: a seed draws the same scenario only at the same cores (`docs/contracts.md`, Seeds).
+- A `smoke` run prints `Status: PASS (mode: smoke; no coverage claim)`; the batch summary counts smoke runs
+  apart (`smoke`, `cores`, and per-run `attempt` and `mode` in `summary.json`; `counts` leaves smoke runs out).
+
 ### Changed: exit codes and replay verification (read by `valkey-ci-agent`)
 
 - New exit code `64` (`EX_USAGE`) for usage and input errors: a bad option or option mix, no command,

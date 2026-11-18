@@ -37,6 +37,16 @@ def positive_count(value: str) -> int:
     return count
 
 
+def port_number(value: str) -> int:
+    try:
+        port = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a port number from 1 to 65535") from exc
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError("must be a port number from 1 to 65535")
+    return port
+
+
 def exclusion(text: str) -> Exclusion:
     """A ``--exclude PATH=VALUE`` argument."""
 
@@ -71,6 +81,7 @@ def add_common_options(
     *,
     valkey_binary: bool = False,
     artifact: bool = False,
+    base_port: bool = False,
     artifact_dir: bool = False,
     timeout: bool = False,
     allow_unsupported: bool = False,
@@ -89,6 +100,14 @@ def add_common_options(
             metavar="NAME=PATH",
             help="Resolve the valkey.artifact.local-binary artifact NAME at PATH instead of the recorded path; "
             "may be repeated",
+        )
+    if base_port:
+        parser.add_argument(
+            "--base-port",
+            type=port_number,
+            metavar="PORT",
+            help="First client port of the deployment, instead of the scenario's or the draw's; the others, and "
+            "the cluster bus ports, follow from it",
         )
     parser.add_argument(
         "--experiment-dir",

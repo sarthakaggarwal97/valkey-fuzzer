@@ -794,6 +794,9 @@ def job_result(
         "summary": summary,
         "experiment": experiment,
         "seed": scenario.get("seed", job.get("generate", {}).get("seed")),
+        # The attempt that drew the seed's scenario: another number of cores can draw another scenario.
+        "attempt": ((report or {}).get("reproducer", {}).get("generated") or {}).get("attempt"),
+        "mode": (((report or {}).get("outcome") or {}).get("plan") or {}).get("mode"),
         "report": os.path.join("runs", job["id"], REPORT_FILE) if report is not None else None,
         "coverage_key": ((report or {}).get("coverage") or {}).get("key"),
         "exit_code": exit_code,
@@ -1395,9 +1398,12 @@ class BatchRunner:
         results = _results(self.folder)
         by_id = {job["id"]: job for job in self.jobs}
         main = [results[job["id"]] for job in self.jobs if job["id"] in results and "zoo" not in job]
+        # Smoke runs (lifecycle only, no coverage claim) are counted apart: their PASS is not an experiment's.
         counts: dict[str, int] = {}
+        smoke: dict[str, int] = {}
         for result in main:
-            counts[result["status"]] = counts.get(result["status"], 0) + 1
+            tally = smoke if result.get("mode") == "smoke" else counts
+            tally[result["status"]] = tally.get(result["status"], 0) + 1
         groups: dict[str, dict[str, Any]] = {}
         for result in main:
             if not result["signature_key"]:
@@ -1468,6 +1474,8 @@ class BatchRunner:
             "jobs": len(self.jobs),
             "finished": finished,
             "counts": counts,
+            "smoke": smoke,
+            "cores": self.run_cores,
             "runs": [
                 {
                     key: result.get(key)
@@ -1478,6 +1486,8 @@ class BatchRunner:
                         "summary",
                         "experiment",
                         "seed",
+                        "attempt",
+                        "mode",
                         "report",
                         "signature_key",
                         "duration_s",

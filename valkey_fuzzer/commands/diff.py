@@ -8,7 +8,7 @@ from typing import Any
 from ..outcomes import EXIT_FAILURE, EXIT_HARNESS_ERROR, exit_code
 from ..reports import ReportWriteError, write_document
 from ..results import RunOutcome
-from ._common import add_common_options, service_for
+from ._common import add_common_options, artifact_paths, service_for
 
 
 def register(subparsers: Any) -> None:
@@ -17,7 +17,9 @@ def register(subparsers: Any) -> None:
     diff.add_argument("--seed", type=int, help="Override the base scenario seed")
     diff.add_argument("--output", help="Path to save the differential report")
     diff.add_argument("--verbose", action="store_true")
-    add_common_options(diff, valkey_binary=True, artifact_dir=True, timeout=True, allow_unsupported=True)
+    add_common_options(
+        diff, valkey_binary=True, artifact=True, base_port=True, artifact_dir=True, timeout=True, allow_unsupported=True
+    )
     diff.set_defaults(handler=diff_command)
 
 
@@ -36,6 +38,8 @@ def diff_command(args: argparse.Namespace) -> int:
         args.file,
         seed=args.seed,
         valkey_binary=args.valkey_binary,
+        artifacts=artifact_paths(args),
+        base_port=args.base_port,
         timeout=args.timeout,
         on_variant=on_variant,
     )

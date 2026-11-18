@@ -179,7 +179,8 @@ class EnvironmentProviderRegistry(BaseRegistry[EnvironmentProviderRegistration])
 
         registration = self.get((spec.kind.value, spec.provider_id))
         if registration is None:
-            raise UnknownRegistrationError(f"{spec.dependency.path} provider", spec.provider_id)
+            known = [provider_id for kind, provider_id in self.registered_ids if kind == spec.kind.value]
+            raise UnknownRegistrationError(f"{spec.dependency.path} provider", spec.provider_id, known)
         return registration
 
 

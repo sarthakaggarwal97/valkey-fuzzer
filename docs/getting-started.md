@@ -253,16 +253,27 @@ seed. Everything about cluster chaos is in
 experiment, and the [experiment table](scenarios-and-experiments.md#the-valkey-experiments)
 says what each one checks and what it needs. Some need a second build, or
 Linux and root; on a host without them they report
-`SKIP_UNSUPPORTED`. Edit `base_port` when you run several scenarios at once by
-hand, so their ports do not overlap, or let a [batch](#running-many-tests) run
-them.
+`SKIP_UNSUPPORTED`. Pass `--base-port N` when you run several scenarios at
+once by hand, so their ports do not overlap, or let a
+[batch](#running-many-tests) run them. The examples whose experiment is not
+shipped (`examples/*_scenario.yaml`, and the `example.*` ones in
+`examples/valkey/`) need `--experiment-dir`; the first lines of each file
+give the exact command:
+
+```bash
+valkey-fuzzer run examples/standalone_scenario.yaml --experiment-dir examples/experiments
+```
 
 The same runner also drives two tools over runs:
 
 ```bash
-valkey-fuzzer diff examples/valkey/differential_baseline_vs_candidate.yaml
+valkey-fuzzer diff examples/valkey/differential_baseline_vs_candidate.yaml \
+  --artifact baseline=/path/to/old/valkey-server --artifact candidate=/path/to/new/valkey-server
 valkey-fuzzer minimize report.json --output minimized.yaml
 ```
+
+Without `--artifact`, both builds of the `diff` example are the
+`valkey-server` on `PATH`.
 
 `diff` runs one seeded scenario under several variants and compares their
 evidence, and `minimize` shrinks a failing scenario while it keeps failing the

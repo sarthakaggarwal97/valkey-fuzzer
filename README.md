@@ -131,6 +131,22 @@ evidence is and what to attach to a Valkey issue. [Getting
 started](docs/getting-started.md) explains the output, the report files, and
 what to try next.
 
+## Commands
+
+| Command | Does |
+| --- | --- |
+| `run FILE` / `run --seed N` | Run one scenario, or the one a seed draws. |
+| `batch --random all --seeds 5` | Run many scenarios in parallel. Add `--guided N` for a coverage-guided batch that steers by the Valkey code each run reached (needs a gcov build; see [Coverage-guided batches](docs/cli.md#coverage-guided-batches)). |
+| `validate FILE` | Check a scenario without starting anything. `--strict` also warns when only shared fragments supply the required evidence. |
+| `replay REPORT` | Run a recorded run again. |
+| `diff FILE` | Compare one seeded scenario across builds or settings; `--artifact NAME=PATH` picks the builds. |
+| `minimize REPORT` | Shrink a failing scenario. |
+
+`run`, `batch`, and `diff` take `--base-port N` (`batch --port-base`) to move
+the ports. Experiments that live in a directory, such as the ones in
+[`examples/experiments`](examples/experiments), need `--experiment-dir DIR`;
+each example's first lines show the command that runs it.
+
 ## Safety
 
 The fuzzer acts on the machine it runs on. Use a disposable host, VM, or

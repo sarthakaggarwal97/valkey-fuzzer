@@ -5,6 +5,7 @@ from typing import Any, Union
 import yaml
 
 from ._data import to_plain_data
+from .plan import RunMode
 from .results import ComponentStatus, OutcomeStatus, RunOutcome
 
 # The process exit codes of every command (docs/cli.md#exit-codes).
@@ -44,7 +45,9 @@ def _print_summary(outcome: RunOutcome) -> None:
         counts[result.status] += 1
     print(f"\nScenario: {outcome.plan.scenario_id}")
     print(f"Experiment: {outcome.plan.experiment_id}")
-    print(f"Status: {outcome.status.value}")
+    # A smoke run judges no experiment, so its PASS says only that the deployment started and stopped.
+    smoke = " (mode: smoke; no coverage claim)" if outcome.plan.mode is RunMode.SMOKE else ""
+    print(f"Status: {outcome.status.value}{smoke}")
     print(f"Mode: {outcome.plan.mode.value}")
     print(f"Deployment: {outcome.plan.deployment_mode}")
     print(f"Duration: {_duration(outcome):.2f}s")

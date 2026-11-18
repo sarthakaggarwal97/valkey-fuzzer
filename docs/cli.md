@@ -48,7 +48,8 @@ rejects it:
 | Option | Commands | Meaning |
 | --- | --- | --- |
 | `--valkey-binary PATH` | `run`, `batch`, `validate`, `replay`, `diff`, `minimize` | Use this `valkey-server` for the deployment (the local deployment's `deployment.valkey_binary`; a deployment provider without a `binary_override` hook refuses it). For `batch` it applies only to scenarios that name no binary of their own; for `replay` it is an intentional override; see [replay](#replay). |
-| `--artifact NAME=PATH` | `run`, `replay` | Resolve the scenario's `valkey.artifact.local-binary` or `valkey.artifact.local-module` artifact `NAME` at `PATH` instead of the path it declares, so a run recorded elsewhere (a CI batch's parent build, `artifacts.parent`, or its module builds, `artifacts.module` and `artifacts.module_parent`) runs on this host's build of it. Repeatable, once per artifact; an artifact the scenario does not declare, or of another provider, is an error. The report records the scenario with the override; see [replay](#replay) for how the binary is still compared. |
+| `--base-port PORT` | `run`, `diff` (`batch`: `--port-base`) | The first client port of the deployment, instead of the scenario's or the draw's. Every other client port, and in cluster mode every bus port, follows from it, so two scenarios started by hand do not overlap. For `batch` it is the first client port of worker 0 (the alias of `--port-base`). A generated run's `Reproduce:` line keeps it. |
+| `--artifact NAME=PATH` | `run`, `replay`, `diff` | Resolve the scenario's `valkey.artifact.local-binary` or `valkey.artifact.local-module` artifact `NAME` at `PATH` instead of the path it declares, so a run recorded elsewhere (a CI batch's parent build, `artifacts.parent`, or its module builds, `artifacts.module` and `artifacts.module_parent`) runs on this host's build of it. Repeatable, once per artifact; an artifact the scenario does not declare (for `diff`, its `base` does not), or of another provider, is an error. The report records the scenario with the override; see [replay](#replay) for how the binary is still compared. |
 | `--artifact-dir DIR` | `run`, `batch`, `replay`, `diff`, `minimize` | Root for report folders, which hold each run's component artifacts, and for provider directories; for `batch`, where the default batch folder goes. See [Report folders](#report-folders). |
 | `--timeout SECONDS` | `run`, `batch`, `replay`, `diff`, `minimize` | Deadline for each run. Without it, a run gets a derived default: the search profile's `budget.timeout_s`, else 1200 s, and for `run` never less than the sum of the components' `timeout_s`. See [Deadlines and cancellation](contracts.md#deadlines-and-cancellation). |
 | `--allow-unsupported` | `run`, `batch`, `replay`, `diff` | Exit `0` instead of `3` on `SKIP_UNSUPPORTED`. |
@@ -169,7 +170,7 @@ larger `--timeout` for one that needs it.
 
 The command prints the scenario, the experiment, the outcome, component
 counts, the evidence count, the Valkey SHA, the summary, and the report
-path. The summary names why a run did not pass; for missing required
+path. A `smoke` run (it judges no experiment) prints `Status: PASS (mode: smoke; no coverage claim)`. The summary names why a run did not pass; for missing required
 evidence it names each item and its source, such as `required evidence was
 not observed: valkey.rdb.reload-verified from snapshot`.
 
@@ -192,8 +193,11 @@ whole scenario (deployment shape, inputs, server config pools, fault timing)
 for an experiment that declares `metadata.generator` (see
 [Declaring what may be randomized](scenarios-and-experiments.md#declaring-what-may-be-randomized)),
 compiles it, and runs it like any other. The same seed (and profile) always
-draws the same scenario. `batch --random EXPERIMENT --seeds K` runs many
-seeds (see [batch](#batch)).
+draws the same scenario on a host with the same number of usable cores (see
+[Seeds](contracts.md#seeds-replay-and-provenance)): the header prints
+`seed 42 (attempt 0, cores 4)`, and a bug report that names a seed should name
+them too. `batch --random EXPERIMENT --seeds K` runs many seeds (see
+[batch](#batch)).
 
 | Option | Meaning |
 | --- | --- |
@@ -305,7 +309,7 @@ run names its build.
 | `profile` | `--profile NAME` | The [search profile](scenarios-and-experiments.md#legal-space-and-search-profiles) every random job is drawn under, and the budgets. |
 | `workers` | `--workers N` | Parallel workers; default 1. On resume, the only option that may change. A random job's deployment is drawn to fit its worker's share of the batch's cores: the cores the creating process may use, over `workers`. |
 | `timeout_s` | `--timeout SECONDS` | The deadline of each run. |
-| `port_base` | `--port-base PORT` | The first client port of worker 0; default 11000. |
+| `port_base` | `--port-base PORT` (or `--base-port`) | The first client port of worker 0; default 11000. |
 | `valkey_binary` | `--valkey-binary PATH` | See above. |
 | `prune_pass` | `--prune-pass` | Keep only `report.json` and `scenario.yaml` of a run that passed and left nothing behind. |
 | `serial_reruns` | `--serial-reruns N` | After the parallel runs, run `N` jobs of each `FAIL` or `ERROR` signature again, one at a time (load can explain those, not an unsupported run). |
@@ -414,8 +418,10 @@ and change nothing.
 | --- | --- |
 | `status`, `exit_code`, `complete` | The worst result (see [Exit codes](#exit-codes)), its exit code, and whether every job finished. |
 | `batch_id`, `folder`, `profile`, `created_at`, `updated_at`, `jobs`, `finished` | The batch and how far it got. |
-| `counts` | Runs by status, zoo runs and serial re-runs left out. |
-| `runs` | Every finished job: `id`, `source`, `status`, `summary`, `experiment`, `seed`, `report` (its run report, relative to the folder; `null` when it left none), `signature_key`, `duration_s`, `worker`, `leaks` (a count), `origin` (the job a re-run repeats). |
+| `counts` | Runs by status, zoo runs, serial re-runs, and smoke runs left out. |
+| `smoke` | Runs of `smoke` mode by status: they only start and stop a deployment and make no coverage claim, so their `PASS` is not counted with an experiment's. |
+| `cores` | The cores each run could use. A random job's scenario depends on it (see [Seeds](contracts.md#seeds-replay-and-provenance)). |
+| `runs` | Every finished job: `id`, `source`, `status`, `summary`, `experiment`, `seed`, `attempt` (the draw that gave the seed's scenario, for a generated run), `mode`, `report` (its run report, relative to the folder; `null` when it left none), `signature_key`, `duration_s`, `worker`, `leaks` (a count), `origin` (the job a re-run repeats). |
 | `signatures` | The non-PASS runs grouped by the minimizer's [failure signature](#minimize) and experiment (a crash by its causes alone, across experiments), most runs first: `key`, `label`, `status`, `experiment`, `signature`, `count`, `runs`, and `serial_reruns`: `runs` (each re-run's `id`, `status`, `same_signature`, and its own `signature_key` and `signature_label`), `reproduced` (how many failed the same way), and `verdict`: `reproduced` (all did), `intermittent` (some did), `failed differently` (none did, but some failed another way; the summary printout gives their signatures), or `not reproduced` (all passed, which points at load). |
 | `zoo` | `valkey_commit`, `cases` (each case's controls, per-scenario detection rates, and whether it `holds`: true, false, or null for a case with an unobserved `ERROR` or `SKIP_UNSUPPORTED` run, which `undecided` then names), `skipped` (cases this host cannot run), `held`, `not_held`, and `undecided`. |
 | `conformance` | Per spec bundle the runs' plans name: `status` (`pass`, `fail`, or `error` over the checked runs; `skipped`, `unexercised`, or `not_run` when none was checked), `approved`, `counts` (runs by conform status: `pass`, `fail`, `error`, `skipped` without TLC, `unexercised` for a run that took no mapped step, `not_run` for a run that ended `ERROR` or `SKIP_UNSUPPORTED`), `skipped` (why), `violations` (each run, property, whether it was `claimed`, and the `first` failing step), `errors`, `action_coverage` (runs observing each mapped action), `never_observed`, `targets_reached`, and `report`, the bundle's full conform report under `conformance/`. |
@@ -514,6 +520,12 @@ components, or the Valkey binary happen when the scenario runs. `--verbose`
 lists each component with its role, registration, `required` flag, and
 dependencies. The exit code is 0 only when every file is valid, and 2
 otherwise.
+
+`--strict` adds warnings that do not change the exit code. Today it warns when
+none of the experiment's own components is required evidence: the experiment
+then passes on what `valkey.base` and the other fragments require alone, which
+never shows that the components it adds ran (`--format json` lists them under
+`warnings` for each file).
 
 `--format json` is for tools that write scenarios (an AI agent proposing
 them, say). All files are checked with one catalog:
@@ -672,7 +684,11 @@ valkey-fuzzer diff examples/valkey/differential_baseline_vs_candidate.yaml --see
 
 Runs one base scenario, with the same seed, under two or more variants and
 compares evidence fields across them. `--seed` overrides the base seed, and
-`--output` saves the differential report. Each variant gets a report folder
+`--output` saves the differential report. `--artifact NAME=PATH` resolves a
+local-binary artifact of `base` at `PATH` (the shipped example names
+`valkey-server` for both, so it runs against the `valkey-server` on `PATH`
+until you point `baseline` and `candidate` at two builds), and `--base-port
+PORT` moves the base deployment's ports. Each variant gets a report folder
 under `<root>/differential/<name>/`, next to `differential.json`.
 
 ```yaml
