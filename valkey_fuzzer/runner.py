@@ -210,7 +210,8 @@ class _EarlyTerminalError(Exception):
 
 
 def _preflight(catalog: Catalog, plan: ExecutionPlan) -> tuple[ExecutionPlan, DeploymentProvider]:
-    """Static checks that need no environment: the provider, then :func:`~valkey_fuzzer.compiler.check_plan`.
+    """Static checks that need no environment: the provider, then :func:`~valkey_fuzzer.compiler.check_plan`, then each
+    component's host probe (a tool it calls that is not installed).
 
     Returns the checked plan and its deployment provider.
     """
@@ -234,7 +235,16 @@ def _preflight(catalog: Catalog, plan: ExecutionPlan) -> tuple[ExecutionPlan, De
     with _plan_check():
         if bound:
             plan = with_planned_instances(plan, registration)
-        return check_plan(plan, catalog), provider
+        plan = check_plan(plan, catalog)
+    for spec in plan.components:
+        registration = catalog.components.get(spec.use)
+        probe = registration.probe if registration is not None else None
+        if probe is not None:
+            try:
+                probe(spec.config, spec, plan)
+            except Exception as exc:
+                raise RunnerError(f"component {spec.id!r} ({spec.use}) cannot run on this host: {exc}") from exc
+    return plan, provider
 
 
 def _environment_diagnostics(

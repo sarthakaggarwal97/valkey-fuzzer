@@ -35,6 +35,10 @@ class ComponentRegistration(Generic[T]):
     config: Optional[ConfigSchema] = None
     check: Optional[Callable[[Mapping[str, Any], ComponentSpec, ExecutionPlan], None]] = None
     deployment_modes: Optional[tuple[str, ...]] = None
+    # ``probe(config, spec, plan)`` raises when the host cannot run the component (a tool it calls is not
+    # installed). Unlike ``check`` it may look at the host, so it runs when a plan is validated for a run
+    # (``validate`` and the start of ``run``, before anything is acquired) and not when a scenario compiles.
+    probe: Optional[Callable[[Mapping[str, Any], ComponentSpec, ExecutionPlan], None]] = None
     # Evidence IDs a component's config marks as required; the compiler adds
     # them to the plan's required_evidence with that component as their source.
     required_evidence: Optional[Callable[[ComponentSpec], Sequence[str]]] = None

@@ -162,15 +162,34 @@ def _nanoseconds(at: float) -> int:
     return round(at * 1e9)
 
 
-def check_linearizable(history_path: str, timeout_s: float, visualization_path: str) -> dict[str, Any]:
-    """Porcupine's verdict on the history at ``history_path``: ``{"result", "illegal_keys"}``."""
+def find_checker() -> str:
+    """The path of the porcupine checker; a ``FileNotFoundError`` saying how to build it when it is not on PATH."""
 
     checker = shutil.which(CHECKER)
     if checker is None:
+        have_go = shutil.which("go") is not None
         raise FileNotFoundError(
-            f"{CHECKER} is not on PATH: build it from a valkey-fuzzer checkout with "
+            f"{CHECKER} is not on PATH. Build it from a valkey-fuzzer checkout with "
             f"`go -C porcupine build -o <a directory on PATH>`"
+            + ("" if have_go else " (this needs Go >= 1.21, which is not on PATH either: https://go.dev/dl/)")
         )
+    return checker
+
+
+def probe_host() -> None:
+    """Raises when the checker is not installed: ``validate`` and the start of a run call it, before any build."""
+
+    find_checker()
+
+
+def _probe_history(config: Mapping[str, Any], spec: ComponentSpec, plan: ExecutionPlan) -> None:
+    probe_host()
+
+
+def check_linearizable(history_path: str, timeout_s: float, visualization_path: str) -> dict[str, Any]:
+    """Porcupine's verdict on the history at ``history_path``: ``{"result", "illegal_keys"}``."""
+
+    checker = find_checker()
     command = [checker, "-timeout", f"{timeout_s}s", "-visualize", visualization_path, history_path]
     # An Illegal result searches the illegal keys once more, for the visualization.
     completed = subprocess.run(command, capture_output=True, text=True, timeout=2 * timeout_s + 60, check=False)
@@ -307,6 +326,11 @@ _HISTORY_DECLARES = Declarations(
 
 REGISTRATIONS = (
     component_registration(
-        "valkey.oracle.history", HistoryOracle, _HISTORY_FIELDS, check=_validate_history, declares=_HISTORY_DECLARES
+        "valkey.oracle.history",
+        HistoryOracle,
+        _HISTORY_FIELDS,
+        check=_validate_history,
+        probe=_probe_history,
+        declares=_HISTORY_DECLARES,
     ),
 )

@@ -80,7 +80,8 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "--strict-markers --tb=short -m \"not slow\""
+# -rs lists every skip with its reason, so a run that could not test something (no Go, no valkey-server) says so.
+addopts = "--strict-markers --tb=short -rs -m \"not slow\""
 markers = [
     "slow: starts real processes (valkey-server, batch workers); deselect with -m 'not slow'",
     "live: runs the Valkey experiments against real servers (also marked slow)",

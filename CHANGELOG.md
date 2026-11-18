@@ -12,6 +12,16 @@
 - The local deployment's planning lines are logged at DEBUG, and a source build's output goes to
   `<build dir>/build.log` after a one-line notice.
 
+### Changed: a missing `porcupine` is reported at `validate` and at run start
+
+- A scenario with `valkey.oracle.history` now fails `validate` (exit `2`) and a `run` fails as `ERROR` before
+  anything is acquired or started, when `porcupine` is not on `PATH`. The message gives the build command
+  (`go -C porcupine build -o <a directory on PATH>`) and says Go >= 1.21 is needed when `go` is missing too.
+  It was an `ERROR` of the oracle after the whole run. Components can register a `probe` for this
+  (`ComponentRegistration.probe`); it runs at validate and run start, never at compile.
+- `pytest` lists every skip and its reason (`-rs`). `test_every_excluded_config_is_one_the_build_under_test_has`
+  runs only on a Valkey tree at the commit in `zoo/valkey-commit`, so another release on `PATH` no longer fails it.
+
 ### Changed: exit codes and replay verification (read by `valkey-ci-agent`)
 
 - New exit code `64` (`EX_USAGE`) for usage and input errors: a bad option or option mix, no command,

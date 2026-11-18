@@ -153,7 +153,7 @@ def porcupine_dir(tmp_path_factory):
     if found is not None:
         return os.path.dirname(found)
     if shutil.which("go") is None:
-        pytest.skip("neither porcupine nor go is on PATH")
+        pytest.skip("neither porcupine nor go is on PATH: build it with `go -C porcupine build -o <dir on PATH>`")
     directory = tmp_path_factory.mktemp("porcupine")
     subprocess.run(["go", "build", "-o", str(directory / "porcupine"), "."], cwd=ROOT / "porcupine", check=True)
     return str(directory)

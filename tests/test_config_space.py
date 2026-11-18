@@ -4,6 +4,8 @@ config-churn workload."""
 import os
 import random
 import shutil
+import subprocess
+import sys
 import threading
 from dataclasses import replace
 from pathlib import Path
@@ -31,6 +33,7 @@ from valkey_fuzzer.results import make_evidence
 
 from .live_support import BINARY
 
+ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = Path(__file__).parent / "fixtures" / "config_space"
 INT_MAX, LLONG_MAX = 2**31 - 1, 2**63 - 1
 
@@ -181,11 +184,50 @@ def test_the_pool_hook_offers_the_space_of_the_scenarios_builds_or_nothing_when_
     assert config_space_pool(random.Random(1), two) == {}
 
 
-@pytest.mark.skipif(not BINARY or build_config_table(BINARY) is None, reason="needs a valkey-server built in its tree")
+def _pinned_build_table():
+    """The config table of the build under test when it is the commit in ``zoo/valkey-commit``, else None.
+
+    :data:`EXCLUDED` follows one Valkey commit. A build of another release (the 9.1.3 the fuzzer falls back to)
+    lacks configs named there, so the test would fail for a contributor who changed nothing; it runs on the pinned
+    commit only, which is the one CI builds.
+    """
+
+    if not BINARY:
+        return None
+    source = config_space.config_source(BINARY)
+    if source is None:
+        return None
+    pinned = (ROOT / "zoo" / "valkey-commit").read_text().strip()
+    head = subprocess.run(
+        ["git", "-C", os.path.dirname(source), "rev-parse", "HEAD"], capture_output=True, text=True, check=False
+    )
+    return build_config_table(BINARY) if head.returncode == 0 and head.stdout.strip() == pinned else None
+
+
+def test_the_excluded_configs_are_held_to_a_build_only_at_the_pinned_commit(tmp_path, monkeypatch):
+    binary = stand_in_build(tmp_path / "tree")
+    git = ["git", "-C", str(tmp_path / "tree"), "-c", "user.name=t", "-c", "user.email=t@example.com"]
+    subprocess.run([*git, "init", "-q"], check=True)
+    subprocess.run([*git, "add", "."], check=True)
+    subprocess.run([*git, "commit", "-q", "-m", "build"], check=True)
+    head = subprocess.run([*git, "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+    monkeypatch.setattr(sys.modules[__name__], "BINARY", binary)
+    assert _pinned_build_table() is None
+    expected = {config.name for config in _table()}
+    monkeypatch.setattr(Path, "read_text", lambda self, *args, **kwargs: head if self.name == "valkey-commit" else "")
+    assert {config.name for config in _pinned_build_table()} == expected
+
+
 def test_every_excluded_config_is_one_the_build_under_test_has():
     """Holds :data:`EXCLUDED` to the build: a name it does not have is a typo, or a config Valkey removed."""
 
-    names = {config.name for config in build_config_table(BINARY)}
+    table = _pinned_build_table()
+    if table is None:
+        pytest.skip(
+            "needs a valkey-server built in a git tree at the commit in zoo/valkey-commit "
+            "(VALKEY_FUZZER_BINARY, or valkey-server on PATH)"
+        )
+    names = {config.name for config in table}
     assert len(names) > 150
     # Configs of builds made with other options (RDMA, TLS) are in every table; these are newer than some builds.
     assert sorted(set(EXCLUDED) - names) == []
