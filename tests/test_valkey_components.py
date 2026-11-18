@@ -58,6 +58,8 @@ _FORCED = {"extra": (_component("valkey.action.failover", "failover", force=True
         ("valkey.workload.key-value", {"mix": {"zap": 1}}, {}, r"mix contains unknown fields: \['zap'\]"),
         # No operation thread runs, so <instance>.drained would never be published.
         ("valkey.workload.key-value", {"drain_on_stop": True, "max_ops": 10, "rate": 0}, {}, "drain_on_stop requires rate > 0 and mutable_keys > 0"),
+        # RENAME relies on knowing a key's value for certain, which other clients' writes take away.
+        ("valkey.workload.key-value", {"clients": 2, "mix": {"rename": 1}}, {}, "mix.rename needs clients: 1"),
         ("valkey.workload.key-value", {"wait_replicas": 2}, {"mode": "cluster"}, "standalone"),
         ("valkey.workload.key-value", {"wait_replicas": 2}, {"document": {"mode": "standalone", "replicas_per_primary": 1}}, "exceeds replicas_per_primary"),
         ("valkey.action.bgsave", {"instances": "everyone"}, {}, "must be all, primaries, primary, replicas, replica, or instance IDs"),
@@ -86,6 +88,8 @@ _FORCED = {"extra": (_component("valkey.action.failover", "failover", force=True
         ("valkey.oracle.rdb-snapshot", {"bgsave": "bgsave", "expect": "refused", "refused_log": "("}, _BGSAVE, "not a valid regex"),
         ("valkey.oracle.rdb-snapshot", {"bgsave": "bgsave"}, {"extra": (_component("valkey.action.bgsave", "bgsave", capture_rdb=False),)}, "capture_rdb: false"),
         ("valkey.oracle.rdb-snapshot", {"bgsave": "pause"}, {"extra": (_component("valkey.action.sleep", "pause", seconds=1),)}, r"'pause' is a valkey\.action\.sleep, not a valkey\.action\.bgsave"),
+        # A snapshot is a cut of one client's write order.
+        ("valkey.oracle.rdb-snapshot", {"bgsave": "bgsave", "workload": "writes"}, {"extra": (_component("valkey.action.bgsave", "bgsave"), _component("valkey.workload.key-value", "writes", clients=3))}, "several clients"),
         ("valkey.oracle.ledger", {"workload": "missing"}, {}, "not a component"),
         # appendfsync always cannot lose an acknowledged write to a process fault (appendonly yes is the local
         # deployment's default); everysec may lose two seconds of writes; a forced failover can lose writes.
@@ -96,6 +100,7 @@ _FORCED = {"extra": (_component("valkey.action.failover", "failover", force=True
         # The history oracle checks every read and every write the policy does not let be lost.
         ("valkey.oracle.history", {"ledger": "data"}, {"extra": (_component("valkey.oracle.ledger", "data", workload="writes", lost_writes_budget=1),)}, "lost_writes_budget"),
         ("valkey.oracle.history", {"ledger": "data"}, {"extra": (_component("valkey.oracle.ledger", "data", workload="writes", check_reads=False),)}, "check_reads"),
+        ("valkey.oracle.history", {"ledger": "data", "min_clients": 2}, {"extra": (_component("valkey.oracle.ledger", "data", workload="writes"), _component("valkey.workload.key-value", "writes"))}, "min_clients 2 exceeds the clients of workload 'writes'"),
         # Only a tmpfs resource that holds instance data is ever filled.
         ("valkey.fault.disk-fill", {"path": _DISK, "when_event": "x"}, _TMPFS, "instance_data_roots"),
         ("valkey.fault.disk-fill", {"path": _DISK, "when_event": "x"}, {"document": _ROOTS, "resources": (EnvironmentSpec(EnvironmentKind.RESOURCE, "disk", "valkey.resource.tmpdir"),)}, r"of a valkey\.resource\.tmpfs resource"),

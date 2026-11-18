@@ -9,12 +9,15 @@ behaves as one register. It catches what a single final read cannot: a read
 that returned a value already overwritten (a stale read after a failover or
 a restart), or a value that later vanished.
 
-The history comes from one sequential writer thread that reads only the
-primary (see the ``valkey.workload.key-value`` docstring in ``workloads.py``,
-"One writer thread"), so no operations overlap. A PASS means "linearizable
-(single-client history)": no stale read after a failover or restart. It does
-not cover concurrency, replica reads (``READONLY``), ``WAIT`` or multi-client
-visibility; a multi-client workload is future work.
+The workload's ``clients`` setting decides what a PASS covers, and the oracle
+records it (``clients``) and words its verdict by it. With one client (the
+default) no operations overlap: a PASS means "linearizable (single-client
+history)", no stale read after a failover or restart, which the ledger oracle's
+sequential model also finds. With several, operations on a key overlap and
+Porcupine searches for an order of them: a PASS is "linearizable (N-client
+history)". Neither covers replica reads (``READONLY``), ``WAIT`` or client
+tracking, and the workload reads only the primary. ``min_clients`` makes the
+oracle ERROR on a workload with fewer clients than a scenario needs.
 
 It judges under the loss policy of a ``valkey.oracle.ledger`` component
 (``ledger``), so a loss that policy allows is not a violation:
@@ -202,6 +205,8 @@ _HISTORY_FIELDS = {
     # The valkey.oracle.ledger component whose workload and loss policy this oracle uses.
     "ledger": ConfigField(str),
     "timeout_s": ConfigField(float, default=300.0, minimum=1, maximum=3600),
+    # The fewest workload clients this check is worth: fewer is ERROR, not a PASS that proves less than asked.
+    "min_clients": ConfigField(int, default=1, minimum=1, maximum=64),
 }
 
 
@@ -210,6 +215,11 @@ def _validate_history(config: dict, spec: ComponentSpec, plan: ExecutionPlan) ->
     if ledger is None or ledger.use != "valkey.oracle.ledger":
         raise ConfigError(f"ledger {config['ledger']!r} is not a valkey.oracle.ledger component of this plan")
     ledger_config = plain_config(ledger.config)
+    workload = next((component for component in plan.components if component.id == ledger_config["workload"]), None)
+    if workload is not None and config["min_clients"] > plain_config(workload.config).get("clients", 1):
+        raise ConfigError(
+            f"min_clients {config['min_clients']} exceeds the clients of workload {ledger_config['workload']!r}"
+        )
     # Every read and every acknowledged write the policy does not let be lost is checked.
     if ledger_config.get("lost_writes_budget", 0) or ledger_config.get("check_reads") is False:
         raise ConfigError(
@@ -240,6 +250,13 @@ class HistoryOracle:
             windows, lossy_key, _, wait_confirmed = loss_policy(ledger_config, evidence, handle, summary)
         except LossScopeError as exc:
             return make_result(spec, ComponentStatus.ERROR, f"cannot scope the loss window: {exc}")
+        clients = summary.get("clients", 1)
+        if clients < config["min_clients"]:
+            return make_result(
+                spec,
+                ComponentStatus.ERROR,
+                f"the workload ran {clients} client(s), fewer than min_clients {config['min_clients']}",
+            )
         keys = sorted({entry["key"] for entry in ledger} | {key for key in preload if not is_stable_key(key)})
         read_at = time.time()
         values, error = read_retrying(
@@ -283,6 +300,7 @@ class HistoryOracle:
             "keys": len(keys),
             "indeterminate": sum(op["return"] is None for op in history),
             "unchecked_reads": unchecked,
+            "clients": clients,
             "history_path": history_path,
         }
         if verdict["result"] == "Illegal":
@@ -290,7 +308,7 @@ class HistoryOracle:
             return make_result(
                 spec,
                 ComponentStatus.FAIL,
-                f"the history of {len(illegal)} key(s) is not linearizable: {', '.join(illegal[:5])}",
+                f"the {clients}-client history of {len(illegal)} key(s) is not linearizable: {', '.join(illegal[:5])}",
                 diagnostics={**record, "illegal_keys": illegal[:20], "visualization_path": visualization_path},
             )
         if verdict["result"] != "Ok":
@@ -303,7 +321,8 @@ class HistoryOracle:
         return make_result(
             spec,
             ComponentStatus.PASS,
-            f"the history of {len(keys)} keys is linearizable (single-client history, {len(history)} operations)",
+            f"the history of {len(keys)} keys is linearizable "
+            f"({'single-client history' if clients == 1 else f'{clients}-client history'}, {len(history)} operations)",
             evidence=(make_evidence(spec, "valkey.data.linearizable", "oracle.completed", record),),
         )
 
@@ -317,6 +336,7 @@ _HISTORY_DECLARES = Declarations(
                     "keys": INTEGER,
                     "indeterminate": INTEGER,
                     "unchecked_reads": INTEGER,
+                    "clients": INTEGER,
                     "history_path": TEXT,
                 }
             )

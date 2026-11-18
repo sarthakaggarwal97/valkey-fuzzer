@@ -131,7 +131,7 @@ a retry succeeded makes the fault, and the run, `ERROR`.
 | [`valkey.oracle.error-counters`](#valkeyoracleerror-counters) | oracle | any | no error counter in INFO rose without a cause in the scenario |
 | [`valkey.oracle.quiet-end`](#valkeyoraclequiet-end) | oracle | any | every instance comes to rest: no blocked client or child process, links up, not spinning |
 | [`valkey.oracle.ledger`](#valkeyoracleledger) | oracle | any | data matches the workload ledger |
-| [`valkey.oracle.history`](#valkeyoraclehistory) | oracle | any | the single-client history is linearizable (Porcupine) |
+| [`valkey.oracle.history`](#valkeyoraclehistory) | oracle | any | the workload's history, single- or multi-client, is linearizable (Porcupine) |
 | [`valkey.oracle.rdb-snapshot`](#valkeyoraclerdb-snapshot) | oracle | any | captured RDBs reload with plausible data |
 | [`valkey.oracle.deployment-state`](#valkeyoracledeployment-state) | oracle | any | the deployment's state validators pass, with a chaos action's kills and keys |
 | [`valkey.oracle.cluster-election-safety`](#valkeyoraclecluster-election-safety) | oracle | cluster | the election model's invariants hold |
@@ -275,16 +275,19 @@ Evidence: `valkey.host.supported`.
 ### `valkey.workload.key-value`
 
 Preloads `stable_keys`, which never change afterwards, and `mutable_keys`,
-then mutates the mutable keys from one writer thread at `rate` operations per
-second until teardown. For every operation it records what the client
+then mutates the mutable keys at `rate` operations per second until teardown,
+from one writer thread, or from `clients` threads at once, each on its own
+connection. For every operation it records what the client
 observed in a ledger: `ok` (acknowledged, with the `instance_id` that
 acknowledged it), `error` (an error reply such as `OOM` or `READONLY`, or no
 reachable server, so never applied), or `ambiguous` (a timeout or connection error, which may or
 may not have applied). Oracles derive the acceptable final values from that
 ledger, and [`valkey.oracle.history`](#valkeyoraclehistory) checks it as a
 history: each entry is invoked at `t_start` and completes at `t_end` on
-connection `process` (numbered from 1; the writer opens a new connection
-after any failure), and a `get` entry's `reply` is the value it read. The preload counts as acknowledged writes too: each preloaded key
+connection `process` (numbered from 1 across all clients; a client opens a
+new connection after any failure), and a `get` entry's `reply` is the value it
+read. With `clients` above 1 operations on a key overlap, and the `id` order
+is the order operations were issued, not the order the server applied them. The preload counts as acknowledged writes too: each preloaded key
 records when its batch was acknowledged and by which instance, so a key
 preloaded inside a loss window may be lost like any other write. In cluster
 mode it writes through a cluster client that makes one
@@ -297,6 +300,7 @@ standalone mode it writes to the current primary. Keys are named
 | `stable_keys` | integer, 0 to 5,000,000 | 0 | Keys written once in the preload. |
 | `mutable_keys` | integer, 0 to 1,000,000 | 100 | Keys the writer mutates. At least one of the two counts must be above 0. |
 | `preload_mutable` | boolean | `true` | Also write an initial value for every mutable key in the preload. |
+| `clients` | integer, 1 to 64 | 1 | Writer threads, each on its own connection, over the same keys. `rate` is their total. Above 1 the workload makes overlapping operations, which `valkey.oracle.history` checks; `valkey.oracle.ledger` then judges the final values only (see [`valkey.oracle.ledger`](#valkeyoracleledger)) and `mix.rename` and `valkey.oracle.rdb-snapshot`'s `workload` are refused. |
 | `rate` | number, 0 to 100,000 | 200 | Operations per second; 0 writes the preload only. |
 | `value_size` | integer, 1 to 1,048,576 | 64 | Value size in bytes. |
 | `compressible` | boolean | `false` | Repetitive values instead of random ones. |
@@ -1632,6 +1636,12 @@ converge on its primary's values. Reads are retried within
 the harness could not read, and [`valkey.oracle.liveness`](#valkeyoracleliveness)
 judges a server that is down.
 
+With a workload of several `clients` the operations overlap and the ledger
+holds them in completion order, not the order the server applied them. The
+oracle then accepts, for a key, the value of every write that overlaps the last
+acknowledged one, and does not check reads (`unchecked_reads` counts them):
+[`valkey.oracle.history`](#valkeyoraclehistory) orders them by overlap.
+
 Any component can also publish `valkey.data.loss-window` evidence `{start,
 end, instance_id?}`, as `valkey.action.replication-chaos` does for a forced
 promotion: writes acknowledged inside `(start, end]` may be lost, with
@@ -1691,13 +1701,19 @@ after a failover or a restart) and an acknowledged write that a read saw and
 that later vanished, through any order of concurrent and indeterminate
 operations.
 
-**Scope of the claim.** The shipped `valkey.workload.key-value` workload is
-one sequential writer that reads only from the primary, so no two operations
-overlap. This oracle therefore proves "no stale read after a failover or a
-restart" for that one client. It does not exercise concurrency, replica reads
-(`READONLY`), `WAIT`, client tracking or multi-client visibility, and a PASS
-says nothing about them. A multi-client workload (several threads, some
-reading replicas under `READONLY`) is future work.
+**Scope of the claim.** What a PASS covers depends on the workload's
+`clients`, which the oracle reads from the workload's evidence and records
+(`clients`). With `clients: 1` (the default) no two operations overlap, so a
+PASS reads "linearizable (single-client history)" and proves "no stale read
+after a failover or a restart" for that one client, which the ledger oracle's
+sequential model finds too. With `clients` above 1, operations on a key
+overlap, Porcupine searches for an order of them, and a PASS reads
+"linearizable (N-client history)". Neither covers replica reads (`READONLY`),
+`WAIT`, or client tracking: the workload reads only the primary, and replica
+reads are not linearizable against it, so they are not part of this history.
+Set `min_clients` to make the oracle `ERROR` when the workload ran fewer
+clients than the scenario needs, and the scenario fail to compile when the
+workload's `clients` is below it.
 
 It judges under the loss policy of the [`valkey.oracle.ledger`](#valkeyoracleledger)
 component named by `ledger` (its loss windows, scope, `window_reads`, and
@@ -1723,8 +1739,9 @@ skips reads (`check_reads: false`), which a history check cannot honor.
 | --- | --- | --- | --- |
 | `ledger` | string | | The `valkey.oracle.ledger` component's `id`; its `workload` and `converge_timeout_s` apply too. |
 | `timeout_s` | number, 1 to 3600 | 300 | How long Porcupine may search. |
+| `min_clients` | integer, 1 to 64 | 1 | The fewest workload `clients` this check is worth; fewer is `ERROR`. |
 
-`FAIL` when a key's single-client history is not linearizable, naming the keys
+`FAIL` when a key's history is not linearizable, naming the keys
 (`illegal_keys`) and writing Porcupine's visualization of their histories
 to `illegal.html` (`visualization_path`). `ERROR` when the `porcupine`
 checker is not on `PATH`, the final read keeps failing, the check times out,
@@ -1732,7 +1749,7 @@ or the history is too large to check: Porcupine's memory grows with the
 square of a key's operation count (about 370 MB for 50,000 operations on one
 key), and the oracle refuses a history whose estimate exceeds 2 GB. Evidence:
 `valkey.data.linearizable`, with the operation, key, indeterminate, and
-unchecked-read counts and `history_path`.
+unchecked-read counts, `clients`, and `history_path`.
 
 The `porcupine` checker is a small Go program in the repository's
 `porcupine/` directory (Go 1.21 or later) that wraps the Porcupine library
