@@ -111,7 +111,8 @@ def add_common_options(
             "--timeout",
             type=positive_seconds,
             metavar="SECONDS",
-            help="Cooperative run deadline in seconds",
+            help="Run deadline in seconds (default: the search profile's budget, else 1200; run also keeps it "
+            "at or above the sum of the components' timeout_s)",
         )
     if allow_unsupported:
         parser.add_argument(

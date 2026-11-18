@@ -135,9 +135,11 @@ def run_command(args: argparse.Namespace) -> int:
         # The report records the scenario as run, including a --valkey-binary
         # or --artifact override, so it replays and minimizes on its own.
         prepared = service.prepare_run(args.file, valkey_binary=args.valkey_binary, artifacts=artifact_paths(args))
-    record = service.execute(
-        prepared.plan, scenario=prepared.scenario, timeout=args.timeout, generated=prepared.generated
+    timeout, source = service.resolve_timeout(
+        prepared.plan, args.timeout, profile=(prepared.generated or {}).get("profile")
     )
+    print(f"Timeout: {timeout:g}s ({source})")
+    record = service.execute(prepared.plan, scenario=prepared.scenario, timeout=timeout, generated=prepared.generated)
     print_outcome(record.outcome, verbose=args.verbose)
     print(f"Report: {record.report_path}")
     replay = replay_command(record.report_path)

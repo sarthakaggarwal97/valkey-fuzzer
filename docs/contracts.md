@@ -222,8 +222,13 @@ in [Scenarios and experiments](scenarios-and-experiments.md#declaring-what-may-b
 ## Deadlines and cancellation
 
 A component call has a deadline when the component sets `timeout_s` in the
-experiment or the command has `--timeout SECONDS` (a deadline for the whole
-run); with both, the earlier one applies. Components see it as
+experiment or the run has a deadline for the whole run; with both, the
+earlier one applies. The run deadline is `--timeout SECONDS` if given. Without
+it the run derives one from its budget: the search profile's `budget.timeout_s`
+(`--profile`), else 1200 seconds, and never less than the sum of the
+components' `timeout_s`, so the default cannot cut a run its components
+allowed to take longer. `run` prints the deadline and its source before it
+starts (`Timeout: 600s (search profile 'pr-quick' budget)`). Components see it as
 `context.deadline` and are expected to finish before it. Each call sees its
 own deadline; a thread a component starts sees the run's, unless it runs
 under a copy of the call's context (`contextvars.copy_context().run`), which
@@ -231,7 +236,8 @@ shares the call's deadline and cancellation. The wave engine runs its
 operations that way.
 
 - A call with no deadline runs on the runner's own thread. If it hangs, the
-  run hangs.
+  run hangs. The commands always set a run deadline, so only a program that
+  drives the runner without one has such calls.
 - A call with a deadline runs on a separate thread. When the deadline passes,
   the runner **cancels** it: on that thread `context.cancelled` becomes true,
   `context.sleep()` returns `False` at once, and `context.deadline` is in the
@@ -255,9 +261,17 @@ operations that way.
   rollback and cleanup events, `run.completed`) get a 60-second window each.
   A dispatch still running at its deadline aborts the event bus: no later
   event is dispatched, and the run is `ERROR`.
-- Teardown (`stop`, `recover`) ignores `--timeout` and gets the component's
-  own `timeout_s` as a fresh window. A hung teardown without `timeout_s`
-  hangs the run. A component whose start call the runner gave up on is torn
+- Teardown (`stop`, `recover`) ignores the run deadline and gets the
+  component's own `timeout_s` as a fresh window, or 60 seconds if it sets none.
+- The deployment provider's `cleanup` and `rollback`, and each obligation's
+  `undo`, get a 60-second window each. When one expires, the run records a
+  cleanup error that names the wait (`deployment cleanup did not return
+  within 60.000s`, `undo of <kind> on <target> (owner '<id>') did not
+  return within 60.000s`) and goes on; the run is `ERROR` unless an oracle
+  already reported a trustworthy `FAIL`. An undo that is still running is not
+  started a second time: its obligation stays open and is listed under
+  `open_obligations`. A call still running after its window is an abandoned
+  call, as above. A component whose start call the runner gave up on is torn
   down only after that call returns: the runner waits for it after
   deployment cleanup, and if it is still running then, the run records a
   cleanup error saying the component was not torn down.

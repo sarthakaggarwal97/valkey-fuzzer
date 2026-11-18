@@ -69,6 +69,31 @@ class ReplayDriftError(RunServiceError):
         self.drift = [dict(entry) for entry in drift]
 
 
+# The deadline of a run that names none and has no search-profile budget (seconds).
+DEFAULT_TIMEOUT_S = 1200.0
+
+
+def derive_timeout(
+    plan: ExecutionPlan, *, profile_timeout_s: Optional[float] = None, profile: Optional[str] = None
+) -> tuple[float, str]:
+    """The run deadline when ``--timeout`` is not given, and where it came from.
+
+    The base is the search profile's ``budget.timeout_s``, else
+    :data:`DEFAULT_TIMEOUT_S`. A scenario whose components set ``timeout_s`` may
+    need longer: the deadline is never below their sum, so the default does not
+    cut a run its own components allowed to take that long.
+    """
+
+    if profile_timeout_s is not None:
+        base, source = profile_timeout_s, f"search profile {profile!r} budget" if profile else "search profile budget"
+    else:
+        base, source = DEFAULT_TIMEOUT_S, "default"
+    declared = sum(spec.timeout_s for spec in plan.components if spec.timeout_s is not None)
+    if declared > base:
+        return declared, f"sum of the components' timeout_s, above the {source} of {base:g}s"
+    return base, source
+
+
 # The artifact providers whose path ``--artifact NAME=PATH`` overrides: a binary or a module build on this host,
 # so a run recorded elsewhere (a CI batch's parent build, its module builds) resolves it here.
 LOCAL_PATH_PROVIDERS = ("valkey.artifact.local-binary", "valkey.artifact.local-module")
@@ -309,6 +334,17 @@ class RunService:
 
         self.runner.validate(plan)
 
+    def resolve_timeout(
+        self, plan: ExecutionPlan, timeout: Optional[float], *, profile: Optional[str] = None
+    ) -> tuple[float, str]:
+        """The run deadline and its source: ``--timeout`` if given, else :func:`derive_timeout` with the
+        budget of search profile ``profile``."""
+
+        if timeout is not None:
+            return timeout, "--timeout"
+        budget = None if profile is None else find_profile(self.catalog, profile).timeout_s
+        return derive_timeout(plan, profile_timeout_s=budget, profile=profile)
+
     @property
     def report_root(self) -> str:
         return self._artifact_dir
@@ -439,7 +475,10 @@ class RunService:
         longer has), ``runner`` when the runner itself fails after them.
         """
 
-        deadline = time.monotonic() + timeout if timeout is not None else None
+        if timeout is None:
+            # Every run is bounded: one that names no deadline gets the derived default.
+            timeout = derive_timeout(plan)[0]
+        deadline = time.monotonic() + timeout
         try:
             return self.runner.run(plan, deadline=deadline, run_dir=run_dir)
         except PreflightError as exc:

@@ -32,6 +32,10 @@ def _reset():
 
 def _undo(target):
     def undo():
+        if target == "hang":
+            # A process in D state: deaf to cancellation until the test lets it go.
+            HUNG.append(threading.current_thread())
+            GATE.wait(20)
         if target == "ctrl-c":
             # Ctrl-C while the runner's undo restarts a killed instance (a 30-60 s readiness wait).
             raise KeyboardInterrupt
@@ -155,6 +159,8 @@ def test_a_change_the_owner_may_not_make_is_an_error_and_still_undone(config, me
 THREADS: list[threading.Thread] = []
 GATE = threading.Event()
 REFUSED: list[str] = []
+# The threads of undo calls that block on GATE.
+HUNG: list[threading.Thread] = []
 
 
 class Abandoned:
@@ -225,3 +231,26 @@ def test_an_interrupt_during_the_runners_undo_still_undoes_the_rest_and_cleans_u
         run_experiment(experiment, REGISTRATIONS, deployment_providers=(provider,))
 
     assert UNDONE == ["two", "one"] and calls == ["validate", "provision", "cleanup"]
+
+
+def test_an_undo_that_blocks_past_its_budget_ends_the_run_in_error_with_the_obligation_listed(monkeypatch):
+    monkeypatch.setattr("valkey_fuzzer.obligations.UNDO_TIMEOUT_S", 0.2)
+    monkeypatch.setattr("valkey_fuzzer.deadlines.CANCEL_GRACE_S", 0.1)
+    HUNG.clear()
+    GATE.clear()
+    started = time.monotonic()
+    try:
+        outcome = _run(targets=["hang", "one"], forget=True)
+        assert time.monotonic() - started < 15, "the hung undo held the run"
+        assert outcome.status is OutcomeStatus.ERROR
+        assert UNDONE == ["one"], "the undo behind the hung one still ran"
+        (left,) = [item for item in to_plain_data(outcome.diagnostics["open_obligations"]) if item["target"] == "hang"]
+        assert (
+            "undo of tests.stopped on hang (owner 'fault') did not return within 0.200s" in left["errors"][0]["message"]
+        )
+        assert "is still running" in left["errors"][-1]["message"], "a stuck undo is not started a second time"
+        assert len(HUNG) == 1
+    finally:
+        GATE.set()
+        for thread in HUNG:
+            thread.join(5)

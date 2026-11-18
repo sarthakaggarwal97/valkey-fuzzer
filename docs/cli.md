@@ -50,7 +50,7 @@ rejects it:
 | `--valkey-binary PATH` | `run`, `batch`, `validate`, `replay`, `diff`, `minimize` | Use this `valkey-server` for the deployment (the local deployment's `deployment.valkey_binary`; a deployment provider without a `binary_override` hook refuses it). For `batch` it applies only to scenarios that name no binary of their own; for `replay` it is an intentional override; see [replay](#replay). |
 | `--artifact NAME=PATH` | `run`, `replay` | Resolve the scenario's `valkey.artifact.local-binary` or `valkey.artifact.local-module` artifact `NAME` at `PATH` instead of the path it declares, so a run recorded elsewhere (a CI batch's parent build, `artifacts.parent`, or its module builds, `artifacts.module` and `artifacts.module_parent`) runs on this host's build of it. Repeatable, once per artifact; an artifact the scenario does not declare, or of another provider, is an error. The report records the scenario with the override; see [replay](#replay) for how the binary is still compared. |
 | `--artifact-dir DIR` | `run`, `batch`, `replay`, `diff`, `minimize` | Root for report folders, which hold each run's component artifacts, and for provider directories; for `batch`, where the default batch folder goes. See [Report folders](#report-folders). |
-| `--timeout SECONDS` | `run`, `batch`, `replay`, `diff`, `minimize` | Deadline for each run. See [Deadlines and cancellation](contracts.md#deadlines-and-cancellation). |
+| `--timeout SECONDS` | `run`, `batch`, `replay`, `diff`, `minimize` | Deadline for each run. Without it, a run gets a derived default: the search profile's `budget.timeout_s`, else 1200 s, and for `run` never less than the sum of the components' `timeout_s`. See [Deadlines and cancellation](contracts.md#deadlines-and-cancellation). |
 | `--allow-unsupported` | `run`, `batch`, `replay`, `diff` | Exit `0` instead of `3` on `SKIP_UNSUPPORTED`. |
 
 ## Exit codes
@@ -160,6 +160,12 @@ scenarios](#generated-scenarios-run---random)). To run many, use
 | `--output PATH` | Also save the run report here. |
 | `--output-format json\|yaml` | Format of `--output` (which it needs); default `json`. |
 | `--verbose` | Print every component's result, evidence count, and diagnostics, and the run diagnostics. |
+
+`run` prints the deadline it uses and where it came from, before the run
+starts: `Timeout: 1200s (default)`, `Timeout: 600s (search profile 'pr-quick'
+budget)`, `Timeout: 1800s (sum of the components' timeout_s, above the default
+of 1200s)`, or `Timeout: 90s (--timeout)`. A run is never unbounded; pass a
+larger `--timeout` for one that needs it.
 
 The command prints the scenario, the experiment, the outcome, component
 counts, the evidence count, the Valkey SHA, the summary, and the report

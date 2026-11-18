@@ -566,6 +566,36 @@ def test_teardown_waits_for_a_timed_out_start_or_reports_it_and_refuses_later_ru
     assert _execute(_plan((_spec(ACTION, "act"),)), (ACTION, _Component)).status is OutcomeStatus.PASS
 
 
+@pytest.mark.parametrize("wait", ["cleanup", "rollback", "teardown"])
+def test_a_hung_cleanup_rollback_or_teardown_is_cut_and_the_run_ends_in_error(short_grace, monkeypatch, wait):
+    monkeypatch.setattr(runner_module, "_RELEASE_S", 0.3)
+    monkeypatch.setattr(runner_module, "_TEARDOWN_S", 0.3)
+    gate = threading.Event()
+    block = lambda *args: gate.wait(20)  # noqa: E731  deaf to cancellation, like a process in D state
+    provider = _provider([], **({"provision": RuntimeError("no deployment")} if wait == "rollback" else {}))
+    if wait != "teardown":
+        setattr(provider, wait, block)
+
+    class HangsOnStop(_Component):
+        def stop(self, context, spec):
+            gate.wait(20)
+            return ComponentResult(spec.id, PASS, "stopped")
+
+    started = time.monotonic()
+    try:
+        # Neither the component (no timeout_s) nor the run (no deadline) bounds the wait: only the watchdog does.
+        outcome = _execute(_plan((_spec(WORKLOAD, "load"),)), (WORKLOAD, HangsOnStop), provider=provider)
+    finally:
+        gate.set()
+    assert time.monotonic() - started < 15
+    assert outcome.status is OutcomeStatus.ERROR
+    label = {"cleanup": "deployment cleanup", "rollback": "deployment rollback", "teardown": "component 'load' stop"}[
+        wait
+    ]
+    messages = [item["exception"]["message"] for item in outcome.diagnostics["cleanup_errors"]]
+    assert any(message.startswith(f"{label} did not return within") for message in messages), messages
+
+
 @pytest.mark.parametrize("event", ["act.started", "load.stopping"])
 def test_a_blocking_subscriber_cannot_hang_the_run_past_its_deadline(short_grace, event):
     release, calls = threading.Event(), []

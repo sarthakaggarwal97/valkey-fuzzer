@@ -95,6 +95,11 @@ def _plan_check() -> Iterator[None]:
 # deadline, but a blocking subscriber must not hold the run forever.
 _CLEANUP_DISPATCH_S = 60.0
 
+# How long the runner waits for the deployment provider's ``cleanup`` or ``rollback``, and for the teardown of
+# a component that sets no ``timeout_s``, before it records the wait as a cleanup error and goes on (ERROR).
+_RELEASE_S = 60.0
+_TEARDOWN_S = 60.0
+
 
 def _result(spec: ComponentSpec, status: ComponentStatus, summary: str, **diagnostics: Any) -> ComponentResult:
     return ComponentResult(spec.id, status, summary, diagnostics=diagnostics)
@@ -341,7 +346,7 @@ class _Execution:
         self.context = _Context(
             plan,
             bus,
-            ObligationLedger(check=self.contract.check_change),
+            ObligationLedger(check=self.contract.check_change, abandoned=self.abandon_undo),
             artifact_root,
             deadline,
             run_dir,
@@ -458,6 +463,13 @@ class _Execution:
             if exc.call is not None:
                 abandon(exc.call, exc)
             raise
+
+    def abandon_undo(self, call: ComponentCall) -> None:
+        """An obligation's undo is still running after its watchdog expired: wait for it once more after cleanup,
+        and refuse later runs in this process until it returns."""
+
+        self.cancelled_calls.append(call)
+        deadlines.record_abandoned_call(self.context.source_plan.scenario_id, call)
 
     def emit(
         self, name: str, *, source: str, payload: Optional[Mapping[str, Any]] = None, cleanup: bool = False
@@ -653,7 +665,15 @@ class _Execution:
         )
         self.context.cleaning_up = True
         try:
-            released = self.cleanup_step("deployment", step, lambda: method(self.context, *args))
+            released = self.cleanup_step(
+                "deployment",
+                step,
+                lambda: self.watch(
+                    lambda: method(self.context, *args),
+                    deadline=time.monotonic() + _RELEASE_S,
+                    label=f"deployment {step}",
+                ),
+            )
         finally:
             self.context.cleaning_up = False
         if released:
@@ -716,7 +736,7 @@ class _Execution:
             # timeout as a fresh window, so a hung stop cannot hang the run.
             result = self.watch(
                 lambda: getattr(self.objects[spec.id], method)(self.context, spec),
-                deadline=None if spec.timeout_s is None else started + spec.timeout_s,
+                deadline=started + (_TEARDOWN_S if spec.timeout_s is None else spec.timeout_s),
                 label=f"component {spec.id!r} {method}",
             )
             self.check_result(spec, result, "cleanup for component")
