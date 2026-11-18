@@ -116,6 +116,13 @@ def with_artifact_paths(scenario: Mapping[str, Any], paths: Mapping[str, str]) -
     return merge(scenario, {"artifacts": overrides})
 
 
+def with_base_port(scenario: Mapping[str, Any], base_port: Optional[int]) -> dict[str, Any]:
+    """A copy of ``scenario`` whose deployment starts its ports at ``base_port`` (``--base-port``); every client and
+    cluster bus port follows from it. ``scenario`` itself for None."""
+
+    return dict(scenario) if base_port is None else merge(scenario, {"deployment": {"base_port": base_port}})
+
+
 def _plan_with_artifact_paths(plan: ExecutionPlan, paths: Mapping[str, str]) -> ExecutionPlan:
     """``plan`` with its local-binary or local-module artifacts named in ``paths`` resolving those paths."""
 
@@ -352,15 +359,20 @@ class RunService:
     # -- compiling -----------------------------------------------------------
 
     def prepare_run(
-        self, path: str, *, valkey_binary: Optional[str] = None, artifacts: Optional[Mapping[str, str]] = None
+        self,
+        path: str,
+        *,
+        valkey_binary: Optional[str] = None,
+        artifacts: Optional[Mapping[str, str]] = None,
+        base_port: Optional[int] = None,
     ) -> PreparedRun:
-        """Read and compile one scenario file; the recorded scenario includes a ``valkey_binary`` override and
-        the ``artifacts`` path overrides (``--artifact NAME=PATH``)."""
+        """Read and compile one scenario file; the recorded scenario includes a ``valkey_binary`` override, the
+        ``artifacts`` path overrides (``--artifact NAME=PATH``), and a ``base_port`` (``--base-port``)."""
 
         scenario = with_valkey_binary(
             self.catalog, plain_config(load_yaml_mapping(read_scenario(path), source_name=str(path))), valkey_binary
         )
-        scenario = with_artifact_paths(scenario, artifacts or {})
+        scenario = with_base_port(with_artifact_paths(scenario, artifacts or {}), base_port)
         return PreparedRun(scenario=scenario, plan=self.compile(scenario))
 
     def generate(
@@ -416,6 +428,7 @@ class RunService:
         free_ports: bool = True,
         keep_own_binary: bool = False,
         pinned: Optional[Mapping[str, Any]] = None,
+        base_port: Optional[int] = None,
     ) -> PreparedRun:
         """Generate and compile one scenario (``run --random`` / ``run --seed``); a random seed when None.
 
@@ -426,9 +439,11 @@ class RunService:
         (:meth:`generate`). ``free_ports`` moves a scenario whose planned ports
         are busy to free ones (the deployment provider's ``relocate_ports``
         hook); the batch runner turns it off, because its workers own their
-        port blocks.
+        port blocks. A ``base_port`` (``--base-port``) overrides the ``base``'s.
         """
 
+        if base_port is not None:
+            base = with_base_port(base or {}, base_port)
         drawn = self.generate(
             _new_seed() if seed is None else seed,
             experiment=experiment,
@@ -678,16 +693,23 @@ class RunService:
         *,
         seed: Optional[int] = None,
         valkey_binary: Optional[str] = None,
+        artifacts: Optional[Mapping[str, str]] = None,
+        base_port: Optional[int] = None,
         timeout: Optional[float] = None,
         on_variant: Optional[Callable[[str, RunOutcome], None]] = None,
     ) -> SessionResult:
-        """Run a differential document's variants and compare their evidence."""
+        """Run a differential document's variants and compare their evidence.
+
+        ``artifacts`` (``--artifact NAME=PATH``) resolves the base scenario's local-binary artifacts at other
+        paths, and ``base_port`` (``--base-port``) moves its ports.
+        """
 
         differential = Differential.from_document(load_document(path))
         if seed is not None:
             differential.base["seed"] = seed
         # Variants patch the base, so a variant that sets its own binary keeps it.
         differential.base = with_valkey_binary(self.catalog, differential.base, valkey_binary)
+        differential.base = with_base_port(with_artifact_paths(differential.base, artifacts or {}), base_port)
         # Every variant compiles before the first runs; a bad one leaves no folder.
         session = _Session(self, "differential", differential.differential_id, timeout)
 

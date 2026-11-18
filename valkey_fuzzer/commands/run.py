@@ -28,7 +28,13 @@ def register(subparsers: Any) -> None:
     run_parser = subparsers.add_parser("run", help="Compile and run a scenario, or generated ones")
     run_parser.add_argument("file", nargs="?", help="Path to the scenario YAML file (omit with --random or --seed)")
     add_common_options(
-        run_parser, valkey_binary=True, artifact=True, artifact_dir=True, timeout=True, allow_unsupported=True
+        run_parser,
+        valkey_binary=True,
+        artifact=True,
+        base_port=True,
+        artifact_dir=True,
+        timeout=True,
+        allow_unsupported=True,
     )
     generated = run_parser.add_argument_group("generated scenarios")
     generated.add_argument("--random", action="store_true", help="Run a scenario generated from a random seed")
@@ -123,10 +129,12 @@ def run_command(args: argparse.Namespace) -> int:
             base=base,
             valkey_binary=args.valkey_binary,
             profile=args.profile,
+            base_port=args.base_port,
         )
         generated = prepared.generated
         print_header(
-            f"Generated scenario: {generated['experiment']}, seed {generated['seed']} (attempt {generated['attempt']})"
+            f"Generated scenario: {generated['experiment']}, seed {generated['seed']} "
+            f"(attempt {generated['attempt']}, cores {_cores(generated['cores'])})"
         )
         for note in prepared.notes:
             print(f"Note: {note}")
@@ -134,7 +142,9 @@ def run_command(args: argparse.Namespace) -> int:
         print_header(f"Scenario: {args.file}")
         # The report records the scenario as run, including a --valkey-binary
         # or --artifact override, so it replays and minimizes on its own.
-        prepared = service.prepare_run(args.file, valkey_binary=args.valkey_binary, artifacts=artifact_paths(args))
+        prepared = service.prepare_run(
+            args.file, valkey_binary=args.valkey_binary, artifacts=artifact_paths(args), base_port=args.base_port
+        )
     timeout, source = service.resolve_timeout(
         prepared.plan, args.timeout, profile=(prepared.generated or {}).get("profile")
     )
@@ -169,6 +179,12 @@ def run_command(args: argparse.Namespace) -> int:
     return code
 
 
+def _cores(cores: Optional[float]) -> str:
+    """The cores a draw had to fit, as the header says them: ``any`` when it had no limit."""
+
+    return "any" if cores is None else f"{cores:g}"
+
+
 def _reproduce_command(prepared: PreparedRun, args: argparse.Namespace) -> str:
     """A shell command that draws the same scenario: every option a draw depends on, quoted."""
 
@@ -180,6 +196,8 @@ def _reproduce_command(prepared: PreparedRun, args: argparse.Namespace) -> str:
         command += ["--profile", generated["profile"]]
     if args.base:
         command += ["--base", args.base]
+    if args.base_port is not None:
+        command += ["--base-port", str(args.base_port)]
     # Hooks see the binary (rolling-upgrade names the second build after it), and the catalog decides what exists.
     if args.valkey_binary:
         command += ["--valkey-binary", args.valkey_binary]

@@ -367,6 +367,11 @@ def recorded_run(path: str) -> tuple[ExecutionPlan, Optional[dict[str, Any]], Op
     data = load_document(path)
     report = as_run_report(data, path)
     if report is None:
+        # A scenario names its experiment under ``experiment``; a plan, under ``experiment_id``.
+        if isinstance(data, Mapping) and "experiment" in data and "experiment_id" not in data:
+            raise InputError(
+                f"{path} is a scenario, not a run report or plan; run it with `valkey-fuzzer run {shlex.quote(path)}`"
+            )
         plan = ExecutionPlan.from_data(data)
         return plan, *_beside_plan(path, plan)
     outcome = report["outcome"]

@@ -26,7 +26,7 @@ from .environment import (
     stable_environment_order,
 )
 from .evidence import check_requirements
-from .fields import carry_path, document_text, errors_at, located, model_from_data, strict_fields
+from .fields import carry_path, did_you_mean, document_text, errors_at, located, model_from_data, strict_fields
 from .plan import ComponentSpec, EvidenceRequirement, ExecutionPlan, ExperimentSpec
 from .protocols import ComponentRole
 from .references import (
@@ -140,13 +140,22 @@ def _resolve_template(value: Any, inputs: Mapping[str, Any], location: str) -> A
     return value
 
 
+def _hint(hint: str) -> str:
+    """``hint`` as the end of an error message: ``"; <hint>"``, or nothing when it is empty."""
+
+    return f"; {hint}" if hint else ""
+
+
 def _component_role(component: ComponentSpec, components: ComponentRegistry) -> ComponentRole:
     """The role ``component``'s registration has; an explicit role must agree with it."""
 
     registration = components.get(component.use)
     if registration is None:
         raise located(
-            ScenarioCompileError(f"component {component.id!r} uses {component.use!r}, which is not registered"),
+            ScenarioCompileError(
+                f"component {component.id!r} uses {component.use!r}, which is not registered"
+                + _hint(did_you_mean(component.use, components.registered_ids))
+            ),
             f"components.{component.id}.use",
         )
     actual = registration.role
@@ -306,7 +315,11 @@ def resolve_components(plan: ExecutionPlan, components: ComponentRegistry) -> Ex
         registration = components.get(component.use)
         if registration is None:
             raise located(
-                ScenarioCompileError(f"component {component.use!r} is not registered"), f"components.{component.id}.use"
+                ScenarioCompileError(
+                    f"component {component.use!r} is not registered"
+                    + _hint(did_you_mean(component.use, components.registered_ids))
+                ),
+                f"components.{component.id}.use",
             )
         if registration.role is not component.role:
             raise located(

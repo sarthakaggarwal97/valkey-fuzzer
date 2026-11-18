@@ -1,6 +1,14 @@
 # Same seeded workload on a baseline and a candidate build: every client
 # reply, the final dataset, and the reloaded snapshot must match.
-# Point the two artifacts at the builds you want to compare.
+# Both artifacts name `valkey-server`, which is found on PATH, so the example
+# runs as it is (both variants then use the same build). Point each at the
+# build you want to compare without editing the file:
+#
+#   valkey-fuzzer diff examples/valkey/differential_baseline_vs_candidate.yaml \
+#     --artifact baseline=/opt/valkey-8.1/src/valkey-server \
+#     --artifact candidate=/opt/valkey/src/valkey-server
+#
+# `--base-port N` moves the deployment's ports (this file uses 7640).
 differential_id: baseline-vs-candidate
 base:
   scenario_id: build-equivalence
@@ -8,10 +16,10 @@ base:
   artifacts:
     baseline:
       use: valkey.artifact.local-binary
-      with: {path: /opt/valkey-8.1/src/valkey-server}
+      with: {path: valkey-server}
     candidate:
       use: valkey.artifact.local-binary
-      with: {path: /opt/valkey/src/valkey-server}
+      with: {path: valkey-server}
   experiment:
     id: valkey.snapshot-equivalence
     inputs: {operations: 3000}

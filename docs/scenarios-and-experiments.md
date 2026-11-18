@@ -443,6 +443,9 @@ the plan ([Evidence contract](contracts.md#evidence-contract)).
 `smoke` mode has no such requirement and makes no coverage claim: it only
 tests that a deployment starts and stops, as in
 [`examples/experiments/deployment-smoke.yaml`](../examples/experiments/deployment-smoke.yaml).
+Its `PASS` is not an experiment's, so the run summary says
+`Status: PASS (mode: smoke; no coverage claim)` and a batch counts smoke runs
+apart from the others (`smoke` in `summary.json`).
 
 ## Fragments
 

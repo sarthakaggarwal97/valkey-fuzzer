@@ -1,3 +1,7 @@
+# Start and stop a cluster: the deployment smoke test, which judges no experiment.
+#
+#   valkey-fuzzer run examples/cluster_scenario.yaml \
+#     --experiment-dir examples/experiments
 scenario_id: cluster-deployment-smoke
 seed: 303
 

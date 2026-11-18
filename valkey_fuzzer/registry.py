@@ -4,6 +4,8 @@ from collections.abc import Iterable, Mapping
 from types import MappingProxyType
 from typing import Any, Generic, Optional, TypeVar
 
+from .fields import did_you_mean
+
 T = TypeVar("T")
 
 
@@ -18,9 +20,10 @@ class DuplicateRegistrationError(RegistrationError):
 
 
 class UnknownRegistrationError(RegistrationError):
-    def __init__(self, label: str, key: Any):
+    def __init__(self, label: str, key: Any, known: Iterable[Any] = ()):
         self.key = key
-        super().__init__(f"{label} {key!r} is not registered")
+        hint = did_you_mean(key, known)
+        super().__init__(f"{label} {key!r} is not registered" + (f"; {hint}" if hint else ""))
 
 
 class FrozenRegistryError(RegistrationError):
@@ -76,7 +79,7 @@ class BaseRegistry(Generic[T]):
         try:
             return self._entries[key]
         except (KeyError, TypeError) as exc:
-            raise UnknownRegistrationError(self.label, key) from exc
+            raise UnknownRegistrationError(self.label, key, self._entries) from exc
 
     def get(self, key: Any) -> Optional[T]:
         return self._entries.get(key)

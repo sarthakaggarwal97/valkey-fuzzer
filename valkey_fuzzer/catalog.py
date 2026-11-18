@@ -18,7 +18,14 @@ from ._data import freeze_mapping
 from .deployment.local.provider import local_deployment_provider_registrations
 from .documents import merge
 from .environment import EnvironmentProviderRegistration, EnvironmentProviderRegistry
-from .fields import document_sequence, model_from_data, models_from_data, require_qualified_id, strict_fields
+from .fields import (
+    did_you_mean,
+    document_sequence,
+    model_from_data,
+    models_from_data,
+    require_qualified_id,
+    strict_fields,
+)
 from .plan import ComponentSpec, EvidenceRequirement, ExecutionPlan, ExperimentSpec, InstanceSelector, StartupOverlay
 from .registrations import ComponentRegistration, DeploymentProviderRegistration, GeneratorRegistration
 from .registry import BaseRegistry, DuplicateRegistrationError, FrozenRegistryError, RegistrationError
@@ -40,9 +47,10 @@ class DuplicateExperimentError(ExperimentError):
 
 
 class UnknownExperimentError(ExperimentError):
-    def __init__(self, experiment_id: str):
+    def __init__(self, experiment_id: str, known: Iterable[str] = ()):
         self.experiment_id = experiment_id
-        super().__init__(f"experiment {experiment_id!r} is not registered")
+        hint = did_you_mean(experiment_id, known)
+        super().__init__(f"experiment {experiment_id!r} is not registered" + (f"; {hint}" if hint else ""))
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +270,7 @@ class ExperimentRegistry(BaseRegistry[ExperimentSpec]):
     def resolve(self, experiment_id: str) -> ExperimentSpec:
         experiment = self.get(experiment_id)
         if experiment is None:
-            raise UnknownExperimentError(experiment_id)
+            raise UnknownExperimentError(experiment_id, self._entries)
         return experiment
 
 

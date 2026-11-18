@@ -3,6 +3,7 @@ error names, which ``valkey-fuzzer validate`` reports), and the strict loaders t
 models, so every loader names a bad field the same way.
 """
 
+import difflib
 import math
 import re
 from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -139,6 +140,17 @@ def carry_path(error: Exception, cause: BaseException) -> Exception:
 
 T = TypeVar("T")
 
+# How many close names a "did you mean" hint offers.
+SUGGESTION_COUNT = 3
+
+
+def did_you_mean(name: Any, candidates: Iterable[Any]) -> str:
+    """``did you mean 'a', 'b'?`` naming the (at most three) ``candidates`` closest to ``name``; ``""`` when none is."""
+
+    names = sorted({item for item in candidates if isinstance(item, str)})
+    close = difflib.get_close_matches(str(name), names, n=SUGGESTION_COUNT)
+    return "did you mean " + ", ".join(repr(item) for item in close) + "?" if close else ""
+
 
 def strict_fields(
     value: Any,
@@ -156,9 +168,15 @@ def strict_fields(
 
     if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
         raise located(error(f"{field_name} must be a mapping with string keys"), field_name)
-    unknown = [] if allowed is None else sorted(set(value) - set(allowed))
+    valid = None if allowed is None else sorted(allowed)
+    unknown = [] if valid is None else sorted(set(value) - set(valid))
     if unknown:
-        raise located(error(f"{field_name} contains unknown fields: {unknown}"), f"{field_name}.{unknown[0]}")
+        hints = [f"{item!r}: {hint}" for item in unknown if (hint := did_you_mean(item, valid))]
+        message = f"{field_name} contains unknown fields: {unknown}"
+        if hints:
+            message += "; " + "; ".join(hints)
+        message += f"; valid fields: {valid}"
+        raise located(error(message), f"{field_name}.{unknown[0]}")
     missing = next((name for name in required if name not in value), None)
     if missing is not None:
         raise located(error(f"{field_name} is missing required field {missing!r}"), f"{field_name}.{missing}")

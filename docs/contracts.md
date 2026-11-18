@@ -308,7 +308,20 @@ stream)`, a stream derived from the scenario seed, the component `id`, and a
 stream name. The same seed repeats every choice: the keys a workload writes,
 the replica a failover promotes, the instance a chaos action kills. The
 generator draws each dimension of a random scenario from its own stream, so
-the same seed and profile always draw the same scenario.
+the same seed and profile draw the same scenario on a host with the same
+number of usable cores.
+
+The cores are part of the draw. A random run may use only the cores its
+process may (its CPU affinity, less its cgroup's CPU quota; in a batch, its
+worker's share). When a candidate's deployment needs more, the generator draws
+again with the next `attempt` number, so a seed can give one scenario on a
+developer's host and another in a CI container with a CPU limit. A seed is
+therefore stable per (profile, cores), and a bug report should give the seed
+with its `cores` and `attempt`: `run` prints them next to the seed (`seed 42
+(attempt 0, cores 4)`), the batch summary prints the cores per run and each
+failure's seed and attempt, and the run report records them under
+`reproducer.generated`. The scenario a run saved (`scenario.yaml`) replays on
+any host, whatever its cores.
 
 A seed does not fix timing. Thread scheduling, process start-up, and the
 server's own timers still vary, so a fault that races with the server can

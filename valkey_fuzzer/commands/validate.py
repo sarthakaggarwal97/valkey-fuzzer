@@ -11,6 +11,7 @@ import argparse
 import json
 import sys
 import traceback
+from collections.abc import Mapping
 from typing import Any, Optional
 
 from ..outcomes import EXIT_HARNESS_ERROR, EXIT_SUCCESS
@@ -27,6 +28,12 @@ def register(subparsers: Any) -> None:
     add_common_options(parser, valkey_binary=True)
     parser.add_argument("--format", choices=["text", "json"], default="text")
     parser.add_argument("--verbose", action="store_true", help="Show the resolved component plan")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Warn about a scenario that would pass without proving its own experiment ran (the exit code is "
+        "unchanged)",
+    )
     parser.set_defaults(handler=validate_command)
 
 
@@ -49,8 +56,33 @@ def error_location(error: BaseException) -> str:
 INVALID_SCENARIO_ERRORS = (InputError, RunnerError, ValueError)
 
 
+def strict_warnings(service: RunService, plan: ExecutionPlan) -> list[str]:
+    """What ``validate --strict`` warns of for ``plan``.
+
+    An experiment passes on its fragments' required evidence alone (the ``valkey.base`` writes, ledger and liveness
+    checks) without any evidence from a component of its own, so nothing shows that what it adds ran.
+    shortcut: a component is the experiment's own when no registered fragment declares its ID; upgrade when parsed
+    experiments record which components came from a fragment.
+    """
+
+    inherited = {
+        component["id"]
+        for fragment in service.catalog.fragments.values()
+        for component in fragment.get("components", ())
+        if isinstance(component, Mapping) and "id" in component
+    }
+    own = [component.id for component in plan.components if component.id not in inherited]
+    if not own or any(requirement.source not in inherited for requirement in plan.required_evidence):
+        return []
+    return [
+        f"no component of the experiment's own is required evidence (required: {len(plan.required_evidence)}, all "
+        f"from shared fragments), so {plan.experiment_id} can PASS without its own components {own} having run; "
+        "add required_evidence naming one (docs/extending.md, Design the test)"
+    ]
+
+
 def _validate_file(
-    service: RunService, path: str, binary: Optional[str]
+    service: RunService, path: str, binary: Optional[str], strict: bool = False
 ) -> tuple[dict[str, Any], Optional[ExecutionPlan], Optional[Exception]]:
     try:
         plan = service.validate(path, valkey_binary=binary)
@@ -58,6 +90,8 @@ def _validate_file(
         row = {"file": path, "ok": False, "errors": [{"path": error_location(exc), "message": str(exc)}]}
         return row, None, exc
     row = {"file": path, "ok": True, "errors": [], "experiment": plan.experiment_id, "scenario_id": plan.scenario_id}
+    if strict:
+        row["warnings"] = strict_warnings(service, plan)
     return row, plan, None
 
 
@@ -70,7 +104,7 @@ def validate_command(args: argparse.Namespace) -> int:
     verbose = args.verbose
     rows = []
     for path in args.files:
-        row, plan, error = _validate_file(service, path, binary)
+        row, plan, error = _validate_file(service, path, binary, args.strict)
         rows.append(row)
         if json_output:
             continue
@@ -83,6 +117,8 @@ def validate_command(args: argparse.Namespace) -> int:
         print(
             "Scenario is valid without provisioning (what needs acquired artifacts or a server is checked at run time)"
         )
+        for warning in row.get("warnings", ()):
+            print(f"Warning: {warning}", file=sys.stderr)
         _print_plan(plan, verbose=verbose)
     ok = all(row["ok"] for row in rows)
     if json_output:

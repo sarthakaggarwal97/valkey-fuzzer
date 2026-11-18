@@ -1,3 +1,7 @@
+# Start and stop a standalone primary with replicas: the deployment smoke test, which judges no experiment.
+#
+#   valkey-fuzzer run examples/standalone_replicas_scenario.yaml \
+#     --experiment-dir examples/experiments
 scenario_id: standalone-replicas-deployment-smoke
 seed: 202
 
