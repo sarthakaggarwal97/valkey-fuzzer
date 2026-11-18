@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -163,6 +164,28 @@ def test_a_failed_spawn_stops_the_started_servers_and_removes_their_data(tmp_pat
     first.terminate.assert_called_once()
     assert manager.spawned_instances == []
     assert not (tmp_path / f"deployment-{manager.deployment_id}").exists()
+
+
+def test_a_server_that_exits_before_its_first_ping_is_reported_with_its_exit_code_and_last_lines(tmp_path):
+    manager = process_manager(tmp_path)
+    script = "import sys\nfor n in range(8): print(f'line {n}', file=sys.stderr)\nsys.exit(3)"
+    started = manager._start_process
+
+    def start(cmd, log_file, env=None):
+        return started([sys.executable, "-c", script], log_file, env)
+
+    with (
+        patch("valkey_fuzzer.deployment.local.ports.port_unavailable_reason", return_value=None),
+        patch.object(manager, "_start_process", side_effect=start),
+        patch.object(manager, "_answers", return_value=False),
+        pytest.raises(LocalDeploymentError) as raised,
+    ):
+        manager.spawn_all(plan_deployment(manager.config))
+
+    message = str(raised.value)
+    assert re.search(r"valkey-0 exited with code 3 after \d+\.\d+s", message) and "within" not in message
+    # The last five lines, not the first three.
+    assert "line 7" in message and "line 3" in message and "line 2" not in message
 
 
 def test_binaries_must_exist(tmp_path):

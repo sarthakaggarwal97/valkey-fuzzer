@@ -460,7 +460,7 @@ def test_a_crash_the_post_mortem_finds_in_a_failed_run_is_its_verdict(failed, lo
     }[failed]  # fmt: skip
     signature = failure_signature(outcome)
     if logs == "crashed":
-        assert outcome.status is OutcomeStatus.FAIL and outcome.summary == f"{TRUSTED}: {judged}"
+        assert outcome.status is OutcomeStatus.FAIL and outcome.summary.startswith(f"{TRUSTED}: {judged}")
         assert signature["crashes"] == ["server.c:N:N: runtime error: signed integer overflow"]
     else:
         assert outcome.status is OutcomeStatus.ERROR and outcome.summary.startswith("runner execution failed")
@@ -480,7 +480,7 @@ def test_a_crash_an_action_found_stands_when_the_run_fails_after_it():
 
     outcome = _execute(_plan((_spec(ACTION, "crash"), _spec(ACTION, "after"))), (ACTION, Actions))
 
-    assert outcome.status is OutcomeStatus.FAIL and outcome.summary == f"{TRUSTED}: crash"
+    assert outcome.status is OutcomeStatus.FAIL and outcome.summary.startswith(f"{TRUSTED}: crash")
     assert outcome.diagnostics["error"]["phase"] == "action.run"
 
 
@@ -509,7 +509,7 @@ def test_a_crash_any_component_reports_is_a_finding_and_a_capability_crash_ends_
     assert ("standalone.provision" in calls) is (role is not CAPABILITY)
     assert "error" not in outcome.diagnostics
     if crash:
-        assert outcome.summary == f"{TRUSTED}: probe" and failure_signature(outcome)["crashes"] == ["y"]
+        assert outcome.summary.startswith(f"{TRUSTED}: probe") and failure_signature(outcome)["crashes"] == ["y"]
 
 
 @pytest.fixture

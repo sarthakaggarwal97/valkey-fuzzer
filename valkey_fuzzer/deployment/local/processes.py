@@ -419,7 +419,16 @@ class ProcessManager:
                     retry=(valkey.ConnectionError, valkey.TimeoutError),
                     context=context,
                 )
-                if not answered or instance.process.poll() is not None:
+                exit_code = instance.process.poll()
+                if exit_code is not None:
+                    # Died before its first PING: the harness could not establish its preconditions (an ERROR),
+                    # unless the process left a crash report, which the liveness post-mortem turns into a FAIL.
+                    raise LocalDeploymentError(
+                        f"Instance {instance.instance_id} exited with code {exit_code} after "
+                        f"{time.time() - instance.started_at:.1f}s, before answering a PING"
+                        f"{self._process_output_tail(instance.log_file, lines=5)}"
+                    )
+                if not answered:
                     raise LocalDeploymentError(
                         f"Instance {instance.instance_id} failed to start within {READY_TIMEOUT_S:g}s"
                         f"{self._process_output_tail(instance.log_file)}"
@@ -460,16 +469,20 @@ class ProcessManager:
             return subprocess.Popen(cmd, stdout=output, stderr=subprocess.STDOUT, env=env)
 
     def _process_output_tail(self, log_file: str, lines: int = 20) -> str:
-        """Return a short suffix with the last process output lines, for error messages."""
+        """Return a short suffix with the last lines the process wrote, for error messages: its stdout/stderr, then
+        its own log file (a server that exits at startup says why in either)."""
         output_path = process_output_path(log_file)
-        try:
-            with open(output_path, encoding="utf-8", errors="replace") as output:
-                tail = output.read().splitlines()[-lines:]
-        except OSError:
-            return ""
+        tail: list[str] = []
+        for path in (output_path, log_file):
+            try:
+                with open(path, encoding="utf-8", errors="replace") as output:
+                    tail += [line.strip() for line in output.read().splitlines() if line.strip()]
+            except OSError:
+                continue
+        tail = tail[-lines:]
         if not tail:
             return ""
-        return f" (process output from {output_path}: " + " | ".join(line.strip() for line in tail) + ")"
+        return f" (process output from {output_path} and {log_file}: " + " | ".join(tail) + ")"
 
     @staticmethod
     def _terminate_untracked_process(process: subprocess.Popen, instance_id: str) -> None:
