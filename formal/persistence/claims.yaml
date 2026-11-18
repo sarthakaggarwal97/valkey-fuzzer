@@ -1,6 +1,8 @@
 # What formal/persistence/model.tla claims about the order in which one Valkey
 # server writes its AOF files, manifest and RDB file, under which assumptions
 # and bounds, and what it leaves out.
+# Model only: no property below is evaluated against a live run. A `spec check` PASS says the model
+# holds within its bounds, not that Valkey does.
 protocol: persistence
 summary: >-
   A process killed at any step of an AOF rewrite, of CONFIG SET appendonly in

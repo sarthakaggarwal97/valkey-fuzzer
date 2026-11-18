@@ -6,6 +6,7 @@ The terms it uses are defined in [Concepts and glossary](concepts.md).
 
 - [Install](#install)
 - [Choose a Valkey binary](#choose-a-valkey-binary)
+- [Build porcupine](#build-porcupine)
 - [Run an experiment](#run-an-experiment)
 - [Read the output](#read-the-output)
 - [Find the files a run leaves](#find-the-files-a-run-leaves)
@@ -17,8 +18,13 @@ The terms it uses are defined in [Concepts and glossary](concepts.md).
 
 ## Install
 
+Until this code lands in `valkey-io/valkey-fuzzer`, clone the `generic-fuzzer`
+branch of the fork; `main` of `valkey-io/valkey-fuzzer` is an older layout.
+You need Python 3.10 or later and git; use a virtual environment if your
+system Python refuses `pip install`.
+
 ```bash
-git clone https://github.com/valkey-io/valkey-fuzzer.git
+git clone -b generic-fuzzer https://github.com/sarthakaggarwal97/valkey-fuzzer.git
 cd valkey-fuzzer
 python -m pip install -e .
 ```
@@ -50,20 +56,54 @@ The local deployment looks for `valkey-server` in this order:
    and builds it with `make` into `/tmp/valkey-build/valkey`, one build at a
    time.
 
-Most Valkey experiments probe the build before the deployment starts
-(`valkey.capability.build-probe`), and the probe goes only through steps 1
-to 3: without a binary it reports `ERROR` instead of building one. Only
-`valkey.cluster-chaos`, `valkey.cluster-partition`, and
-`valkey.bgsave-disk-full` reach step 4. So build Valkey once, or point at a
-build:
+Only four experiments probe the binary before the deployment starts
+(`valkey.capability.build-probe`): `valkey.cluster-election-durability`,
+`valkey.cluster-vote-save-crash`, `valkey.mixed-version-cluster`, and
+`valkey.rolling-upgrade`. The probe goes through steps 1 to 3, so without a
+binary these report `ERROR` instead of building one. Every other experiment,
+including the quickstart's `valkey.aof-durability`, reaches step 4 on a host
+with no binary: it clones and builds Valkey 9.1.3 before it starts, which
+takes about 70 seconds and 280 MB, and needs git, make, a C compiler, and
+network access. It logs one line when it starts and writes the clone and make
+output to `/tmp/valkey-build/build.log`. The build is reused afterwards. To
+build Valkey yourself once, or point at a build:
 
 ```bash
-valkey-fuzzer run examples/valkey/aof_durability.yaml --valkey-binary ~/src/valkey/src/valkey-server
+git clone --depth 1 --branch 9.1.3 https://github.com/valkey-io/valkey.git && make -C valkey -j"$(nproc)"
+valkey-fuzzer run examples/valkey/aof_durability.yaml --valkey-binary "$PWD/valkey/src/valkey-server"
 ```
+
+Use a binary where it was built. A `valkey-server` copied out of its build
+tree can crash at start because it cannot find its Lua module, and the run
+then reports `FAIL`.
 
 Some experiments need features that only some builds have (such as
 `cluster-config-save-behavior`). They probe the binary first and report
 `SKIP_UNSUPPORTED` instead of failing when it lacks a feature they name.
+
+## Build porcupine
+
+Six experiments check that the history of reads and writes is linearizable
+with [Porcupine](https://github.com/anishathalye/porcupine), through the
+`valkey.history` fragment: `valkey.aof-durability` (the quickstart),
+`valkey.cluster-partition`, `valkey.mixed-version-cluster`,
+`valkey.replication-chaos`, `valkey.replication-full-resync`, and
+`valkey.rolling-upgrade`. The checker is a small Go program in `porcupine/`
+that pip does not build, so install Go 1.21 or later and build it once per
+host, from the checkout:
+
+```bash
+mkdir -p "$HOME/.local/bin"
+go -C porcupine build -o "$HOME/.local/bin/porcupine"
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+The build downloads the Porcupine module. Behind a proxy that breaks TLS to
+`proxy.golang.org` (`x509: certificate is valid for ...`), run it as
+`GOPROXY=direct GOSUMDB=off go -C porcupine build -o "$HOME/.local/bin/porcupine"`.
+Without `porcupine` on `PATH`, `validate` of these experiments exits `2` and a
+run ends `ERROR` before it starts anything, with `porcupine is not on PATH` and
+the build command; the other experiments do not need it.
 
 ## Run an experiment
 
@@ -120,6 +160,7 @@ Evidence: 12
 Valkey SHA: dff4c58e
 Summary: experiment passed
 Report: /tmp/valkey-fuzzer/runs/20261028T041350.730Z-aof-durability-5405f2/report.json
+Reproduce: valkey-fuzzer replay /tmp/valkey-fuzzer/runs/20261028T041350.730Z-aof-durability-5405f2/report.json
 
 Results saved to report.json
 ```
@@ -137,6 +178,8 @@ Results saved to report.json
 and the component that should have produced it, for example
 `required evidence was not observed: valkey.rdb.reload-verified from snapshot`.
 [Outcomes and verdicts](contracts.md#outcomes-and-verdicts) has the rules.
+For a `FAIL`, [Reading a FAIL](reading-a-fail.md) shows where its evidence and
+logs are and what to attach to a Valkey issue.
 Add `--verbose` to `run` to print every component's result, its evidence
 count, and its diagnostics.
 
@@ -267,7 +310,10 @@ option and file is in [batch](cli.md#batch).
 | Symptom | Cause and fix |
 | --- | --- |
 | `ERROR`, and `--verbose` shows `Cannot provision the local deployment, planned ports are in use: valkey-0: client port 7430 on 127.0.0.1 is unavailable (...)` | Another process holds the port, often a server left by an interrupted run. Stop it, or change `deployment.base_port`. |
-| `ERROR` with `valkey-server binary 'valkey-server' was not found` | The experiment probes the build before it starts anything, and the probe does not build from source. Put `valkey-server` on `PATH` or pass `--valkey-binary`. |
+| `ERROR` with `valkey-server binary 'valkey-server' was not found` | One of the four experiments that probe the build before they start anything (see [Choose a Valkey binary](#choose-a-valkey-binary)); the probe does not build from source. Put `valkey-server` on `PATH` or pass `--valkey-binary`. |
+| `ERROR` (or `validate` exit `2`) with `porcupine is not on PATH` | The experiment checks linearizability and the checker is not built. See [Build porcupine](#build-porcupine). |
+| `go: ... x509: certificate is valid for ..., not proxy.golang.org` while building `porcupine` | A proxy intercepts TLS. Build with `GOPROXY=direct GOSUMDB=off`. |
+| `FAIL` with `crash report` in the component's diagnostics, right after start | The `valkey-server` cannot run where it is, often a binary copied away from its build tree. Run it in place. See [Reading a FAIL](reading-a-fail.md). |
 | A batch job is `ERROR` although its run report passed, and `batch.log` shows `LEAKED` | The run left a server, chain, mount, or directory behind; the batch removed it and lists it under `leaks`. See [Isolation, deadlines, and leaks](cli.md#isolation-deadlines-and-leaks). |
 | `SKIP_UNSUPPORTED` with `build rejects startup configuration` or `does not support config` | The binary lacks a feature the experiment needs. Use a build that has it. |
 | `ERROR` with `not a setting the experiment says the build may lack` | The build rejects a setting of the scenario's server config, often a misspelt name or value. Fix the scenario. |
