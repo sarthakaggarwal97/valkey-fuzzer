@@ -591,3 +591,21 @@ def test_an_error_goes_to_stderr_and_names_its_type_when_its_message_does_not(ca
         assert main() == EXIT_HARNESS_ERROR
     captured = capsys.readouterr()
     assert captured.out == "" and captured.err.strip() == shown
+
+
+def test_a_run_of_a_scenario_file_prints_the_command_that_replays_it(tmp_path, canned_runs, capsys):
+    assert _cli("run", EXAMPLE) == 0
+    out = capsys.readouterr().out
+    (report,) = (tmp_path / "valkey-fuzzer" / "runs").glob("*/report.json")
+    assert f"Reproduce: valkey-fuzzer replay {report}" in out
+    assert "Look at:" not in out
+
+
+def test_a_failed_run_says_where_to_look_and_a_generated_one_also_prints_the_replay(tmp_path, canned_runs, capsys):
+    canned_runs.status = OutcomeStatus.FAIL
+    assert _cli("run", "--seed", 5, "--experiment", "valkey.aof-durability") == 1
+    out = capsys.readouterr().out
+    (report,) = (tmp_path / "valkey-fuzzer" / "runs").glob("*/report.json")
+    assert "Reproduce: valkey-fuzzer run --seed 5" in out
+    assert f"or, replay this exact run: valkey-fuzzer replay {report}" in out
+    assert f"Look at: {report.parent}" in out and "server logs:" in out

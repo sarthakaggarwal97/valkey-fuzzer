@@ -3,6 +3,7 @@ code or a plan its scenario does not compile to, minimization keeps only the sam
 comparison never passes on missing evidence."""
 
 import json
+import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -12,7 +13,7 @@ import pytest
 import yaml
 
 from tests.support import make_plan, recorded_report
-from valkey_fuzzer import provenance
+from valkey_fuzzer import provenance, reports
 from valkey_fuzzer.cli import main
 from valkey_fuzzer.differential import Differential, compare_outcomes, differential_status
 from valkey_fuzzer.minimize import failure_signature, same_failure
@@ -254,3 +255,95 @@ def test_an_exported_scenario_replaces_the_old_file_whole_or_not_at_all(tmp_path
     with pytest.raises(ReportWriteError, match="could not write the scenario"):
         export_scenario({"scenario_id": "s", "seed": 1}, str(target))
     assert target.read_text(encoding="utf-8") == "old: scenario\n" and list(tmp_path.iterdir()) == [target]
+
+
+# The keys of a report.json and of its reproducer before the readable layout; sarthakaggarwal97/valkey-ci-agent
+# reads them, so none may go or change its name.
+LEGACY_REPORT_KEYS = {
+    "generated_at",
+    "status",
+    "summary",
+    "scenario",
+    "outcome",
+    "coverage",
+    "reproducer",
+    "provenance",
+}
+LEGACY_REPRODUCER_KEYS = {
+    "python",
+    "platform",
+    "experiment",
+    "fuzzer_digest",
+    "components",
+    "deployment_provider",
+    "plan_digest",
+    "valkey_sha",
+}
+
+
+def _failed_report(service, canned_runs, tmp_path):
+    canned_runs.status = OutcomeStatus.FAIL
+    canned_runs.evidence = lambda plan: ()
+    prepared = service.prepare_run(EXAMPLE)
+    record = service.execute(prepared.plan, scenario=prepared.scenario, report_dir=str(tmp_path / "r"))
+    return record, json.loads((tmp_path / "r" / "report.json").read_text())
+
+
+def test_report_json_leads_with_the_verdict_and_keeps_every_key_a_tool_reads(service, canned_runs, tmp_path):
+    _, report = _failed_report(service, canned_runs, tmp_path)
+    assert list(report)[:5] == ["status", "summary", "failed_components", "reproduce", "look_at"]
+    assert set(report) >= LEGACY_REPORT_KEYS
+    assert set(report["reproducer"]) >= LEGACY_REPRODUCER_KEYS
+    assert [row["component_id"] for row in report["failed_components"]] == ["data"]
+    assert report["failed_components"][0]["summary"] == "lost"
+    assert report["look_at"]["report_folder"] == str(tmp_path / "r")
+    # The data a tool reads is unchanged: the full component results stay in the outcome.
+    assert [row["component_id"] for row in report["outcome"]["component_results"]] == ["data"]
+
+
+def test_the_report_records_the_command_and_binary_that_reproduce_it(service, canned_runs, tmp_path):
+    prepared = service.prepare_run(EXAMPLE, valkey_binary="/opt/my builds/valkey")
+    record = service.execute(prepared.plan, scenario=prepared.scenario, report_dir=str(tmp_path / "r"))
+    report = json.loads((tmp_path / "r" / "report.json").read_text())
+    assert report["reproduce"] == report["reproducer"]["command"]
+    assert shlex.split(report["reproduce"]) == ["valkey-fuzzer", "replay", record.report_path]
+    assert report["reproducer"]["valkey_binary"] == "/opt/my builds/valkey"
+
+
+def test_a_long_value_in_failed_components_is_cut_with_its_length_and_digest_and_the_outcome_keeps_it(
+    service, canned_runs, tmp_path
+):
+    long_value = "k" * 4000
+
+    def run(plan, *, deadline=None, run_dir=None):
+        evidence = (Evidence("valkey.data.violation", "data", "oracle", 1.0, long_value),)
+        failing = ComponentResult("data", ComponentStatus.FAIL, "s" * 500, evidence=evidence)
+        return RunOutcome(plan, OutcomeStatus.FAIL, "FAIL", component_results=(failing,))
+
+    with patch("valkey_fuzzer.runner.Runner.run", staticmethod(run)):
+        prepared = service.prepare_run(EXAMPLE)
+        service.execute(prepared.plan, scenario=prepared.scenario, report_dir=str(tmp_path / "r"))
+    report = json.loads((tmp_path / "r" / "report.json").read_text())
+    (row,) = report["failed_components"]
+    assert row["summary"].startswith("s" * 120 + "...") and "500 chars" in row["summary"] and "sha256" in row["summary"]
+    shown = row["evidence"][0]["value"]
+    assert len(shown) < 200 and "sha256" in shown and long_value not in shown
+    assert report["outcome"]["component_results"][0]["evidence"][0]["value"] == long_value
+
+
+def test_shorten_leaves_a_short_value_alone_and_gives_equal_digests_to_equal_values():
+    assert reports.shorten("abc") == "abc" and reports.shorten({"a": 1}) == '{"a": 1}'
+    assert reports.shorten("z" * 121) == reports.shorten("z" * 121) != reports.shorten("y" * 121)
+    assert reports.shorten("z" * 120) == "z" * 120
+
+
+def test_an_old_report_without_the_readable_keys_still_loads_and_replays(service, canned_runs, tmp_path):
+    def drop_new_keys(report):
+        for key in ("failed_components", "reproduce", "look_at"):
+            del report[key]
+        del report["reproducer"]["command"], report["reproducer"]["valkey_binary"]
+
+    path = recorded_report(service, tmp_path, edit=drop_new_keys)
+    assert reports.as_run_report(json.loads(Path(path).read_text()), path) is not None
+    prepared = service.prepare_replay(path)
+    assert prepared.verified

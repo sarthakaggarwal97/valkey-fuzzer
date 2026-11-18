@@ -74,11 +74,11 @@ def plan_deployment(config: DeploymentConfig, overlays: Sequence[StartupOverlay]
     """
     cluster = config.mode is DeploymentMode.CLUSTER
     if cluster:
-        logger.info(
+        logger.debug(
             "Planning a cluster of %s primaries with %s replica(s) each", config.primaries, config.replicas_per_primary
         )
     else:
-        logger.info("Planning a standalone deployment with %s replica(s)", config.replicas_per_primary)
+        logger.debug("Planning a standalone deployment with %s replica(s)", config.replicas_per_primary)
 
     slots_per_shard = HASH_SLOTS // config.primaries
     instances = []

@@ -222,13 +222,25 @@ def build_valkey(base_dir: str = SOURCE_BUILD_DIR, timeout: float = BUILD_TIMEOU
             if not os.path.exists(binary):
                 work = tempfile.mkdtemp(prefix="valkey-", dir=base_dir)
                 deadline = time.monotonic() + timeout
+                build_log = os.path.join(base_dir, "build.log")
+                logger.info(
+                    "Building Valkey %s from source (about a minute; once, then reused); output: %s",
+                    VALKEY_SOURCE_REF,
+                    build_log,
+                )
                 try:
-                    clone = ["git", "clone", "--depth", "1", "--branch", VALKEY_SOURCE_REF, VALKEY_REPOSITORY, work]
-                    subprocess.run(clone, check=True, timeout=timeout)
-                    make = ["make", f"-j{os.cpu_count() or 1}"]
-                    subprocess.run(make, cwd=work, check=True, timeout=max(0.0, deadline - time.monotonic()))
+                    # The git and make output goes to a file, not the terminal; a failure points at it.
+                    with open(build_log, "w", encoding="utf-8") as output:
+                        clone = ["git", "clone", "--depth", "1", "--branch", VALKEY_SOURCE_REF, VALKEY_REPOSITORY, work]
+                        subprocess.run(clone, check=True, timeout=timeout, stdout=output, stderr=subprocess.STDOUT)
+                        make = ["make", f"-j{os.cpu_count() or 1}"]
+                        remaining = max(0.0, deadline - time.monotonic())
+                        subprocess.run(
+                            make, cwd=work, check=True, timeout=remaining, stdout=output, stderr=subprocess.STDOUT
+                        )
                     os.rename(work, target)
                 except BaseException:
+                    logger.error("The Valkey build failed; its output is in %s", build_log)
                     shutil.rmtree(work, ignore_errors=True)
                     raise
         finally:

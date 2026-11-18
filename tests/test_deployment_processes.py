@@ -1,5 +1,6 @@
 """The local deployment's servers: their commands, spawning, restarts, ports, formation, output, and cleanup."""
 
+import logging
 import os
 import signal
 import socket
@@ -195,11 +196,12 @@ def test_components_find_valkey_server_and_read_slot_ranges_as_the_deployment_do
 
 def test_the_source_build_is_pinned_parallel_and_built_aside_under_a_lock(tmp_path):
     # Concurrent batch workers without a binary must not race on one clone, or build an unpinned HEAD.
-    commands, timeouts = [], []
+    commands, timeouts, outputs = [], [], []
 
-    def run(command, cwd=None, check=False, timeout=None):
+    def run(command, cwd=None, check=False, timeout=None, stdout=None, stderr=None):
         commands.append((command, cwd))
         timeouts.append(timeout)
+        outputs.append((stdout.name, stderr))
         if command[0] == "make":
             binary = os.path.join(cwd, "src", "valkey-server")
             os.makedirs(os.path.dirname(binary))
@@ -222,6 +224,9 @@ def test_the_source_build_is_pinned_parallel_and_built_aside_under_a_lock(tmp_pa
     assert flock.call_count == 2  # taken, then released
     # A hung clone or make cannot hold the run past its deadline.
     assert timeouts[0] == 600.0 and 0 < timeouts[1] <= 600.0
+    # The clone and make output goes to one file beside the build, not the terminal.
+    build_log = str(tmp_path / "build" / "build.log")
+    assert outputs == [(build_log, subprocess.STDOUT)] * 2 and os.path.isfile(build_log)
 
 
 def test_spawn_and_formation_waits_end_at_the_runs_deadline(tmp_path, monkeypatch):
@@ -680,3 +685,27 @@ def test_a_killed_primary_of_a_real_cluster_restarts_as_a_new_process_the_cluste
         assert primary.pid != old_pid and primary.process.poll() is None
         with valkey_client(primary.host, primary.port, timeout=2.0) as client:
             assert int(client.info("server")["process_id"]) == primary.pid
+
+
+def test_planning_a_deployment_is_logged_at_debug_not_info(tmp_path, caplog):
+    manager = process_manager(tmp_path)
+    with caplog.at_level(logging.INFO, logger="valkey_fuzzer.deployment.local.planner"):
+        plan_deployment(manager.config)
+    assert not [record for record in caplog.records if "Planning" in record.getMessage()]
+    with caplog.at_level(logging.DEBUG, logger="valkey_fuzzer.deployment.local.planner"):
+        plan_deployment(manager.config)
+    assert [record for record in caplog.records if "Planning" in record.getMessage()]
+
+
+def test_a_failed_source_build_names_the_file_holding_its_output(tmp_path, caplog):
+    def run(command, **options):
+        raise subprocess.CalledProcessError(2, command)
+
+    with (
+        patch(f"{PROCESSES}.subprocess.run", side_effect=run),
+        patch(f"{PROCESSES}.fcntl.flock"),
+        caplog.at_level(logging.ERROR),
+        pytest.raises(subprocess.CalledProcessError),
+    ):
+        processes.build_valkey(str(tmp_path / "build"))
+    assert str(tmp_path / "build" / "build.log") in caplog.text

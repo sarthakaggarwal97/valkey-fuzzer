@@ -507,8 +507,11 @@ class RunService:
     ) -> RunRecord:
         """Write ``report.json`` for ``outcome``; every command's run reports are written here."""
 
-        report = self.run_report(outcome, scenario=scenario, provenance=provenance, generated=generated)
-        write_document(os.path.join(report_dir, REPORT_FILE), report)
+        report_path = os.path.join(report_dir, REPORT_FILE)
+        report = self.run_report(
+            outcome, scenario=scenario, provenance=provenance, generated=generated, report_path=report_path
+        )
+        write_document(report_path, report)
         return RunRecord(outcome=outcome, report=report, report_dir=report_dir)
 
     def run_report(
@@ -518,10 +521,18 @@ class RunService:
         scenario: Optional[Mapping[str, Any]] = None,
         provenance: Optional[Mapping[str, Any]] = None,
         generated: Optional[Mapping[str, Any]] = None,
+        report_path: Optional[str] = None,
     ) -> dict[str, Any]:
         """:func:`~valkey_fuzzer.reports.run_report` of ``outcome`` through this service's catalog."""
 
-        return run_report(self.catalog, outcome, scenario=scenario, provenance=provenance, generated=generated)
+        return run_report(
+            self.catalog,
+            outcome,
+            scenario=scenario,
+            provenance=provenance,
+            generated=generated,
+            report_path=report_path,
+        )
 
     # -- replay --------------------------------------------------------------
 
