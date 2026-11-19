@@ -81,16 +81,7 @@ class _Handle(FakeHandle):
         return os.path.join(self.root, instance_id)
 
     def new_client(self, instance_id, timeout=5.0):
-        return _Client(self.commands)
-
-
-class _Client(FakeClient):
-    def __init__(self, commands):
-        self.commands = commands
-
-    def execute_command(self, *args):
-        self.commands.append(args)
-        return "OK"
+        return FakeClient(self.commands)
 
 
 def _owned(context):

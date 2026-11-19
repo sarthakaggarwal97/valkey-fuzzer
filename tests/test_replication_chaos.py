@@ -11,7 +11,7 @@ from unittest.mock import Mock
 import pytest
 import valkey
 
-from tests.fakes import FakeHandle
+from tests.fakes import FakeHandle, fake_instances
 from tests.support import VirtualClock
 from tests.test_valkey_components_faults import Iptables
 from tests.valkey_experiments_support import (
@@ -44,11 +44,7 @@ class FakeStandalone(FakeHandle):
 
     def __init__(self, replicas=2, *, failover_works=True, record_dead=True, fail=None):
         self.mode = SimpleNamespace(value="standalone")
-        self.instances = tuple(
-            SimpleNamespace(instance_id=f"valkey-{n}", host="127.0.0.1", port=7000 + n, shard_id=0,
-                            role="replica" if n else "primary")
-            for n in range(replicas + 1)
-        )  # fmt: skip
+        self.instances = fake_instances(replicas + 1, host="127.0.0.1", port=lambda n: 7000 + n, shard_id=0)
         ids = [item.instance_id for item in self.instances]
         self.alive, self.stopped = dict.fromkeys(ids, True), dict.fromkeys(ids, False)
         # Live upstream; ``recorded`` is what a restart starts the instance as.

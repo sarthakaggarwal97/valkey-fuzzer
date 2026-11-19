@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 import valkey
 
-from tests.fakes import FakeClient, FakeHandle
+from tests.fakes import FakeClient, FakeHandle, fake_instances
 from tests.support import VirtualClock
 from tests.valkey_experiments_support import fake_context, registration_for, valkey_service
 from valkey_fuzzer import deadlines
@@ -181,9 +181,9 @@ class _Handle(FakeHandle):
         count = 4 if cluster else 2
         slots = ((0, 8191), (8192, 16383)) if cluster else ((None, None),) * 2
         role = ("primary",) * count + ("replica",) * replicas
-        self.instances = tuple(
-            SimpleNamespace(instance_id=f"valkey-{i}", role=role[i], host="127.0.0.1", port=7000 + i, shard_id=i % 2, slot_start=slots[i % 2][0], slot_end=slots[i % 2][1])
-            for i in range(count + replicas)
+        self.instances = fake_instances(
+            count + replicas, role=lambda i: role[i], host="127.0.0.1", port=lambda i: 7000 + i,
+            shard_id=lambda i: i % 2, slot_start=lambda i: slots[i % 2][0], slot_end=lambda i: slots[i % 2][1],
         )  # fmt: skip
         self.alive = primaries
         self.slots = {}
@@ -431,10 +431,10 @@ class _ThreeShards(_Handle):
 
     def __init__(self, values):
         super().__init__(values, cluster=True)
-        ids = range(6)
-        self.instances = tuple(
-            SimpleNamespace(instance_id=f"valkey-{i}", role="primary" if i < 3 else "replica", host="127.0.0.1", port=7000 + i, shard_id=i % 3, slot_start=(0, 5461, 10923)[i % 3] if i < 3 else None, slot_end=(5460, 10922, 16383)[i % 3] if i < 3 else None)
-            for i in ids
+        self.instances = fake_instances(
+            6, role=lambda i: "primary" if i < 3 else "replica", host="127.0.0.1", port=lambda i: 7000 + i,
+            shard_id=lambda i: i % 3, slot_start=lambda i: (0, 5461, 10923)[i % 3] if i < 3 else None,
+            slot_end=lambda i: (5460, 10922, 16383)[i % 3] if i < 3 else None,
         )  # fmt: skip
 
     def replicas(self):

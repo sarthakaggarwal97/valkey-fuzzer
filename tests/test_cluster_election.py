@@ -51,23 +51,16 @@ class FakeHandle(BaseHandle):
         return os.path.join(self.log_dir, f"{node_id}.log")
 
     def new_client(self, node_id, timeout=5.0):
-        handle, replies = self, self.replies(node_id)
+        replies = self.replies(node_id)
 
         class Client(FakeClient):
-            def execute_command(self, *args):
-                handle.commands.setdefault(node_id, []).append(args)
-                reply = replies.get(args, "OK")
-                if isinstance(reply, Exception):
-                    raise reply
-                return reply
-
             def config_get(self, name):
                 reply = replies.get(("CONFIG", name), "sync")
                 if isinstance(reply, Exception):
                     raise reply
                 return {name: reply}
 
-        return Client()
+        return Client(self.commands.setdefault(node_id, []), replies)
 
 
 def test_a_fault_fires_on_the_nth_matching_event_and_errors_when_that_event_never_came():

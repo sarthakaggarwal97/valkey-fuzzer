@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 import valkey
 
+from tests.fakes import FakeClient, fake_instances
 from valkey_fuzzer.components import config_space, server_stats
 from valkey_fuzzer.components.config_space import (
     CHURN_EVIDENCE,
@@ -238,12 +239,7 @@ def test_every_excluded_config_is_one_the_build_under_test_has():
 # ---------------------------------------------------------------------------
 
 
-class _Instance:
-    def __init__(self, instance_id):
-        self.instance_id = instance_id
-
-
-class _Client:
+class _Client(FakeClient):
     def __init__(self, deployment, instance_id):
         self.deployment, self.instance_id = deployment, instance_id
 
@@ -255,13 +251,10 @@ class _Client:
         self.deployment.sets.append((self.instance_id, name, value))
         return True
 
-    def close(self):
-        pass
-
 
 class _Deployment:
     def __init__(self, binary):
-        self.instances = [_Instance("valkey-0"), _Instance("valkey-1")]
+        self.instances = fake_instances(2)
         self.binaries = {"valkey-0": binary, "valkey-1": binary}
         self.sets, self.refused, self.down = [], set(), set()
 

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.fakes import FakeClient
+from tests.fakes import FakeClient, fake_instances
 from tests.support import VirtualClock
 from tests.valkey_experiments_support import evidence_values, fake_context, resolved, unit_plan
 from valkey_fuzzer import deadlines
@@ -39,16 +39,7 @@ class _Handle:
 
     def __init__(self, infos, mode="standalone", down=()):
         self.infos = {instance_id: list(replies) for instance_id, replies in infos.items()}
-        self.instances = tuple(
-            SimpleNamespace(
-                instance_id=instance_id,
-                role="replica" if index else "primary",
-                shard_id=0,
-                host="127.0.0.1",
-                port=7000 + index,
-            )
-            for index, instance_id in enumerate(infos)
-        )
+        self.instances = fake_instances(len(infos), host="127.0.0.1", port=lambda n: 7000 + n, shard_id=0)
         self.mode = SimpleNamespace(value=mode)
         self.down = set(down)
         self.cluster_nodes = {}

@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 import valkey
 
+from tests.fakes import fake_instances
 from tests.live_support import BINARY, free_port_block
 from tests.valkey_experiments_support import fake_context, resolved
 from valkey_fuzzer.components.server_stats import ErrorCountersOracle, QuietEndOracle
@@ -29,9 +30,7 @@ class _Handle:
 
     def __init__(self, port):
         self.port = port
-        self.instances = (
-            SimpleNamespace(instance_id="valkey-0", role="primary", shard_id=0, host="127.0.0.1", port=port),
-        )
+        self.instances = fake_instances(1, shard_id=0, host="127.0.0.1", port=port)
 
     def is_alive(self, instance_id):
         return True
