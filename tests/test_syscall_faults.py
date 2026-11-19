@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.fakes import FakeHandle, fake_instances
 from tests.valkey_experiments_support import fake_context, registration_for, resolved, unit_plan
 from valkey_fuzzer.components.faults import FAULT_INJECTED
 from valkey_fuzzer.components.syscall_faults import SyscallFault, read_calls, rule_text
@@ -256,21 +257,13 @@ def test_a_deployment_with_syscall_faults_starts_its_servers_under_the_library(t
     assert deployment_config_from_document({"mode": "standalone", "syscall_faults": True}).syscall_faults
 
 
-class _Handle:
+class _Handle(FakeHandle):
     """Two instances; the syscall fault directory is under ``root``; the process dies once the library kills."""
 
     def __init__(self, root):
         self.root = root
-        self.instances = tuple(
-            SimpleNamespace(instance_id=f"valkey-{n}", port=7000 + n, bus_port=17000 + n) for n in range(2)
-        )
+        self.instances = fake_instances(2, port=lambda n: 7000 + n, bus_port=lambda n: 17000 + n)
         self.alive, self.restarts = True, 0
-
-    def primaries(self):
-        return ["valkey-0"]
-
-    def replicas(self):
-        return ["valkey-1"]
 
     def syscall_fault_dir(self, instance_id):
         path = os.path.join(self.root, instance_id, "syscall-faults")

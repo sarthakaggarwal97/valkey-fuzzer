@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.fakes import FakeClient
 from tests.support import VirtualClock
 from tests.valkey_experiments_support import evidence_values, fake_context, resolved, unit_plan
 from valkey_fuzzer.components import polling, server_stats
@@ -14,7 +15,7 @@ from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.results import Evidence
 
 
-class _Client:
+class _Client(FakeClient):
     """One connection to a fake instance: INFO answers with the instance's next reply (an exception is raised)."""
 
     def __init__(self, handle, instance_id):
@@ -30,12 +31,6 @@ class _Client:
     def execute_command(self, *command):
         assert command == ("CLUSTER", "NODES")
         return self.handle.cluster_nodes[self.instance_id]
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc_info):
-        pass
 
 
 class _Handle:

@@ -12,6 +12,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.fakes import FakeClient, fake_instances
+from tests.fakes import FakeHandle as BaseHandle
 from tests.support import VirtualClock
 from tests.valkey_experiments_support import fake_context, resolved, valkey_experiment
 from valkey_fuzzer.components import cluster_election, instances, polling, processes
@@ -32,24 +34,17 @@ from valkey_fuzzer.spec import collect_runs, load_bundle, load_spec_mapping
 ID = {name: name[-1] * 40 for name in ("valkey-0", "valkey-1", "valkey-2", "valkey-3")}
 
 
-class FakeHandle:
+class FakeHandle(BaseHandle):
     """Instances valkey-0 up to ``count``; each client answers ``replies`` and records its commands."""
 
     def __init__(self, count=2, replies=lambda node_id: {}, log_dir=""):
-        self.instances = tuple(
-            SimpleNamespace(instance_id=f"valkey-{n}", shard_id=0, port=7000 + n, cluster_node_id=ID[f"valkey-{n}"])
-            for n in range(count)
+        self.instances = fake_instances(
+            count, shard_id=0, port=lambda n: 7000 + n, cluster_node_id=lambda n: ID[f"valkey-{n}"]
         )
         self.replies, self.log_dir, self.commands = replies, log_dir, {}
 
     def is_alive(self, node_id):
         return True
-
-    def primaries(self):
-        return ["valkey-0"]
-
-    def replicas(self):
-        return [node.instance_id for node in self.instances[1:]]
 
     def log_file(self, node_id):
         return os.path.join(self.log_dir, f"{node_id}.log")
@@ -57,7 +52,7 @@ class FakeHandle:
     def new_client(self, node_id, timeout=5.0):
         handle, replies = self, self.replies(node_id)
 
-        class Client:
+        class Client(FakeClient):
             def execute_command(self, *args):
                 handle.commands.setdefault(node_id, []).append(args)
                 reply = replies.get(args, "OK")
@@ -70,15 +65,6 @@ class FakeHandle:
                 if isinstance(reply, Exception):
                     raise reply
                 return {name: reply}
-
-            def close(self):
-                pass
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *exc_info):
-                pass
 
         return Client()
 
@@ -196,7 +182,7 @@ def test_the_trace_header_says_why_a_nodes_config_is_missing(tmp_path):
 
     handle = FakeHandle(2, replies)
     handle.instances = tuple(
-        SimpleNamespace(**vars(node), role="primary", data_root=str(tmp_path)) for node in handle.instances
+        SimpleNamespace(**{**vars(node), "role": "primary"}, data_root=str(tmp_path)) for node in handle.instances
     )
     handle.data_dir = lambda node_id: str(tmp_path / node_id)
     spec = resolved(
