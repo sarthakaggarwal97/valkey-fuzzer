@@ -1924,7 +1924,10 @@ def test_the_faults_check_skips_a_sequence_that_manages_auth(builds, command):
         ([["CONFIG", "SET", "rdb-key-save-delay", "0"]], {}, False),
     ],
 )
-def test_the_faults_check_skips_a_sequence_that_delays_saves_or_loads(builds, commands, server_config, skipped):
+def test_the_faults_check_skips_a_sequence_that_delays_saves_or_loads(
+    builds, monkeypatch, commands, server_config, skipped
+):
+    monkeypatch.setattr(checks, "_SYNC_TIMEOUT_S", 0.2)
     # The walk's aaeee8d5b replayed: 100,000 keys at rdb-key-save-delay 10000 made the check's DEBUG RELOAD a
     # 1,000 s save, and it timed out.
     commands = [{"command": command} for command in commands] or [{"command": ["PING"]}]
@@ -2693,6 +2696,7 @@ def test_the_parents_data_loads_and_replicates_into_the_candidate(builds, monkey
 
 
 def test_the_candidate_is_asked_nothing_until_it_loaded_the_parents_rdb(builds, monkeypatch):
+    monkeypatch.setattr(checks, "_SYNC_TIMEOUT_S", 0.2)
     # The walk's test of valkey#1317 replayed (fuzzer#117): under the sequence's key-load-delay the candidate
     # still loaded the parent's RDB, and DEBUG DIGEST answered LOADING.
     persistence = ("INFO", "persistence")
