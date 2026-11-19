@@ -1,7 +1,9 @@
-"""The Valkey components, providers, and experiments.
+"""The Valkey components, providers, and experiments: the ``valkey`` pack.
 
-:func:`valkey_fuzzer.catalog.register_valkey_components` registers what this
-package lists. Its experiments are the data-only YAML documents under
+:func:`register` registers what this package lists; ``pyproject.toml``
+declares it as the ``valkey`` entry point of the ``valkey_fuzzer.packs`` group,
+which :func:`valkey_fuzzer.catalog.build_catalog` loads with every other
+installed pack. Its experiments are the data-only YAML documents under
 ``experiments/``; they extend the fragments under ``fragments/``
 (``valkey.writes``, ``valkey.base``, the procedures they share, such as
 ``valkey.psync``), and every experiment extends ``valkey.liveness``, which adds
@@ -14,7 +16,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Optional
 
-from valkey_fuzzer.catalog import load_experiment_yaml
+from valkey_fuzzer.catalog import Catalog, load_experiment_yaml
 from valkey_fuzzer.registrations import ComponentRegistration
 from valkey_fuzzer.schema import load_yaml_mapping
 
@@ -106,6 +108,19 @@ def experiments(fragments: Optional[Mapping[str, Any]] = None) -> tuple[Any, ...
     )
 
 
+def register(catalog: Catalog) -> None:
+    """Register the Valkey components, generator hooks, environment providers, experiment fragments, and experiments."""
+
+    fragments = experiment_fragments()
+    catalog.register(
+        components=component_registrations(),
+        generators=GENERATORS,
+        experiments=experiments(fragments),
+        environment_providers=ENVIRONMENT_PROVIDERS,
+        fragments=fragments,
+    )
+
+
 __all__ = [
     "ENVIRONMENT_PROVIDERS",
     "EXPERIMENT_DIRECTORY",
@@ -114,4 +129,5 @@ __all__ = [
     "component_registrations",
     "experiment_fragments",
     "experiments",
+    "register",
 ]

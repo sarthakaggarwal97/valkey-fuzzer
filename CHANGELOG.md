@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Changed: packs register through the `valkey_fuzzer.packs` entry point
+
+- `build_catalog` no longer imports the Valkey components by name: it calls the `register(catalog)` of every entry
+  point of the `valkey_fuzzer.packs` group, in name order. The Valkey components are the `valkey` entry point
+  (`valkey_fuzzer.components:register`), so `run`, `batch`, `validate`, and `list` see the same catalog as before.
+  A package of your own can ship components, providers, and experiments the same way, with no edit to the fuzzer
+  (`docs/extending.md`, "Ship a pack"). `register_valkey_components` is removed; call
+  `valkey_fuzzer.components.register(catalog)`.
+- An existing editable install must be reinstalled (`pip install -e .`) to record the entry point; without it no
+  Valkey component is registered.
+- A scenario that uses a component whose namespace no installed pack registers now fails with
+  `no installed pack registers <namespace>.* components; install the package whose 'valkey_fuzzer.packs' entry
+  point is named '<namespace>'` instead of a "did you mean" naming an unrelated Valkey component.
+
 ### Changed: the replication and slot-migration claims say what their mapping pins
 
 - `formal/replication/claims.yaml` claimed its properties under `AdoptOnLoad = TRUE`, a fix Valkey does not have,

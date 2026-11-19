@@ -46,6 +46,11 @@ Issues = "https://github.com/valkey-io/valkey-fuzzer/issues"
 [project.scripts]
 valkey-fuzzer = "valkey_fuzzer.cli:main"
 
+# Packs: build_catalog loads every entry point of this group, each a register(catalog) function named after the
+# namespace of the IDs it registers (docs/extending.md, "Ship a pack"). The Valkey components are one.
+[project.entry-points."valkey_fuzzer.packs"]
+valkey = "valkey_fuzzer.components:register"
+
 # The packages are listed (tests/test_packaging.py keeps the list complete)
 # because the spec bundles under formal/ ship as valkey_fuzzer/formal: a
 # shipped experiment that names a bundle (spec: cluster-election) must find
