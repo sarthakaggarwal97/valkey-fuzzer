@@ -1,6 +1,5 @@
 """What a run's report is trusted for: a run whose report cannot be written fails, replay refuses changed
-code or a plan its scenario does not compile to, minimization keeps only the same failure, and a differential
-comparison never passes on missing evidence."""
+code or a plan its scenario does not compile to, minimization keeps only the same failure."""
 
 import json
 import shlex
@@ -16,14 +15,12 @@ from tests.support import make_plan, recorded_report
 from valkey_fuzzer import provenance, reports
 from valkey_fuzzer.cli import main
 from valkey_fuzzer.compiler import Overrides
-from valkey_fuzzer.differential import Differential, compare_outcomes, differential_status
 from valkey_fuzzer.minimize import failure_signature, same_failure
 from valkey_fuzzer.reports import InputError, ReportWriteError, export_scenario, write_plan
 from valkey_fuzzer.results import ComponentResult, ComponentStatus, Evidence, OutcomeStatus, RunOutcome
 
 GENERATED = ["--seed", "9", "--experiment", "valkey.cluster-chaos"]
 EXAMPLE = str(Path(__file__).resolve().parents[1] / "examples" / "valkey" / "snapshot_equivalence.yaml")
-DIFFERENTIAL = Path(__file__).resolve().parents[1] / "examples" / "valkey" / "differential_baseline_vs_candidate.yaml"
 
 
 @pytest.mark.usefixtures("report_root")
@@ -35,7 +32,6 @@ DIFFERENTIAL = Path(__file__).resolve().parents[1] / "examples" / "valkey" / "di
         # A FAIL stands when only the copy of its report cannot be written, as for run.
         (["replay", "REPORT", "--output"], OutcomeStatus.FAIL, 1),
         (["replay", "REPORT", "--output"], OutcomeStatus.PASS, 2),
-        (["diff", str(DIFFERENTIAL), "--output"], OutcomeStatus.FAIL, 1),
     ],
 )
 def test_a_run_whose_requested_output_cannot_be_written_does_not_succeed(
@@ -187,25 +183,6 @@ LOST = ("ledger", ComponentStatus.FAIL, "3 acknowledged write(s) lost (budget 0)
 )  # fmt: skip
 def test_minimization_keeps_only_the_same_failure_of_a_component(candidate, same):
     assert same_failure(failure_signature(_failing(LOST)), failure_signature(candidate)) is same
-
-
-def test_a_differential_item_without_the_compared_field_leaves_the_comparison_unmade():
-    base = {"seed": 5, "experiment": {"id": "valkey.snapshot-equivalence"}, "deployment": {"mode": "standalone"}}
-    rule = {"evidence_id": "valkey.dataset.digest", "source": "dataset", "field": "digest"}
-    differential = Differential.from_document(
-        {"differential_id": "unit", "base": base, "variants": {"a": {}, "b": {}}, "compare": {"equal": [rule]}}
-    )
-
-    def digests(*values):
-        evidence = tuple(Evidence("valkey.dataset.digest", "dataset", "oracle.completed", 1.0, item) for item in values)
-        return RunOutcome(plan=make_plan(), status=OutcomeStatus.PASS, summary="PASS", evidence=evidence)
-
-    # The item without a digest counts: dropped, both variants would compare as "d1".
-    outcomes = {"a": digests({"digest": "d1"}, {"shard": 2}), "b": digests({"digest": "d1"})}
-    comparisons = compare_outcomes(differential, outcomes)
-    assert comparisons[0]["result"] == "missing"
-    # Not a pass, and not a finding about the server either: the harness could not compare.
-    assert differential_status(differential, outcomes, comparisons)[0] == "ERROR"
 
 
 def test_a_report_with_a_small_float_replays_and_minimizes_as_written(service, canned_runs, tmp_path):

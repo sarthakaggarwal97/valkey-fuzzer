@@ -6,8 +6,8 @@ component's config, an artifact or resource provider's config, an
 experiment's ``inputs:``, the field rules in an experiment's ``deployment:``
 block (the last two read from their YAML form by
 :meth:`ConfigSchema.from_document` and :meth:`ConfigSchema.from_rules`), and
-the fuzzer's own documents: batch specs, search profiles, zoo cases, and
-differentials.
+the fuzzer's own documents: batch specs, search profiles, and
+zoo cases.
 The YAML loaders here reject duplicate keys, so every document is parsed the
 same way.
 """

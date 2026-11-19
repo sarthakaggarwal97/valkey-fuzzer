@@ -138,10 +138,9 @@ what to try next.
 | `batch --random all --seeds 5` | Run many scenarios in parallel. |
 | `validate FILE` | Check a scenario without starting anything. `--strict` also warns when only shared fragments supply the required evidence. |
 | `replay REPORT` | Run a recorded run again. |
-| `diff FILE` | Compare one seeded scenario across builds or settings; `--artifact NAME=PATH` picks the builds. |
 | `minimize REPORT` | Shrink a failing scenario. |
 
-`run`, `batch`, and `diff` take `--base-port N` to move
+`run` and `batch` take `--base-port N` to move
 the ports. Experiments that live in a directory, such as the ones in
 [`examples/experiments`](examples/experiments), need `--experiment-dir DIR`;
 each example's first lines show the command that runs it.

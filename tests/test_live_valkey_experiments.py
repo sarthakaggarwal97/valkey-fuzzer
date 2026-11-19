@@ -218,36 +218,6 @@ def test_cluster_election_with_sync_saves_every_vote_before_it_leaves_and_confor
         assert check_run(bundle, run, TlaTools.locate(jar, workers="1"))["status"] == "pass"
 
 
-_DIGESTS = [
-    {"evidence_id": "valkey.dataset.digest", "source": "dataset", "field": "digest"},
-    {"evidence_id": "valkey.rdb.reload-verified", "source": "snapshot", "field": "content_digest"},
-    {"evidence_id": "valkey.workload.ledger", "source": "writes", "field": "replies_digest"},
-]
-
-
-def _differential(variants, compare):
-    base = scenario("valkey.snapshot-equivalence", inputs={"operations": 1500})
-    return {"differential_id": "live", "base": base, "variants": variants, "compare": compare}
-
-
-@pytest.mark.parametrize(
-    ("document", "status"),
-    [
-        # The same seeded writes with AOF off and on leave the same data, replies, and snapshot.
-        pytest.param(lambda: _differential({aof: {"deployment.server_config": {"appendonly": aof}} for aof in ("no", "yes")},
-                                           {"equal": _DIGESTS}),
-                     "PASS", id="aof-off-vs-on"),
-        # Negative control: changing the generated data must break equality.
-        pytest.param(lambda: _differential({"small": {}, "large": {"experiment.inputs.value_size": 65}}, {"equal": _DIGESTS[:1]}),
-                     "FAIL", id="divergent-data"),
-    ],
-)  # fmt: skip
-def test_a_differential_compares_its_variants_on_real_deployments(runtime, document, status):
-    report = live.differential(runtime, document())
-    assert report["status"] == status, report["summary"]
-    assert status == "PASS" or report["comparisons"][0]["result"] == "mismatch"
-
-
 RESTART_EXPERIMENT = """
 extends: [valkey.liveness]
 id: tests.restart-under-writes

@@ -1,4 +1,4 @@
-# A deterministic, build-agnostic workload for differential runs.
+# A deterministic, build-agnostic workload for compare_with runs.
 #
 # A seeded workload performs exactly `operations` operations and drains; a
 # BGSAVE then snapshots the quiesced dataset. Evidence records canonical
@@ -12,7 +12,7 @@ id: valkey.snapshot-equivalence
 deployment:
   modes: [standalone, cluster]
 metadata:
-  description: Deterministic workload, quiesced BGSAVE, and dataset/RDB/reply digests for differential runs
+  description: Deterministic workload, quiesced BGSAVE, and dataset/RDB/reply digests for compare_with runs
   generator:
     deployment:
       replicas_per_primary: {minimum: 0, maximum: 2}

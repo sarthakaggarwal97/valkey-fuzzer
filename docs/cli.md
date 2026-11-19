@@ -12,7 +12,7 @@ and cluster chaos and the CI workflows are in [Cluster chaos and CI](cluster-cha
 - [Report folders](#report-folders)
 - [run](#run) (and [generated scenarios](#generated-scenarios-run---random)),
   [batch](#batch), [validate](#validate), [list](#list), [replay](#replay),
-  [diff](#diff), [minimize](#minimize), [cleanup-logs](#cleanup-logs),
+  [minimize](#minimize), [cleanup-logs](#cleanup-logs),
   [sweep](#sweep), [spec](#spec)
 - [Run reports](#run-reports)
 
@@ -25,7 +25,6 @@ and cluster chaos and the CI workflows are in [Cluster chaos and CI](cluster-cha
 | `validate FILE...` | Compile scenarios and check them without starting anything. |
 | `list experiments\|components\|generators` | List the installed experiments, components, or generator hooks, or print the catalog as JSON. |
 | `replay REPORT` | Check a recorded run against this environment, then run its execution plan again. |
-| `diff FILE` | Run one seeded scenario under several variants and compare their evidence. |
 | `minimize REPORT` | Shrink a failing scenario while its failure signature holds. |
 | `cleanup-logs SEED` | Delete the instance logs of one seed. |
 | `sweep` | Remove what fuzzer processes that are gone left on this host. |
@@ -36,7 +35,7 @@ and cluster chaos and the CI workflows are in [Cluster chaos and CI](cluster-cha
 
 ## Common options
 
-`run`, `batch`, `validate`, `list`, `replay`, `diff`, and `minimize` accept:
+`run`, `batch`, `validate`, `list`, `replay`, and `minimize` accept:
 
 | Option | Meaning |
 | --- | --- |
@@ -47,12 +46,12 @@ rejects it:
 
 | Option | Commands | Meaning |
 | --- | --- | --- |
-| `--valkey-binary PATH` | `run`, `batch`, `validate`, `replay`, `diff`, `minimize` | Use this `valkey-server` for the deployment (the local deployment's `deployment.valkey_binary`; a deployment provider without a `binary_override` hook refuses it). For `batch` it applies only to scenarios that name no binary of their own; for `replay` it is an intentional override; see [replay](#replay). |
-| `--base-port PORT` | `run`, `diff`, `batch` | The first client port of the deployment, instead of the scenario's or the draw's. Every other client port, and in cluster mode every bus port, follows from it, so two scenarios started by hand do not overlap. For `batch` it is the first client port of worker 0. A generated run's `Reproduce:` line keeps it. |
-| `--artifact NAME=PATH` | `run`, `replay`, `diff` | Resolve the scenario's `valkey.artifact.local-binary` or `valkey.artifact.local-module` artifact `NAME` at `PATH` instead of the path it declares, so a run recorded elsewhere (a CI batch's parent build, `artifacts.parent`, or its module builds, `artifacts.module` and `artifacts.module_parent`) runs on this host's build of it. Repeatable, once per artifact; an artifact the scenario does not declare (for `diff`, its `base` does not), or of another provider, is an error. The report records the scenario with the override; see [replay](#replay) for how the binary is still compared. |
-| `--artifact-dir DIR` | `run`, `batch`, `replay`, `diff`, `minimize` | Root for report folders, which hold each run's component artifacts, and for provider directories; for `batch`, where the default batch folder goes. See [Report folders](#report-folders). |
-| `--timeout SECONDS` | `run`, `batch`, `replay`, `diff`, `minimize` | Deadline for each run. Without it, a run gets a derived default: the search profile's `budget.timeout_s`, else 1200 s, and for `run` never less than the sum of the components' `timeout_s`. See [Deadlines and cancellation](contracts.md#deadlines-and-cancellation). |
-| `--allow-unsupported` | `run`, `batch`, `replay`, `diff` | Exit `0` instead of `3` on `SKIP_UNSUPPORTED`. |
+| `--valkey-binary PATH` | `run`, `batch`, `validate`, `replay`, `minimize` | Use this `valkey-server` for the deployment (the local deployment's `deployment.valkey_binary`; a deployment provider without a `binary_override` hook refuses it). For `batch` it applies only to scenarios that name no binary of their own; for `replay` it is an intentional override; see [replay](#replay). |
+| `--base-port PORT` | `run`, `batch` | The first client port of the deployment, instead of the scenario's or the draw's. Every other client port, and in cluster mode every bus port, follows from it, so two scenarios started by hand do not overlap. For `batch` it is the first client port of worker 0. A generated run's `Reproduce:` line keeps it. |
+| `--artifact NAME=PATH` | `run`, `replay` | Resolve the scenario's `valkey.artifact.local-binary` or `valkey.artifact.local-module` artifact `NAME` at `PATH` instead of the path it declares, so a run recorded elsewhere (a CI batch's parent build, `artifacts.parent`, or its module builds, `artifacts.module` and `artifacts.module_parent`) runs on this host's build of it. Repeatable, once per artifact; an artifact the scenario does not declare, or of another provider, is an error. The report records the scenario with the override; see [replay](#replay) for how the binary is still compared. |
+| `--artifact-dir DIR` | `run`, `batch`, `replay`, `minimize` | Root for report folders, which hold each run's component artifacts, and for provider directories; for `batch`, where the default batch folder goes. See [Report folders](#report-folders). |
+| `--timeout SECONDS` | `run`, `batch`, `replay`, `minimize` | Deadline for each run. Without it, a run gets a derived default: the search profile's `budget.timeout_s`, else 1200 s, and for `run` never less than the sum of the components' `timeout_s`. See [Deadlines and cancellation](contracts.md#deadlines-and-cancellation). |
+| `--allow-unsupported` | `run`, `batch`, `replay` | Exit `0` instead of `3` on `SKIP_UNSUPPORTED`. |
 
 ## Exit codes
 
@@ -67,9 +66,9 @@ rejects it:
 
 Errors and warnings go to stderr, so stdout (`--format json`, say) holds only the command's output.
 
-These hold for `run`, `replay`, and `diff`. The other cases:
+These hold for `run` and `replay`. The other cases:
 
-- `run`, `replay`, and `diff`: an `--output` (or `--export-scenario`) that
+- `run` and `replay`: an `--output` (or `--export-scenario`) that
   cannot be written counts as an `ERROR`, unless the run failed.
 - `batch` exits with its worst result: `1` if any run failed or a zoo case did
   not hold, else `2` if any run errored, left something behind, a zoo case
@@ -107,17 +106,16 @@ Every execution plan a command runs gets its own report folder holding:
 | --- | --- |
 | `run` | `<root>/runs/<name>/` |
 | `replay` | `<root>/replays/<name>/` |
-| `diff` | `<root>/differential/<name>/<variant>/`, with `differential.json` in `<name>/` |
 | `batch` | `<batch folder>/runs/<job id>/`, with `summary.json` in the batch folder; the folder is `--out`, or `<root>/batches/<name>/` |
 | `minimize` | `<root>/minimize/<name>/attempt-<n>/` |
 
 `<root>` is `--artifact-dir`, or `<temp dir>/valkey-fuzzer` without it
 (`<temp dir>` is `/tmp` on most Linux hosts). `<name>` is the UTC start time
-to the millisecond, the scenario, differential, or batch ID, and a random
+to the millisecond, the scenario or batch ID, and a random
 suffix, for example `20261028T041350.730Z-aof-durability-5405f2`. Folders are
 created exclusively, so names sort by start time and never collide, even
 between processes. `run` and `replay` print `Report: <path>`;
-`diff` and `minimize` print `Reports: <folder>`, and `batch` prints
+`minimize` prints `Reports: <folder>`, and `batch` prints
 `Batch: <folder>`.
 
 Other files go elsewhere:
@@ -291,7 +289,7 @@ sources:
 | Source | Flag | Jobs |
 | --- | --- | --- |
 | `random` | `--random EXPERIMENT` (repeatable, or `all`), `--seeds N`, `--first-seed N`, `--exclude PATH=VALUE`, `--base FILE` | `random-<experiment>-s<seed>`: seeds `first_seed` to `first_seed + seeds - 1` of each experiment, drawn under the batch's profile exactly as `run --seed N --experiment ID --profile P` draws them. `all` is every experiment that declares `metadata.generator`, less those an `experiment=` exclusion names. |
-| `matrix` | (spec only) | `matrix-<base scenario_id>-<combination>-<n>`: every combination of the dotted-path `dimensions` (paths as in [diff](#diff) variants), `seeds_per_case` times, each with a seed drawn from `seed`. A combination that does not compile is listed under `invalid` and not run, and counts as `ERROR` in the batch's status (exit `2`): a misspelt value never skips. |
+| `matrix` | (spec only) | `matrix-<base scenario_id>-<combination>-<n>`: every combination of the dotted-path `dimensions` (paths start with `experiment`, `deployment`, `artifacts`, `resources`, or `policies`; under `experiment` only `experiment.inputs` and the paths below it; a `null` value removes a key), `seeds_per_case` times, each with a seed drawn from `seed`. A combination that does not compile is listed under `invalid` and not run, and counts as `ERROR` in the batch's status (exit `2`): a misspelt value never skips. |
 | `scenarios` | `--scenarios PATH` (repeatable) | `scenario-<file stem>`: each file, or each `*.yaml` and `*.yml` file of a directory, run as written. |
 | `zoo` | `--zoo BUILDS`, `--zoo-case ID` (repeatable) | `zoo-<case>-<file stem>-control`, and `-<n>` for the broken runs, numbered from 0 across the case: each [bug zoo](bug-zoo.md) case's clean control and broken runs, on the builds `zoo/build.sh` made in `BUILDS`. `directory` defaults to the repository's `zoo/`, which only a checkout has (an installed package does not ship it). Each build must name the pinned commit, or nothing runs. |
 | `failures` | `--failures BATCH` | `rerun-<job id>`: the jobs of an earlier batch whose result had one of `statuses` (default `FAIL` and `ERROR`), at most `per_signature` of each failure signature (default all), each as it ran: the same scenario, and for a random job the scenario its seed drew (its run's `scenario.yaml`), so a re-run after a code change runs what failed. A random job that never drew a scenario draws again. Zoo runs are left out. |
@@ -606,75 +604,12 @@ warns that nothing could be verified, and records `provenance.verified` as `fals
 Replay is not hermetic even when nothing drifted: the seed fixes each
 component's random choices, not timing.
 
-## diff
+## Comparing two builds
 
-```bash
-valkey-fuzzer diff examples/valkey/differential_baseline_vs_candidate.yaml --seed 7 --output diff.json
-```
-
-Runs one base scenario, with the same seed, under two or more variants and
-compares evidence fields across them. `--seed` overrides the base seed, and
-`--output` saves the differential report. `--artifact NAME=PATH` resolves a
-local-binary artifact of `base` at `PATH` (the shipped example names
-`valkey-server` for both, so it runs against the `valkey-server` on `PATH`
-until you point `baseline` and `candidate` at two builds), and `--base-port
-PORT` moves the base deployment's ports. Each variant gets a report folder
-under `<root>/differential/<name>/`, next to `differential.json`.
-
-```yaml
-differential_id: aof-off-vs-on
-base:
-  scenario_id: snapshot-equivalence
-  seed: 41
-  experiment:
-    id: valkey.snapshot-equivalence
-    inputs: {operations: 3000, stable_keys: 1000}
-  deployment:
-    mode: standalone
-    base_port: 7620
-variants:
-  aof-off:
-    deployment.server_config: {appendonly: "no"}
-  aof-on:
-    deployment.server_config: {appendonly: "yes"}
-compare:
-  equal:
-    - {evidence_id: valkey.dataset.digest, source: dataset, field: digest}
-    - {evidence_id: valkey.rdb.reload-verified, source: snapshot, field: content_digest}
-    - {evidence_id: valkey.workload.ledger, source: writes, field: replies_digest}
-```
-
-| Field | Required | Meaning |
-| --- | --- | --- |
-| `differential_id` | yes | Name of the comparison and its folder. |
-| `base` | yes | A scenario with `seed`, `experiment`, and `deployment`. |
-| `variants` | yes | At least two. Each name (letters, digits, `-`, `_`) maps dotted paths to values, applied to a copy of `base`. Paths start with `experiment`, `deployment`, `artifacts`, `resources`, or `policies`. Under `experiment` only `experiment.inputs` and the paths below it are allowed, so every variant runs the same experiment. A `null` value removes a key. |
-| `compare.equal` | one of `equal`, `differ` | Rules whose value must be the same in every variant. |
-| `compare.differ` | one of `equal`, `differ` | Rules whose value must differ in every variant, which shows each variant took a different path. |
-| `compare.require_status` | no | The outcome every variant must reach: `PASS` (the default), `FAIL`, or `SKIP_UNSUPPORTED`. |
-
-A rule is `{evidence_id, source, field}`. `source` (a component `id`) and
-`field` (a dotted path into the evidence value; a number indexes a list) are
-optional. When several evidence items match, the rule compares the sorted
-list of their values. A matching item without `field` makes the rule
-`missing`. Before any variant runs, each rule's `evidence_id` must be declared
-by its `source` (or, without one, by some component) in every variant's
-plan; a rule that names undeclared evidence or an unknown source is rejected
-with exit `2`.
-
-Each variant's `scenario_id` is `<base scenario_id>-<variant>`, or
-`<differential_id>-<variant>` when the base has no `scenario_id`. Every
-variant compiles before any runs. The differential's outcome is, in order:
-`FAIL` if a variant failed (unless `require_status` is `FAIL`), even when
-another errored; `ERROR` if a variant errored; `SKIP_UNSUPPORTED` if a variant was unsupported
-(unless `require_status` is `SKIP_UNSUPPORTED`); `FAIL` if a variant did not
-reach `require_status` or a rule did not hold (`mismatch` or
-`unexpectedly_equal`); `ERROR` if a rule could not be compared because a
-variant recorded no value for it (`missing`); and `PASS` otherwise. The report has
-`differential_id`, `status`, `summary`, `seed`, `variants` (each with
-`status`, `summary`, `scenario`, and `artifact_dir`, its report folder), and
-`comparisons` (each with `kind`, `rule`, `result`, and the `values` per
-variant).
+There is no command for it. Declare both builds as artifacts and give
+`valkey.action.commands` a `compare_with` binary (usually
+`{$ref: artifacts.parent.binary}`): one run sends the same commands to both
+builds and compares every reply. See [components](components.md#valkeyactioncommands).
 
 ## minimize
 

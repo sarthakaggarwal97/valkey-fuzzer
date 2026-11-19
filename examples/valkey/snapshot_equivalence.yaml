@@ -1,4 +1,4 @@
-# Seeded workload plus BGSAVE whose evidence the `diff` command compares.
+# Seeded workload plus BGSAVE whose digests two builds can be compared on.
 scenario_id: snapshot-equivalence
 seed: 41
 experiment:

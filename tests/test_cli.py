@@ -22,7 +22,7 @@ from valkey_fuzzer.deployment.local import config as local_config
 from valkey_fuzzer.hoststate import Owner, current_owner
 from valkey_fuzzer.outcomes import EXIT_FAILURE, EXIT_HARNESS_ERROR, EXIT_INTERRUPTED, EXIT_UNSUPPORTED, EXIT_USAGE
 from valkey_fuzzer.reports import SCENARIO_FILE
-from valkey_fuzzer.results import Evidence, OutcomeStatus
+from valkey_fuzzer.results import OutcomeStatus
 from valkey_fuzzer.runner import PreflightError
 
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "valkey"
@@ -85,7 +85,7 @@ PARSER_ERRORS = [("run", "--random", "--exclude", "x"), ("batch", "--random", "a
 
 
 def test_bad_inputs_run_nothing_and_exit_with_a_usage_or_harness_code(tmp_path, canned_runs):
-    for command in ("run", "validate", "diff", "batch", "minimize", "replay"):
+    for command in ("run", "validate", "batch", "minimize", "replay"):
         assert (
             _cli(command, tmp_path / "missing.yaml") == EXIT_HARNESS_ERROR
             if command in ("validate", "batch")
@@ -448,50 +448,6 @@ def test_an_artifact_override_must_name_a_declared_local_binary_artifact_once(
     assert _cli("replay", report, "--artifact", "nope=/x") == EXIT_USAGE
     assert "the recorded plan declares no artifact 'nope'" in capsys.readouterr().err
     assert len(canned_runs.plans) == 1, "a refused override runs nothing"
-
-
-@pytest.mark.parametrize(("diverges", "code"), [(False, 0), (True, EXIT_FAILURE)])
-def test_diff_passes_only_when_the_variants_evidence_agrees(tmp_path, canned_runs, diverges, code):
-    def evidence(plan):
-        method = plan.deployment["server_config"]["appendonly"]
-        return (
-            Evidence(
-                "valkey.dataset.digest", "dataset", "oracle.completed", 1.0, {"digest": method if diverges else 1}
-            ),
-            Evidence("valkey.rdb.reload-verified", "snapshot", "oracle.completed", 1.0, {"content_digest": 1}),
-            Evidence("valkey.workload.ledger", "writes", "workload.stopped", 1.0, {"replies_digest": 1}),
-            Evidence("valkey.bgsave.result", "bgsave", "action.completed", 1.0, {"after": {"aof_enabled": method}}),
-        )
-
-    canned_runs.evidence = evidence
-    document = tmp_path / "differential.yaml"
-    document.write_text(
-        yaml.safe_dump(
-            {
-                "differential_id": "aof-on-vs-off",
-                "base": yaml.safe_load(Path(EXAMPLE).read_text()),
-                "variants": {
-                    "off": {"deployment.server_config": {"appendonly": "no"}},
-                    "on": {"deployment.server_config": {"appendonly": "yes"}},
-                },
-                "compare": {
-                    "equal": [
-                        {"evidence_id": "valkey.dataset.digest", "source": "dataset", "field": "digest"},
-                        {"evidence_id": "valkey.rdb.reload-verified", "source": "snapshot", "field": "content_digest"},
-                        {"evidence_id": "valkey.workload.ledger", "source": "writes", "field": "replies_digest"},
-                    ],
-                    "differ": [
-                        {"evidence_id": "valkey.bgsave.result", "source": "bgsave", "field": "after.aof_enabled"}
-                    ],
-                },
-            }
-        )
-    )
-    output = tmp_path / "diff.json"
-    assert _cli("diff", document, "--output", output, "--artifact-dir", tmp_path) == code
-    (session,) = (tmp_path / "differential").iterdir()
-    assert json.loads((session / "differential.json").read_text()) == json.loads(output.read_text())
-    assert len(list(session.glob("*/report.json"))) == 2
 
 
 def test_minimize_warns_about_a_drifted_environment_and_rejects_a_budget_below_one(tmp_path, canned_runs, capsys):

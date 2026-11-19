@@ -16,7 +16,6 @@ from tests.valkey_experiments_support import evidence_values, valkey_service
 from valkey_fuzzer._data import to_plain_data
 from valkey_fuzzer.components import EXPERIMENT_DIRECTORY
 from valkey_fuzzer.deployment.local.ports import highest_base_port, port_unavailable_reason
-from valkey_fuzzer.differential import Differential, run_differential
 
 BINARY = os.environ.get("VALKEY_FUZZER_BINARY") or shutil.which("valkey-server")
 OLD_BINARY = os.environ.get("VALKEY_FUZZER_OLD_BINARY")
@@ -117,15 +116,3 @@ def builds(scenario, baseline, candidate):
         for name, path in (("baseline", baseline), ("candidate", candidate))
     }
     return scenario
-
-
-def differential(runtime, document):
-    def execute(name, scenario, plan):
-        return runtime.runner.run(plan, deadline=time.monotonic() + 600), None
-
-    return run_differential(
-        Differential.from_document(document),
-        compile_fn=runtime.compile,
-        execute_fn=execute,
-        components=runtime.catalog.components,
-    )

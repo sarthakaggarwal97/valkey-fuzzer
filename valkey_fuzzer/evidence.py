@@ -61,17 +61,6 @@ def _check_declared(declared: Mapping[str, Declarations], evidence_id: str, sour
         raise ValueError(f"{what} {evidence_id!r} is not declared by {where}")
 
 
-def check_evidence_reference(
-    plan: ExecutionPlan, components: ComponentRegistry, evidence_id: str, source: Optional[str], what: str
-) -> None:
-    """Raise ``ValueError`` unless ``evidence_id`` can come from ``source`` (any component when None) of ``plan``.
-
-    ``what`` names the reference in the message, such as ``compare rule evidence``.
-    """
-
-    _check_declared(_declared(plan, components), evidence_id, source, what)
-
-
 def check_requirements(plan: ExecutionPlan, components: ComponentRegistry) -> None:
     """Raise ``ValueError`` unless every required event and evidence can come from the plan.
 

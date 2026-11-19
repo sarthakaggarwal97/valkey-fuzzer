@@ -37,8 +37,8 @@ the mechanics every test shares:
 - strict parsing of scenarios and experiments, and experiment fragments;
 - one config schema type (`ConfigSchema`) that validates experiment inputs,
   deployment field rules, component config, and provider config, with
-  defaults recorded in the plan, and the batch specs, search profiles, zoo
-  cases, and differentials;
+  defaults recorded in the plan, and the batch specs, search profiles, and zoo
+  cases;
 - immutable plans and deterministic per-component random streams;
 - the component, experiment, and provider registries, filled by atomic
   registrations, after which the catalog is frozen;
@@ -53,7 +53,7 @@ the mechanics every test shares:
   ownership, effective server config, legal space and search profiles,
   deadlines, and host-state tags;
 - the generator and its hook registry, run reports, replay with provenance
-  checks, differential runs, minimization, the batch runner, the sweep, the
+  checks, minimization, the batch runner, the sweep, the
   spec bridge, and the bug zoo.
 
 The engine does not interpret experiment IDs, component IDs, evidence IDs,
@@ -74,7 +74,7 @@ they use directly (see [The Valkey components](#the-valkey-components)).
 | `valkey_fuzzer/_data.py` | Frozen snapshots of JSON/YAML-safe data, `to_plain_data`, `jsonable`, `canonical_json`, `file_sha256`, and `error_record`, how every report records an exception. |
 | `valkey_fuzzer/references.py` | Typed environment references and their serialized marker. |
 | `valkey_fuzzer/ordering.py` | `stable_order`, the dependency order that keeps the authored order, and `DependencyCycleError`. |
-| `valkey_fuzzer/documents.py` | Patching plain-data documents: `merge`, `get_path`/`set_path`, and the scenario sections a batch or differential may patch. |
+| `valkey_fuzzer/documents.py` | Patching plain-data documents: `merge`, `get_path`/`set_path`, and the scenario sections a batch may patch. |
 | `valkey_fuzzer/registry.py` | `BaseRegistry`, the registry the catalog fills and freezes, and the registration errors. |
 | `valkey_fuzzer/schema.py` | `ConfigSchema` and `ConfigField`; the duplicate-key-rejecting YAML loaders; the experiment error types. |
 | `valkey_fuzzer/plan.py` | `ComponentSpec`, `InstanceSelector`, `StartupOverlay`, `EvidenceRequirement`, `ExperimentSpec`, and `ExecutionPlan`. |
@@ -93,13 +93,13 @@ they use directly (see [The Valkey components](#the-valkey-components)).
 | `valkey_fuzzer/verdict.py` | The outcome rules. |
 | `valkey_fuzzer/environment/` | Artifact, resource, and policy specs; the environment provider protocol, registration, and registry; `EnvironmentProvisioner` and `EnvironmentLease`; `resolve_plan`, which binds a plan to what was acquired. |
 | `valkey_fuzzer/deployment/local/` | The local deployment provider (see [below](#the-local-deployment-provider)). |
-| `valkey_fuzzer/service.py` | `RunService`: one frozen catalog with its compiler and runner; compile, execute, replay, differentials, and minimization, writing each run's report folder. |
+| `valkey_fuzzer/service.py` | `RunService`: one frozen catalog with its compiler and runner; compile, execute, replay, and minimization, writing each run's report folder. |
 | `valkey_fuzzer/reports.py` | Report folders and their files (`plan.json`, `report.json`, `scenario.yaml`): writing and reading them, and the run report. |
 | `valkey_fuzzer/provenance.py` | The reproducer a run report records, the source digests, the catalog digest, and the replay drift checks. |
 | `valkey_fuzzer/batch.py` | The batch runner: sources to jobs, isolated worker processes, leak sweeps, signature groups, serial re-runs, resume, and the zoo verdicts. |
 | `valkey_fuzzer/outcomes.py` | The process exit codes of every command and the batch worker, and how a run's outcome prints. |
 | `valkey_fuzzer/commands/`, `valkey_fuzzer/cli.py` | The command handlers; `cli.py` only builds the parser and dispatches. |
-| `valkey_fuzzer/minimize.py`, `valkey_fuzzer/coverage.py`, `valkey_fuzzer/differential.py` | Failure signatures and minimization; a run's coverage tuple; differential runs. |
+| `valkey_fuzzer/minimize.py`, `valkey_fuzzer/coverage.py` | Failure signatures and minimization; a run's coverage tuple. |
 | `valkey_fuzzer/generator.py` | Random scenarios for experiments that declare `metadata.generator`, and the search profiles that sample them. |
 | `valkey_fuzzer/capacity.py` | The cores a run may use (CPU affinity, cgroup quota, a batch worker's share), and whether a drawn deployment fits them. |
 | `valkey_fuzzer/hoststate.py` | Host-state owner tags and `valkey-fuzzer sweep`; run folders under the shared artifact root; SIGTERM as an interrupt. |
@@ -263,14 +263,14 @@ preflight error raises `PreflightError` instead, from the check's own error.
 
 `RunService` does everything a command does with its catalog: compiling,
 executing, writing report folders and run reports, the reproducer, replay
-with its provenance and binary drift checks, differential runs, and
+with its provenance and binary drift checks, and
 minimization. It never parses arguments or prints: methods take
 plain arguments, report progress through callbacks, and raise
 `RunServiceError` subclasses (`InputError`, `ReportWriteError`) or the compiler's errors.
 
 The handlers in `valkey_fuzzer/commands/` (`run.py` for `run` and
 `cleanup-logs`; `batch.py`; `validate.py`; `listing.py`; `replay.py`;
-`diff.py`; `minimize.py`; `sweep.py`; `spec.py`) call the service or the
+`minimize.py`; `sweep.py`; `spec.py`) call the service or the
 batch runner, print, and return exit codes. The batch runner runs each job in
 a worker process, `python -m valkey_fuzzer.batch TASK`, which executes one
 plan through the service. `cli.py` builds the parser from them, and reports
@@ -446,7 +446,7 @@ What it needed from the engine was feature-neutral: per-instance binaries,
 data roots, and loopback addresses in the local deployment; a deployment
 service with process control, instance files, live roles, tracked clients,
 shard failover, and the state validators; report-safe deployment metadata for
-provenance; and tooling (`diff`, `batch`, `minimize`, `replay`, `list`)
+provenance; and tooling (`batch`, `minimize`, `replay`, `list`)
 that works only on scenarios, plans, outcomes, and opaque evidence.
 
 Cluster chaos is one experiment on the common runner, generated from a

@@ -20,8 +20,8 @@ experiments. The components that experiments use are in
 
 A scenario selects one experiment, supplies its inputs, and describes the
 deployment. Unknown fields and duplicate YAML keys are rejected, here and in
-every other file the fuzzer reads: reports, plans, batch specs, differential
-runs. YAML scalars are read as YAML 1.2 reads them, not as YAML 1.1 does:
+every other file the fuzzer reads: reports, plans, batch specs, and
+so on. YAML scalars are read as YAML 1.2 reads them, not as YAML 1.1 does:
 only `true` and `false` are booleans (`yes`, `no`, `on`, and `off` are
 strings, so write `"yes"` or `yes` alike for a server config value, and
 `true` for a boolean field), numbers are plain decimals (`0o` and `0x`
@@ -520,7 +520,7 @@ scenario for each.
 | `valkey.replication-partial-resync` | standalone or cluster, replicas ≥ 1 | | After the primary drops every replica link, the replicas resume with a partial resync (PSYNC), no full sync happens, and they converge. |
 | `valkey.rolling-upgrade` | standalone or cluster, replicas ≥ 1 | two different builds, the target as an artifact | Every instance moves to the new build under writes, replicas first with graceful failovers, and no acknowledged write is lost. |
 | `valkey.save-crash-points` | standalone or cluster, `syscall_faults: true` | a C compiler | Kills a server at the nth system call (`write`, `fsync`, `fdatasync`, `rename`) of one save in its data directory, before or after the call: `BGSAVE`, `BGREWRITEAOF`, or a `nodes.conf` save that a peer's new `cluster-announce-human-nodename` starts. The preload, acknowledged under `appendfsync always`, must survive the restart. A sweep runs `nth` 1, 2, and so on until the fault no longer fires. |
-| `valkey.snapshot-equivalence` | standalone, cluster | | A fixed number of seeded operations, then a BGSAVE of the quiesced dataset that must reload; records dataset, RDB, and reply digests for [differential runs](cli.md#diff). |
+| `valkey.snapshot-equivalence` | standalone, cluster | | A fixed number of seeded operations, then a BGSAVE of the quiesced dataset that must reload; records dataset, RDB, and reply digests. |
 
 An experiment can also compare one command sequence across two builds, the
 build under test and its parent, with
@@ -557,8 +557,9 @@ with no acknowledged write lost;
 [`examples/valkey/replica_killed_under_writes.yaml`](../examples/valkey/replica_killed_under_writes.yaml)
 runs it.
 
-[`differential_baseline_vs_candidate.yaml`](../examples/valkey/differential_baseline_vs_candidate.yaml)
-runs the same seeded workload on two builds and requires equal dataset, reloaded RDB, and reply digests.
+To compare two builds, give `valkey.action.commands` a `compare_with` binary (see
+[components](components.md#valkeyactioncommands)). It runs one command sequence on a
+candidate and a parent server and compares the replies.
 
 In `valkey.replication-chaos` a graceful promotion loses nothing. A forced
 promotion, or the heal's promotion after the primary was killed, may lose
