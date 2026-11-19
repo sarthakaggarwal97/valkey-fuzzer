@@ -3,7 +3,7 @@
 from collections.abc import Mapping
 from typing import Any
 
-# Scenario sections a batch matrix dimension or differential variant may patch.
+# Scenario sections a batch matrix dimension may patch.
 SCENARIO_SECTIONS = ("experiment", "deployment", "artifacts", "resources", "policies")
 
 

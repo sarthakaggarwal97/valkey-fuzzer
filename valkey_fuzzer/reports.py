@@ -7,10 +7,9 @@ Every executed plan, whichever command runs it, leaves one report folder::
     <folder>/components/<component id>/    files the run's components wrote
 
 ``run`` puts it at ``<root>/runs/<name>`` and ``replay`` at
-``<root>/replays/<name>``. A differential or minimization gets a session
-folder ``<root>/differential/<name>`` or ``<root>/minimize/<name>`` holding
-one report folder per variant (``<variant>``, next to ``differential.json``)
-or candidate (``attempt-<n>``); a batch puts each job's at ``runs/<job id>``
+``<root>/replays/<name>``. A minimization gets a session
+folder ``<root>/minimize/<name>`` holding
+one report folder per candidate (``attempt-<n>``); a batch puts each job's at ``runs/<job id>``
 of its batch folder. The root is the artifact directory, or ``<tmp>/valkey-fuzzer``. Every ``<name>`` is
 ``<UTC time to the millisecond>-<scenario or document ID>-<random suffix>``
 (:func:`~valkey_fuzzer.hoststate.new_run_folder`, which also names a run executed

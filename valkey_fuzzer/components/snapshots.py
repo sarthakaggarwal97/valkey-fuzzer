@@ -4,7 +4,7 @@
 captured in a private server and checks that each is a consistent cut of the
 workload ledger's history;
 ``valkey.oracle.dataset-digest`` records a canonical digest of the live dataset
-for differential comparison.
+for comparison across builds (``compare_with``).
 
 Both load the modules the deployment loads (its ``loadmodule``): a module's
 values are digested from their DUMP payloads (:func:`canonical_value`), which
@@ -475,8 +475,8 @@ _DIGEST_FIELDS = {
 class DatasetDigestOracle:
     """Record a canonical digest of the dataset held by every primary.
 
-    The digest itself never fails a run; it is evidence for differential
-    comparison. The oracle fails when no instance is a primary, when in
+    The digest itself never fails a run; it is evidence for comparison
+    across builds. The oracle fails when no instance is a primary, when in
     cluster mode a key is held by more than one primary (in standalone mode
     every primary may hold every key), or when ``include_replicas`` is set and a
     replica's digest differs from its view of the primaries' data. Reads are

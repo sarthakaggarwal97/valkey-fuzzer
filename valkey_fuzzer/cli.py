@@ -8,12 +8,12 @@ import traceback
 from typing import Any
 
 from . import __version__
-from .commands import batch, diff, listing, minimize, replay, run, spec, sweep, validate
+from .commands import batch, listing, minimize, replay, run, spec, sweep, validate
 from .hoststate import interrupt_on_sigterm
 from .outcomes import EXIT_HARNESS_ERROR, EXIT_INTERRUPTED, EXIT_USAGE
 from .reports import InputError
 
-COMMAND_MODULES = (run, batch, validate, listing, replay, diff, minimize, sweep, spec)
+COMMAND_MODULES = (run, batch, validate, listing, replay, minimize, sweep, spec)
 
 
 class _Parser(argparse.ArgumentParser):
@@ -47,7 +47,6 @@ Examples (paths are relative to a checkout of the repository):
   valkey-fuzzer run examples/valkey/cluster_chaos.yaml --timeout 300 --verbose
   valkey-fuzzer replay report.json
   valkey-fuzzer minimize report.json --output minimized.yaml
-  valkey-fuzzer diff examples/valkey/differential_baseline_vs_candidate.yaml
 
   # One random scenario of an experiment that declares metadata.generator
   valkey-fuzzer run --random

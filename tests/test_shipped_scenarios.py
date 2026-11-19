@@ -1,4 +1,4 @@
-"""Every shipped example (each differential variant, each distinct batch scenario) compiles and passes preflight,
+"""Every shipped example (each distinct batch scenario) compiles and passes preflight,
 and the run service example script validates one."""
 
 from pathlib import Path
@@ -8,7 +8,6 @@ import yaml
 
 from tests.valkey_experiments_support import valkey_service
 from valkey_fuzzer.batch import BatchOptions, expand, load_spec
-from valkey_fuzzer.differential import Differential
 
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 DOCUMENTS = sorted([*EXAMPLES.glob("*.yaml"), *(EXAMPLES / "valkey").glob("*.yaml")])
@@ -25,10 +24,7 @@ def runtime():
 def test_every_shipped_example_compiles_and_passes_preflight(runtime, path):
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
     scenarios = [document]
-    if "differential_id" in document:
-        differential = Differential.from_document(document)
-        scenarios = [differential.scenario(variant) for variant in differential.variants]
-    elif "sources" in document:
+    if "sources" in document:
         options, sources = load_spec(str(path))
         jobs = expand(sources, runtime, BatchOptions(**options)).jobs
         found = [job["scenario"] for job in jobs if "scenario" in job]

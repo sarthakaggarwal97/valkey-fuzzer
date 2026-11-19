@@ -143,9 +143,6 @@ scenario seed, so a seed repeats them; it does not fix timing (see
   provider, and Valkey binary match the recorded provenance (a bare
   `plan.json` has none to check). It uses what is installed now, so it is not
   hermetic.
-- A **differential run** runs one seeded scenario under several variants (a
-  config on versus off, two builds) and compares chosen evidence fields: some
-  must be equal, others must differ.
 - A **batch** runs many scenarios (random seeds under a **search profile**, a
   matrix, scenario files, the bug zoo, an earlier batch's failures) on
   parallel, isolated workers, sweeps each worker's leftovers, and groups the
@@ -195,7 +192,6 @@ prints it.
 | deployment | The system under test: its mode, its instance counts, and provider-specific fields. |
 | deployment mode | `standalone` or `cluster` for the local provider; another registered deployment provider may add modes. |
 | deployment provider | The code that starts and cleans up a deployment. The built-in one is `valkey-fuzzer.deployment.local`. |
-| differential run | One seeded scenario run under several variants, with evidence compared across them. |
 | effective server config | An instance's server config as it starts: the deployment provider's defaults under the deployment's config and the startup overlays. The plan records it per instance. |
 | event | A named message on the run's event bus. |
 | evidence | A named record a component returns, used by oracles and required by experiments. |

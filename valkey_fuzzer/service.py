@@ -1,12 +1,11 @@
-"""Run orchestration: compile, execute, report, replay, differentials, and minimization.
+"""Run orchestration: compile, execute, report, replay, and minimization.
 
 :class:`RunService` holds one frozen :class:`~valkey_fuzzer.catalog.Catalog`
 with its compiler and runner, so compiling and executing always see the
 same components and experiments, and does everything a command does with them: compiling
 scenarios to execution plans, executing them, writing reports and reproducers, replaying a
 report or plan with provenance and Valkey binary drift checks, and running
-differentials and minimization through :mod:`valkey_fuzzer.differential` and
-:mod:`valkey_fuzzer.minimize`. Many runs go through the batch runner
+minimization through :mod:`valkey_fuzzer.minimize`. Many runs go through the batch runner
 (:mod:`valkey_fuzzer.batch`), whose workers each execute one plan here.
 
 It never parses arguments or prints. Methods take plain arguments and return
@@ -37,7 +36,6 @@ from .compiler import (
     deployment_registration,
     with_valkey_binary,
 )
-from .differential import Differential, run_differential
 from .documents import merge
 from .generator import Exclusion, Generated, find_profile, generate
 from .hoststate import folder_name, normalize_artifact_root
@@ -204,14 +202,6 @@ class ReplayResult:
 
     record: RunRecord
     late_drift: list[dict[str, Any]]
-
-
-@dataclass(frozen=True)
-class SessionResult:
-    """A differential report, and the folder holding it and every variant's report."""
-
-    report: dict[str, Any]
-    report_dir: str
 
 
 @dataclass(frozen=True)
@@ -473,7 +463,7 @@ class RunService:
     ) -> RunOutcome:
         """Execute ``plan`` within ``timeout`` seconds, its components writing into ``run_dir``.
 
-        An error the runner raises becomes an ERROR outcome, so differentials
+        An error the runner raises becomes an ERROR outcome, so batches
         and minimization continue: phase ``preflight`` when the plan fails the
         static checks (for example a deployment selector a reduced scenario no
         longer has), ``runner`` when the runner itself fails after them.
@@ -646,47 +636,7 @@ class RunService:
         record = self.write_run_report(report_dir, outcome, scenario=prepared.scenario, provenance=provenance)
         return ReplayResult(record=record, late_drift=late)
 
-    # -- differentials and minimization --------------------------------------
-
-    def differential(
-        self,
-        path: str,
-        *,
-        seed: Optional[int] = None,
-        overrides: Overrides = NO_OVERRIDES,
-        timeout: Optional[float] = None,
-        on_variant: Optional[Callable[[str, RunOutcome], None]] = None,
-    ) -> SessionResult:
-        """Run a differential document's variants and compare their evidence.
-
-        ``overrides.artifacts`` (``--artifact NAME=PATH``) resolves the base scenario's local-binary artifacts at
-        other paths, and ``overrides.base_port`` (``--base-port``) moves its ports.
-        """
-
-        differential = Differential.from_document(load_document(path))
-        if seed is not None:
-            differential.base["seed"] = seed
-        # Variants patch the base, so a variant that sets its own binary keeps it.
-        differential.base = with_valkey_binary(self.catalog, differential.base, overrides.binary)
-        differential.base = with_base_port(
-            with_artifact_paths(differential.base, overrides.artifacts), overrides.base_port
-        )
-        # Every variant compiles before the first runs; a bad one leaves no folder.
-        session = _Session(self, "differential", differential.differential_id, timeout)
-
-        def execute_variant(name: str, scenario: dict, plan: ExecutionPlan) -> tuple[RunOutcome, str]:
-            record = session.run(name, plan, scenario)
-            return record.outcome, record.report_dir
-
-        report = run_differential(
-            differential,
-            compile_fn=self.compile,
-            execute_fn=execute_variant,
-            components=self.catalog.components,
-            on_variant=on_variant,
-        )
-        write_document(os.path.join(session.folder(), "differential.json"), report)
-        return SessionResult(report=report, report_dir=session.folder())
+    # -- minimization --------------------------------------
 
     def prepare_minimization(self, path: str, *, overrides: Overrides = NO_OVERRIDES) -> Minimization:
         """Load a failing run's report: its scenario and the failure signature a reduction must keep.

@@ -11,6 +11,14 @@
 - `reproducer.generated` in a run report no longer carries `draws`, and `Overrides.pinned` and
   `GeneratorBlock.kept` are removed: only guided batches read them.
 
+### Removed: the `diff` command and the differential engine
+
+- `valkey-fuzzer diff`, differential documents (`differential_id`, `variants`, `compare`), `RunService.differential`
+  and `valkey_fuzzer/differential.py` are removed, with `examples/valkey/differential_baseline_vs_candidate.yaml`
+  and the `<root>/differential/` report folder. There is no deprecation shim: `diff` is now an unknown command.
+  To compare two builds, use `compare_with` of `valkey.action.commands` (or of `valkey.action.tools`), which runs
+  one sequence on a candidate and a parent server and compares the replies. Batch `matrix` dimensions are unchanged.
+
 ### Changed: `replay` and `minimize` warn about drift and never refuse
 
 - A drifted `replay` or `minimize` runs, prints each difference to stderr, and `replay` records it in the

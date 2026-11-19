@@ -1876,7 +1876,7 @@ Evidence: `valkey.binary.verified`.
 ### `valkey.oracle.dataset-digest`
 
 Records a canonical digest of every primary's dataset (all keys, with values
-compared by type), for differential runs, and writes a key listing as
+compared by type), for comparing builds, and writes a key listing as
 `keyspace.jsonl`. The digest itself never fails a run. The oracle fails only
 when no instance is a primary, in cluster mode a key is held by two primaries, or, with
 `include_replicas`, a replica does not converge on its primary's digest.

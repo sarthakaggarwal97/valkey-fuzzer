@@ -1,5 +1,5 @@
 """What a stranger hits first: example flags, error hints, seeds that depend on cores, and a smoke verdict
-(``--base-port``, ``diff --artifact``, "did you mean", ``validate --strict``, ``replay`` of a scenario)."""
+(``--base-port``, "did you mean", ``validate --strict``, ``replay`` of a scenario)."""
 
 import json
 import re
@@ -23,7 +23,6 @@ from valkey_fuzzer.outcomes import EXIT_USAGE
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES = ROOT / "examples"
 EXPERIMENTS = EXAMPLES / "experiments"
-DIFFERENTIAL = EXAMPLES / "valkey" / "differential_baseline_vs_candidate.yaml"
 
 pytestmark = pytest.mark.usefixtures("report_root")
 
@@ -41,7 +40,7 @@ def _ports(plan):
 
 
 # ---------------------------------------------------------------------------
-# U-04 --base-port, diff --artifact, the examples' flags
+# U-04 --base-port, the examples' flags
 # ---------------------------------------------------------------------------
 
 
@@ -80,24 +79,6 @@ def test_batch_takes_base_port_as_its_port_base():
     assert args.port_base == 12000
 
 
-def test_diff_resolves_artifacts_and_moves_ports_and_defaults_to_valkey_server_on_path(canned_runs):
-    _cli("diff", DIFFERENTIAL)
-    assert len(canned_runs.plans) == 2
-    for plan in canned_runs.plans:
-        assert {spec.config["path"] for spec in plan.artifacts} == {"valkey-server"}
-
-    canned_runs.plans.clear()
-    options = ("--artifact", "baseline=/old/valkey-server", "--artifact", "candidate=/new/valkey-server")
-    _cli("diff", DIFFERENTIAL, *options, "--base-port", 9300)
-    assert len(canned_runs.plans) == 2
-    for plan in canned_runs.plans:
-        paths = {spec.id: spec.config["path"] for spec in plan.artifacts}
-        assert paths == {"baseline": "/old/valkey-server", "candidate": "/new/valkey-server"}
-        assert plan.deployment["base_port"] == 9300
-
-    assert _cli("diff", DIFFERENTIAL, "--artifact", "nope=/x") == EXIT_USAGE
-
-
 def _headers(path):
     """The ``valkey-fuzzer`` command an example's leading comment documents, as its arguments (None if none): an
     indented comment line that starts with it, and the lines a trailing backslash continues it over."""
@@ -119,7 +100,7 @@ def _headers(path):
 SINGLE_SCENARIOS = [
     path
     for path in sorted([*EXAMPLES.glob("*_scenario.yaml"), *(EXAMPLES / "valkey").glob("*.yaml")])
-    if "differential_id" not in path.read_text() and "sources" not in path.read_text()
+    if "sources" not in path.read_text()
 ]
 
 

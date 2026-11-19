@@ -264,20 +264,14 @@ give the exact command:
 valkey-fuzzer run examples/standalone_scenario.yaml --experiment-dir examples/experiments
 ```
 
-The same runner also drives two tools over runs:
+The same runner also drives a tool over runs:
 
 ```bash
-valkey-fuzzer diff examples/valkey/differential_baseline_vs_candidate.yaml \
-  --artifact baseline=/path/to/old/valkey-server --artifact candidate=/path/to/new/valkey-server
 valkey-fuzzer minimize report.json --output minimized.yaml
 ```
 
-Without `--artifact`, both builds of the `diff` example are the
-`valkey-server` on `PATH`.
-
-`diff` runs one seeded scenario under several variants and compares their
-evidence, and `minimize` shrinks a failing scenario while it keeps failing the
-same way. See the [command-line reference](cli.md).
+`minimize` shrinks a failing scenario while it keeps failing the same way. To
+compare two builds, use `compare_with` of `valkey.action.commands`. See the [command-line reference](cli.md).
 
 To write your own experiment, start with
 [Adding tests](extending.md#write-a-data-only-experiment).
