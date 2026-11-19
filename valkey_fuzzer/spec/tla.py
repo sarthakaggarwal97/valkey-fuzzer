@@ -361,6 +361,16 @@ def normalize(text: str) -> str:
 # Running the tools
 # ---------------------------------------------------------------------------
 
+# The tla2tools.jar release CI pins (TLA_TOOLS_VERSION in the workflows; tests/test_ci_workflows.py keeps them
+# equal). The base install needs neither java nor the jar: only the spec commands and a batch's conform step do,
+# and this is what they say without them.
+TLA_TOOLS_VERSION = "v1.7.4"
+TLA_TOOLS_URL = f"https://github.com/tlaplus/tlaplus/releases/download/{TLA_TOOLS_VERSION}/tla2tools.jar"
+TOOLS_HINT = (
+    "the spec bridge needs Java 11 or later on PATH and tla2tools.jar (pass --tla2tools or set TLA2TOOLS_JAR). "
+    f"Get the jar CI pins with: curl -fsSL -o tla2tools.jar {TLA_TOOLS_URL}"
+)
+
 
 @dataclass(frozen=True)
 class TlaTools:
@@ -380,14 +390,18 @@ class TlaTools:
 
     @classmethod
     def locate(cls, jar: Optional[str], *, workers: str = "auto") -> "TlaTools":
-        """The tools at ``jar`` (or ``$TLA2TOOLS_JAR``); raise :class:`TlaError` if java or the jar is missing."""
+        """The tools at ``jar`` (or ``$TLA2TOOLS_JAR``); raise :class:`TlaError`, naming what is missing and
+        :data:`TOOLS_HINT`, if java or the jar is missing."""
 
         path = jar or os.environ.get("TLA2TOOLS_JAR")
-        if not path or not os.path.isfile(path):
-            raise TlaError("tla2tools.jar not found: pass --tla2tools or set TLA2TOOLS_JAR")
         java = shutil.which("java")
+        missing = []
+        if not path or not os.path.isfile(path):
+            missing.append("tla2tools.jar not found")
         if java is None:
-            raise TlaError("java not found on PATH")
+            missing.append("java not found on PATH")
+        if missing:
+            raise TlaError(f"{' and '.join(missing)}: {TOOLS_HINT}")
         return cls(jar=os.path.abspath(path), java=java, workers=workers)
 
     def within(self, seconds: float) -> "TlaTools":

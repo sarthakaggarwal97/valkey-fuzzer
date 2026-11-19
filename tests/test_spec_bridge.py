@@ -468,6 +468,28 @@ def test_conform_folder_checks_a_run_against_each_bundle_its_plan_names(tmp_path
     assert "error" not in empty["replication"]
 
 
+def test_conform_folder_without_tlc_is_an_error_for_an_approved_bundle_and_a_skip_for_a_draft(tmp_path, monkeypatch):
+    run = _run_folder(tmp_path / "run", "PASS", ["register"])
+    draft = {"approved": False, "status": "skipped", "reason": "no java"}
+    assert conform_folder(run, None, "no java") == {"register": draft}
+    # An approved bundle's claims decide the run, so a check that could not run must not let it pass.
+    _edit(_copy(tmp_path, monkeypatch) / "claims.yaml", "status: draft", "status: approved\napproved_by: someone")
+    approved = {"approved": True, "status": "error", "error": "no java"}
+    assert conform_folder(run, None, "no java") == {"register": approved}
+
+
+def test_the_tools_name_what_is_missing_and_how_to_get_it(monkeypatch, tmp_path):
+    monkeypatch.delenv("TLA2TOOLS_JAR", raising=False)
+    monkeypatch.setattr(tla.shutil, "which", lambda name: None)
+    with pytest.raises(TlaError) as error:
+        TlaTools.locate(None)
+    assert str(error.value) == f"tla2tools.jar not found and java not found on PATH: {tla.TOOLS_HINT}"
+    assert "Java 11 or later" in tla.TOOLS_HINT and f"curl -fsSL -o tla2tools.jar {tla.TLA_TOOLS_URL}" in tla.TOOLS_HINT
+    (tmp_path / "tla2tools.jar").write_text("")
+    with pytest.raises(TlaError, match=r"^java not found on PATH: the spec bridge needs Java 11"):
+        TlaTools.locate(str(tmp_path / "tla2tools.jar"))
+
+
 def test_conform_needs_no_tools_for_a_bundle_tlc_has_nothing_to_evaluate(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("TLA2TOOLS_JAR", raising=False)
     run = _run_folder(tmp_path / "run", "PASS", ["replication"], [("replication.link.lost", {"instance_id": "v"})])

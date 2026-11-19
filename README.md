@@ -20,6 +20,7 @@ experiment, cluster chaos (failovers with process kills) included.
 | A `valkey-server` build | every experiment starts real servers | Build one (below), or pass `--valkey-binary PATH`. |
 | Go 1.21 or later | builds the `porcupine` linearizability checker. These experiments need it: `valkey.aof-durability`, `valkey.cluster-partition`, `valkey.mixed-version-cluster`, `valkey.replication-chaos`, `valkey.replication-full-resync`, `valkey.rolling-upgrade`. | `validate` exits `2`, and a run ends `ERROR` before it starts anything, with `porcupine is not on PATH` and the build command. |
 | Free ports | the quickstart uses 7430 and 7431; generated scenarios use ports from 7000 | The run ends `ERROR` and names the port. |
+| Java 11 or later and `tla2tools.jar` (optional) | only the `spec` commands of the [spec bridge](docs/spec-bridge.md), and a batch's check of its runs against a spec bundle that needs TLC. `pip install` needs neither. | A `spec` command exits `2` and prints the jar's download command. A batch skips a draft bundle's check; a run checked against an approved one ends `ERROR`. |
 
 **Build Valkey.** Use the binary where it was built. A `valkey-server` copied
 out of its build tree can crash at start (it cannot find its Lua module), and

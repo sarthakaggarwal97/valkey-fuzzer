@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Changed: the spec bridge loads only when used, and says how to get TLC when it is missing
+
+- `run`, `validate`, `batch` and the other commands no longer import the spec bridge's tools
+  (`valkey_fuzzer.spec.check`, `.translate`, `.conform`). The components still read a bundle's mapping
+  (`valkey_fuzzer.spec.bundle`, which parses TLA+ values with `.tla`), which needs no Java. A base `pip install`
+  needs neither Java nor `tla2tools.jar`; there is no `[spec]` extra, since the bridge has no Python dependency.
+- Without java or the jar, a `spec` command prints one message naming what is missing, Java 11 or later, how to
+  pass the jar, and the `curl` command for the release CI pins, and exits `2`. The message replaces
+  `tla2tools.jar not found: pass --tla2tools or set TLA2TOOLS_JAR` and `java not found on PATH`.
+- In a batch without TLC, a run checked against an approved bundle that needs TLC is now an `ERROR` (it was
+  `skipped`), with the same message as the reason. A draft bundle stays `skipped`. No shipped bundle is approved
+  now, so no shipped batch changes.
+- `CONFORMANCE_FILE` moved from `valkey_fuzzer.spec.conform` to `valkey_fuzzer.batch.conform_plugin`, and `TRACE_FILE` from
+  `valkey_fuzzer.spec.conform` to `valkey_fuzzer.spec.bundle` (`conform` still has it).
+
 ### Changed: `batch.py` is the `valkey_fuzzer.batch` package; the zoo and spec conformance are its plug-ins
 
 - The 1,467-line module is split by concern: `spec.py` (options, sources), `sources.py` (random, matrix, scenarios,

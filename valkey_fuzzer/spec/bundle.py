@@ -43,6 +43,8 @@ MODEL_FILE = "model.tla"
 MAPPING_FILE = "mapping.yaml"
 CONTROLS_DIRECTORY = "negative-controls"
 EXPERIMENTS_DIRECTORY = "experiments"
+# The JSONL a trace component writes in its artifact folder and spec conform reads (:mod:`.conform`).
+TRACE_FILE = "trace.jsonl"
 
 # node reads as str; the name tells a reader the field is a node of the trace header.
 FIELD_TYPES = ("int", "str", "bool", "node", "node_id")

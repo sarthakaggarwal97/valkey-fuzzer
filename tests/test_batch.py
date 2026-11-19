@@ -40,6 +40,8 @@ from valkey_fuzzer.deployment.local import ports
 from valkey_fuzzer.hoststate import OWNER_FILE, sweep
 from valkey_fuzzer.results import OutcomeStatus, RunOutcome
 from valkey_fuzzer.schema import ConfigField, ConfigSchema
+from valkey_fuzzer.spec import conform
+from valkey_fuzzer.spec.tla import TOOLS_HINT
 
 from .batch_worker_stub import InProcessWorkers
 from .valkey_experiments_support import valkey_service
@@ -651,7 +653,7 @@ def test_spec_conform_of_an_approved_bundle_decides_the_run_and_a_drafts_is_only
         3: {"replication": {"approved": True, "status": "error", "error": "2 mapped record(s) could not be applied"}},
         4: {"replication": {"approved": True, "status": "skipped", "reason": "tla2tools.jar not found"}},
     }
-    monkeypatch.setattr(conform_plugin, "conform_folder", lambda folder, tools, unavailable="": canned[_seed(folder)])
+    monkeypatch.setattr(conform, "conform_folder", lambda folder, tools, unavailable="": canned[_seed(folder)])
     sources = [_random(5, experiments=[REPLICATION])]
     runner = _batch(tmp_path, sources, prune_pass=True, serial_reruns=1)
     summary = runner.run()
@@ -710,9 +712,8 @@ def test_a_worker_checks_its_run_against_the_bundles_its_plan_names(tmp_path, wo
     # The election model needs TLC, which this host does not have; its claims are a draft either way.
     election = results["valkey.cluster-election-durability0"]
     assert election["conformance"]["cluster-election"]["status"] == "skipped" and election["status"] == "PASS"
-    assert summary["conformance"]["cluster-election"]["skipped"] == [
-        "tla2tools.jar not found: pass --tla2tools or set TLA2TOOLS_JAR"
-    ]
+    (reason,) = summary["conformance"]["cluster-election"]["skipped"]
+    assert reason.startswith("tla2tools.jar not found") and reason.endswith(TOOLS_HINT)
     assert summary["conformance"]["cluster-election"]["status"] == "skipped"
     assert summary["conformance"]["replication"]["counts"] == {"unexercised": 1, "not_run": 1}
     assert summary["conformance"]["replication"]["status"] == "unexercised"
@@ -740,7 +741,7 @@ def test_a_run_whose_plan_names_a_bundle_but_whose_worker_wrote_no_conformance_i
 
 def test_a_missing_conformance_is_held_against_the_run_only_for_approved_claims(tmp_path, workers, stub, monkeypatch):
     # The worker wrote no conform.json: the batch's own error entry decides by the bundle's claims.
-    monkeypatch.setattr(conform_plugin, "conform_folder", lambda folder, tools, unavailable="": {})
+    monkeypatch.setattr(conform, "conform_folder", lambda folder, tools, unavailable="": {})
     runner = _batch(tmp_path, [_random(1, experiments=[REPLICATION])])
     runner.run()
     (draft,) = _results(runner).values()
