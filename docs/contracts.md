@@ -329,7 +329,8 @@ land differently on a rerun or a replay.
 
 A run report records the digests of the plan, the experiment, the fuzzer's
 source (the Valkey components included), the deployment provider, and each
-instance's binary. `replay` refuses to run when any of them differ from what is
-installed now, unless `--allow-drift` is given (see [replay](cli.md#replay)).
+instance's binary. `replay` runs when any of them differ from what is
+installed now, warns, and records each difference in the replay report's `provenance.drift` (see
+[replay](cli.md#replay)).
 Replay is not hermetic: it runs with what is installed and cannot reproduce
 timing.

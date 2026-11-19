@@ -1,4 +1,4 @@
-"""``replay``: re-execute a recorded run, refusing (or recording) drift from its provenance."""
+"""``replay``: re-execute a recorded run, recording and warning about drift from its provenance."""
 
 import argparse
 import sys
@@ -7,7 +7,6 @@ from typing import Any
 from ..compiler import Overrides
 from ..outcomes import EXIT_FAILURE, EXIT_HARNESS_ERROR, exit_code
 from ..reports import ReportWriteError, write_document
-from ..service import ReplayDriftError
 from ._common import add_common_options, artifact_paths, describe_drift, service_for
 
 
@@ -15,13 +14,6 @@ def register(subparsers: Any) -> None:
     replay = subparsers.add_parser("replay", help="Re-execute a recorded run (report.json or plan.json)")
     replay.add_argument("plan", help="Path to a run report (report.json or a --output copy) or a plan.json")
     replay.add_argument("--output", help="Path to save the replay report")
-    replay.add_argument(
-        "--allow-drift",
-        action="store_true",
-        help="Replay even if the fuzzer, experiment, components, or Valkey binary differ from the "
-        "recorded run, or replay a bare plan.json that has no recorded provenance; the differences are printed "
-        "and recorded in the replay report",
-    )
     replay.add_argument("--verbose", action="store_true")
     add_common_options(
         replay, valkey_binary=True, artifact=True, artifact_dir=True, timeout=True, allow_unsupported=True
@@ -34,25 +26,14 @@ def replay_command(args: argparse.Namespace) -> int:
 
     service = service_for(args)
     artifacts = artifact_paths(args)
-    try:
-        prepared = service.prepare_replay(
-            args.plan,
-            overrides=Overrides(binary=args.valkey_binary, artifacts=artifacts),
-            allow_drift=args.allow_drift,
-        )
-    except ReplayDriftError as exc:
-        print("Error: refusing to replay because this environment differs from the recorded run:", file=sys.stderr)
-        for entry in exc.drift:
-            print(f"  - {describe_drift(entry)}", file=sys.stderr)
-        print("Pass --allow-drift to replay anyway, or --valkey-binary to choose a binary on purpose.", file=sys.stderr)
-        return EXIT_HARNESS_ERROR
+    prepared = service.prepare_replay(args.plan, overrides=Overrides(binary=args.valkey_binary, artifacts=artifacts))
     if not prepared.verified:
         print(
             f"Warning: {args.plan} records no provenance, so the replay cannot be verified against the original run",
             file=sys.stderr,
         )
     for entry in prepared.drift:
-        print(f"Warning: replaying despite drift: {describe_drift(entry)}", file=sys.stderr)
+        print(f"Warning: drift from the recorded run: {describe_drift(entry)}", file=sys.stderr)
     for note in prepared.not_verified:
         print(f"Note: not verified: {note}")
     if args.valkey_binary:
@@ -70,20 +51,8 @@ def replay_command(args: argparse.Namespace) -> int:
     print(f"Summary: {record.outcome.summary}")
     print(f"Report: {record.report_path}")
     code = exit_code(record.outcome.status, allow_unsupported=args.allow_unsupported)
-    if result.late_drift and not args.allow_drift:
-        # A FAIL on a different binary still fails (the drift is in the report's provenance); anything else
-        # proves nothing about the recorded run.
-        failed = code == EXIT_FAILURE
-        print(
-            "Error: the replay ran a different Valkey binary or artifact than the recorded run, "
-            + ("but it still FAILed:" if failed else "so it does not reproduce it:"),
-            file=sys.stderr,
-        )
-        for entry in result.late_drift:
-            print(f"  - {describe_drift(entry)}", file=sys.stderr)
-        if not failed:
-            print("Pass --allow-drift to accept such a replay.", file=sys.stderr)
-            code = EXIT_HARNESS_ERROR
+    for entry in result.late_drift:
+        print(f"Warning: drift found by running: {describe_drift(entry)}", file=sys.stderr)
     if args.output:
         try:
             write_document(args.output, record.report)

@@ -58,8 +58,8 @@ valkey-fuzzer minimize report.json --output minimized.yaml
 ```
 
 Both need the same fuzzer and the same `valkey-server` that produced the
-report; `replay` refuses to run when they differ unless you pass
-`--allow-drift`. Replay does not reproduce timing, so a race can land
+report. When they differ, `replay` still runs, prints each difference as a
+warning, and records it under `provenance.drift` in the replay report. Replay does not reproduce timing, so a race can land
 differently. Every run prints a `Reproduce:` line; a generated run
 (`--seed N --experiment ID`) also prints the command that makes the same
 scenario. The report keeps it as `reproduce`.

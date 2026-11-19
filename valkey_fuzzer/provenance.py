@@ -240,7 +240,7 @@ def provenance_drift(
     available = None if registration is None else to_plain_data(registration.identity)
     label = f"deployment provider for {plan.deployment_mode}"
     if available != locked:
-        # The runner refuses this plan whatever --allow-drift says.
+        # The runner refuses this plan, drift or not.
         drift.append(_drift(label, locked, available))
     else:
         old_row, new_row = recorded["deployment_provider"], current["deployment_provider"]

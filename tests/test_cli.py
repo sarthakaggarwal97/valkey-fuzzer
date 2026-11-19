@@ -234,7 +234,7 @@ def test_a_generated_scenario_moves_off_busy_ports_but_a_batch_workers_never_doe
     assert "base_port" not in kept.scenario["deployment"]
 
 
-def test_replay_refuses_a_drifted_environment_unless_allowed_and_then_records_the_drift(tmp_path, canned_runs):
+def test_replay_of_a_drifted_environment_runs_warns_and_records_the_drift(tmp_path, canned_runs, capsys):
     report = _run_report(tmp_path)
     data = json.loads(report.read_text())
     data["reproducer"]["plan_digest"] = "1" * 64
@@ -242,19 +242,19 @@ def test_replay_refuses_a_drifted_environment_unless_allowed_and_then_records_th
     data["reproducer"]["components"][0]["implementation"] = "old.Component"
     report.write_text(json.dumps(data))
 
-    assert _cli("replay", report) == EXIT_HARNESS_ERROR
-    assert len(canned_runs.plans) == 1, "a drifted replay must not run"
-    assert _cli("replay", report, "--allow-drift", "--output", tmp_path / "replay.json") == 0
+    assert _cli("replay", report, "--output", tmp_path / "replay.json") == 0
+    assert len(canned_runs.plans) == 2, "a drifted replay still runs"
+    assert "Warning: drift from the recorded run: plan digest" in capsys.readouterr().err
     provenance = json.loads((tmp_path / "replay.json").read_text())["provenance"]
-    assert provenance["drift_allowed"] is True and "plan digest" in {entry["item"] for entry in provenance["drift"]}
+    assert "plan digest" in {entry["item"] for entry in provenance["drift"]}
+    with pytest.raises(SystemExit):
+        _cli("replay", report, "--allow-drift")  # the flag is gone
 
 
 def test_replay_runs_a_bare_plan_or_a_yaml_report_but_minimize_needs_a_run_report(tmp_path, canned_runs):
     plan = tmp_path / "plan.json"
     plan.write_text(valkey_service().compile(yaml.safe_load(Path(EXAMPLE).read_text())).to_json())
-    assert _cli("replay", plan, "--output", tmp_path / "replay.json") == EXIT_USAGE, "a bare plan is unverified"
-    assert not canned_runs.plans
-    assert _cli("replay", plan, "--allow-drift", "--output", tmp_path / "replay.json") == 0
+    assert _cli("replay", plan, "--output", tmp_path / "replay.json") == 0, "a bare plan replays, unverified"
     assert json.loads((tmp_path / "replay.json").read_text())["provenance"]["verified"] is False
     assert _cli("minimize", plan) == EXIT_USAGE
     # --output-format is the --output file's; --format, in list, validate, and sweep, is stdout's.
@@ -271,24 +271,20 @@ def test_replay_checks_a_binary_an_environment_provider_supplies_after_the_run(t
     canned_runs.diagnostics = lambda plan: {"deployment": {"instances": [{**instance, "binary_sha256": next(digests)}]}}
     report = tmp_path / "report.json"
     assert _cli("run", EXAMPLES / "mixed_version_cluster.yaml", "--output", report) == 0
-    assert _cli("replay", report) == EXIT_HARNESS_ERROR
-    assert _cli("replay", report, "--allow-drift") == 0
+    assert _cli("replay", report) == 0
 
 
 @pytest.mark.parametrize(
-    ("status", "allow_drift", "code"),
+    ("status", "code"),
     [
-        # A FAIL reproduced on another binary is still a FAIL; the drift is recorded in the report.
-        (OutcomeStatus.FAIL, False, EXIT_FAILURE),
-        (OutcomeStatus.FAIL, True, EXIT_FAILURE),
-        # Anything else on another binary proves nothing about the recorded run, unless drift is allowed.
-        (OutcomeStatus.PASS, False, EXIT_HARNESS_ERROR),
-        (OutcomeStatus.PASS, True, 0),
-        (OutcomeStatus.ERROR, False, EXIT_HARNESS_ERROR),
+        # The exit code is the run's own verdict; the drift is recorded in the report and warned about.
+        (OutcomeStatus.FAIL, EXIT_FAILURE),
+        (OutcomeStatus.PASS, 0),
+        (OutcomeStatus.ERROR, EXIT_HARNESS_ERROR),
     ],
 )
-def test_replay_that_fails_on_a_drifted_binary_exits_fail_and_records_the_drift(
-    tmp_path, canned_runs, status, allow_drift, code
+def test_replay_on_a_drifted_binary_exits_with_the_runs_verdict_and_records_the_drift(
+    tmp_path, canned_runs, status, code
 ):
     digests = iter(["a" * 64, "b" * 64])
     instance = {"instance_id": "valkey-0", "binary": "/opt/valkey"}
@@ -297,7 +293,7 @@ def test_replay_that_fails_on_a_drifted_binary_exits_fail_and_records_the_drift(
     assert _cli("run", EXAMPLES / "mixed_version_cluster.yaml", "--output", report) == 0
     canned_runs.status = status
     replayed = tmp_path / "replay.json"
-    assert _cli("replay", report, *(["--allow-drift"] if allow_drift else []), "--output", replayed) == code
+    assert _cli("replay", report, "--output", replayed) == code
     saved = json.loads(replayed.read_text())
     assert saved["status"] == status.value
     assert saved["provenance"]["drift"], "the drift is in the replay report"
@@ -311,21 +307,19 @@ def test_a_run_writes_a_reproducer_beside_its_plan_so_replaying_the_plan_is_veri
     assert _cli("replay", folder / "plan.json", "--output", replayed) == 0
     assert json.loads(replayed.read_text())["provenance"]["verified"] is True
 
-    # An older folder (plan.json and report.json only) is verified by its report; a bare plan is refused.
+    # An older folder (plan.json and report.json only) is verified by its report; a bare plan replays unverified.
     (folder / "reproducer.json").unlink()
     assert _cli("replay", folder / "plan.json") == 0
     lone = tmp_path / "lone"
     lone.mkdir()
     (lone / "plan.json").write_text((folder / "plan.json").read_text())
-    assert _cli("replay", lone / "plan.json") == EXIT_USAGE
-    assert _cli("replay", lone / "plan.json", "--allow-drift") == 0
+    assert _cli("replay", lone / "plan.json") == 0
 
-    # A plan whose folder records another fuzzer is drift, which --allow-drift accepts and records.
+    # A plan whose folder records another fuzzer is drift, which is recorded.
     data = json.loads((folder / "report.json").read_text())
     data["reproducer"]["fuzzer_digest"] = "0" * 64
     (folder / "report.json").write_text(json.dumps(data))
-    assert _cli("replay", folder / "plan.json") == EXIT_HARNESS_ERROR
-    assert _cli("replay", folder / "plan.json", "--allow-drift", "--output", replayed) == 0
+    assert _cli("replay", folder / "plan.json", "--output", replayed) == 0
     assert json.loads(replayed.read_text())["provenance"]["drift"]
 
 
@@ -365,9 +359,12 @@ def test_replay_compares_the_valkey_binary_digest_and_a_chosen_binary_is_no_drif
     report = _run_report(tmp_path, "--valkey-binary", binary)
     assert _cli("replay", report) == 0
     binary.write_bytes(b"build two")
-    assert _cli("replay", report) == EXIT_HARNESS_ERROR
-    assert len(canned_runs.plans) == 2, "a replay of another build must not run"
-    assert _cli("replay", report, "--valkey-binary", other) == 0
+    replayed = tmp_path / "replay.json"
+    assert _cli("replay", report, "--output", replayed) == 0, "another build still runs"
+    assert len(canned_runs.plans) == 3
+    assert json.loads(replayed.read_text())["provenance"]["drift"]
+    assert _cli("replay", report, "--valkey-binary", other, "--output", replayed) == 0
+    assert not json.loads(replayed.read_text())["provenance"]["drift"], "a chosen binary is no drift"
 
 
 UPGRADE = {
@@ -407,17 +404,12 @@ def test_an_artifact_override_resolves_a_local_binary_elsewhere_and_what_ran_is_
         json.loads(report.read_text())["scenario"]["artifacts"]["candidate"]["with"]["path"] == "/elsewhere/candidate"
     )
     # The replay runs the recorded path unless told otherwise; the override is recorded, and the binary that ran
-    # is still compared with the recorded run, so another build is drift, which --allow-drift accepts.
+    # is still compared with the recorded run, so another build is drift, recorded and warned about.
     assert _cli("replay", report) == 0
     assert _artifact_path(canned_runs.plans[1], "candidate") == "/elsewhere/candidate"
     replayed = tmp_path / "replay.json"
-    assert (
-        _cli("replay", report, "--artifact", "candidate=/third/candidate", "--output", replayed) == EXIT_HARNESS_ERROR
-    )
+    assert _cli("replay", report, "--artifact", "candidate=/third/candidate", "--output", replayed) == 0
     assert _artifact_path(canned_runs.plans[2], "candidate") == "/third/candidate"
-    assert (
-        _cli("replay", report, "--artifact", "candidate=/third/candidate", "--allow-drift", "--output", replayed) == 0
-    )
     provenance = json.loads(replayed.read_text())["provenance"]
     assert provenance["artifact_overrides"] == {"candidate": "/third/candidate"}
     assert [entry["item"] for entry in provenance["drift"]] == ["artifacts.candidate sha256"]
@@ -502,17 +494,15 @@ def test_diff_passes_only_when_the_variants_evidence_agrees(tmp_path, canned_run
     assert len(list(session.glob("*/report.json"))) == 2
 
 
-def test_minimize_refuses_a_drifted_environment_and_a_budget_below_one(tmp_path, canned_runs, capsys):
+def test_minimize_warns_about_a_drifted_environment_and_rejects_a_budget_below_one(tmp_path, canned_runs, capsys):
     canned_runs.status = OutcomeStatus.FAIL
     report = _run_report(tmp_path)
     data = json.loads(report.read_text())
     data["reproducer"]["fuzzer_digest"] = "0" * 64
     report.write_text(json.dumps(data))
-    # Reductions are judged by whether they fail the same way: on other code that proves nothing.
-    assert _cli("minimize", report) == EXIT_HARNESS_ERROR
-    assert "refusing to minimize" in capsys.readouterr().err and len(canned_runs.plans) == 1
-    # One candidate that does not keep the failure leaves nothing smaller: that is not a success.
-    assert _cli("minimize", report, "--allow-drift", "--max-attempts", 1) == 0
+    # Reductions are judged by whether they fail the same way: on other code that proves less, so it warns.
+    assert _cli("minimize", report, "--max-attempts", 1) == 0
+    assert "Warning: drift from the recorded run: fuzzer code" in capsys.readouterr().err
     for budget in (0, -3):
         with pytest.raises(SystemExit):
             _cli("minimize", report, "--max-attempts", budget)

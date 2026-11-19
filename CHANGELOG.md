@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Changed: `replay` and `minimize` warn about drift and never refuse
+
+- A drifted `replay` or `minimize` runs, prints each difference to stderr, and `replay` records it in the
+  report's `provenance.drift` (`item`, `recorded`, `replay`). `--allow-drift` is removed from both commands,
+  `provenance.drift_allowed` is gone, and a bare `plan.json` replays unverified (`provenance.verified: false`).
+  A drifted replay exits with the run's own verdict code; it no longer exits `2` for drift or `64` for a bare plan.
+
 ### Changed: readable run output and `report.json` layout (keys preserved)
 
 - `report.json` now starts with `status`, `summary`, `failed_components` (values cut to 120 characters with
