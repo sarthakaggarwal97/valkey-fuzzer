@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Removed: unreferenced example scenarios
+
+- `examples/valkey/replication_full_resync.yaml` and `replication_partial_resync.yaml` only pinned a seed, ports and
+  the defaults of the shipped experiments of the same id; run them with `--experiment valkey.replication-full-resync`
+  or `--experiment valkey.replication-partial-resync`. `examples/cluster_scenario.yaml` and
+  `examples/standalone_replicas_scenario.yaml` had no reference anywhere.
+
 ### Removed: coverage-guided batches (`--guided`, `--corpus-from`)
 
 - `batch --guided N`, `batch --corpus-from BATCH`, and the batch spec keys `guided` (in a `random` source) and
