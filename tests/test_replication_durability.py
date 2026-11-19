@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 import valkey
 
+from tests.fakes import FakeClient, FakeHandle
 from tests.support import VirtualClock
 from tests.valkey_experiments_support import fake_context, registration_for, valkey_service
 from valkey_fuzzer.components import instances, polling, processes
@@ -155,20 +156,11 @@ class _Pipe:
         return self.replies
 
 
-class _Client:
+class _Client(FakeClient):
     """What ``new_client`` returns: pipelines over the handle's values, and its CLUSTER NODES as seen from one instance."""
 
     def __init__(self, handle, instance_id):
         self.handle, self.instance_id = handle, instance_id
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-    def close(self):
-        pass
 
     def pipeline(self, transaction=False):
         return _Pipe(self.handle.values)
@@ -178,7 +170,7 @@ class _Client:
         return self.handle.cluster_nodes(self.instance_id)
 
 
-class _Handle:
+class _Handle(FakeHandle):
     """Primaries holding ``values``, two per shard, and ``replicas`` replicas; in a cluster shard 0 owns slots
     0-8191. Without ``primaries`` none answers as a primary."""
 
@@ -196,16 +188,10 @@ class _Handle:
         self.slots = {}
 
     def roles(self):
-        return {instance.instance_id: instance.role for instance in self.instances} if self.alive else {}
-
-    def primaries(self):
-        return [instance_id for instance_id, role in self.roles().items() if role == "primary"]
+        return super().roles() if self.alive else {}
 
     def replicas(self):
         return []
-
-    def instance(self, instance_id):
-        return next(instance for instance in self.instances if instance.instance_id == instance_id)
 
     def new_client(self, instance_id, timeout=5.0):
         return _Client(self, instance_id)

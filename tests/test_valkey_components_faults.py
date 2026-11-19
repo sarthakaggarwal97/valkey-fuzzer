@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.fakes import FakeClient, FakeHandle, fake_instances
 from tests.support import VirtualClock
 from tests.valkey_experiments_support import fake_context, registration_for, resolved, unit_plan
 from valkey_fuzzer.components import capabilities, network, processes, providers, storage
@@ -43,19 +44,13 @@ class Iptables:
         return ok
 
 
-class _Handle:
+class _Handle(FakeHandle):
     """valkey-0 (the primary) to valkey-2 on their own addresses; restarts and resumes fail as many times as set."""
 
     def __init__(self, root=""):
-        self.instances = tuple(SimpleNamespace(instance_id=f"valkey-{n}", host=f"127.0.0.{n + 2}") for n in range(3))
+        self.instances = fake_instances(3, host=lambda n: f"127.0.0.{n + 2}")
         self.root, self.alive, self.signals, self.commands = root, True, [], []
         self.fail_restarts = self.fail_resumes = 0
-
-    def primaries(self):
-        return ["valkey-0"]
-
-    def replicas(self):
-        return ["valkey-1", "valkey-2"]
 
     def pid(self, instance_id):
         return 4242
@@ -89,22 +84,13 @@ class _Handle:
         return _Client(self.commands)
 
 
-class _Client:
+class _Client(FakeClient):
     def __init__(self, commands):
         self.commands = commands
 
     def execute_command(self, *args):
         self.commands.append(args)
         return "OK"
-
-    def close(self):
-        pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc_info):
-        pass
 
 
 def _owned(context):

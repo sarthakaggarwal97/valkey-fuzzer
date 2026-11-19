@@ -17,6 +17,7 @@ from valkey.exceptions import ConnectionError as ValkeyConnectionError
 from valkey.exceptions import InvalidResponse, ResponseError
 from valkey.exceptions import TimeoutError as ValkeyTimeoutError
 
+from tests import fakes
 from tests.valkey_experiments_support import registration_for, resolved, unit_plan
 from valkey_fuzzer import deadlines
 from valkey_fuzzer._data import canonical_json, to_plain_data
@@ -1150,23 +1151,9 @@ def test_a_config_file_line_means_what_the_command_line_does():
 # ---------------------------------------------------------------------------
 
 
-class FakeInstance:
-    def __init__(self, instance_id, role, port):
-        self.instance_id, self.role, self.host, self.port = instance_id, role, "127.0.0.1", port
-
-
-class FakeHandle:
+class FakeHandle(fakes.FakeHandle):
     def __init__(self):
-        self.instances = (FakeInstance("valkey-0", "primary", 7000), FakeInstance("valkey-1", "replica", 7001))
-
-    def primaries(self):
-        return ["valkey-0"]
-
-    def replicas(self):
-        return ["valkey-1"]
-
-    def instance(self, instance_id):
-        return next(item for item in self.instances if item.instance_id == instance_id)
+        self.instances = fakes.fake_instances(2, host="127.0.0.1", port=lambda n: 7000 + n)
 
 
 def test_without_compare_with_the_sequence_runs_on_each_selected_instance(builds):

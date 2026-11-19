@@ -11,6 +11,7 @@ from unittest.mock import Mock
 import pytest
 import valkey
 
+from tests.fakes import FakeHandle
 from tests.support import VirtualClock
 from tests.test_valkey_components_faults import Iptables
 from tests.valkey_experiments_support import (
@@ -32,7 +33,7 @@ from valkey_fuzzer.results import ComponentStatus
 from valkey_fuzzer.testing import run_experiment
 
 
-class FakeStandalone:
+class FakeStandalone(FakeHandle):
     """A primary (valkey-0) and ``replicas`` replicas whose replication the fake clients report.
 
     ``record_dead=False`` is a deployment that forgets the new role of a stopped instance; ``fail`` maps a
@@ -76,15 +77,6 @@ class FakeStandalone:
             }
 
     refresh_roles = roles
-
-    def primaries(self):
-        return [item for item, role in self.roles().items() if role == "primary"]
-
-    def replicas(self):
-        return [item for item, role in self.roles().items() if role == "replica"]
-
-    def instance(self, instance_id):
-        return next(item for item in self.instances if item.instance_id == instance_id)
 
     def pid(self, instance_id):
         return 1

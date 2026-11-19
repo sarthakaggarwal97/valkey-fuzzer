@@ -12,6 +12,7 @@ import pytest
 from valkey.exceptions import ConnectionError as ValkeyConnectionError
 from valkey.exceptions import DataError, ResponseError
 
+from tests import fakes
 from tests.support import VirtualClock
 from tests.valkey_experiments_support import evidence_values, fake_context, registration_for, resolved, unit_plan
 from valkey_fuzzer.catalog import load_experiment_yaml
@@ -119,7 +120,7 @@ def test_a_bad_component_config_fails_to_compile(component_id, config, options, 
         registration_for(component_id).resolve_config(spec, plan)
 
 
-class FakeClient:
+class FakeClient(fakes.FakeClient):
     """Replies ``reply`` to every command (or raises ``error``); INFO answers with the next of ``infos``."""
 
     def __init__(self, error=None, reply="OK", infos=({"role": "master"},)):
@@ -137,14 +138,8 @@ class FakeClient:
     def close(self):
         self.closed = True
 
-    def __enter__(self):
-        return self
 
-    def __exit__(self, *exc_info):
-        pass
-
-
-class FakeHandle:
+class FakeHandle(fakes.FakeHandle):
     """A primary valkey-0 and replicas of one shard; a stopped instance stays down until ``restart``."""
 
     def __init__(self, instances=("valkey-0", "valkey-1"), log_dir=None):
@@ -154,18 +149,6 @@ class FakeHandle:
         )
         self.mode = SimpleNamespace(value="standalone")
         self.log_dir, self.clients, self.alive, self.restarted = log_dir, {}, dict.fromkeys(instances, True), []
-
-    def primaries(self):
-        return [node.instance_id for node in self.instances if node.role == "primary"]
-
-    def replicas(self):
-        return [node.instance_id for node in self.instances if node.role == "replica"]
-
-    def roles(self):
-        return {node.instance_id: node.role for node in self.instances}
-
-    def instance(self, node_id):
-        return next(node for node in self.instances if node.instance_id == node_id)
 
     def pid(self, node_id):
         return self.instance(node_id).pid
