@@ -46,17 +46,23 @@ None of these properties is evaluated against a live run. `spec conform` reports
 | File | Holds |
 |---|---|
 | `model.tla` | the model and both properties |
-| `model.cfg` | single-channel replication: must find no error |
+| `model.cfg` | single-channel replication (the default), Valkey as it is: must find no error |
 | `dual-channel.cfg` | dual-channel replication with the fix of fuzzer issue #133 (`AdoptOnLoad`): must find no error |
 | `negative-controls/keep_old_id_on_load.cfg` | Valkey as it is: must violate `OneHistoryPerId` (#133) |
 | `negative-controls/keep_id_without_backlog.tla` | freeing the backlog keeps the ID: must violate `OneHistoryPerId` |
 | `negative-controls/no_shift_on_promotion.tla` | a promoted replica keeps its ID: must violate `OneHistoryPerId` |
 | `negative-controls/save_info_without_primary.tla` | an RDB file always records the ID: must violate `OneHistoryPerId` |
 | `negative-controls/no_second_offset_check.tla` | PSYNC on replid2 ignores `second_replid_offset`: must violate `ReplicaIsPrefix` |
-| `claims.yaml` | the properties, scope, assumptions, bounds and exclusions (status `approved`) |
+| `claims.yaml` | the properties, scope, assumptions, bounds and exclusions (status `draft`) |
 | `mapping.yaml` | the log lines that show each step |
 
 Each `.tla` control `EXTENDS model` and replaces one action, so it checks the model's own property.
+
+The claims hold for Valkey as it is over one channel: `holds_when` is `DualChannel = FALSE, AdoptOnLoad = FALSE`,
+what `model.cfg` checks and what `mapping.yaml` pins for a run. Over two channels they hold only with the fix of
+#133 (`dual-channel.cfg`). The claims were approved on 2026-11-12 under `AdoptOnLoad = TRUE`, which Valkey does not
+do, and went back to draft when that was corrected: no property can be checked on a run (every variable both read
+is hidden in `mapping.yaml`), so an approval would enforce nothing.
 
 ## Results (3 nodes, 2 writes, 5 replication IDs, 1 crash, 2 promotions or `REPLICAOF`s)
 

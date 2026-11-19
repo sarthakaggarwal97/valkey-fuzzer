@@ -89,7 +89,9 @@ claim the slot, but not that it deletes the keys.
 `spec conform slot-migration RUN` replays a run's mapped log lines (published by `valkey.observer.log-trigger` with
 `spec: slot-migration`) and reports which steps it took. Both properties need each node's view of the owner and the
 writes it holds, which a run does not show in the model's terms, so conform checks neither (`conform: excluded`).
-No experiment migrates slots yet.
+`mapping.yaml` pins the three constants to the claims' `holds_when` (the fixes, not Valkey as it is), so a run is
+checked as claimed once a property can be: a run in which Valkey as it is lets two nodes write would fail, as it
+should. No experiment migrates slots yet.
 
 ## Run
 

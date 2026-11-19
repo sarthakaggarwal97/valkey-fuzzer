@@ -705,7 +705,8 @@ def conform_folder(folder: str, tools: Optional[TlaTools], unavailable: str = ""
         try:
             bundle = load_bundle(name)
         except SpecBundleError as exc:
-            results[name] = {"status": "error", "error": str(exc)}
+            # Nothing says the claims are a draft, so the batch holds the error against the run.
+            results[name] = {"status": "error", "error": str(exc), "approved": True}
             continue
         entry: dict[str, Any] = {"approved": bundle.claims.status == "approved"}
         if report.get("status") not in CHECKED_RUN_STATUSES:

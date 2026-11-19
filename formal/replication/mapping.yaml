@@ -143,5 +143,10 @@ constants:
   MaxIds: {value: 5, why: "As MaxWrites."}
   MaxCrashes: {max_of: [crashes], at_least: 1}
   MaxSwitches: {max_of: [switches], at_least: 1}
-  DualChannel: {value: "TRUE", why: "No property is checked on observed states."}
+  # The claims hold under single-channel replication. The mapped lines carry no
+  # config, so a run cannot say whether dual channel was on; FALSE is the
+  # claims' condition, so every run is checked as claimed (as cluster-election
+  # pins FlushBeforeSave), and a dual-channel run that showed fuzzer issue
+  # #133 would fail once a property is conformed, as it should.
+  DualChannel: {value: "FALSE", why: "The claims' condition; the mapped lines do not say whether dual channel was on."}
   AdoptOnLoad: {value: "FALSE", why: "Valkey as it is (fuzzer issue #133)."}

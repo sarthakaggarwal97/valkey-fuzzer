@@ -10,6 +10,7 @@ import pytest
 from valkey_fuzzer.components import experiments
 from valkey_fuzzer.spec.bundle import load_bundle
 from valkey_fuzzer.spec.conform import ObservedRun, collect_runs
+from valkey_fuzzer.spec.tla import parse_config
 
 ID_A = "a" * 40
 ID_B = "b" * 40
@@ -18,7 +19,9 @@ ID_B = "b" * 40
 def test_every_guard_the_model_relies_on_has_a_control_that_breaks_it():
     bundle = load_bundle("replication")
 
-    assert (bundle.claims.status, bundle.claims.approved_by) == ("approved", "sarthakaggarwal97")
+    # Approved on 2026-11-12 under AdoptOnLoad = TRUE, which Valkey does not do; a draft again since the claims say
+    # what Valkey does, and no property can be checked on a run.
+    assert (bundle.claims.status, bundle.claims.approved_by) == ("draft", None)
     assert bundle.safe_configs == ("dual-channel.cfg", "model.cfg")
     assert {control.name: control.violates for control in bundle.controls} == {
         # Valkey as it is (fuzzer issue #133): the safe configs assume the fix.
@@ -31,6 +34,18 @@ def test_every_guard_the_model_relies_on_has_a_control_that_breaks_it():
     assert {control.name for control in bundle.controls if control.module is None} == {"keep_old_id_on_load"}
     # Both properties compare data sets, which a run does not observe: conform reports coverage only.
     assert all(not item.conform and item.conform_note for item in bundle.claims.properties)
+
+
+def test_the_claims_hold_for_valkey_as_it_is_which_conform_pins():
+    # Single channel, and a load before +CONTINUE keeps the old ID (fuzzer issue #133): what Valkey does, what
+    # model.cfg checks, and what mapping.yaml pins for a run, so a run is checked as claimed.
+    bundle = load_bundle("replication")
+    pinned = {name: str(spec["value"]) for name, spec in bundle.mapping.constants.items() if "value" in spec}
+
+    for item in bundle.claims.properties:
+        assert item.holds_when == {"DualChannel": "FALSE", "AdoptOnLoad": "FALSE"}, item.name
+        assert {name: pinned[name] for name in item.holds_when} == item.holds_when, item.name
+    assert parse_config(bundle.files["model.cfg"]).constants["AdoptOnLoad"] == "FALSE"
 
 
 def _run(tmp_path, events):
