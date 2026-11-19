@@ -314,7 +314,10 @@ def test_a_waves_operations_run_in_the_calling_context_so_a_cancelled_call_stops
 
 
 def test_replicaof_moves_an_instance_and_fails_when_the_link_never_comes_up(monkeypatch):
-    handle, clock = FakeStandalone(replicas=1), VirtualClock().install(monkeypatch, instances, polling, deadlines, processes)
+    handle, clock = (
+        FakeStandalone(replicas=1),
+        VirtualClock().install(monkeypatch, instances, polling, deadlines, processes),
+    )
 
     def replicaof(**config):
         spec = resolved(ComponentSpec(role=ComponentRole.ACTION, use="valkey.action.replicaof", id="r", config=config))
@@ -344,7 +347,10 @@ def test_replicaof_that_cannot_read_the_instance_is_an_error_not_a_failure(monke
                 raise valkey.exceptions.ConnectionError("Connection reset by peer")
             return super().info(instance_id)
 
-    handle, clock = Unreadable(replicas=1), VirtualClock().install(monkeypatch, instances, polling, deadlines, processes)
+    handle, clock = (
+        Unreadable(replicas=1),
+        VirtualClock().install(monkeypatch, instances, polling, deadlines, processes),
+    )
     spec = resolved(
         ComponentSpec(role=ComponentRole.ACTION, use="valkey.action.replicaof", id="r",
                       config={"instance": "valkey-1", "primary": None, "timeout_s": 0.3})
