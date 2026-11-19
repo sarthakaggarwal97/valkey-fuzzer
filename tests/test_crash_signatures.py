@@ -45,7 +45,10 @@ class _Client:
 
 
 def _liveness(node, log, alive=False, evidence=(), client=_Client, pid=100, exit_signal=None):
-    spec = resolved(ComponentSpec(role=ComponentRole.ORACLE, use="valkey.oracle.liveness", id="liveness"))
+    # A short timeout_s: a hung or loading server is judged failed once it has not answered for that long.
+    spec = resolved(
+        ComponentSpec(role=ComponentRole.ORACLE, use="valkey.oracle.liveness", id="liveness", config={"timeout_s": 0.2})
+    )
     # One instance, ``node``, whose process is gone (unless ``alive``), whose log is ``log``, and that answers.
     handle = SimpleNamespace(
         instances=(SimpleNamespace(instance_id=node),),
