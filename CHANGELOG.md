@@ -16,6 +16,11 @@
   unknown component. To send a command at a lifecycle event, use `valkey.action.command` after the event; to restart
   an instance, use `valkey.fault.process-signal` (`restart_mode`) or `valkey.action.rolling-upgrade`.
 
+### Removed: the one-off search-abort-probes workflow
+
+- `.github/workflows/search-abort-probes.yml` and `.github/scripts/search_abort_probes.py` are removed. Nothing
+  imported the script.
+
 ### Removed: coverage-guided batches (`--guided`, `--corpus-from`)
 
 - `batch --guided N`, `batch --corpus-from BATCH`, and the batch spec keys `guided` (in a `random` source) and
