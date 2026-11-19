@@ -15,6 +15,7 @@ import shlex
 import sys
 from typing import Any, Optional
 
+from ..compiler import Overrides
 from ..deployment.local.models import DEFAULT_BASE_DATA_DIR
 from ..hoststate import Owner, read_tag
 from ..outcomes import EXIT_FAILURE, EXIT_HARNESS_ERROR, EXIT_SUCCESS, EXIT_USAGE, exit_code, print_outcome
@@ -127,9 +128,8 @@ def run_command(args: argparse.Namespace) -> int:
             experiment=args.experiment,
             excludes=args.excludes,
             base=base,
-            valkey_binary=args.valkey_binary,
             profile=args.profile,
-            base_port=args.base_port,
+            overrides=Overrides(binary=args.valkey_binary, base_port=args.base_port),
         )
         generated = prepared.generated
         print_header(
@@ -143,7 +143,8 @@ def run_command(args: argparse.Namespace) -> int:
         # The report records the scenario as run, including a --valkey-binary
         # or --artifact override, so it replays and minimizes on its own.
         prepared = service.prepare_run(
-            args.file, valkey_binary=args.valkey_binary, artifacts=artifact_paths(args), base_port=args.base_port
+            args.file,
+            overrides=Overrides(binary=args.valkey_binary, artifacts=artifact_paths(args), base_port=args.base_port),
         )
     timeout, source = service.resolve_timeout(
         prepared.plan, args.timeout, profile=(prepared.generated or {}).get("profile")

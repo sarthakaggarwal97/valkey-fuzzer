@@ -5,6 +5,7 @@ import json
 import sys
 from typing import Any
 
+from ..compiler import Overrides
 from ..outcomes import EXIT_FAILURE, EXIT_HARNESS_ERROR, exit_code
 from ..reports import ReportWriteError, write_document
 from ..results import RunOutcome
@@ -37,9 +38,7 @@ def diff_command(args: argparse.Namespace) -> int:
     result = service_for(args).differential(
         args.file,
         seed=args.seed,
-        valkey_binary=args.valkey_binary,
-        artifacts=artifact_paths(args),
-        base_port=args.base_port,
+        overrides=Overrides(binary=args.valkey_binary, artifacts=artifact_paths(args), base_port=args.base_port),
         timeout=args.timeout,
         on_variant=on_variant,
     )

@@ -8,6 +8,7 @@ from typing import Any
 
 import yaml
 
+from ..compiler import Overrides
 from ..outcomes import EXIT_HARNESS_ERROR, EXIT_SUCCESS
 from ..service import ReplayDriftError
 from ._common import add_common_options, describe_drift, positive_count, service_for
@@ -34,7 +35,7 @@ def minimize_command(args: argparse.Namespace) -> int:
     service = service_for(args)
     try:
         prepared = service.prepare_minimization(
-            args.report, valkey_binary=args.valkey_binary, allow_drift=args.allow_drift
+            args.report, overrides=Overrides(binary=args.valkey_binary), allow_drift=args.allow_drift
         )
     except ReplayDriftError as exc:
         print("Error: refusing to minimize because this environment differs from the recorded run:", file=sys.stderr)
