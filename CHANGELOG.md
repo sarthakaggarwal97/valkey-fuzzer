@@ -9,6 +9,13 @@
   or `--experiment valkey.replication-partial-resync`. `examples/cluster_scenario.yaml` and
   `examples/standalone_replicas_scenario.yaml` had no reference anywhere.
 
+### Removed: four components no shipped experiment, example, zoo entry, or workflow used
+
+- `valkey.action.replicaof`, `valkey.action.restart-instance`, `valkey.fault.command`, and `valkey.fault.deny-writes`
+  are removed, with their tests and `docs/components.md` entries. An experiment that names one is now rejected as an
+  unknown component. To send a command at a lifecycle event, use `valkey.action.command` after the event; to restart
+  an instance, use `valkey.fault.process-signal` (`restart_mode`) or `valkey.action.rolling-upgrade`.
+
 ### Removed: coverage-guided batches (`--guided`, `--corpus-from`)
 
 - `batch --guided N`, `batch --corpus-from BATCH`, and the batch spec keys `guided` (in a `random` source) and

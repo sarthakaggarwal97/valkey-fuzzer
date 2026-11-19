@@ -117,7 +117,7 @@ def risen(info: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _configured_commands(plan: ExecutionPlan) -> list[dict[str, Any]]:
-    """The commands the plan's components are configured to send (valkey.action.command, valkey.fault.command),
+    """The commands the plan's components are configured to send (valkey.action.command),
     as the command checks judge them."""
 
     return [

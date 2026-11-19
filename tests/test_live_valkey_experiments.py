@@ -218,25 +218,25 @@ def test_cluster_election_with_sync_saves_every_vote_before_it_leaves_and_confor
         assert check_run(bundle, run, TlaTools.locate(jar, workers="1"))["status"] == "pass"
 
 
-RESTART_EXPERIMENT = """
+SAVE_EXPERIMENT = """
 extends: [valkey.liveness]
-id: tests.restart-under-writes
+id: tests.save-under-writes
 deployment: {modes: [standalone]}
 components:
   - {use: valkey.workload.key-value, id: writes, config: {stable_keys: 200, mutable_keys: 50, rate: 200}}
   - {use: valkey.action.sleep, id: warmup, depends_on: [writes], config: {seconds: 0.5}}
-  - {use: valkey.action.restart-instance, id: restart, depends_on: [warmup], config: {instance: primary}}
-  - {use: valkey.action.command, id: dbsize, depends_on: [restart], config: {instances: primary, command: [DBSIZE], expect: {min: 200}}}
+  - {use: valkey.action.bgsave, id: save, depends_on: [warmup], config: {instances: primary}}
+  - {use: valkey.action.command, id: dbsize, depends_on: [save], config: {instances: primary, command: [DBSIZE], expect: {min: 200}}}
   - {use: valkey.oracle.ledger, id: data, config: {workload: writes}}
-required_events: [restart.completed]
+required_events: [save.completed]
 required_evidence:
-  - {evidence_id: valkey.instance.restarted, source: restart}
+  - {evidence_id: valkey.bgsave.result, source: save}
   - {evidence_id: valkey.data.ledger-verified, source: data}
 """
 
 
 def test_data_only_experiment_runs_live_from_an_experiment_directory(tmp_path):
     (tmp_path / "experiments").mkdir()
-    (tmp_path / "experiments" / "restart.yaml").write_text(RESTART_EXPERIMENT)
+    (tmp_path / "experiments" / "save.yaml").write_text(SAVE_EXPERIMENT)
     runtime = valkey_service(experiment_directories=(str(tmp_path / "experiments"),), artifact_dir=str(tmp_path / "a"))
-    check(run_scenario(runtime, scenario("tests.restart-under-writes", replicas=1)))
+    check(run_scenario(runtime, scenario("tests.save-under-writes", replicas=1)))

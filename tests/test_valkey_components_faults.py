@@ -13,7 +13,7 @@ from tests.fakes import FakeClient, FakeHandle, fake_instances
 from tests.support import VirtualClock
 from tests.valkey_experiments_support import fake_context, registration_for, resolved, unit_plan
 from valkey_fuzzer.components import capabilities, network, processes, providers, storage
-from valkey_fuzzer.components.faults import FAULT_INJECTED, CommandFault, ProcessSignalFault
+from valkey_fuzzer.components.faults import FAULT_INJECTED, ProcessSignalFault
 from valkey_fuzzer.components.ledger import fault_records
 from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import ComponentRole
@@ -115,12 +115,9 @@ def _fire(fault, handle, use, component_id="fault", **config):
     [
         (ProcessSignalFault, "valkey.fault.process-signal", {"signal": "SIGKILL"}, "process.stopped"),
         (ProcessSignalFault, "valkey.fault.process-signal", {"signal": "SIGSTOP", "pause_s": 0.0}, "process.paused"),
-        (CommandFault, "valkey.fault.command",
-         {"command": ["CONFIG", "SET", "maxmemory", "1mb"], "undo": ["CONFIG", "SET", "maxmemory", "0"]}, "server.command"),
-        (storage.DenyWritesFault, "valkey.fault.deny-writes", {"instances": "primaries"}, "directory.read-only"),
         (network.PartitionFault, "valkey.fault.network-partition", {"isolate": "valkey-0"}, "network.partition"),
     ],
-    ids=["kill", "pause", "command", "deny-writes", "partition"],
+    ids=["kill", "pause", "partition"],
 )  # fmt: skip
 def test_a_fault_owns_its_change_until_its_recovery_undoes_it(monkeypatch, tmp_path, make, use, config, kind):
     iptables = Iptables()
@@ -142,8 +139,6 @@ def test_a_fault_owns_its_change_until_its_recovery_undoes_it(monkeypatch, tmp_p
     assert fault.recover(context, spec).status is ComponentStatus.PASS
     assert _owned(context) == [("fault", kind, "owner")]
     assert handle.alive and os.stat(handle.data_dir("valkey-0")).st_mode & 0o777 == 0o750 and not iptables.chains
-    if "undo" in config:
-        assert handle.commands[-1] == tuple(config["undo"])
 
 
 def _paused_without_resume(monkeypatch, tmp_path):
@@ -180,25 +175,6 @@ def _partition(fail, heal=None):
         return context, spec, fault
 
     return setup
-
-
-def _cancelled_command(monkeypatch, tmp_path):
-    handle = _Handle()
-    context = fake_context(handle)
-    context.cancel()
-    spec = resolved(
-        ComponentSpec(
-            role=ComponentRole.FAULT,
-            use="valkey.fault.command",
-            id="fault",
-            config={"when_event": "go", "command": ["PING"], "delay_s": 30},
-        )
-    )
-    fault = CommandFault()
-    fault.inject(context, spec)
-    context.event_bus.publish("go", source="test")
-    assert handle.commands == []
-    return context, spec, fault
 
 
 def _cancelled_fill(monkeypatch, tmp_path):
@@ -242,7 +218,6 @@ _BUSY = "Device or resource busy"
         (_partition({("-I", 1): "no INPUT", ("-X", 1): _BUSY, ("-X", 2): _BUSY}), "ERROR", _BUSY, 1),
         (_partition({("-X", 1): _BUSY}, heal=True), "ERROR", "heal failed", 0),
         (_partition("hung"), "", "timed out", 0),
-        (_cancelled_command, "", "cancelled", 0),
         (_cancelled_fill, "", "cancelled", 0),
     ],
     ids=[
@@ -253,7 +228,6 @@ _BUSY = "Device or resource busy"
         "partition-chain-stays",
         "partition-heal-fails",
         "iptables-hangs",
-        "cancelled-command",
         "cancelled-fill",
     ],
 )
@@ -368,14 +342,6 @@ def test_a_kill_whose_target_never_exits_is_a_fault_error_and_announces_no_recov
     assert not context.event_bus.committed_history("fault.recovered")
 
 
-def test_a_command_fault_whose_selector_matches_nothing_never_runs_on_the_events_instance():
-    handle = _Handle()
-    handle.replicas = lambda: []
-    with pytest.raises(LookupError, match="no live instance matches 'replicas'"):
-        _fire(CommandFault(), handle, "valkey.fault.command", instance="replicas", command=["PING"])
-    assert handle.commands == []
-
-
 _LOOPBACK = {"addressing": "per_instance_loopback"}
 _CC, _RC = "valkey.action.cluster-chaos", "valkey.action.replication-chaos"
 _SHARDS = {"primaries": 3, "replicas_per_primary": 1}  # cluster chaos waves
@@ -386,19 +352,17 @@ _FO0 = {"op": "failover", "shard": 0}
 @pytest.mark.parametrize(
     ("use", "role", "config", "mode", "document", "message"),
     [
-        ("valkey.fault.command", "fault", {"command": ["config", "set", "x", "1"]}, "standalone", {},
-         "CONFIG SET needs an undo command"),
-        ("valkey.fault.command", "fault", {"command": ["PING"], "occurrence": 0}, "standalone", {}, "occurrence must be at least 1"),
-        ("valkey.fault.command", "fault", {"command": ["PING"], "when_payload": {"epoch": {"between": 1}}},
+        ("valkey.fault.process-signal", "fault", {"signal": "SIGKILL", "occurrence": 0}, "standalone", {}, "occurrence must be at least 1"),
+        ("valkey.fault.process-signal", "fault", {"signal": "SIGKILL", "when_payload": {"epoch": {"between": 1}}},
          "standalone", {}, r"when_payload.epoch contains unknown fields: \['between'\]"),
-        ("valkey.fault.command", "fault", {"command": ["PING"], "when_payload": {"epoch": {}}},
+        ("valkey.fault.process-signal", "fault", {"signal": "SIGKILL", "when_payload": {"epoch": {}}},
          "standalone", {}, "epoch needs one predicate"),
-        ("valkey.fault.command", "fault", {"command": ["PING"], "when_payload": {"instance_id": []}}, "standalone", {},
+        ("valkey.fault.process-signal", "fault", {"signal": "SIGKILL", "when_payload": {"instance_id": []}}, "standalone", {},
          "must be a non-empty list"),
         # Checked as expect and predicate are: at run time these raised in the event dispatch, or matched characters.
-        ("valkey.fault.command", "fault", {"command": ["PING"], "when_payload": {"epoch": {"min": "x"}}},
+        ("valkey.fault.process-signal", "fault", {"signal": "SIGKILL", "when_payload": {"epoch": {"min": "x"}}},
          "standalone", {}, "when_payload.epoch.min"),
-        ("valkey.fault.command", "fault", {"command": ["PING"], "when_payload": {"role": {"in": "abc"}}},
+        ("valkey.fault.process-signal", "fault", {"signal": "SIGKILL", "when_payload": {"role": {"in": "abc"}}},
          "standalone", {}, "when_payload.role.in"),
         ("valkey.fault.process-signal", "fault", {"capture_cluster_vars": True}, "standalone", {}, "needs a cluster"),
         ("valkey.fault.network-partition", "fault", {"isolate": "valkey-0"}, "cluster", {}, "per_instance_loopback"),
@@ -503,17 +467,6 @@ def test_a_partition_timer_that_fires_once_recovery_began_does_nothing(monkeypat
     fault._heal("duration")
     assert context.event_bus.committed_history("fault.healed") == () and iptables.chains, "recovery removes it"
     assert fault.recover(context, spec).status is ComponentStatus.PASS and not iptables.chains
-
-
-def test_deny_writes_changes_nothing_as_root(monkeypatch, tmp_path):
-    handle = _Handle(root=str(tmp_path))
-    os.makedirs(handle.data_dir("valkey-0"))
-    os.chmod(handle.data_dir("valkey-0"), 0o750)
-    monkeypatch.setattr(storage.os, "geteuid", lambda: 0)
-    context, spec, fault = _fire(storage.DenyWritesFault(), handle, "valkey.fault.deny-writes", instances="primaries")
-    result = fault.recover(context, spec)
-    assert result.status is ComponentStatus.ERROR and "refused to fire" in result.summary, result.summary
-    assert _owned(context) == [] and os.stat(handle.data_dir("valkey-0")).st_mode & 0o777 == 0o750
 
 
 def test_a_disk_fill_whose_ballast_stayed_does_not_record_it_removed(monkeypatch, tmp_path):

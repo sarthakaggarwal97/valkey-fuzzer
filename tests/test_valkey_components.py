@@ -19,7 +19,7 @@ from valkey_fuzzer import deadlines
 from valkey_fuzzer.catalog import load_experiment_yaml
 from valkey_fuzzer.compiler import ScenarioCompileError
 from valkey_fuzzer.components import actions, component_registrations, instances, polling, processes
-from valkey_fuzzer.components.faults import FAULT_INJECTED, CommandFault, ProcessSignalFault
+from valkey_fuzzer.components.faults import FAULT_INJECTED, ProcessSignalFault
 from valkey_fuzzer.components.observers import InfoObserver, LogObserver, LogTriggerObserver
 from valkey_fuzzer.components.oracles import EvidenceAssertOracle, LivenessOracle
 from valkey_fuzzer.components.snapshots import DatasetDigestOracle
@@ -67,7 +67,6 @@ _FORCED = {"extra": (_component("valkey.action.failover", "failover", force=True
         ("valkey.action.bgsave", {"instances": "everyone"}, {}, "must be all, primaries, primary, replicas, replica, or instance IDs"),
         ("valkey.action.command", {"command": []}, {}, "non-empty"),
         ("valkey.action.command", {"command": ["PING"], "expect": {}}, {}, "predicate"),
-        ("valkey.action.restart-instance", {"instance": "primaries,replicas"}, {}, "config field 'instance'"),
         ("valkey.action.failover", {}, {}, "supports deployment modes"),
         # A shard the cluster does not have is a config error, not a finding about Valkey.
         ("valkey.action.failover", {"shard": 3}, _SHARDS, "shard 3 is not below primaries 3"),
@@ -436,7 +435,6 @@ def test_the_log_observer_does_not_judge_a_log_it_could_not_read(tmp_path, confi
         ("valkey.action.command", {"command": ["PING"], "expect": {"equals": "PONG"}}, "FAIL", None),
         ("valkey.action.poll", {"section": "replication", "field": "role", "predicate": {"equals": "master"}}, "PASS", {"valkey-0": "master", "valkey-1": "master"}),
         ("valkey.action.poll", {"command": ["PING"], "predicate": {"equals": "PONG"}, "timeout_s": 0.2}, "FAIL", None),
-        ("valkey.action.restart-instance", {"instance": "valkey-1"}, "PASS", {"instance_id": "valkey-1", "pid": 1001}),
         ("valkey.action.failover", {"target": "valkey-1", "force": True}, "PASS", {"primary_before": "valkey-0", "force": True, "success": True}),
     ],
 )  # fmt: skip
@@ -514,45 +512,6 @@ def test_a_rolling_upgrade_fails_only_on_what_valkey_did(monkeypatch, raised, st
     spec = _spec("valkey.action.rolling-upgrade", "upgrade", to_binary="/new/valkey-server")
     result = actions.RollingUpgradeAction().run(fake_context(handle), spec)
     assert result.status.value == status and str(raised) in result.summary, result.summary
-
-
-def test_a_restart_that_does_not_come_up_or_a_role_nobody_has_is_no_finding():
-    handle = FakeHandle()
-    handle.alive["valkey-1"] = False
-    handle.restart = lambda node_id, **options: (_ for _ in ()).throw(RuntimeError("not ready within 30s"))
-    spec = _spec("valkey.action.restart-instance", "restart", instance="valkey-1")
-    result = actions.RestartAction().run(fake_context(handle), spec)
-    assert result.status is ComponentStatus.ERROR and "not ready within 30s" in result.summary
-    # No live replica to restart: the runner records the raised error as ERROR.
-    handle.replicas = lambda: []
-    with pytest.raises(LookupError, match="no live instance matches 'replica'"):
-        actions.RestartAction().run(
-            fake_context(handle), _spec("valkey.action.restart-instance", "r", instance="replica")
-        )
-
-
-@pytest.mark.parametrize(
-    ("ignored", "status"), [(1, "PASS"), (10**9, "FAIL")], ids=["first-sigterm-dropped", "never-exits"]
-)
-def test_a_restart_sends_sigterm_again_and_fails_when_the_server_never_stops(clock, ignored, status):
-    handle, sent = FakeHandle(), []
-
-    def send_signal(node_id, signum):
-        sent.append(signum)
-        if len(sent) > ignored:
-            handle.alive[node_id] = False
-
-    def wait_exit(node_id, timeout=10):
-        if handle.alive[node_id]:
-            clock.sleep(timeout)
-        return not handle.alive[node_id]
-
-    handle.send_signal, handle.wait_exit = send_signal, wait_exit
-    spec = _spec("valkey.action.restart-instance", "restart", instance="valkey-1")
-    result = registration_for("valkey.action.restart-instance").factory().run(clock.drive(fake_context(handle)), spec)
-    assert result.status.value == status, result.summary
-    # Restarted either way: the restart stops a process that is still running.
-    assert handle.restarted == ["valkey-1"] and set(sent) == {signal.SIGTERM} and len(sent) >= 2
 
 
 @pytest.mark.parametrize(
@@ -733,43 +692,6 @@ def test_bgsave_follows_each_save_and_records_the_rdb_it_wrote(
 
 
 # Faults
-
-
-@pytest.mark.parametrize(
-    ("triggers", "error", "status", "applied"),
-    [(0, None, "ERROR", False), (2, None, "PASS", True), (1, RuntimeError("ERR no save"), "ERROR", False)],
-    ids=["never-triggered", "fires-once", "error-not-applied"],
-)
-def test_a_command_fault_fires_once_on_its_event_and_records_only_what_it_applied(triggers, error, status, applied):
-    handle = FakeHandle()
-    handle.clients["valkey-0"] = FakeClient(error=error)
-    context = fake_context(handle)
-    spec = _spec("valkey.fault.command", "cancel", when_event="go", command=["BGSAVE", "CANCEL"])
-    fault = CommandFault()
-    fault.inject(context, spec)
-    events = [context.event_bus.publish("go", source="action") for _ in range(triggers)]
-    result = fault.recover(context, spec)
-    assert result.status.value == status, result.summary
-    assert handle.clients["valkey-0"].commands == [("BGSAVE", "CANCEL")] * min(triggers, 1)
-    assert [item.event_sequence for item in result.evidence] == ([events[0].sequence] if applied else [])
-
-
-@pytest.mark.parametrize(
-    ("error", "status"),
-    [(ResponseError("NOPERM"), "PASS"), (ValkeyConnectionError("Connection reset by peer"), "ERROR"), (None, "ERROR")],
-    ids=["valkey-error", "connection-error", "no-error"],
-)
-def test_a_command_fault_expecting_an_error_counts_only_valkeys_error_reply(error, status):
-    # A connection error shows nothing of what Valkey did with the command, so it is not the error expected.
-    handle = FakeHandle()
-    handle.clients["valkey-0"] = FakeClient(error=error)
-    context = fake_context(handle)
-    spec = _spec("valkey.fault.command", "deny", when_event="go", command=["ACL", "WHOAMI"], expect_error=True)
-    fault = CommandFault()
-    fault.inject(context, spec)
-    context.event_bus.publish("go", source="action")
-    result = fault.recover(context, spec)
-    assert result.status.value == status, result.summary
 
 
 @pytest.mark.parametrize("restart_mode", ["immediate", "background"])
