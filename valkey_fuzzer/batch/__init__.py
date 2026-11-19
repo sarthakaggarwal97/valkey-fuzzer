@@ -1,0 +1,126 @@
+"""The batch runner: the one way to run many scenarios.
+
+A batch expands its **sources** into jobs, one run each:
+
+- ``random``: seeds ``first_seed .. first_seed + seeds - 1`` for each listed
+  experiment (or ``all`` that declare ``metadata.generator``), drawn under the
+  batch's search profile;
+- ``matrix``: a base scenario over every combination of dotted-path values;
+- ``scenarios``: scenario files, or directories of them, run as written;
+- ``zoo``: the bug zoo's cases, each a clean control and broken runs on its builds;
+- ``failures``: the failed runs of an earlier batch, a sample per failure signature, each
+  as it ran (a random job as the scenario it drew).
+
+Every job runs in its own worker process (``python -m valkey_fuzzer.batch
+TASK``) on one of ``workers`` slots. Slot ``k`` owns the client ports
+``port_base + k * PORT_BLOCK`` up to the next block (and their cluster bus
+ports), the per-instance loopback addresses ``127.0.<k+1>.0/24``, and its own
+data directory, ``TMPDIR``, and provider directories, which are wiped after
+each job, so no two concurrent runs share ports, addresses, logs, or
+directories (a partition matches addresses, so a shared address would let one
+worker's partition cut another's instances). After each run the host :func:`~valkey_fuzzer.hoststate.sweep`
+removes whatever that worker left behind (servers, chains, mounts, data
+directories); a leftover is a finding that makes the job an ERROR, and a slot
+whose sweep cannot remove one runs no more jobs (the batch stops once none is left).
+Before its first job a batch removes the servers, chains, and mounts of every
+fuzzer process that is gone, and refuses to start if one stays.
+
+A random job's deployment is drawn to fit its worker's share of the batch's
+cores: the cores the process that created the batch may use (its CPU affinity
+and cgroup quota, recorded as ``cores`` in ``batch.json``) over ``workers``
+(:mod:`~valkey_fuzzer.capacity`). So a large run neither misses its own
+validation window nor slows the runs beside it.
+
+The batch folder::
+
+    batch.json          options, sources, the zoo cases, and the cores, as resolved (written once)
+    jobs.json           every job, in order
+    workers.json        the jobs running now and their worker processes (for resume)
+    results/<id>.json   one finished job: status, failure signature, leaks, zoo observation
+    runs/<id>/          the job's run folder: plan.json, report.json, scenario.yaml,
+                        components/, logs/ (instance logs), console.log, and conform.json
+                        when its plan names a spec bundle
+    conformance/<b>.json  the spec conform report of spec bundle <b> over the runs that exercised it
+    summary.json        counts, failure signatures, serial re-runs, zoo verdicts, conformance, leaks, exit code
+    batch.log           one line per finished job
+
+A batch resumes where it stopped: finished jobs keep their results, a job that
+was running is swept and run again (its slot retired if the sweep could not
+remove what it left), and a worker that outlived a killed batch is stopped
+first. Non-PASS runs are grouped by the minimizer's failure signature
+(:func:`~valkey_fuzzer.minimize.failure_signature`); with ``serial_reruns`` a
+sample of each group runs again one at a time, which separates failures that
+need load from real ones.
+
+Each run whose plan names a spec bundle (a component's ``spec``) is checked
+against it by its worker, as ``valkey-fuzzer spec conform`` would, before the
+run folder is pruned (:func:`~valkey_fuzzer.spec.conform.conform_folder`;
+TLC from ``$TLA2TOOLS_JAR``). For a bundle whose claims are approved, a
+claimed property violated on the run's observed states fails the run, and a
+check that could not decide is an ERROR; a draft's findings are only
+reported. The batch's status is the worst of its runs, its
+leaks (ERROR), its zoo cases (FAIL when one does not hold), and its matrix
+combinations that do not compile (ERROR).
+
+The package::
+
+    spec.py             the options and the sources a batch spec names; ``normalize_source``, ``load_spec``
+    sources.py          the built-in sources: random, matrix, scenarios, failures
+    jobs.py             ``Expansion`` and ``expand``: the sources' jobs, in order
+    worker.py           ``run_worker``: one job in its own process (``python -m valkey_fuzzer.batch``)
+    results.py          ``job_result``: a finished job's status and failure signature
+    pool.py             ``BatchRunner``: the worker slots, sweeps, deadlines, resume
+    summary.py          ``summary.json``
+    hooks.py            the plug-in points: ``BatchSource`` and ``BatchPlugin``
+    zoo_plugin.py       the bug zoo as a plug-in
+    conform_plugin.py   spec conformance as a plug-in
+"""
+
+from . import hooks, sources  # noqa: F401  (registers the built-in sources)
+from .conform_plugin import ConformancePlugin
+from .hooks import BatchPlugin, BatchSource
+from .jobs import MAX_JOBS, Expansion, expand
+from .pool import HOST_LOCK, WORKER_COMMAND, BatchRunner
+from .results import Verdict, job_result, signature_key, signature_label
+from .sources import failure_samples
+from .spec import (
+    DEFAULT_PORT_BASE,
+    PORT_BLOCK,
+    STATUS_ORDER,
+    BatchError,
+    BatchOptions,
+    load_spec,
+    normalize_source,
+    worst,
+)
+from .worker import main, run_worker
+from .zoo_plugin import ZooPlugin
+
+hooks.register(ZooPlugin())
+hooks.register(ConformancePlugin())
+
+__all__ = [
+    "DEFAULT_PORT_BASE",
+    "HOST_LOCK",
+    "MAX_JOBS",
+    "PORT_BLOCK",
+    "STATUS_ORDER",
+    "WORKER_COMMAND",
+    "BatchError",
+    "BatchOptions",
+    "BatchPlugin",
+    "BatchRunner",
+    "BatchSource",
+    "Expansion",
+    "Verdict",
+    "expand",
+    "failure_samples",
+    "job_result",
+    "load_spec",
+    "main",
+    "normalize_source",
+    "run_worker",
+    "signature_key",
+    "signature_label",
+    "worst",
+]

@@ -33,7 +33,7 @@ def test_zoo_case_holds(tmp_path, case):
     )
     expansion = expand(sources, valkey_service(), options)
     if not expansion.jobs:
-        pytest.skip(expansion.zoo["skipped"][0]["reason"])
+        pytest.skip(expansion.recorded["zoo"]["skipped"][0]["reason"])
     summary = BatchRunner.create(str(tmp_path / "batch"), options, sources, expansion).run()
     (report,) = summary["zoo"]["cases"]
     assert report["holds"] and not summary["leaks"], json.dumps(report, indent=2)

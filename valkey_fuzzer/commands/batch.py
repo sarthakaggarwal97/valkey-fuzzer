@@ -220,7 +220,7 @@ def batch_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
                 print(f"{job['id']}: {job.get('label', '')}")
             for case in expansion.invalid:
                 print(f"invalid {case['case']}: {case['error']}")
-            for item in (expansion.zoo or {}).get("skipped", ()):
+            for item in (expansion.recorded.get("zoo") or {}).get("skipped", ()):
                 print(f"skipped zoo case {item['case']}: {item['reason']}")
             print(f"{len(expansion.jobs)} job(s)")
             return EXIT_SUCCESS

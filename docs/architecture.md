@@ -97,7 +97,7 @@ they use directly (see [The Valkey components](#the-valkey-components)).
 | `valkey_fuzzer/service.py` | `RunService`: one frozen catalog with its compiler and runner; compile, execute, replay, and minimization, writing each run's report folder. |
 | `valkey_fuzzer/reports.py` | Report folders and their files (`plan.json`, `report.json`, `scenario.yaml`): writing and reading them, and the run report. |
 | `valkey_fuzzer/provenance.py` | The reproducer a run report records, the source digests, the catalog digest, and the replay drift checks. |
-| `valkey_fuzzer/batch.py` | The batch runner: sources to jobs, isolated worker processes, leak sweeps, signature groups, serial re-runs, resume, and the zoo verdicts. |
+| `valkey_fuzzer/batch/` | The batch runner: sources to jobs (`spec.py`, `sources.py`, `jobs.py`), the worker process (`worker.py`), a finished job's result and failure signature (`results.py`), the worker slots with their leak sweeps, deadlines and resume (`pool.py`), and `summary.json` (`summary.py`). `hooks.py` is the plug-in interface (`BatchSource`, `BatchPlugin`); the bug zoo (`zoo_plugin.py`) and spec conformance (`conform_plugin.py`) take part through it, and the batch loop names neither. |
 | `valkey_fuzzer/outcomes.py` | The process exit codes of every command and the batch worker, and how a run's outcome prints. |
 | `valkey_fuzzer/commands/`, `valkey_fuzzer/cli.py` | The command handlers; `cli.py` only builds the parser and dispatches. |
 | `valkey_fuzzer/minimize.py`, `valkey_fuzzer/coverage.py` | Failure signatures and minimization; a run's coverage tuple. |
