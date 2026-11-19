@@ -125,14 +125,14 @@ class Owner:
         match = _OWNER_RE.match(text) if isinstance(text, str) else None
         return cls(int(match.group(1)), match.group(2)) if match else None
 
-    def alive(self, force_foreign: bool = False) -> bool:
+    def alive(self) -> bool:
         """Whether the owner still runs; True whenever that cannot be ruled out.
 
         A PID means nothing in another PID namespace (a container sharing /tmp), so an owner recorded in
-        another one is taken to be alive, unless ``force_foreign``.
+        another one is taken to be alive.
         """
 
-        if self.namespace is not None and self.namespace != _pid_namespace("self") and not force_foreign:
+        if self.namespace is not None and self.namespace != _pid_namespace("self"):
             return True
         try:
             os.kill(self.pid, 0)
@@ -818,7 +818,6 @@ def sweep(
     older_than: Optional[float] = None,
     dry_run: bool = False,
     owners: Optional[Collection[str]] = None,
-    force_foreign_namespace: bool = False,
 ) -> SweepReport:
     """Find the leftovers of fuzzer processes that are gone and, unless ``dry_run``, remove them.
 
@@ -827,7 +826,7 @@ def sweep(
     anything younger than that many seconds, and anything whose age is unknown
     (a chain), alone. ``owners`` (owner tokens) limits the sweep to what those
     processes left: the batch runner sweeps each worker after its run. An owner recorded in another PID
-    namespace is kept as alive (its PID means nothing here) unless ``force_foreign_namespace``.
+    namespace is kept as alive (its PID means nothing here).
     Iptables chains carry no namespace: they are judged by PID alone.
     """
 
@@ -835,7 +834,7 @@ def sweep(
         # The owners asked about first: a liveness check may spawn ps.
         if owners is not None and owner.token not in owners:
             return False
-        return not (owner.alive(force_foreign=True) if force_foreign_namespace else owner.alive())
+        return not owner.alive()
 
     now = time.time()
     report = SweepReport(dry_run=dry_run)

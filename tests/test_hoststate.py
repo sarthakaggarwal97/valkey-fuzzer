@@ -440,8 +440,6 @@ def test_an_owner_in_another_pid_namespace_is_kept_unless_forced(host, tmp_path,
     (mine / hoststate.OWNER_FILE).write_text(json.dumps({**tag, "owner": OTHER.token, "pid_ns": "pid:[1]"}))
     assert _found(sweep([str(tmp_path)], dry_run=True)) == [("directory", str(mine), "would remove")]
     assert foreign.exists()
-    forced = sweep([str(tmp_path)], dry_run=True, force_foreign_namespace=True)
-    assert _found(forced) == [("directory", str(foreign), "would remove"), ("directory", str(mine), "would remove")]
     assert Owner(DEAD.pid, DEAD.start, "pid:[2]").alive() and not Owner(DEAD.pid, DEAD.start, "pid:[1]").alive()
 
 

@@ -601,7 +601,7 @@ def test_the_command_runs_a_batch_and_exits_with_its_worst_result(tmp_path, work
         "--first-seed",
         "0",
         *[arg for item in EXCLUDES for arg in ("--exclude", item)],
-        "--port-base",
+        "--base-port",
         "12000",
     ]
 
@@ -795,7 +795,7 @@ def test_a_killed_batch_resumes_without_rerunning_finished_jobs_or_leaving_anyth
 
 
 RESUME_REFUSES = [
-    ["--dry-run"], ["--timeout", "5"], ["--profile", "adversarial"], ["--port-base", "15000"],
+    ["--dry-run"], ["--timeout", "5"], ["--profile", "adversarial"], ["--base-port", "15000"],
     ["--serial-reruns", "1"], ["--prune-pass"], ["--valkey-binary", "/other/valkey-server"],
     ["--batch-id", "x"], ["--out", "elsewhere"], ["--experiment-dir", "experiments"],
     ["--artifact-dir", "artifacts"], ["--random", SNAPSHOT], ["--seeds", "3"], ["--corpus-from", "earlier"],

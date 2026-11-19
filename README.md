@@ -142,7 +142,7 @@ what to try next.
 | `diff FILE` | Compare one seeded scenario across builds or settings; `--artifact NAME=PATH` picks the builds. |
 | `minimize REPORT` | Shrink a failing scenario. |
 
-`run`, `batch`, and `diff` take `--base-port N` (`batch --port-base`) to move
+`run`, `batch`, and `diff` take `--base-port N` to move
 the ports. Experiments that live in a directory, such as the ones in
 [`examples/experiments`](examples/experiments), need `--experiment-dir DIR`;
 each example's first lines show the command that runs it.
