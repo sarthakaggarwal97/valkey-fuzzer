@@ -1084,7 +1084,9 @@ class BatchRunner:
             if owner is not None and owner.alive():
                 self.log(f"stopping worker {entry['pid']} of {entry['job']}, left running by an interrupted batch")
                 _signal_worker(entry["pid"], signal.SIGKILL)
-                wait_for(lambda owner=owner: (not owner.alive(), None), timeout_s=30, interval_s=POLL_S, reason="the worker")
+                wait_for(
+                    lambda owner=owner: (not owner.alive(), None), timeout_s=30, interval_s=POLL_S, reason="the worker"
+                )
             leftovers = self._sweep(entry["slot"], entry["owner"])
             if leftovers:
                 self.log(f"interrupted job {entry['job']}: {_swept(leftovers)}")
