@@ -1,5 +1,5 @@
 """valkey.action.replication-chaos and the wave engine on a fake standalone deployment: promotions and their loss
-windows, conflict keys, undo obligations through a run, and valkey.action.replicaof."""
+windows, conflict keys, undo obligations through a run."""
 
 import contextvars
 import signal
@@ -25,7 +25,6 @@ from tests.valkey_experiments_support import (
 from valkey_fuzzer import deadlines
 from valkey_fuzzer._data import to_plain_data
 from valkey_fuzzer.components import actions, instances, network, polling, processes, replication_chaos
-from valkey_fuzzer.components.actions import ReplicaofAction
 from valkey_fuzzer.components.ledger import LOSS_WINDOW
 from valkey_fuzzer.components.replication_chaos import ReplicationChaosAction, StandaloneWaves
 from valkey_fuzzer.plan import ComponentSpec, ExperimentSpec, RunMode
@@ -307,53 +306,6 @@ def test_a_waves_operations_run_in_the_calling_context_so_a_cancelled_call_stops
 
     assert ReplicationChaosAction().run(context, spec).status is ComponentStatus.PASS
     assert seen and set(seen) == {"the chaos action's call"}
-
-
-def test_replicaof_moves_an_instance_and_fails_when_the_link_never_comes_up(monkeypatch):
-    handle, clock = (
-        FakeStandalone(replicas=1),
-        VirtualClock().install(monkeypatch, instances, polling, deadlines, processes),
-    )
-
-    def replicaof(**config):
-        spec = resolved(ComponentSpec(role=ComponentRole.ACTION, use="valkey.action.replicaof", id="r", config=config))
-        return ReplicaofAction().run(clock.drive(fake_context(handle, spec)), spec)
-
-    assert replicaof(instance="valkey-1", primary=None, timeout_s=1).status is ComponentStatus.PASS
-    assert sorted(handle.primaries()) == ["valkey-0", "valkey-1"]
-    result = replicaof(instance="valkey-1", primary="valkey-0", timeout_s=1)
-    assert result.status is ComponentStatus.PASS and handle.upstream["valkey-1"] == "valkey-0"
-    value = to_plain_data(result.evidence[0].value)
-    assert (value["instance_id"], value["primary_id"]) == ("valkey-1", "valkey-0") and value["took_effect_at"]
-    handle.stopped["valkey-0"] = True
-    waited = clock.elapsed
-    assert replicaof(instance="valkey-1", primary="valkey-0", timeout_s=0.3).status is ComponentStatus.FAIL
-    assert clock.elapsed - waited >= 0.3 - 1e-6, "it waited out timeout_s for the link"
-    # A link to the primary's port on another address is not a link to the primary.
-    handle = FakeStandalone(replicas=1)
-    handle.instances[0].host = "127.0.0.2"
-    result = replicaof(instance="valkey-1", primary="valkey-0", timeout_s=0.3)
-    assert result.status is ComponentStatus.FAIL and "not linked to valkey-0" in result.summary
-
-
-def test_replicaof_that_cannot_read_the_instance_is_an_error_not_a_failure(monkeypatch):
-    class Unreadable(FakeStandalone):
-        def info(self, instance_id):
-            if instance_id == "valkey-1":
-                raise valkey.exceptions.ConnectionError("Connection reset by peer")
-            return super().info(instance_id)
-
-    handle, clock = (
-        Unreadable(replicas=1),
-        VirtualClock().install(monkeypatch, instances, polling, deadlines, processes),
-    )
-    spec = resolved(
-        ComponentSpec(role=ComponentRole.ACTION, use="valkey.action.replicaof", id="r",
-                      config={"instance": "valkey-1", "primary": None, "timeout_s": 0.3})
-    )  # fmt: skip
-    result = ReplicaofAction().run(clock.drive(fake_context(handle, spec)), spec)
-    assert result.status is ComponentStatus.ERROR, result.summary
-    assert "cannot tell whether valkey-1 was a primary" in result.summary and clock.elapsed >= 0.3 - 1e-6
 
 
 def _exits_by_itself():

@@ -393,8 +393,8 @@ instance (an error or a 5-second timeout is raised, with the record kept).
 So a primary that was killed and replaced restarts with `--replicaof` as a
 replica of its successor, not as a second, empty primary, and the
 replication validator, which takes the expected primary from the recorded
-roles, follows the new topology. `valkey.action.replication-chaos` and
-`valkey.action.replicaof` change the topology only through it.
+roles, follows the new topology. `valkey.action.replication-chaos` changes the
+topology only through it.
 
 `failover(shard)` (cluster mode) tries the replicas of the shard's current
 primary in an order drawn from the caller's seeded random stream and picks

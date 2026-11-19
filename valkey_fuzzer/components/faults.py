@@ -32,11 +32,11 @@ from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
 from valkey_fuzzer.schema import ConfigError, ConfigField, ConfigSchema, plain_config
 
-from .instances import EXPECTED_DOWN, deployment, select_instance, select_instances, send_to
+from .instances import EXPECTED_DOWN, deployment, select_instance
 from .predicates import payload_matches
 from .processes import KILL_EXIT_TIMEOUT_S, pause_owned, wait_killed
-from .registration import component_registration, validate_command
-from .schemas import FLAG, INTEGER, LIST, MAPPING, NUMBER, TEXT, declared, mapping_of, nullable, optional
+from .registration import component_registration
+from .schemas import FLAG, INTEGER, MAPPING, NUMBER, TEXT, declared, mapping_of, nullable, optional
 
 FAULT_INJECTED = "valkey.fault.injected"
 # ``instance: event`` targets the instance named by the triggering event's ``instance_id`` field.
@@ -468,76 +468,6 @@ class ProcessSignalFault(EventFault):
             raise RuntimeError("the background restart was still running when recovery restarted the instance")
 
 
-# ---------------------------------------------------------------------------
-# valkey.fault.command
-# ---------------------------------------------------------------------------
-
-_COMMAND_FAULT_FIELDS = {
-    "instance": ConfigField(str, default="primary"),
-    "command": ConfigField(list),
-    "expect_error": ConfigField(bool, default=False),
-    "undo": ConfigField(list, allow_none=True, default=None),
-}
-
-
-def _validate_command_fault(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -> None:
-    for name in ("command", "undo"):
-        if config[name] is not None:
-            validate_command(config[name], name)
-    # A fault owns what it changes: a setting it changes, it must restore.
-    if [str(item).upper() for item in config["command"][:2]] == ["CONFIG", "SET"] and config["undo"] is None:
-        raise ConfigError("a command fault that runs CONFIG SET needs an undo command that restores the setting")
-
-
-class CommandFault(EventFault):
-    """Run a command (e.g. BGSAVE CANCEL, CLIENT KILL) at a lifecycle event.
-
-    ``instance`` may select several instances (e.g. ``primaries``); the fault counts
-    as applied only if the command behaved as expected on every target. With
-    ``undo``, each target the command succeeded on is owned until the undo
-    command (which must be idempotent) runs there.
-    """
-
-    def _prepare(self, context: Any, spec: ComponentSpec) -> None:
-        self._targets: list[str] = []
-        self._undo_replies: dict[str, Any] = {}
-        if self._config["instance"] != EVENT_TARGET:
-            self._targets = select_instances(deployment(context), self._config["instance"])
-            if not self._targets:
-                raise LookupError(f"no live instance matches {self._config['instance']!r}")
-
-    def _fire(self, context: Any, spec: ComponentSpec, event: Any) -> dict[str, Any]:
-        handle = deployment(context)
-        if self._config["instance"] == EVENT_TARGET:
-            self._targets = [self._event_target(handle, event)]
-        replies = {}
-        applied = True
-        for target in self._targets:
-            replies[target] = send_to(handle, target, self._config["command"], timeout_s=10.0, context=context)
-            failed = "error" in replies[target]
-            if not failed and self._config["undo"]:
-                self._own("server.command", target, lambda target=target: self._run_undo(handle, target))
-            # Only Valkey's error reply is the error expected: an unanswered command shows nothing of what Valkey did.
-            applied = applied and not replies[target].get("unanswered") and failed == self._config["expect_error"]
-        record: dict[str, Any] = {
-            "targets": self._targets,
-            "command": self._config["command"],
-            "replies": replies,
-            "applied": applied,
-        }
-        if not applied:
-            record["error"] = f"unexpected replies: {replies}"
-        return record
-
-    def _run_undo(self, handle: Any, target: str) -> None:
-        with handle.new_client(target, timeout=10.0) as client:
-            self._undo_replies[target] = jsonable(client.execute_command(*[str(item) for item in self._config["undo"]]))
-
-    def _settled(self, context: Any, spec: ComponentSpec, record: dict[str, Any]) -> None:
-        if self._undo_replies:
-            record["undo_replies"] = dict(self._undo_replies)
-
-
 _SIGNAL_DECLARES = fault_declares(
     {
         "target": TEXT,
@@ -560,11 +490,6 @@ _SIGNAL_DECLARES = fault_declares(
     evidence={EXPECTED_DOWN: declared(mapping_of({"instances": ConfigField(list, items=TEXT)}))},
 )
 
-_COMMAND_FAULT_DECLARES = fault_declares(
-    {"targets": LIST, "command": LIST, "replies": MAPPING, "undo_replies": optional(dict)},
-    changes=("server.command",),
-)
-
 REGISTRATIONS = (
     component_registration(
         "valkey.fault.process-signal",
@@ -574,14 +499,5 @@ REGISTRATIONS = (
         selectors={"instance": (EVENT_TARGET,)},
         triggered=True,
         declares=_SIGNAL_DECLARES,
-    ),
-    component_registration(
-        "valkey.fault.command",
-        CommandFault,
-        _COMMAND_FAULT_FIELDS,
-        check=_validate_command_fault,
-        selectors={"instance": (EVENT_TARGET,)},
-        triggered=True,
-        declares=_COMMAND_FAULT_DECLARES,
     ),
 )

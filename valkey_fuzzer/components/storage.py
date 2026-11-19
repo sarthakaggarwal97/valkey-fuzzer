@@ -2,7 +2,6 @@
 
 import errno
 import os
-import stat
 from typing import Any, Optional
 
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
@@ -11,9 +10,8 @@ from valkey_fuzzer.schema import ConfigError, ConfigField, ConfigSchema, plain_c
 
 from . import providers
 from .faults import EventFault, FaultRefusedError, fault_declares
-from .instances import deployment, select_instances
 from .registration import component_registration
-from .schemas import INTEGER, MAPPING, TEXT, optional
+from .schemas import INTEGER, TEXT, optional
 
 # ---------------------------------------------------------------------------
 # valkey.fault.disk-fill — fill a valkey.resource.tmpfs mount until ENOSPC
@@ -140,40 +138,6 @@ class FillFilesystemFault(EventFault):
             record["ballast_removed"] = not self._filled.open
 
 
-# ---------------------------------------------------------------------------
-# valkey.fault.deny-writes — make instance data directories read-only
-# ---------------------------------------------------------------------------
-
-_DENY_FIELDS = {"instances": ConfigField((str, list), default="primaries")}
-
-
-class DenyWritesFault(EventFault):
-    """Make the selected instances' data directories read-only at a lifecycle event, until recovery.
-
-    Saves then fail to write their files, which Valkey must report rather than claim success. Root ignores
-    the permissions, so as root the fault refuses to fire (ERROR) and changes nothing.
-    """
-
-    def _prepare(self, context: Any, spec: ComponentSpec) -> None:
-        handle = deployment(context)
-        self._dirs = {
-            instance_id: handle.data_dir(instance_id)
-            for instance_id in select_instances(handle, self._config["instances"])
-        }
-
-    def _fire(self, context: Any, spec: ComponentSpec, event: Any) -> dict[str, Any]:
-        if providers.as_root():
-            raise FaultRefusedError("read-only directories do not stop root from writing; run as another user")
-        for path in self._dirs.values():
-            mode = stat.S_IMODE(os.stat(path).st_mode)
-            os.chmod(path, 0o500)
-            self._own("directory.read-only", path, lambda path=path, mode=mode: os.chmod(path, mode))
-        return {"directories": self._dirs}
-
-    def _settled(self, context: Any, spec: ComponentSpec, record: dict[str, Any]) -> None:
-        record["restored"] = not any(obligation.open for obligation in self._obligations)
-
-
 _FILL_DECLARES = fault_declares(
     {
         "ballast": TEXT,
@@ -187,8 +151,6 @@ _FILL_DECLARES = fault_declares(
     changes=("disk.filled",),
 )
 
-_DENY_DECLARES = fault_declares({"directories": MAPPING, "restored": optional(bool)}, changes=("directory.read-only",))
-
 REGISTRATIONS = (
     component_registration(
         "valkey.fault.disk-fill",
@@ -197,13 +159,5 @@ REGISTRATIONS = (
         check=_validate_fill,
         triggered=True,
         declares=_FILL_DECLARES,
-    ),
-    component_registration(
-        "valkey.fault.deny-writes",
-        DenyWritesFault,
-        _DENY_FIELDS,
-        selectors={"instances": ()},
-        triggered=True,
-        declares=_DENY_DECLARES,
     ),
 )

@@ -44,10 +44,9 @@ Fields that pick instances take a selector:
 
 The fields `instances`, `isolate`, `peers`, and the trace observer's `nodes`
 take any of these forms. The single-instance fields (`instance` of the
-process-signal fault, the command fault, and the restart action, and
-`target` of the failover action) take a word or an instance ID, not a list,
-and use the first instance it selects. The process-signal and command faults
-also accept `event`, the instance named by the `instance_id` field of the
+process-signal fault and `target` of the failover action) take a word or an
+instance ID, not a list, and use the first instance it selects. The
+process-signal fault also accepts `event`, the instance named by the `instance_id` field of the
 triggering event's payload. Startup overlays also accept a mapping
 `{roles, instance_ids, first}` (see
 [startup_overlays](scenarios-and-experiments.md#startup_overlays)). Every
@@ -108,7 +107,6 @@ a retry succeeded makes the fault, and the run, `ERROR`.
 | [`valkey.action.tools`](#valkeyactiontools) | action | any | runs a Valkey tool of two builds and compares what they do |
 | [`valkey.action.bgsave`](#valkeyactionbgsave) | action | any | runs BGSAVE to completion |
 | [`valkey.action.failover`](#valkeyactionfailover) | action | cluster | fails over one shard |
-| [`valkey.action.restart-instance`](#valkeyactionrestart-instance) | action | any | restarts one instance |
 | [`valkey.action.sleep`](#valkeyactionsleep) | action | any | waits |
 | [`valkey.action.poll`](#valkeyactionpoll) | action | any | waits for an INFO field or reply to match |
 | [`valkey.action.wait-event`](#valkeyactionwait-event) | action | any | waits for an event |
@@ -116,13 +114,10 @@ a retry succeeded makes the fault, and the run, `ERROR`.
 | [`valkey.action.cluster-chaos`](#valkeyactioncluster-chaos) | action | cluster | failover waves with process kills |
 | [`valkey.action.cluster-election`](#valkeyactioncluster-election) | action | cluster | forces one failover election |
 | [`valkey.action.replication-chaos`](#valkeyactionreplication-chaos) | action | standalone | waves of kills, promotions, repoints, stalls, and partitions, healed and validated |
-| [`valkey.action.replicaof`](#valkeyactionreplicaof) | action | standalone | points an instance at a primary, or makes it one |
 | [`valkey.fault.process-signal`](#valkeyfaultprocess-signal) | fault | any | kills, stops, or pauses an instance |
-| [`valkey.fault.command`](#valkeyfaultcommand) | fault | any | runs a command at an event |
 | [`valkey.fault.syscall`](#valkeyfaultsyscall) | fault | any (needs `syscall_faults`) | kills, delays, or fails an instance at its nth matching system call |
 | [`valkey.fault.network-partition`](#valkeyfaultnetwork-partition) | fault | any (needs per-instance addresses) | drops traffic between instances |
 | [`valkey.fault.disk-fill`](#valkeyfaultdisk-fill) | fault | any | fills the run's tmpfs |
-| [`valkey.fault.deny-writes`](#valkeyfaultdeny-writes) | fault | any | makes data directories read-only |
 | [`valkey.observer.info`](#valkeyobserverinfo) | observer | any | samples INFO and checks expectations |
 | [`valkey.observer.log`](#valkeyobserverlog) | observer | any | scans instance logs |
 | [`valkey.observer.log-trigger`](#valkeyobserverlog-trigger) | observer | any | turns log lines into events |
@@ -164,17 +159,13 @@ schemas.
 | `valkey.action.commands` | none | `valkey.command.sequence` (many) | `process.private-server` |
 | `valkey.action.failover` | none | `valkey.failover.result` | none |
 | `valkey.action.poll` | none | `valkey.poll.satisfied` | none |
-| `valkey.action.replicaof` | none | `valkey.replication.replicaof` | none |
 | `valkey.action.replication-chaos` | `<id>.instance-killed`<br>`<id>.promoted`<br>`<id>.wave-validated` | `valkey.chaos.schedule`<br>`valkey.chaos.test-keys`<br>`valkey.data.loss-window` (many)<br>`valkey.instances.expected-down` | `network.partition`<br>`process.paused`<br>`process.stopped`<br>`server.client-pause`<br>`server.config` |
-| `valkey.action.restart-instance` | none | `valkey.instance.restarted` | `process.stopped` |
 | `valkey.action.rolling-upgrade` | `<id>.failed-over`<br>`<id>.instance-upgraded` | `valkey.upgrade.completed` | `process.stopped` |
 | `valkey.action.sleep` | none | none | none |
 | `valkey.action.tools` | none | `valkey.tool.runs` | `process.private-server` |
 | `valkey.action.wait-event` | none | `valkey.wait.event-observed` | none |
 | `valkey.capability.build-probe` | none | `valkey.capability.supported` | `process.private-server` |
 | `valkey.capability.host-probe` | none | `valkey.host.supported` | none |
-| `valkey.fault.command` | `<id>.injected` | `valkey.fault.injected` | `server.command` |
-| `valkey.fault.deny-writes` | `<id>.injected` | `valkey.fault.injected` | `directory.read-only` |
 | `valkey.fault.disk-fill` | `<id>.injected`<br>`<id>.released` | `valkey.fault.injected` | `disk.filled` |
 | `valkey.fault.network-partition` | `<id>.healed`<br>`<id>.injected`<br>`<id>.partitioned` | `valkey.fault.injected` | `network.partition` |
 | `valkey.fault.process-signal` | `<id>.injected`<br>`<id>.recovered` | `valkey.fault.injected`<br>`valkey.instances.expected-down` | `process.paused`<br>`process.stopped` |
@@ -909,25 +900,6 @@ Evidence: `valkey.failover.result` (target, force, success, roles after,
 failover is a loss window for its old primary (see
 [`valkey.oracle.ledger`](#valkeyoracleledger)).
 
-### `valkey.action.restart-instance`
-
-Stops one instance with `SIGTERM` if it is running and starts it again with
-the same address, binary, data directory, and config. An instance whose
-replica was promoted restarts in its current role. Until the instance exits
-it gets `SIGTERM` again every second (Valkey drops one it cannot act on yet);
-one still running after 30 seconds is restarted anyway, and the action
-fails.
-
-| Field | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `instance` | selector | | The first selected instance restarts. |
-| `wait_ready` | boolean | `true` | Wait until the instance is ready for its role. |
-
-`FAIL` when the instance does not exit; `ERROR` when it does not come back
-(the post-mortem of `valkey.oracle.liveness` judges a server that crashed) or the selector
-matches no live instance. Evidence: `valkey.instance.restarted`
-(instance ID and new PID).
-
 ### `valkey.action.sleep`
 
 Waits, for example so a workload runs for a while before a fault triggers on
@@ -1163,25 +1135,6 @@ instances replication chaos killed; `heal_promotions` and `loss_windows`), `valk
 per window. Events: `<id>.instance-killed`, `<id>.promoted` (`from`, `to`,
 `mode`), `<id>.wave-validated`.
 
-### `valkey.action.replicaof`
-
-Standalone. Points one instance at a primary, or makes it a primary, through
-the deployment's `replicate` (which records the role, so a later restart
-keeps it), and waits until it took effect.
-
-| Field | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `instance` | selector | | The instance (the first match). |
-| `primary` | selector or null | `null` | The primary to follow (the first match other than `instance`); `null` sends `REPLICAOF NO ONE`. |
-| `wait_linked` | boolean | `true` | Wait for `master_link_status:up` to that primary (or for the primary role). |
-| `timeout_s` | number, 0.1 to 3600 | 60 | |
-
-`FAIL` when `REPLICAOF` does not take effect in time while the instance
-answers; `ERROR` when the command itself fails (a timeout or lost
-connection), or the instance did not answer at the last look. Evidence:
-`valkey.replication.replicaof` (`instance_id`, `primary_id`, `sent_at`,
-`took_effect_at`).
-
 ## Faults
 
 Every fault also takes the [trigger fields](#trigger-fields).
@@ -1212,24 +1165,6 @@ dataset-digest oracles honor.
 Events: `<id>.injected`, then `<id>.recovered` after an `immediate` or
 `background` restart that started the instance again. Evidence: `valkey.fault.injected` (target, signal, PID,
 `exited_at`, restart timing, and the `nodes.conf` vars when captured).
-
-### `valkey.fault.command`
-
-Runs a command on the selected instances when the trigger fires, such as
-`BGSAVE CANCEL` or `CLIENT KILL TYPE replica`. The fault counts as applied
-only if the command behaved as `expect_error` says on every target. Like
-[`valkey.action.command`](#valkeyactioncommand), it sends the command once
-and keeps trying to open a connection for up to 10 seconds.
-
-| Field | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `instance` | selector or `event` | `primary` | May select several instances; one that matches no live instance when the fault is installed is an `ERROR`. |
-| `command` | list of strings or numbers | | |
-| `expect_error` | boolean | `false` | The command must fail instead of succeed: Valkey replies with an error (a connection error or timeout is not that error). |
-| `undo` | list or null | `null` | A command to run at teardown on each target the command succeeded on; it must be safe to run twice. A `CONFIG SET` command needs one. |
-
-Events: `<id>.injected`. Evidence: `valkey.fault.injected` (targets and
-replies).
 
 ### `valkey.fault.syscall`
 
@@ -1325,19 +1260,6 @@ disk.
 
 Events: `<id>.injected`, `<id>.released`. Evidence: `valkey.fault.injected`
 (bytes written, free bytes after).
-
-### `valkey.fault.deny-writes`
-
-Makes the data directories of the selected instances read-only (mode 0500)
-and restores them at teardown. It has no effect as root, where it reports
-that it was not applied, which makes the run `ERROR`; pair it with
-`requires: [not_root]`.
-
-| Field | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `instances` | selector | `primaries` | |
-
-Events: `<id>.injected`. Evidence: `valkey.fault.injected`.
 
 ## Observers
 
@@ -1542,7 +1464,7 @@ scenario did:
 
 | Cause | The scenario |
 | --- | --- |
-| `links` | broke replication or cluster links: a component stopped, paused, or partitioned an instance (an [undo obligation](contracts.md#fault-ownership) of kind `process.stopped`, `process.paused`, or `network.partition`), killed one for good or moved a role (`valkey.instances.expected-down` naming an instance, `valkey.chaos.schedule`, `valkey.failover.result`, or `valkey.replication.replicaof` evidence), or is configured with a command that does (`REPLICAOF`, `SLAVEOF`, `FAILOVER`, or any `CLIENT`, `CLUSTER`, or `DEBUG` command of a [`valkey.action.command`](#valkeyactioncommand) or [`valkey.fault.command`](#valkeyfaultcommand)) |
+| `links` | broke replication or cluster links: a component stopped, paused, or partitioned an instance (an [undo obligation](contracts.md#fault-ownership) of kind `process.stopped`, `process.paused`, or `network.partition`), killed one for good or moved a role (`valkey.instances.expected-down` naming an instance, `valkey.chaos.schedule`, `valkey.failover.result`, or `valkey.replication.replicaof` evidence), or is configured with a command that does (`REPLICAOF`, `SLAVEOF`, `FAILOVER`, or any `CLIENT`, `CLUSTER`, or `DEBUG` command of a [`valkey.action.command`](#valkeyactioncommand)) |
 | `storage` | made writes to disk fail: an undo obligation of kind `disk.filled` or `directory.read-only` |
 | `commands` | sent a command that Valkey answered with an error reply: the [`valkey.workload.command-table`](#valkeyworkloadcommand-table) workload counted one, [`valkey.workload.config-churn`](#valkeyworkloadconfig-churn) had a `CONFIG SET` refused, a configured command's recorded reply is one, or a [`valkey.action.bgsave`](#valkeyactionbgsave) was refused (`refusals`, or status `rejected`) |
 | `memory` | set a `maxmemory` itself, in the deployment's server config, a startup overlay, or a configured `CONFIG SET`; the deployment provider's default is one no experiment's dataset reaches |

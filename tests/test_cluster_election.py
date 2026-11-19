@@ -22,8 +22,9 @@ from valkey_fuzzer.components.cluster import parse_slots, read_view
 from valkey_fuzzer.components.cluster_election import ElectionAction
 from valkey_fuzzer.components.cluster_trace import TRACE_EVIDENCE, ClusterTraceObserver
 from valkey_fuzzer.components.election_safety import ElectionSafetyOracle, split_primaries
-from valkey_fuzzer.components.faults import FAULT_INJECTED, CommandFault
+from valkey_fuzzer.components.faults import FAULT_INJECTED, EventFault
 from valkey_fuzzer.components.files import log_line_time
+from valkey_fuzzer.components.instances import deployment
 from valkey_fuzzer.components.observers import LogTriggerObserver
 from valkey_fuzzer.deployment.local.cluster_nodes import parse_cluster_nodes
 from valkey_fuzzer.plan import ComponentSpec
@@ -63,13 +64,26 @@ class FakeHandle(BaseHandle):
         return Client(self.commands.setdefault(node_id, []), replies)
 
 
+class _PingFault(EventFault):
+    """An event fault that sends PING to the instance whose event fired it."""
+
+    def _fire(self, context, spec, event):
+        handle = deployment(context)
+        target = self._event_target(handle, event)
+        with handle.new_client(target) as client:
+            client.execute_command("PING")
+        return {"target": target}
+
+
 def test_a_fault_fires_on_the_nth_matching_event_and_errors_when_that_event_never_came():
     handle = FakeHandle()
     context = fake_context(handle)
     when = {"instance_id": ["valkey-1", "valkey-3"], "epoch": {"min": 4}, "flag": {"exists": False}}
-    config = {"when_event": "vote", "occurrence": 2, "when_payload": when, "instance": "event", "command": ["PING"]}
-    spec = resolved(ComponentSpec(role=ComponentRole.FAULT, use="valkey.fault.command", id="fault", config=config))
-    fault = CommandFault()
+    config = {"when_event": "vote", "occurrence": 2, "when_payload": when, "instance": "event", "signal": "SIGSTOP"}
+    spec = resolved(
+        ComponentSpec(role=ComponentRole.FAULT, use="valkey.fault.process-signal", id="fault", config=config)
+    )
+    fault = _PingFault()
     fault.inject(context, spec)
     for instance_id, epoch in (("valkey-1", 4), ("valkey-0", 4), ("valkey-1", 3), ("valkey-1", 5), ("valkey-1", 6)):
         context.event_bus.publish("vote", source="t", payload={"instance_id": instance_id, "epoch": epoch})
@@ -79,7 +93,7 @@ def test_a_fault_fires_on_the_nth_matching_event_and_errors_when_that_event_neve
     assert record["occurrence"] == 2 and record["trigger_payload"]["epoch"] == 5
 
     context = fake_context(FakeHandle())
-    fault = CommandFault()
+    fault = _PingFault()
     fault.inject(context, spec)
     context.event_bus.publish("vote", source="t", payload={"instance_id": "valkey-1", "epoch": 4})
     result = fault.recover(context, spec)

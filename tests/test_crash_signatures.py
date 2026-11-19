@@ -301,11 +301,11 @@ def _fake_server(path, real_start, *, real=None):
     return str(path)
 
 
-_RESTART = {"use": "valkey.action.restart-instance", "id": "restart", "config": {"instance": "valkey-0"}}
+_IDLE = {"use": "valkey.action.sleep", "id": "idle", "config": {"seconds": 0}}
 
 
-def _run_crash_experiment(tmp_path, binary, first=_RESTART):
-    """A run of an experiment of the component ``first`` (an action that restarts valkey-0) and then the liveness
+def _run_crash_experiment(tmp_path, binary, first=_IDLE):
+    """A run of an experiment of the component ``first`` (by default one that does nothing) and then the liveness
     oracle, on a standalone deployment of ``binary``."""
 
     directory = tmp_path / "experiments"
@@ -363,20 +363,6 @@ def test_a_server_that_crashes_while_the_deployment_is_provisioned_fails_the_run
         error = outcome.diagnostics["error"]["message"]
         assert "exited with code 1 after" in error and PORT_IN_USE in error and "within 60s" not in error
         assert not signature["crashes"] and signature["error_type"].endswith(".LocalDeploymentError")
-
-
-@pytest.mark.slow
-@pytest.mark.skipif(not BINARY, reason="needs valkey-server (VALKEY_FUZZER_BINARY or on PATH)")
-def test_a_server_that_crashes_when_an_action_restarts_it_fails_the_run_with_its_crash(tmp_path):
-    # rolling-upgrade and restart-instance returned ERROR ("failed to restart instance"), and the run never
-    # reached its oracles. The server starts for real the first time and reports a crash the second.
-    started = tmp_path / "started"
-    real_start = f'if [ -e {started} ]; then echo "{OVERFLOW}" >&2; exit 1; fi; touch {started}'
-    outcome = _run_crash_experiment(tmp_path, _fake_server(tmp_path / "valkey-server", real_start, real=BINARY))
-
-    assert outcome.status is OutcomeStatus.FAIL, explain(outcome)
-    assert outcome.diagnostics["error"]["phase"] == "action.run"
-    assert failure_signature(outcome)["crashes"] == [OVERFLOW_CAUSE]
 
 
 # What a probe server's start leaves: a rejected startup option, as Valkey reports it before exit(1), and a

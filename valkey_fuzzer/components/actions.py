@@ -42,11 +42,8 @@ from .instances import (
     check_shard,
     close_quietly,
     deployment,
-    follows,
     graceful_failover,
     is_cluster,
-    is_primary,
-    replication_info,
     select_instance,
     select_instances,
     send_to,
@@ -406,10 +403,7 @@ def _validate_commands(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -
             raise ConfigError(f"{where} needs one of command, raw, read, and restart")
         if item["restart"]:
             if not compared:
-                raise ConfigError(
-                    f"{where}: restart needs compare_with or modules_parent: valkey.action.restart-instance "
-                    "restarts the deployment's instances"
-                )
+                raise ConfigError(f"{where}: restart needs compare_with or modules_parent")
             if item["connection"] != "main":
                 raise ConfigError(f"{where}: restart restarts a node, every connection to it; it names none")
         if not item["connection"]:
@@ -2010,66 +2004,6 @@ class FailoverAction:
 
 
 # ---------------------------------------------------------------------------
-# valkey.action.restart-instance
-# ---------------------------------------------------------------------------
-
-_RESTART_FIELDS = {
-    "instance": ConfigField(str),
-    "wait_ready": ConfigField(bool, default=True),
-}
-
-
-# How long a restart's SIGTERM may take to stop the instance.
-_RESTART_EXIT_TIMEOUT_S = 30.0
-
-
-class RestartAction:
-    """Restart one instance (``SIGTERM``, then start it again); a stopped instance is just started.
-
-    The stop is owned until the restart, so a failed restart leaves the instance for the runner to bring back.
-    """
-
-    def run(self, context: Any, spec: ComponentSpec):
-        config = spec.config
-        handle = deployment(context)
-        instance_id = select_instance(handle, config["instance"])
-        try:
-            if handle.is_alive(instance_id):
-                own = functools.partial(context.obligations.open, spec)
-                stopped = stop_owned(own, handle, instance_id, wait_ready=config["wait_ready"])
-                exited = wait_exit_signalling(handle, instance_id, _RESTART_EXIT_TIMEOUT_S)
-                # The restart stops a process that is still running, so the instance comes back either way.
-                stopped.discharge()
-                if not exited:
-                    return make_result(
-                        spec,
-                        ComponentStatus.FAIL,
-                        f"{instance_id} did not exit within {_RESTART_EXIT_TIMEOUT_S:g}s of SIGTERM, sent every second",
-                    )
-            else:
-                handle.restart(instance_id, wait_ready=config["wait_ready"])
-        except Exception as exc:
-            # A restart that did not come up is the harness's to report; valkey.oracle.liveness judges a server
-            # that crashed.
-            return make_result(
-                spec, ComponentStatus.ERROR, f"restart of {instance_id} failed: {type(exc).__name__}: {exc}"
-            )
-        return make_result(
-            spec,
-            ComponentStatus.PASS,
-            f"restarted {instance_id}",
-            evidence=(
-                make_evidence(
-                    spec,
-                    "valkey.instance.restarted",
-                    "action.completed",
-                    {"instance_id": instance_id, "pid": handle.pid(instance_id)},
-                ),
-            ),
-        )
-
-
-# ---------------------------------------------------------------------------
 # valkey.action.sleep and valkey.action.poll
 # ---------------------------------------------------------------------------
 
@@ -2223,92 +2157,6 @@ class WaitEventAction:
                 ),
             ),
         )
-
-
-# ---------------------------------------------------------------------------
-# valkey.action.replicaof
-# ---------------------------------------------------------------------------
-
-_REPLICAOF_FIELDS = {
-    "instance": ConfigField(str),
-    # The primary to follow; null makes the instance a primary (REPLICAOF NO ONE).
-    "primary": ConfigField(str, allow_none=True, default=None),
-    "wait_linked": ConfigField(bool, default=True),
-    "timeout_s": ConfigField(float, default=60.0, minimum=0.1, maximum=3600),
-}
-
-
-class ReplicaofAction:
-    """Point one instance at a primary, or make it a primary, and wait until that took effect."""
-
-    def run(self, context: Any, spec: ComponentSpec):
-        config = spec.config
-        handle = deployment(context)
-        instance_id = select_instance(handle, config["instance"])
-        primary_id = None
-        if config["primary"] is not None:
-            candidates = [item for item in select_instances(handle, config["primary"]) if item != instance_id]
-            if not candidates:
-                return make_result(
-                    spec,
-                    ComponentStatus.ERROR,
-                    f"no primary other than {instance_id} matches {config['primary']!r}; name another instance",
-                )
-            primary_id = candidates[0]
-        sent_at = time.time()
-        try:
-            handle.replicate(instance_id, primary_id)
-        except Exception as exc:
-            # The command did not go through (a timeout, a lost connection): nothing was seen of Valkey.
-            return make_result(
-                spec, ComponentStatus.ERROR, f"REPLICAOF on {instance_id} failed: {type(exc).__name__}: {exc}"
-            )
-        record = {"instance_id": instance_id, "primary_id": primary_id, "sent_at": sent_at}
-        if config["wait_linked"]:
-            target = handle.instance(primary_id) if primary_id else None
-
-            def took_effect() -> tuple[bool, Optional[dict]]:
-                info = replication_info(handle, instance_id, 2.0)
-                return (is_primary(info) if target is None else follows(info, target)), info
-
-            done, info = poll_until(took_effect, timeout_s=config["timeout_s"], interval_s=0.1, context=context)
-            if not done:
-                outcome = f"linked to {primary_id}" if primary_id else "a primary"
-                if info is None:
-                    # The last look could not read the instance: whether it took effect is unknown.
-                    return make_result(
-                        spec,
-                        ComponentStatus.ERROR,
-                        f"cannot tell whether {instance_id} was {outcome} within {config['timeout_s']}s: "
-                        "it did not answer INFO replication",
-                    )
-                return make_result(
-                    spec, ComponentStatus.FAIL, f"{instance_id} was not {outcome} within {config['timeout_s']}s"
-                )
-            record["took_effect_at"] = time.time()
-        handle.refresh_roles()
-        return make_result(
-            spec,
-            ComponentStatus.PASS,
-            f"{instance_id} now replicates {primary_id}" if primary_id else f"{instance_id} is now a primary",
-            evidence=(make_evidence(spec, "valkey.replication.replicaof", "action.completed", record),),
-        )
-
-
-_REPLICAOF_DECLARES = Declarations(
-    evidence={
-        "valkey.replication.replicaof": declared(
-            mapping_of(
-                {
-                    "instance_id": TEXT,
-                    "primary_id": nullable(str),
-                    "sent_at": NUMBER,
-                    "took_effect_at": optional(float),
-                }
-            )
-        )
-    }
-)
 
 
 # ---------------------------------------------------------------------------
@@ -2631,11 +2479,6 @@ _FAILOVER_DECLARES = Declarations(
     }
 )
 
-_RESTART_DECLARES = Declarations(
-    evidence={"valkey.instance.restarted": declared(mapping_of({"instance_id": TEXT, "pid": nullable(int)}))},
-    changes=("process.stopped",),
-)
-
 # {instance_id: the last value read}
 _POLL_DECLARES = Declarations(evidence={"valkey.poll.satisfied": declared(mapping_of(additional=ANY))})
 
@@ -2685,13 +2528,6 @@ REGISTRATIONS = (
         deployment_modes=("cluster",),
         declares=_FAILOVER_DECLARES,
     ),
-    component_registration(
-        "valkey.action.restart-instance",
-        RestartAction,
-        _RESTART_FIELDS,
-        selectors={"instance": ()},
-        declares=_RESTART_DECLARES,
-    ),
     component_registration("valkey.action.sleep", SleepAction, _SLEEP_FIELDS, declares=Declarations()),
     component_registration(
         "valkey.action.poll",
@@ -2711,13 +2547,5 @@ REGISTRATIONS = (
         check=_validate_upgrade,
         deployment_modes=("standalone", "cluster"),
         declares=_UPGRADE_DECLARES,
-    ),
-    component_registration(
-        "valkey.action.replicaof",
-        ReplicaofAction,
-        _REPLICAOF_FIELDS,
-        selectors={"instance": (), "primary": ()},
-        deployment_modes=("standalone",),
-        declares=_REPLICAOF_DECLARES,
     ),
 )
