@@ -1,11 +1,24 @@
-"""Test doubles shared by the unit tests: a client that is a context manager, and a deployment handle that answers
+"""Test doubles shared by the unit tests: a client that is a context manager and records commands, and a deployment handle that answers
 the role and instance questions from its ``instances``."""
 
 from types import SimpleNamespace
 
 
 class FakeClient:
-    """A client the code under test opens with ``with`` or closes: it enters as itself and closes to nothing."""
+    """A client the code under test opens with ``with`` or closes: it enters as itself and closes to nothing.
+    ``execute_command`` appends its arguments to ``commands`` and answers ``replies.get(args, "OK")``, raising an
+    exception reply."""
+
+    def __init__(self, commands=None, replies=None):
+        self.commands = [] if commands is None else commands
+        self.replies = replies or {}
+
+    def execute_command(self, *args):
+        self.commands.append(args)
+        reply = self.replies.get(args, "OK")
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
 
     def __enter__(self):
         return self
