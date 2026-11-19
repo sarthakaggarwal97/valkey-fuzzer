@@ -4,10 +4,7 @@ A batch expands its **sources** into jobs, one run each:
 
 - ``random``: seeds ``first_seed .. first_seed + seeds - 1`` for each listed
   experiment (or ``all`` that declare ``metadata.generator``), drawn under the
-  batch's search profile; with ``guided: N``, then ``N`` more runs, each drawn
-  when a worker is free from a corpus entry (:mod:`~valkey_fuzzer.corpus`): the
-  scenario a run that reached new Valkey code drew, with a new seed and maybe
-  one dimension drawn anew;
+  batch's search profile;
 - ``matrix``: a base scenario over every combination of dotted-path values;
 - ``scenarios``: scenario files, or directories of them, run as written;
 - ``zoo``: the bug zoo's cases, each a clean control and broken runs on its builds;
@@ -37,14 +34,12 @@ validation window nor slows the runs beside it.
 The batch folder::
 
     batch.json          options, sources, the zoo cases, and the cores, as resolved (written once)
-    jobs.json           every job, in order (a guided job is added when it is drawn)
+    jobs.json           every job, in order
     workers.json        the jobs running now and their worker processes (for resume)
     results/<id>.json   one finished job: status, failure signature, leaks, zoo observation
     runs/<id>/          the job's run folder: plan.json, report.json, scenario.yaml,
                         components/, logs/ (instance logs), console.log, and conform.json
                         when its plan names a spec bundle
-    corpus.json         a guided batch's corpus: the runs that reached new Valkey code, and what they reached
-                        (with ``corpus_from``, an earlier batch's entries first)
     conformance/<b>.json  the spec conform report of spec bundle <b> over the runs that exercised it
     summary.json        counts, failure signatures, serial re-runs, zoo verdicts, conformance, leaks, exit code
     batch.log           one line per finished job
@@ -70,7 +65,6 @@ combinations that do not compile (ERROR).
 
 import copy
 import fcntl
-import functools
 import hashlib
 import itertools
 import json
@@ -91,13 +85,11 @@ from ._data import canonical_json, error_record, exception_type
 from .capacity import usable_cores
 from .catalog import Catalog
 from .compiler import Overrides, with_valkey_binary
-from .corpus import CORPUS_FILE, Corpus, mutation, parent
-from .coverage import gcov_features
 from .deadlines import wait_for
 from .deployment.local.config import CLUSTER_BUS_PORT_OFFSET, MAX_TCP_PORT
 from .deployment.local.ports import LOCK_DIRECTORY, ephemeral_overlap
 from .documents import SCENARIO_SECTIONS, merge, set_path
-from .generator import Exclusion, GeneratorBlock, GeneratorError, find_profile, installed_pools, opted_in
+from .generator import Exclusion, GeneratorError, find_profile, opted_in
 from .hoststate import Owner, interrupt_on_sigterm, open_shared_lock, owner_of, shared_directory, sweep
 from .minimize import empty_signature, failure_signature, verdict_clauses
 from .ordering import DependencyCycleError
@@ -134,10 +126,6 @@ _COMPILE_ERRORS = (ConfigError, ExperimentError, EnvironmentReferenceError, Depe
 
 WORKER_COMMAND = (sys.executable, "-m", "valkey_fuzzer.batch")
 ERROR_FILE = "error.json"
-# What a guided batch's worker writes in its coverage directory: the features its run reached.
-FEATURES_FILE = "features.json"
-# Corpus entries a guided job tries to derive a scenario from before it draws a fresh seed.
-GUIDED_TRIES = 10
 CONSOLE_FILE = "console.log"
 # What a pruned PASS run keeps.
 KEPT_WHEN_PRUNED = (REPORT_FILE, SCENARIO_FILE, CONFORMANCE_FILE)
@@ -176,7 +164,6 @@ _OPTION_FIELDS = {
     "valkey_binary": ConfigField(str, required=False, allow_none=True),
     "prune_pass": ConfigField(bool, required=False),
     "serial_reruns": ConfigField(int, minimum=0, required=False),
-    "corpus_from": ConfigField(str, required=False, allow_none=True),
 }
 _SPEC = ConfigSchema({**_OPTION_FIELDS, "sources": ConfigField(list, required=False, allow_none=True)})
 
@@ -189,7 +176,6 @@ _SOURCES = {
             "first_seed": ConfigField(int, minimum=0, required=False, allow_none=True),
             "excludes": ConfigField(list, items=ConfigField(str), default=list, allow_none=True),
             "base": ConfigField(dict, default=dict, allow_none=True),
-            "guided": ConfigField(int, minimum=0, default=0, allow_none=True),
         }
     ),
     "matrix": ConfigSchema(
@@ -234,8 +220,6 @@ class BatchOptions:
     valkey_binary: Optional[str] = None
     prune_pass: bool = False
     serial_reruns: int = 0
-    # An earlier batch folder whose corpus a guided batch starts from.
-    corpus_from: Optional[str] = None
     experiment_directories: tuple[str, ...] = ()
 
     def check(self) -> None:
@@ -312,7 +296,6 @@ def normalize_source(source: Any, base_dir: str) -> dict[str, Any]:
         except GeneratorError as exc:
             raise BatchError(f"{where}.excludes: {exc}") from None
         settings["base"] = settings["base"] or {}
-        settings["guided"] = settings["guided"] or 0
         # A fresh first seed unless one is given; jobs.json records every seed.
         if settings.get("first_seed") is None:
             settings["first_seed"] = random.randrange(0, 2**31)
@@ -338,9 +321,8 @@ def load_spec(path: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         raise BatchError(str(exc)) from None
     base_dir = os.path.dirname(os.path.abspath(path))
     sources = document.pop("sources", None) or []
-    for name in ("valkey_binary", "corpus_from"):
-        if document.get(name):
-            document[name] = _absolute(document[name], base_dir, name)
+    if document.get("valkey_binary"):
+        document["valkey_binary"] = _absolute(document["valkey_binary"], base_dir, "valkey_binary")
     return document, [normalize_source(source, base_dir) for source in sources]
 
 
@@ -602,7 +584,7 @@ def run_worker(task_path: str) -> int:
                 base=merge(draw["base"], isolation),
                 profile=draw["profile"],
                 free_ports=False,
-                overrides=Overrides(binary=task["valkey_binary"], keep_own_binary=True, pinned=draw.get("pinned")),
+                overrides=Overrides(binary=task["valkey_binary"], keep_own_binary=True),
             )
         else:
             scenario = merge(
@@ -625,8 +607,6 @@ def run_worker(task_path: str) -> int:
     )
     print_outcome(record.outcome, verbose=True)
     _conform(report_dir)
-    if task.get("coverage_dir"):
-        _collect_coverage(task["coverage_dir"])
     return exit_code(record.outcome.status)
 
 
@@ -647,18 +627,6 @@ def _conform(report_dir: str) -> None:
             f"spec conform {name}: {entry['status']}"
             + (f": {entry.get('error') or entry.get('reason')}" if entry["status"] not in ("pass", "fail") else "")
         )
-
-
-def _collect_coverage(directory: str) -> None:
-    """Write the Valkey code the run's processes reached to ``<directory>/features.json``, for the batch."""
-
-    try:
-        features = gcov_features(directory)
-    except Exception as exc:
-        # Coverage only steers the batch: a run whose coverage cannot be read keeps its result.
-        print(f"No code coverage: {exception_type(exc)}: {exc}")
-        return
-    write_document(os.path.join(directory, FEATURES_FILE), features)
 
 
 # ---------------------------------------------------------------------------
@@ -901,15 +869,6 @@ class BatchRunner:
         self._running: dict[int, _Running] = {}
         # Slots whose sweep could not remove a leftover: its ports or addresses may still be taken.
         self._retired: set[int] = set()
-        # The random sources that draw guided jobs, by their index in the batch's sources.
-        self._guided = {
-            index: value
-            for index, source in enumerate(spec["sources"])
-            for kind, value in source.items()
-            if kind == "random" and value.get("guided")
-        }
-        self.corpus = Corpus.load(self.folder)
-        self._draws: dict[str, Optional[Mapping[str, Any]]] = {}
 
     # -- creating --------------------------------------------------------------
 
@@ -927,11 +886,6 @@ class BatchRunner:
             raise BatchError("the batch has no jobs")
         if os.path.exists(os.path.join(folder, "batch.json")):
             raise BatchError(f"{folder} already holds a batch; resume it instead")
-        corpus = None
-        if options.corpus_from:
-            if not any(source.get("random", {}).get("guided") for source in sources):
-                raise BatchError("corpus_from needs a random source with guided runs")
-            corpus = Corpus.of(_earlier_corpus(options.corpus_from))
         os.makedirs(folder, exist_ok=True)
         _copy_experiments(folder, options.experiment_directories)
         spec = {
@@ -944,10 +898,8 @@ class BatchRunner:
             "cores": usable_cores(),
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
-        # jobs.json and corpus.json first: a folder with batch.json is complete.
+        # jobs.json first: a folder with batch.json is complete.
         write_document(os.path.join(folder, "jobs.json"), expansion.jobs)
-        if corpus is not None:
-            corpus.save(folder)
         write_document(os.path.join(folder, "batch.json"), spec)
         return cls(folder)
 
@@ -1023,9 +975,7 @@ class BatchRunner:
                 f"({self.options.workers} worker(s)); random draws fit their deployments to it"
             )
             done = _results(self.folder)
-            self._run_pool(
-                [job for job in self.jobs if job["id"] not in done], self.options.workers, more=self._next_guided
-            )
+            self._run_pool([job for job in self.jobs if job["id"] not in done], self.options.workers)
             if not self.stop_requested and self.options.serial_reruns:
                 done = _results(self.folder)
                 reruns = [job for job in self.serial_jobs() if job["id"] not in done]
@@ -1137,22 +1087,11 @@ class BatchRunner:
             },
         )
 
-    def _run_pool(
-        self,
-        todo: list[dict[str, Any]],
-        concurrency: int,
-        more: Optional[Callable[[], Optional[dict[str, Any]]]] = None,
-    ) -> None:
-        """Run ``todo``, then the jobs ``more`` draws whenever a worker is free, until it draws None."""
+    def _run_pool(self, todo: list[dict[str, Any]], concurrency: int) -> None:
+        """Run ``todo``, ``concurrency`` jobs at a time."""
 
         queue = list(todo)
         while True:
-            if not queue and more is not None and not self.stop_requested and len(self._running) < concurrency:
-                job = more()
-                if job is None:
-                    more = None
-                else:
-                    queue.append(job)
             if not ((queue and not self.stop_requested) or self._running):
                 break
             usable = [slot for slot in range(self.options.workers) if slot not in self._retired]
@@ -1194,10 +1133,6 @@ class BatchRunner:
             "experiment_directories": list(self.options.experiment_directories),
         }
         env = {**os.environ, "TMPDIR": os.path.join(work, "tmp"), "PYTHONUNBUFFERED": "1"}
-        if self._guided:
-            # Every process the run starts writes its coverage counters under the worker's own directory.
-            task["coverage_dir"] = env["GCOV_PREFIX"] = os.path.join(work, "coverage")
-            os.makedirs(task["coverage_dir"])
         task_path = os.path.join(work, "task.json")
         write_document(task_path, task)
         with open(os.path.join(run_dir, CONSOLE_FILE), "w", encoding="utf-8") as console:
@@ -1253,8 +1188,6 @@ class BatchRunner:
         logs = os.path.join(self._work(slot), "data", "logs")
         if os.path.isdir(logs):
             shutil.copytree(logs, os.path.join(run_dir, "logs"), dirs_exist_ok=True)
-        features_path = os.path.join(self._work(slot), "coverage", FEATURES_FILE)
-        features = _read_json(features_path) if os.path.exists(features_path) else None
         self._retire_if_stuck(slot, job["id"], leaks)
         if slot not in self._retired:
             shutil.rmtree(self._work(slot), ignore_errors=True)
@@ -1276,15 +1209,7 @@ class BatchRunner:
         }
         if job.get("origin"):
             extra["origin"] = job["origin"]
-        if job.get("guided"):
-            extra["guided"] = job["guided"]
         result = job_result(job, run_dir, exit_code=code, timed_out=item.timed_out, leaks=leaks, extra=extra)
-        if self._guided:
-            # The corpus first: a resume runs a job again whose result is missing, and it then adds nothing.
-            new = None if features is None else self.corpus.add(job["id"], result["experiment"], features)
-            if new:
-                self.corpus.save(self.folder)
-            result["code_coverage"] = None if features is None else {"reached": len(features), "new": new}
         write_document(self._path("results", f"{job['id']}.json"), result)
         if self.options.prune_pass and result["status"] == "PASS":
             for entry in os.listdir(run_dir):
@@ -1292,100 +1217,9 @@ class BatchRunner:
                     target = os.path.join(run_dir, entry)
                     shutil.rmtree(target) if os.path.isdir(target) else os.remove(target)
         leaked = f" LEAKED {len(leaks)}" if leaks else ""
-        if self._guided:
-            leaked += " coverage none" if features is None else f" coverage +{result['code_coverage']['new']}"
         self.log(
             f"[{result['status']:<16}] {job['id']} {extra['duration_s']}s w{slot}{leaked}: {result['summary'][:200]}"
         )
-
-    # -- guided jobs -----------------------------------------------------------
-
-    @functools.cached_property
-    def service(self) -> RunService:
-        return RunService(experiment_directories=self.options.experiment_directories)
-
-    def _next_guided(self) -> Optional[dict[str, Any]]:
-        """The next guided job of the first guided source with some left (added to jobs.json); None when none is."""
-
-        for index, source in self._guided.items():
-            drawn = sum(job.get("guided", {}).get("source") == index for job in self.jobs)
-            if drawn < source["guided"]:
-                job = self._guided_job(index, source, drawn)
-                self.jobs.append(job)
-                write_document(self._path("jobs.json"), self.jobs)
-                return job
-        return None
-
-    def _parent_draws(self, entry: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
-        """What the run of corpus ``entry`` drew; None for a scenario it did not draw."""
-
-        if "run" in entry:
-            return entry["draws"]
-        if entry["job"] not in self._draws:
-            self._draws[entry["job"]] = _run_draws(self._path("runs", entry["job"]))
-        return self._draws[entry["job"]]
-
-    def _guided_job(self, index: int, source: Mapping[str, Any], number: int) -> dict[str, Any]:
-        """Guided job ``number`` of random source ``index``: a scenario derived from a corpus entry of one of its
-        experiments, or a fresh seed while the corpus holds none it can derive one from."""
-
-        catalog = self.service.catalog
-        excludes = [Exclusion.parse(item) for item in source["excludes"]]
-        experiments = source["experiments"]
-        if experiments == "all":
-            experiments = opted_in(catalog, excludes)
-        rng = random.Random(f"guided\0{source['first_seed']}\0{index}\0{number}")
-        picked = Counter(job["guided"]["parent"] for job in self.jobs if job.get("guided"))
-        common = {"excludes": source["excludes"], "base": source["base"], "profile": self.options.profile}
-
-        # Deployment fields that only place a deployment on the host (a batch worker sets its own) are never changed.
-        placement = {
-            f"deployment.{name}"
-            for provider in catalog.deployment_providers.snapshot().values()
-            for name in provider.host_fields
-        }
-
-        def eligible(entry: Mapping[str, Any]) -> bool:
-            return entry["experiment"] in experiments and self._parent_draws(entry) is not None
-
-        for _ in range(GUIDED_TRIES):
-            entry = self.corpus.pick(rng, eligible, picked)
-            if entry is None:
-                break
-            experiment, draws = entry["experiment"], self._parent_draws(entry)
-            changed = mutation(rng, [name for name in draws if name not in placement])
-            seed = rng.randrange(2**31)
-            try:
-                block = GeneratorBlock.parse(catalog.experiments.resolve(experiment), installed_pools(catalog))
-                pinned = block.kept(draws, changed)
-                # Drawn here first, so a derived scenario no attempt can draw is never a job that errors.
-                self.service.generate(
-                    seed,
-                    experiment=experiment,
-                    excludes=excludes,
-                    base=source["base"],
-                    profile=self.options.profile,
-                    overrides=Overrides(binary=self.options.valkey_binary, keep_own_binary=True, pinned=pinned),
-                )
-            except GeneratorError:
-                picked[parent(entry)] += 1
-                continue
-            change = changed or "seed"
-            return {
-                "id": f"guided-{experiment}-s{seed}",
-                "source": "guided",
-                "label": f"{experiment} seed {seed}: {entry['job']}, new {change}",
-                "generate": {"seed": seed, "experiment": experiment, **common, "pinned": pinned},
-                "guided": {"source": index, "parent": parent(entry), "mutation": change},
-            }
-        experiment, seed = rng.choice(experiments), rng.randrange(2**31)
-        return {
-            "id": f"guided-{experiment}-s{seed}",
-            "source": "guided",
-            "label": f"{experiment} seed {seed}",
-            "generate": {"seed": seed, "experiment": experiment, **common},
-            "guided": {"source": index, "parent": None, "mutation": None},
-        }
 
     # -- the summary -----------------------------------------------------------
 
@@ -1503,9 +1337,6 @@ class BatchRunner:
                 name: {"runs": entry["runs"], "tuples": len(entry["tuples"])}
                 for name, entry in sorted(coverage.items())
             },
-            "code_coverage": {"covered": len(self.corpus.covered), "corpus": len(self.corpus.entries)}
-            if self._guided
-            else None,
         }
 
     def _conformance(self, results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -1590,33 +1421,6 @@ class BatchRunner:
             "not_held": [case["case"] for case in cases if case.get("holds") is False],
             "undecided": [case["case"] for case in cases if case.get("undecided")],
         }
-
-
-def _run_draws(run_dir: str) -> Optional[Mapping[str, Any]]:
-    """What the run in ``run_dir`` drew (its report's ``reproducer.generated.draws``); None for a scenario it did
-    not draw, or a run without a report."""
-
-    path = os.path.join(run_dir, REPORT_FILE)
-    report = _read_json(path) if os.path.exists(path) else {}
-    return ((report.get("reproducer") or {}).get("generated") or {}).get("draws")
-
-
-def _earlier_corpus(folder: str) -> list[dict[str, Any]]:
-    """The corpus entries of earlier batch ``folder``, to start a new batch's from, each with the run folder it
-    names (``run``) and what that run drew (``draws``): the new batch never reads the earlier one again, and an
-    entry the earlier batch brought from one before it comes as it is."""
-
-    try:
-        entries = _read_json(os.path.join(folder, CORPUS_FILE))["entries"]
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise BatchError(f"corpus_from {folder} holds no corpus to start from: {type(exc).__name__}: {exc}") from None
-    imported = []
-    for entry in entries:
-        if "run" not in entry:
-            run = os.path.join(folder, "runs", entry["job"])
-            entry = {**entry, "run": run, "draws": _run_draws(run)}
-        imported.append(entry)
-    return imported
 
 
 def _swept(leaks: Sequence[Mapping[str, Any]]) -> str:

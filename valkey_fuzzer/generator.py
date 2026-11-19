@@ -695,28 +695,21 @@ class GeneratorBlock:
         excludes: Sequence[Exclusion] = (),
         base: Optional[Mapping[str, Any]] = None,
         profile: Optional[Profile] = None,
-        pinned: Optional[Mapping[str, Any]] = None,
-    ) -> tuple[dict[str, Any], int, dict[str, Any]]:
-        """One candidate scenario, how many of its draws were edges, and its draws by dimension, in draw order.
+    ) -> tuple[dict[str, Any], int]:
+        """One candidate scenario, and how many of its draws were edges.
 
-        ``profile`` changes only how it samples; a dimension in ``pinned`` takes that value instead of a draw
-        (its hook does not run). ``with_binary`` gives a scenario the Valkey binary it runs, once its deployment
-        mode is drawn.
+        ``profile`` changes only how it samples. ``with_binary`` gives a scenario the Valkey binary it runs, once
+        its deployment mode is drawn.
         """
 
         edges = 0
         edge_probability = EDGE_PROBABILITY if profile is None else profile.edge_probability
-        draws: dict[str, Any] = {}
-        pinned = pinned or {}
 
         def stream(dimension: str) -> random.Random:
             return generator_rng(seed, dimension, attempt, self.experiment_id)
 
         def draw(rule: _Rule, dimension: str) -> Any:
             nonlocal edges
-            if dimension in pinned:
-                draws[dimension] = copy.deepcopy(pinned[dimension])
-                return draws[dimension]
             aliases = self.input_configs.get(dimension[len("inputs.") :], ()) if dimension.startswith("inputs.") else ()
             if profile is not None:
                 rule = profile.rule(rule, dimension)
@@ -724,7 +717,6 @@ class GeneratorBlock:
                 stream(dimension), _excluded(dimension, excludes, aliases), dimension, edge_probability
             )
             edges += edge
-            draws[dimension] = value
             return value
 
         mode = draw(self.modes, "deployment.mode")
@@ -751,32 +743,22 @@ class GeneratorBlock:
             if not isinstance(documents, Mapping):
                 raise GeneratorError(f"{where} must return a mapping of server config keys to rules")
             documents = {key: document for key, document in documents.items() if key not in taken}
-            dimension = f"pools.{pool_id}.keys"
-            if dimension in pinned:
-                keys = set(pinned[dimension]) & set(documents)
-            else:
-                salt = stream(dimension).getrandbits(64)
-                keys = {key for key in documents if _chosen(salt, key, pool["share"])}
-            draws[dimension] = sorted(keys)
+            salt = stream(f"pools.{pool_id}.keys").getrandbits(64)
+            keys = {key for key in documents if _chosen(salt, key, pool["share"])}
             return {key: _hook_rule(documents[key], f"{where}.{key}") for key in keys}
 
         sources = self._draw_pools(deployment, draw, offered)
         pools = dict(self.pools)
         for name, pool_ids in sorted(self.pool_inputs.items()):
-            dimension = f"inputs.{name}"
-            if dimension in pinned:
-                inputs[name] = copy.deepcopy(pinned[dimension])
-            else:
-                inputs[name] = {
-                    key: [
-                        value
-                        for value in pools[pool_id][key]
-                        if not any(item.matches(value) for item in _excluded(f"server_config.{key}", excludes))
-                    ]
-                    for key, pool_id in sorted(sources.items())
-                    if pool_id in pool_ids
-                }
-            draws[dimension] = copy.deepcopy(inputs[name])
+            inputs[name] = {
+                key: [
+                    value
+                    for value in pools[pool_id][key]
+                    if not any(item.matches(value) for item in _excluded(f"server_config.{key}", excludes))
+                ]
+                for key, pool_id in sorted(sources.items())
+                if pool_id in pool_ids
+            }
         inputs.update(
             (name, draw(rule, f"inputs.{name}"))
             for name, rule in sorted(self.inputs.items())
@@ -785,41 +767,14 @@ class GeneratorBlock:
         visible = with_binary(merge(scenario, base or {}))
         for name, rule in sorted(self.inputs.items()):
             if rule is not None and rule.hook:
-                dimension = f"inputs.{name}"
-                if dimension in pinned:
-                    inputs[name] = copy.deepcopy(pinned[dimension])
-                else:
-                    inputs[name] = hooks[rule.hook](stream(dimension), copy.deepcopy(visible))
-                draws[dimension] = copy.deepcopy(inputs[name])
+                inputs[name] = hooks[rule.hook](stream(f"inputs.{name}"), copy.deepcopy(visible))
                 visible["experiment"]["inputs"][name] = copy.deepcopy(inputs[name])
         if self.hook:
-            if "hook" in pinned:
-                patch = copy.deepcopy(pinned["hook"])
-            else:
-                patch = hooks[self.hook](stream("hook"), copy.deepcopy(visible))
+            patch = hooks[self.hook](stream("hook"), copy.deepcopy(visible))
             if not isinstance(patch, Mapping):
                 raise GeneratorError(f"generator {self.hook!r} must return a partial scenario mapping")
-            draws["hook"] = copy.deepcopy(patch)
             scenario = merge(scenario, patch)
-        return with_binary(merge(scenario, base or {})), edges, draws
-
-    def kept(self, draws: Mapping[str, Any], dimension: Optional[str]) -> dict[str, Any]:
-        """The draws a scenario keeps (as ``pinned``) when it draws ``dimension`` anew; every draw for None.
-
-        A hook sees everything drawn before it, so the hooks drawn after ``dimension`` are drawn anew too.
-        """
-
-        if dimension is None:
-            return dict(draws)
-        order = list(draws)
-        hooked = {"hook"} | {f"inputs.{name}" for name, rule in self.inputs.items() if rule is not None and rule.hook}
-        hooked |= {f"inputs.{name}" for name in self.pool_inputs}
-        after = order.index(dimension) if dimension in order else len(order)
-        return {
-            name: draws[name]
-            for index, name in enumerate(order)
-            if name != dimension and not (index > after and name in hooked)
-        }
+        return with_binary(merge(scenario, base or {})), edges
 
     def _draw_pools(
         self,
@@ -963,8 +918,6 @@ class Generated:
     boundary: int
     excludes: tuple[Exclusion, ...] = ()
     profile: Optional[str] = None
-    # Every drawn value by dimension, in draw order: what a coverage-guided batch pins to derive another scenario.
-    draws: Mapping[str, Any] = field(default_factory=dict)
     # The cores the draw's deployment had to fit (None: any number), and why it does not when no attempt did.
     cores: Optional[float] = None
     shortfall: Optional[str] = None
@@ -982,7 +935,6 @@ class Generated:
             "profile": self.profile,
             "cores": self.cores,
             "shortfall": self.shortfall,
-            "draws": to_plain_data(self.draws),
         }
 
 
@@ -1031,9 +983,7 @@ def generate(
     """A valid scenario for ``experiment`` (drawn from the opted-in ones when None) from ``seed``.
 
     ``base`` is a partial scenario merged over every draw and hook; ``profile``
-    is the search profile that samples the experiment's legal space; ``overrides.pinned``
-    holds values of an earlier scenario's draws (:attr:`Generated.draws`) that
-    this one keeps, every other dimension drawn from ``seed``; ``cores``
+    is the search profile that samples the experiment's legal space; ``cores``
     is how many cores the run may use, which its deployment must fit (None:
     any number);
     ``overrides.binary`` is the binary the deployment runs, set before the hooks
@@ -1058,7 +1008,7 @@ def generate(
     # The first candidate that needed more cores than the run may use: the scenario when none fits.
     oversized: Optional[Generated] = None
     for attempt in range(MAX_ATTEMPTS):
-        scenario, boundary, draws = block.draw(
+        scenario, boundary = block.draw(
             seed,
             attempt,
             hooks=hooks,
@@ -1066,7 +1016,6 @@ def generate(
             base=base,
             profile=profile,
             with_binary=with_binary,
-            pinned=overrides.pinned,
         )
         try:
             plan = compile_fn(scenario)
@@ -1089,7 +1038,6 @@ def generate(
             boundary,
             tuple(excludes),
             None if profile is None else profile.name,
-            draws,
             cores,
         )
         reason = capacity.shortfall(plan, catalog, cores)

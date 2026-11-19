@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Removed: coverage-guided batches (`--guided`, `--corpus-from`)
+
+- `batch --guided N`, `batch --corpus-from BATCH`, and the batch spec keys `guided` (in a `random` source) and
+  `corpus_from` are gone, with `corpus.py`, the gcov feature collection (`coverage.gcov_features`), the
+  `code_coverage` summary key and result field, and `corpus.json`. A batch spec that names `guided` or
+  `corpus_from` is now rejected as an unknown key. No workflow used them, and they needed a gcov build of Valkey.
+- `reproducer.generated` in a run report no longer carries `draws`, and `Overrides.pinned` and
+  `GeneratorBlock.kept` are removed: only guided batches read them.
+
 ### Changed: `replay` and `minimize` warn about drift and never refuse
 
 - A drifted `replay` or `minimize` runs, prints each difference to stderr, and `replay` records it in the
