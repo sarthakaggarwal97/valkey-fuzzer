@@ -124,7 +124,7 @@ def failover_shard(
     observed raises instead (no node answered, no replica to promote or none
     synced within the harness's wait, a command that failed, or the run's
     deadline or a cancellation of ``context``'s call during a wait, see
-    :func:`~.queries.pause`), so the caller can tell it from Valkey's doing.
+    :func:`~valkey_fuzzer.deadlines.pause`), so the caller can tell it from Valkey's doing.
     """
     logger.info("Executing failover on shard %s", shard_id)
     stopped_ports = {node.port for node in connection.instances if node.instance_id in set(stopped_instances)}
