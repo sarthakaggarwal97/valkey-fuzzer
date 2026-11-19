@@ -48,7 +48,7 @@ rejects it:
 | Option | Commands | Meaning |
 | --- | --- | --- |
 | `--valkey-binary PATH` | `run`, `batch`, `validate`, `replay`, `diff`, `minimize` | Use this `valkey-server` for the deployment (the local deployment's `deployment.valkey_binary`; a deployment provider without a `binary_override` hook refuses it). For `batch` it applies only to scenarios that name no binary of their own; for `replay` it is an intentional override; see [replay](#replay). |
-| `--base-port PORT` | `run`, `diff` (`batch`: `--port-base`) | The first client port of the deployment, instead of the scenario's or the draw's. Every other client port, and in cluster mode every bus port, follows from it, so two scenarios started by hand do not overlap. For `batch` it is the first client port of worker 0 (the alias of `--port-base`). A generated run's `Reproduce:` line keeps it. |
+| `--base-port PORT` | `run`, `diff`, `batch` | The first client port of the deployment, instead of the scenario's or the draw's. Every other client port, and in cluster mode every bus port, follows from it, so two scenarios started by hand do not overlap. For `batch` it is the first client port of worker 0. A generated run's `Reproduce:` line keeps it. |
 | `--artifact NAME=PATH` | `run`, `replay`, `diff` | Resolve the scenario's `valkey.artifact.local-binary` or `valkey.artifact.local-module` artifact `NAME` at `PATH` instead of the path it declares, so a run recorded elsewhere (a CI batch's parent build, `artifacts.parent`, or its module builds, `artifacts.module` and `artifacts.module_parent`) runs on this host's build of it. Repeatable, once per artifact; an artifact the scenario does not declare (for `diff`, its `base` does not), or of another provider, is an error. The report records the scenario with the override; see [replay](#replay) for how the binary is still compared. |
 | `--artifact-dir DIR` | `run`, `batch`, `replay`, `diff`, `minimize` | Root for report folders, which hold each run's component artifacts, and for provider directories; for `batch`, where the default batch folder goes. See [Report folders](#report-folders). |
 | `--timeout SECONDS` | `run`, `batch`, `replay`, `diff`, `minimize` | Deadline for each run. Without it, a run gets a derived default: the search profile's `budget.timeout_s`, else 1200 s, and for `run` never less than the sum of the components' `timeout_s`. See [Deadlines and cancellation](contracts.md#deadlines-and-cancellation). |
@@ -308,7 +308,7 @@ run names its build.
 | `profile` | `--profile NAME` | The [search profile](scenarios-and-experiments.md#legal-space-and-search-profiles) every random job is drawn under, and the budgets. |
 | `workers` | `--workers N` | Parallel workers; default 1. On resume, the only option that may change. A random job's deployment is drawn to fit its worker's share of the batch's cores: the cores the creating process may use, over `workers`. |
 | `timeout_s` | `--timeout SECONDS` | The deadline of each run. |
-| `port_base` | `--port-base PORT` (or `--base-port`) | The first client port of worker 0; default 11000. |
+| `port_base` | `--base-port PORT` | The first client port of worker 0; default 11000. |
 | `valkey_binary` | `--valkey-binary PATH` | See above. |
 | `prune_pass` | `--prune-pass` | Keep only `report.json` and `scenario.yaml` of a run that passed and left nothing behind. |
 | `serial_reruns` | `--serial-reruns N` | After the parallel runs, run `N` jobs of each `FAIL` or `ERROR` signature again, one at a time (load can explain those, not an unsupported run). |

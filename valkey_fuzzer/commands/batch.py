@@ -61,7 +61,6 @@ def register(subparsers: Any) -> None:
     options.add_argument("--profile", help="Search profile: sampling and budgets (pr-quick, nightly-soak, ...)")
     options.add_argument("--workers", type=positive_count, help="Parallel workers (default: 1)")
     options.add_argument(
-        "--port-base",
         "--base-port",
         dest="port_base",
         type=int,

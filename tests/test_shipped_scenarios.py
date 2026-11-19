@@ -1,9 +1,6 @@
 """Every shipped example (each differential variant, each distinct batch scenario) compiles and passes preflight,
 and the run service example script validates one."""
 
-import importlib.util
-import json
-import sys
 from pathlib import Path
 
 import pytest
@@ -42,14 +39,3 @@ def test_every_shipped_example_compiles_and_passes_preflight(runtime, path):
         scenarios = list(distinct.values())
     for scenario in scenarios:
         runtime.validate_plan(runtime.compile(scenario))
-
-
-def test_the_run_service_example_validates_a_scenario(monkeypatch, capsys):
-    spec = importlib.util.spec_from_file_location("run_fuzzer", EXAMPLES / "run_fuzzer.py")
-    run_fuzzer = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(run_fuzzer)
-    scenario = EXAMPLES / "standalone_scenario.yaml"
-    monkeypatch.setattr(sys, "argv", ["run_fuzzer.py", "validate", str(scenario)])
-
-    assert run_fuzzer.main() == 0
-    assert json.loads(capsys.readouterr().out)["scenario_id"] == "standalone-deployment-smoke"

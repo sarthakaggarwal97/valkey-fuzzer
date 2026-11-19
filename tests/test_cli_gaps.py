@@ -77,7 +77,7 @@ def test_base_port_must_be_a_port(canned_runs, capsys, value):
 
 def test_batch_takes_base_port_as_its_port_base():
     args = create_parser().parse_args(["batch", "--random", "all", "--base-port", "12000"])
-    assert args.port_base == 12000 == create_parser().parse_args(["batch", "--port-base", "12000"]).port_base
+    assert args.port_base == 12000
 
 
 def test_diff_resolves_artifacts_and_moves_ports_and_defaults_to_valkey_server_on_path(canned_runs):

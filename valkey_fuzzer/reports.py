@@ -54,8 +54,6 @@ REPRODUCER_KEYS = (
     "valkey_sha",
 )
 
-# What a person reads first in a report.json, in this order, ahead of the data a tool reads (see run_report).
-READABLE_KEYS = ("status", "summary", "failed_components", "reproduce", "look_at")
 # Longest value copied into ``failed_components``; a longer one is cut and carries its length and digest.
 MAX_VALUE_CHARS = 120
 # Most evidence items listed for one failed component.

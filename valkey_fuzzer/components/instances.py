@@ -131,13 +131,6 @@ def follows(info: Optional[Mapping[str, Any]], primary: Any) -> bool:
     )
 
 
-def replica_links(info: Mapping[str, Any], handle: Any) -> list[tuple[Any, Optional[str]]]:
-    """A primary's replica entries (INFO replication's ``slaveN``, as ``parse_replication`` reads them), each with
-    the instance at its address."""
-
-    return [(entry, instance_at(handle, entry.ip, entry.port)) for entry in parse_replication(info).replicas]
-
-
 def wait_following(
     context: Any, handle: Any, ids: Sequence[str], primary: str, timeout_s: float
 ) -> tuple[bool, dict[str, Optional[bool]]]:

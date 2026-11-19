@@ -33,23 +33,12 @@ def register(subparsers: Any) -> None:
         help="Look for tagged directories in DIR instead of the defaults "
         f"({', '.join(default_roots())}); may be repeated",
     )
-    parser.add_argument(
-        "--force-foreign-namespace",
-        action="store_true",
-        help="Also remove what an owner in another PID namespace (a container sharing /tmp) left; "
-        "by default such owners are taken to be alive",
-    )
     parser.add_argument("--format", choices=["text", "json"], default="text")
     parser.set_defaults(handler=sweep_command)
 
 
 def sweep_command(args: argparse.Namespace) -> int:
-    report = sweep(
-        args.roots,
-        older_than=args.older_than,
-        dry_run=args.dry_run,
-        force_foreign_namespace=args.force_foreign_namespace,
-    )
+    report = sweep(args.roots, older_than=args.older_than, dry_run=args.dry_run)
     if args.format == "json":
         print(json.dumps(report.to_data(), indent=2, sort_keys=True))
     else:
