@@ -22,6 +22,7 @@ from tests.valkey_experiments_support import (
     resolved,
     validation_result,
 )
+from valkey_fuzzer import deadlines
 from valkey_fuzzer._data import to_plain_data
 from valkey_fuzzer.components import actions, instances, network, polling, processes, replication_chaos
 from valkey_fuzzer.components.actions import ReplicaofAction
@@ -313,7 +314,7 @@ def test_a_waves_operations_run_in_the_calling_context_so_a_cancelled_call_stops
 
 
 def test_replicaof_moves_an_instance_and_fails_when_the_link_never_comes_up(monkeypatch):
-    handle, clock = FakeStandalone(replicas=1), VirtualClock().install(monkeypatch, instances, polling, processes)
+    handle, clock = FakeStandalone(replicas=1), VirtualClock().install(monkeypatch, instances, polling, deadlines, processes)
 
     def replicaof(**config):
         spec = resolved(ComponentSpec(role=ComponentRole.ACTION, use="valkey.action.replicaof", id="r", config=config))
@@ -328,7 +329,7 @@ def test_replicaof_moves_an_instance_and_fails_when_the_link_never_comes_up(monk
     handle.stopped["valkey-0"] = True
     waited = clock.elapsed
     assert replicaof(instance="valkey-1", primary="valkey-0", timeout_s=0.3).status is ComponentStatus.FAIL
-    assert clock.elapsed - waited >= 0.3, "it waited out timeout_s for the link"
+    assert clock.elapsed - waited >= 0.3 - 1e-6, "it waited out timeout_s for the link"
     # A link to the primary's port on another address is not a link to the primary.
     handle = FakeStandalone(replicas=1)
     handle.instances[0].host = "127.0.0.2"
@@ -343,14 +344,14 @@ def test_replicaof_that_cannot_read_the_instance_is_an_error_not_a_failure(monke
                 raise valkey.exceptions.ConnectionError("Connection reset by peer")
             return super().info(instance_id)
 
-    handle, clock = Unreadable(replicas=1), VirtualClock().install(monkeypatch, instances, polling, processes)
+    handle, clock = Unreadable(replicas=1), VirtualClock().install(monkeypatch, instances, polling, deadlines, processes)
     spec = resolved(
         ComponentSpec(role=ComponentRole.ACTION, use="valkey.action.replicaof", id="r",
                       config={"instance": "valkey-1", "primary": None, "timeout_s": 0.3})
     )  # fmt: skip
     result = ReplicaofAction().run(clock.drive(fake_context(handle, spec)), spec)
     assert result.status is ComponentStatus.ERROR, result.summary
-    assert "cannot tell whether valkey-1 was a primary" in result.summary and clock.elapsed >= 0.3
+    assert "cannot tell whether valkey-1 was a primary" in result.summary and clock.elapsed >= 0.3 - 1e-6
 
 
 def _exits_by_itself():
@@ -546,7 +547,7 @@ def test_a_rolling_upgrade_fails_over_within_its_step_timeout_and_aborts_after(m
 
     handle, clock = (
         FakeStandalone(replicas=2, failover_works=failover_works),
-        VirtualClock().install(monkeypatch, instances, polling, processes),
+        VirtualClock().install(monkeypatch, instances, polling, deadlines, processes),
     )
     config = {"to_binary": "/new/valkey-server", "step_timeout_s": 1}
     spec = resolved(
@@ -595,7 +596,7 @@ class _FailoverToRaises(FakeStandalone):
 def test_a_graceful_failover_without_a_reply_is_unknown_and_one_valkey_refused_failed(monkeypatch, error, unknown):
     # A FAILOVER TO that got no reply may never have reached Valkey: roles that did not swap say nothing then.
     handle = _FailoverToRaises(error, replicas=1)
-    clock = VirtualClock().install(monkeypatch, instances, polling, processes)
+    clock = VirtualClock().install(monkeypatch, instances, polling, deadlines, processes)
     context = clock.drive(fake_context(handle))
     done, reported = instances.graceful_failover(context, handle, "valkey-0", "valkey-1", 0.3)
     assert done is (None if unknown else False) and reported == f"{type(error).__name__}: {error}"
@@ -616,7 +617,7 @@ def test_a_graceful_failover_whose_roles_cannot_be_read_at_the_end_is_unknown(mo
             return reply
 
     handle = PrimaryGoesQuiet(replicas=1, failover_works=False)
-    clock = VirtualClock().install(monkeypatch, instances, polling, processes)
+    clock = VirtualClock().install(monkeypatch, instances, polling, deadlines, processes)
     done, error = instances.graceful_failover(clock.drive(fake_context(handle)), handle, "valkey-0", "valkey-1", 0.3)
     assert (done, error) == (None, None)
 
@@ -628,7 +629,7 @@ def test_a_graceful_failover_whose_roles_cannot_be_read_at_the_end_is_unknown(mo
     ids=["no-reply", "valkey-did-not-fail-over"],
 )  # fmt: skip
 def test_a_rolling_upgrade_failover_the_harness_could_not_see_is_no_finding(monkeypatch, handle, harness):
-    handle, clock = handle(), VirtualClock().install(monkeypatch, instances, polling, processes)
+    handle, clock = handle(), VirtualClock().install(monkeypatch, instances, polling, deadlines, processes)
     spec = resolved(
         ComponentSpec(role=ComponentRole.ACTION, use="valkey.action.rolling-upgrade", id="u",
                       config={"to_binary": "/new/valkey-server", "step_timeout_s": 1})
@@ -652,7 +653,7 @@ def test_a_rolling_upgrade_failover_the_harness_could_not_see_is_no_finding(monk
     ids=["took-effect", "never-read", "half-read", "seen-wrong"],
 )  # fmt: skip
 def test_a_rolling_upgrade_wait_fails_only_on_roles_valkey_reported(monkeypatch, roles, raised):
-    clock = VirtualClock().install(monkeypatch, polling)
+    clock = VirtualClock().install(monkeypatch, polling, deadlines)
     monkeypatch.setattr(actions, "instance_role", lambda handle, instance_id: roles[instance_id])
     context = clock.drive(fake_context(FakeStandalone()))
     wait = lambda: actions._wait(context, None, {"valkey-1": "primary", "valkey-0": "replica"}, 1, "no failover")  # noqa: E731
@@ -747,7 +748,7 @@ def test_a_graceful_promotion_counts_once_the_old_primary_follows_its_target(mon
     # the tracked primary, and the restart of a killed replica would be refused ("configured primary ... is
     # unavailable"), an ERROR. The old primary following the target with its failover state cleared shows the
     # target took over. A failover that never happened fails once its time is up.
-    clock = VirtualClock().install(monkeypatch, instances, polling, processes)
+    clock = VirtualClock().install(monkeypatch, instances, polling, deadlines, processes)
     result, _ = run_chaos(handle(), [[{"op": "promote", "target": "valkey-1", "timeout_s": 0.3}]], clock=clock)
 
     promoted = chaos_operation(result, "1.0")

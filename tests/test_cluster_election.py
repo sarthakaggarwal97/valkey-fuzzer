@@ -16,6 +16,7 @@ from tests.fakes import FakeClient, fake_instances
 from tests.fakes import FakeHandle as BaseHandle
 from tests.support import VirtualClock
 from tests.valkey_experiments_support import fake_context, resolved, valkey_experiment
+from valkey_fuzzer import deadlines
 from valkey_fuzzer.components import cluster_election, instances, polling, processes
 from valkey_fuzzer.components.cluster import parse_slots, read_view
 from valkey_fuzzer.components.cluster_election import ElectionAction
@@ -462,7 +463,7 @@ class _ElectionShard:
 def test_a_paused_primary_election_starts_only_once_a_replica_is_linked(
     monkeypatch, sync_s, elects, master_host, status, summary
 ):
-    clock = VirtualClock().install(monkeypatch, cluster_election, instances, polling, processes)
+    clock = VirtualClock().install(monkeypatch, cluster_election, instances, polling, deadlines, processes)
     shard = _ElectionShard(clock, sync_s, elects, master_host)
     config = {
         "shard": 0,
@@ -480,7 +481,7 @@ def test_a_paused_primary_election_starts_only_once_a_replica_is_linked(
     assert result.status.value == status and summary in result.summary, result.summary
     assert shard.signals == [] if status == "ERROR" else shard.paused_linked is True
     # It waited for the sync, or gave up at its timeout.
-    assert clock.elapsed >= (config["timeout_s"] if status == "ERROR" else sync_s)
+    assert clock.elapsed >= (config["timeout_s"] if status == "ERROR" else sync_s) - 1e-6
 
 
 @pytest.mark.parametrize(
@@ -495,7 +496,7 @@ def test_a_paused_primary_election_starts_only_once_a_replica_is_linked(
     ids=["primary-unread", "replica-unread", "candidate-unread-at-timeout"],
 )
 def test_an_election_whose_nodes_do_not_answer_is_no_verdict(monkeypatch, unanswered, phase, status, summary):
-    clock = VirtualClock().install(monkeypatch, cluster_election, instances, polling, processes)
+    clock = VirtualClock().install(monkeypatch, cluster_election, instances, polling, deadlines, processes)
     shard = _ElectionShard(clock, 0.0, elects=False)
     config = {"shard": 0, "trigger": "pause_primary", "pause_s": 1.0, "timeout_s": 2, "wait_synced": False}
     spec = resolved(
@@ -515,7 +516,7 @@ def test_an_election_whose_nodes_do_not_answer_is_no_verdict(monkeypatch, unansw
 
 
 def test_a_killed_primary_is_a_crash_the_safety_oracle_and_spec_conform_see(monkeypatch, tmp_path):
-    clock = VirtualClock().install(monkeypatch, cluster_election, instances, polling, processes)
+    clock = VirtualClock().install(monkeypatch, cluster_election, instances, polling, deadlines, processes)
     shard = _ElectionShard(clock, 0.0)
     shard.data_root = str(tmp_path)
     (tmp_path / "valkey-1").mkdir()
@@ -537,7 +538,7 @@ def test_a_killed_primary_is_a_crash_the_safety_oracle_and_spec_conform_see(monk
 
 
 def _kill_primary(monkeypatch, tmp_path, shard_type=None, **config):
-    clock = VirtualClock().install(monkeypatch, cluster_election, instances, polling, processes)
+    clock = VirtualClock().install(monkeypatch, cluster_election, instances, polling, deadlines, processes)
     shard = (shard_type or _ElectionShard)(clock, 0.0)
     shard.data_root = str(tmp_path)
     (tmp_path / "valkey-1").mkdir()
@@ -585,7 +586,7 @@ def test_an_election_whose_trigger_never_took_effect_is_no_verdict(monkeypatch, 
     )
 
     # Every CLUSTER FAILOVER FORCE went unanswered.
-    clock = VirtualClock().install(monkeypatch, cluster_election, instances, polling, processes)
+    clock = VirtualClock().install(monkeypatch, cluster_election, instances, polling, deadlines, processes)
     shard = _ElectionShard(clock, 0.0, elects=False)
     spec = resolved(
         ComponentSpec(role=ComponentRole.ACTION, use="valkey.action.cluster-election", id="election",
@@ -605,7 +606,7 @@ def test_an_old_primary_that_still_claims_its_slots_is_given_until_the_timeout(m
     # A voter restarted from its nodes.conf claims the slots it owned there until gossip of the newer config
     # reaches it: two slot owners for a while is Valkey converging. Still two at the timeout, the election never
     # started, so the action has nothing to judge (ERROR); the oracles judge the shard.
-    clock = VirtualClock().install(monkeypatch, cluster_election, instances, polling, processes)
+    clock = VirtualClock().install(monkeypatch, cluster_election, instances, polling, deadlines, processes)
     shard = _ElectionShard(clock, 0.0)
     reads = []
 
@@ -642,7 +643,7 @@ def test_the_election_experiment_checks_every_kill_it_can_make():
 
 
 def test_a_shard_without_a_live_replica_starts_no_election(monkeypatch):
-    clock = VirtualClock().install(monkeypatch, cluster_election, instances, polling, processes)
+    clock = VirtualClock().install(monkeypatch, cluster_election, instances, polling, deadlines, processes)
     shard = _ElectionShard(clock, 0.0)
     spec = resolved(
         ComponentSpec(role=ComponentRole.ACTION, use="valkey.action.cluster-election", id="election",

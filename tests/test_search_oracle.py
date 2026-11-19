@@ -11,6 +11,7 @@ import valkey
 from tests.support import VirtualClock
 from tests.test_valkey_components import FakeHandle, _spec
 from tests.valkey_experiments_support import fake_context
+from valkey_fuzzer import deadlines
 from valkey_fuzzer.components import polling
 from valkey_fuzzer.components.search import (
     STOP_WORDS,
@@ -327,7 +328,7 @@ def test_a_replica_whose_index_holds_a_tag_its_hash_no_longer_has_fails(monkeypa
 
 
 def test_an_index_still_catching_up_passes_once_it_answers_as_the_hashes_say(monkeypatch):
-    VirtualClock().install(monkeypatch, polling)
+    VirtualClock().install(monkeypatch, polling, deadlines)
     _tag_only(monkeypatch)
     handle = FakeHandle(instances=("valkey-0",))
     # The first 30 searches answer from no hashes at all, as an index still backfilling.

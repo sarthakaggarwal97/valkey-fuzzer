@@ -56,6 +56,7 @@ from valkey_fuzzer.protocols import component_artifact_dir
 from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
 from valkey_fuzzer.schema import ConfigError, ConfigField, ConfigSchema
 
+from ..deadlines import WaitInterruptedError
 from .files import write_jsonl
 from .instances import close_quietly, deployment, is_cluster, select_instances
 from .polling import StoppableThread, poll_until
@@ -606,13 +607,16 @@ class KeyValueWorkload:
         problem = None
         drained = True
         if self._config.get("drain_on_stop") and self._threads:
-            # poll_until waits with context.sleep, so a cancelled run stops waiting at once.
-            poll_until(
-                lambda: (self._drained.is_set() or not any(thread.is_alive() for thread in self._threads), None),
-                timeout_s=self._config["drain_timeout_s"],
-                interval_s=0.05,
-                context=context,
-            )
+            try:
+                poll_until(
+                    lambda: (self._drained.is_set() or not any(thread.is_alive() for thread in self._threads), None),
+                    timeout_s=self._config["drain_timeout_s"],
+                    interval_s=0.05,
+                    context=context,
+                )
+            except WaitInterruptedError:
+                # Cancelled: stop draining, but still join the workers and write the ledger.
+                pass
             drained = self._drained.is_set()
         if self._threads:
             timeout = max(30.0, self._config.get("op_timeout_s", 2.0) * 3)

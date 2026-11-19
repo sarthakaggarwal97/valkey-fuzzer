@@ -24,6 +24,8 @@ from tests.deployment_support import (
     snapshot_of,
 )
 from tests.support import VirtualClock
+from valkey_fuzzer import deadlines
+from valkey_fuzzer.deadlines import WaitInterruptedError
 from valkey_fuzzer.deployment.local import failover, queries
 from valkey_fuzzer.deployment.local.cluster_nodes import parse_cluster_nodes, split_slots
 from valkey_fuzzer.deployment.local.failover import failover_shard, wait_until_settled
@@ -33,7 +35,6 @@ from valkey_fuzzer.deployment.local.models import (
     LocalDeployment,
     LocalDeploymentError,
 )
-from valkey_fuzzer.deployment.local.queries import WaitInterruptedError
 from valkey_fuzzer.deployment.local.service import ValkeyDeploymentService
 from valkey_fuzzer.deployment.local.topology import DeploymentConnection
 from valkey_fuzzer.deployment.local.validation import check as check_module
@@ -250,7 +251,7 @@ def test_views_that_disagree_fail_the_check(allow_transient):
 def test_views_that_disagree_are_retried_only_with_allow_transient_inconsistency(
     monkeypatch, allow_transient, attempts
 ):
-    clock = VirtualClock().install(monkeypatch, check_module, queries)
+    clock = VirtualClock().install(monkeypatch, check_module, deadlines)
     runs = []
 
     def run(*args):
@@ -477,7 +478,7 @@ def test_the_role_check_alone_judges_nodes_that_failed_or_live_on_after_a_stop()
 def test_a_critical_failure_is_retried_while_the_cluster_converges(monkeypatch):
     # Right after a kill the cluster has one primary too few until Valkey promotes a replica, which on a loaded
     # host takes longer than the stabilization wait; the same critical failure twice is still convergence.
-    clock = VirtualClock().install(monkeypatch, check_module, queries)
+    clock = VirtualClock().install(monkeypatch, check_module, deadlines)
     primaries = RoleValidation(False, role_mismatches=[RoleMismatch("primary_count", "cluster", "3", "2")])
     results = [
         StateValidationResult(False, 0, roles=primaries, failed_checks=["roles"]),
@@ -496,7 +497,7 @@ def test_a_critical_failure_is_retried_while_the_cluster_converges(monkeypatch):
 
 def test_a_sync_seen_after_the_sync_deadline_is_not_waited_for(monkeypatch):
     # A replica flapping in and out of full syncs must not restart validation until the run's deadline.
-    VirtualClock().install(monkeypatch, check_module, queries)
+    VirtualClock().install(monkeypatch, check_module, deadlines)
     check = DeploymentStateCheck(Mock(), [], {}, StateValidationConfig(), rng=random.Random(0))
     with patch(f"{CHECK}.syncing_replicas", side_effect=[["127.0.0.1:7001"], []]):
         assert check._wait_for_syncs(check_module.time.monotonic() - 1.0) is False
@@ -509,7 +510,7 @@ def test_validation_waits_for_a_replica_in_a_sync_but_judges_one_that_never_ends
     monkeypatch, sync_s, primary_answers, success
 ):
     # A replica that migrated to an orphaned primary has its link down and the old shard's keys until its sync ends.
-    clock = VirtualClock().install(monkeypatch, check_module, queries)
+    clock = VirtualClock().install(monkeypatch, check_module, deadlines)
     ends, attempts = clock.monotonic() + sync_s, []
 
     def run(*args):
@@ -748,7 +749,7 @@ def test_a_snapshot_records_a_node_that_did_not_answer_but_lets_a_harness_bug_th
 
 
 def test_validation_stops_at_its_timeout_during_the_stabilization_wait_and_between_checks(monkeypatch):
-    clock = VirtualClock().install(monkeypatch, check_module, queries)
+    clock = VirtualClock().install(monkeypatch, check_module, deadlines)
     result = _validate_once(_only(stabilization_wait=30.0, validation_timeout=0.5), Mock(spec=DeploymentConnection))
     # The budget is gone before the first check: nothing was judged.
     assert clock.elapsed == pytest.approx(0.5)
@@ -795,7 +796,7 @@ _SYNCED = {**_SYNCING, "master_link_status": "up", "slave_repl_offset": 1359049}
 def test_a_forced_failover_goes_only_to_a_replica_synced_with_the_shards_primary(
     monkeypatch, infos, primary_answers, promoted
 ):
-    clock = VirtualClock().install(monkeypatch, failover, queries)
+    clock = VirtualClock().install(monkeypatch, failover, deadlines)
     nodes = [
         node_row("p", 12923, shard_id=1),
         *(node_row(f"r{port}", port, "replica", 1, primary_id="p") for port in infos),
@@ -831,7 +832,7 @@ def test_a_forced_failover_goes_only_to_a_replica_synced_with_the_shards_primary
 def test_failovers_and_validations_end_their_waits_at_the_run_deadline_or_a_cancellation(monkeypatch):
     # A wait cut short never saw what it waited for: it raises (the runner records ERROR) rather than report that
     # Valkey did not settle, and it returns at once, so the deployment's cleanup is not stuck behind it.
-    clock = VirtualClock().install(monkeypatch, failover, queries, check_module)
+    clock = VirtualClock().install(monkeypatch, failover, deadlines, check_module)
     deadline = SimpleNamespace(deadline=clock.monotonic() + 2.0, sleep=lambda seconds: clock.sleep(seconds) or True)
     cancelled = SimpleNamespace(deadline=None, sleep=lambda seconds: False)
     rows = [node_row("p", 7000), node_row("r", 7001, "replica", primary_id="p")]
@@ -857,7 +858,7 @@ def test_failovers_and_validations_end_their_waits_at_the_run_deadline_or_a_canc
 
 
 def test_a_failover_that_cannot_be_observed_raises_instead_of_reporting_that_valkey_did_not_fail_over(monkeypatch):
-    VirtualClock().install(monkeypatch, failover, queries)
+    VirtualClock().install(monkeypatch, failover, deadlines)
     primary, replica = node_row("p", 7000), node_row("r", 7001, "replica", primary_id="p")
 
     def connection(*rows, live=None):
@@ -926,7 +927,7 @@ def test_a_primary_only_one_node_suspects_still_gets_the_failover():
 
 
 def test_valkey_gets_the_whole_timeout_however_long_the_harness_waited_for_a_synced_replica(monkeypatch):
-    clock = VirtualClock().install(monkeypatch, failover, queries)
+    clock = VirtualClock().install(monkeypatch, failover, deadlines)
     rows = [node_row("p", 7000), node_row("r", 7001, "replica", primary_id="p")]
     connection = Mock(instances=[], **{"get_current_nodes.return_value": rows})
     # The replica syncs 9.5 s into the 10 s wait, e.g. after a restart in the same wave.
@@ -1140,7 +1141,7 @@ class FakeDeployment:
 )
 def test_every_check_runs_against_the_deployment_and_names_what_broke(tmp_path, monkeypatch, mode, fault, failed):
     # A lagging replica is re-read until the snapshot's query timeout, and a failover polls until it settles.
-    VirtualClock().install(monkeypatch, check_module, snapshot, failover, queries)
+    VirtualClock().install(monkeypatch, check_module, snapshot, failover, deadlines)
     fake = FakeDeployment(mode)
     config = DeploymentConfig(mode=DeploymentMode(mode), primaries=len(fake.primary), replicas_per_primary=1)
     instances = fake.instances(tmp_path)
@@ -1263,7 +1264,7 @@ def test_a_critical_replication_failure_is_a_flag_not_a_message(lost, message, c
 def test_a_wall_clock_jump_cuts_no_wait_short(monkeypatch):
     # Deadlines are on the monotonic clock: a wall clock set forward mid-wait changes nothing.
     wall = iter(range(0, 10**9, 10**8))
-    clock = VirtualClock().install(monkeypatch, failover, queries, check_module)
+    clock = VirtualClock().install(monkeypatch, failover, deadlines, check_module)
     monkeypatch.setattr(clock, "time", lambda: next(wall))
     with (
         patch("time.time", side_effect=lambda: next(wall)),

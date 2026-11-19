@@ -5,6 +5,8 @@ import time
 from collections.abc import Sequence
 from typing import Any, Callable, Optional
 
+from ..deadlines import wait_for
+
 
 def remaining(context: Any, fallback: float) -> float:
     """Seconds left before the cooperative deadline, bounded by ``fallback``."""
@@ -22,17 +24,16 @@ def poll_until(
     interval_s: float = 0.1,
     context: Any,
 ) -> tuple[bool, Any]:
-    """Call ``check() -> (done, value)`` until done or ``timeout_s`` (bounded by the run deadline).
+    """:func:`~valkey_fuzzer.deadlines.wait_for` ``check() -> (done, value)`` within ``timeout_s``, bounded by the
+    run deadline: the last ``(done, value)``, with ``check`` run at least once.
 
-    Returns the last ``(done, value)``; ``check`` always runs at least once.
-    It waits with ``context.sleep``, so a cancelled call returns at once.
+    The deadline ends the wait as a timeout. A call the runner cancelled raises
+    :class:`~valkey_fuzzer.deadlines.WaitInterruptedError`: its result is discarded and the run is ``ERROR``.
     """
 
-    deadline = time.monotonic() + remaining(context, timeout_s)
-    while True:
-        done, value = check()
-        if done or time.monotonic() >= deadline or not context.sleep(interval_s):
-            return done, value
+    return wait_for(
+        check, timeout_s=remaining(context, timeout_s), interval_s=interval_s, reason="the condition", context=context
+    )
 
 
 def read_retrying(

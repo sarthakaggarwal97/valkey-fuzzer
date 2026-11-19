@@ -14,6 +14,7 @@ import valkey
 from tests.fakes import FakeClient, FakeHandle
 from tests.support import VirtualClock
 from tests.valkey_experiments_support import fake_context, registration_for, valkey_service
+from valkey_fuzzer import deadlines
 from valkey_fuzzer.components import instances, polling, processes
 from valkey_fuzzer.components.faults import FAULT_INJECTED
 from valkey_fuzzer.components.files import write_jsonl
@@ -517,7 +518,7 @@ def test_the_ledger_oracle_retries_a_failed_read_and_never_fails_valkey_for_one(
     """A read error (of the primary or a replica) says the harness could not read: retried within
     converge_timeout_s, then ERROR. What it reads once it can still decides."""
 
-    clock = VirtualClock().install(monkeypatch, instances, polling, processes)
+    clock = VirtualClock().install(monkeypatch, instances, polling, deadlines, processes)
     paths = {name: os.path.join(tmp_path, f"{name}.jsonl") for name in ("preload", "ledger")}
     write_jsonl(paths["preload"], [{"key": KEY, "value": "v0"}])
     write_jsonl(paths["ledger"], [_op(1, "set", KEY, "ok", "v1")])
@@ -528,7 +529,7 @@ def test_the_ledger_oracle_retries_a_failed_read_and_never_fails_valkey_for_one(
     assert (result.status.value, result.summary.startswith(summary)) == (status, True), result.summary
     # A failed read was retried until it worked; one that never did, or a stale replica, for the whole timeout.
     assert deployment.failures == 0 or _ALWAYS - deployment.failures > 1
-    assert (clock.elapsed >= 0.5) is waits
+    assert (clock.elapsed >= 0.5 - 1e-6) is waits
 
 
 # valkey.workload.key-value: what the ledger records
