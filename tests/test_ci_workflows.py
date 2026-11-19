@@ -22,6 +22,7 @@ from valkey_fuzzer.cli import create_parser
 from valkey_fuzzer.generator import GeneratorBlock, generate, installed_pools, opted_in
 from valkey_fuzzer.reports import write_document
 from valkey_fuzzer.results import ComponentResult, ComponentStatus, OutcomeStatus, RunOutcome
+from valkey_fuzzer.spec.tla import TLA_TOOLS_VERSION
 
 from .generator_support import generate_scenario
 from .valkey_experiments_support import valkey_service
@@ -733,6 +734,8 @@ def test_every_job_with_tlc_backed_tests_has_java_and_the_pinned_tla_tools(name,
     workflow = _workflow(name)
     pinned = {key: _workflow("tla-model-check.yml")["env"][key] for key in ("TLA_TOOLS_VERSION", "TLA_TOOLS_SHA256")}
     assert {key: workflow.get("env", {}).get(key) for key in pinned} == pinned
+    # The hint the spec commands print without the jar names the same release.
+    assert pinned["TLA_TOOLS_VERSION"] == TLA_TOOLS_VERSION
     steps = workflow["jobs"][job]["steps"]
     assert any(step.get("uses", "").startswith("actions/setup-java@") for step in steps)
     (download,) = [step["run"] for step in steps if "tla2tools.jar" in step.get("run", "") and "curl" in step["run"]]

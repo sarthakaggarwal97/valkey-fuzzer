@@ -1,4 +1,10 @@
-"""``spec``: check a TLA+ bundle, translate its counterexamples into scenarios, and conform real runs to it."""
+"""``spec``: check a TLA+ bundle, translate its counterexamples into scenarios, and conform real runs to it.
+
+The three tools (:mod:`~valkey_fuzzer.spec.check`, :mod:`~valkey_fuzzer.spec.translate`,
+:mod:`~valkey_fuzzer.spec.conform`) are imported when a handler runs, not when the parser is built, so a command
+other than ``spec`` never loads them. Without java and ``tla2tools.jar`` a command that needs TLC prints
+:data:`~valkey_fuzzer.spec.tla.TOOLS_HINT` and exits 2.
+"""
 
 import argparse
 import json
@@ -11,10 +17,7 @@ import yaml
 from ..outcomes import EXIT_FAILURE, EXIT_HARNESS_ERROR, EXIT_SUCCESS
 from ..reports import write_document
 from ..spec.bundle import SPEC_PATH_VARIABLE, Bundle, SpecBundleError, load_bundle
-from ..spec.check import check_bundle, run_control
-from ..spec.conform import collect_runs, conform_runs, needs_tlc
 from ..spec.tla import TlaError, TlaTools, read_tlc_output
-from ..spec.translate import TranslateError, bundle_service, translate_trace
 from ._common import add_common_options, positive_seconds
 
 # How long one spec command may run SANY and TLC, unless --timeout says otherwise.
@@ -91,6 +94,8 @@ def _write(args: argparse.Namespace, report: dict[str, Any]) -> None:
 
 
 def check_command(args: argparse.Namespace) -> int:
+    from ..spec.check import check_bundle
+
     try:
         tools = _tools(args)
     except TlaError as exc:
@@ -127,6 +132,9 @@ def check_command(args: argparse.Namespace) -> int:
 
 
 def translate_command(args: argparse.Namespace) -> int:
+    from ..spec.check import run_control
+    from ..spec.translate import TranslateError, bundle_service, translate_trace
+
     bundle = load_bundle(args.bundle)
     if args.control:
         control = bundle.control(args.control)
@@ -197,6 +205,8 @@ def translate_command(args: argparse.Namespace) -> int:
 
 
 def conform_command(args: argparse.Namespace) -> int:
+    from ..spec.conform import collect_runs, conform_runs, needs_tlc
+
     bundle = load_bundle(args.bundle)
     tools = None
     if needs_tlc(bundle):

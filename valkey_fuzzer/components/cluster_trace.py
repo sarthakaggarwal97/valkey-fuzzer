@@ -13,7 +13,7 @@ from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.protocols import component_artifact_dir
 from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
 from valkey_fuzzer.schema import ConfigError, ConfigField, plain_config
-from valkey_fuzzer.spec.conform import TRACE_FILE
+from valkey_fuzzer.spec.bundle import TRACE_FILE
 
 from .cluster import cluster_view, read_view
 from .files import nodes_conf_path, read_cluster_vars, write_jsonl

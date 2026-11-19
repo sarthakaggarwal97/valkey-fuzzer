@@ -399,7 +399,8 @@ run's report and trace, with TLC from `$TLA2TOOLS_JAR`. The result is the
 run's `conform.json` (kept when a passing run is pruned) and its result's
 `conformance`. For a bundle whose claims are approved, a claimed property
 violated on the run's observed states makes the run a `FAIL`, and a check
-that could not decide makes it an `ERROR`; either is in the run's summary
+that could not decide (TLC missing, too, for a bundle that needs it) makes
+it an `ERROR`; either is in the run's summary
 (`spec conform replication: ...`) and failure signature (the failing
 component `spec-conform:<bundle>`). A draft bundle's findings are reported
 and change nothing.
@@ -730,7 +731,8 @@ translates its counterexamples into scenarios, and checks its claims on real
 runs. `--tla2tools` defaults to `$TLA2TOOLS_JAR`. `translate` takes the
 catalog option (`--experiment-dir`) to compile what it
 writes. Exit codes: 0 pass, 1 a gate failed or a claimed property was
-violated, 2 a harness error (no java or jar, a bundle that does not exist, a
+violated, 2 a harness error (no java or jar, which the command names with
+the jar's download command; a bundle that does not exist, a
 SANY or TLC run that never started or was cut short by `--timeout`, a run
 without mapped evidence or with a mapped record it cannot apply, or a
 `translate` whose experiments do not load, whose TLC run timed out, or that

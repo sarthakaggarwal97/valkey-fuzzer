@@ -1,10 +1,14 @@
 """Spec conformance as a batch plug-in: each run checked against the spec bundles its plan names, as
 ``valkey-fuzzer spec conform`` would, and a conform report per bundle over the batch's runs.
 
-The worker writes ``conform.json`` into its run folder (TLC from ``$TLA2TOOLS_JAR``; a bundle that needs TLC
-is skipped without it). For a bundle whose claims are approved, a claimed property violated on the run's
-observed states fails the run, and a check that could not decide is an ERROR; a draft's findings are only
-reported. The summary writes ``conformance/<bundle>.json`` and a digest of it, claimed violations first.
+The worker writes ``conform.json`` into its run folder (TLC from ``$TLA2TOOLS_JAR``; without it a bundle that
+needs TLC is skipped, or an error if its claims are approved). For a bundle whose claims are approved, a
+claimed property violated on the run's observed states fails the run, and a check that could not decide is an
+ERROR; a draft's findings are only reported. The summary writes ``conformance/<bundle>.json`` and a digest of
+it, claimed violations first.
+
+:mod:`~valkey_fuzzer.spec.conform` is imported where it is used, never when this module loads: registering the
+plug-in leaves the spec bridge's tools unloaded for a batch whose runs name no bundle.
 """
 
 import os
@@ -15,7 +19,6 @@ from typing import TYPE_CHECKING, Any, Optional
 from ..minimize import verdict_clauses
 from ..reports import write_document
 from ..spec.bundle import SpecBundleError, load_bundle
-from ..spec.conform import CHECKED_RUN_STATUSES, CONFORMANCE_FILE, conform_folder, plan_bundles, summarize
 from ..spec.tla import TlaError, TlaTools
 from .hooks import BatchPlugin
 from .results import Verdict, read_json
@@ -24,6 +27,8 @@ from .spec import worst
 if TYPE_CHECKING:
     from .pool import BatchRunner
 
+# What a worker writes in its run folder: the run checked against the spec bundles its plan names.
+CONFORMANCE_FILE = "conform.json"
 # How long a worker's spec conform may run TLC on its run's observed states.
 CONFORM_TIMEOUT_S = 300.0
 CONFORMANCE_DIRECTORY = "conformance"
@@ -31,7 +36,9 @@ CONFORMANCE_DIRECTORY = "conformance"
 
 def _conform(report_dir: str) -> None:
     """Write ``conform.json``: the run checked against every spec bundle its plan names, with TLC from
-    ``$TLA2TOOLS_JAR`` (a bundle that needs TLC is skipped without it)."""
+    ``$TLA2TOOLS_JAR`` (without it, a bundle that needs TLC is skipped, or an error if its claims are approved)."""
+
+    from ..spec.conform import conform_folder
 
     try:
         tools, unavailable = TlaTools.locate(None, workers="1").within(CONFORM_TIMEOUT_S), ""
@@ -61,6 +68,8 @@ def _conformance(run_dir: str, report: Optional[Mapping[str, Any]]) -> dict[str,
             problem = f"{CONFORMANCE_FILE} cannot be read: {exc}"
     else:
         problem = f"no {CONFORMANCE_FILE}: the worker ended before spec conform checked the run"
+    from ..spec.conform import CHECKED_RUN_STATUSES, plan_bundles
+
     if report is None or report.get("status") not in CHECKED_RUN_STATUSES:
         return {}
     plan = (report.get("outcome") or {}).get("plan") or {}
@@ -120,6 +129,8 @@ class ConformancePlugin(BatchPlugin):
         """For each spec bundle the runs' plans name (zoo runs and serial re-runs left out, as from ``counts``):
         its conform report over the runs checked against it, written to ``conformance/<bundle>.json``, and a
         digest of it, claimed violations first."""
+
+        from ..spec.conform import summarize
 
         by_bundle: dict[str, list[dict[str, Any]]] = {}
         for result in main:

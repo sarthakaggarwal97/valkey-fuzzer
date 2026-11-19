@@ -3,6 +3,8 @@
 import os
 import re
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -57,3 +59,22 @@ def test_bundles_are_found_by_directory_or_by_protocol_name_on_the_spec_path(tmp
     monkeypatch.chdir(tmp_path)
     assert find_bundle("cluster-election") == ROOT / "formal" / "cluster-election"
     assert find_bundle("./cluster-election") == tmp_path / "cluster-election"
+
+
+def test_only_the_spec_commands_and_a_batchs_conform_step_load_the_spec_tools():
+    # The components read a bundle's mapping (spec.bundle, which parses TLA+ values with spec.tla); check,
+    # translate and conform, the tools that run TLC, load only when a spec command or a batch's conform runs.
+    loaded = """
+import sys
+from valkey_fuzzer import batch
+from valkey_fuzzer.cli import create_parser
+import yaml
+from tests.valkey_experiments_support import valkey_service
+create_parser()
+with open("examples/valkey/cluster_election_durability.yaml") as handle:
+    plan = valkey_service().compile(yaml.safe_load(handle))
+assert any(component.config.get("spec") == "cluster-election" for component in plan.components)
+print(" ".join(sorted(name for name in sys.modules if name.startswith("valkey_fuzzer.spec"))))
+"""
+    result = subprocess.run([sys.executable, "-c", loaded], cwd=ROOT, capture_output=True, text=True, check=True)
+    assert result.stdout.split() == ["valkey_fuzzer.spec", "valkey_fuzzer.spec.bundle", "valkey_fuzzer.spec.tla"]

@@ -35,6 +35,7 @@ from typing import Any, Optional
 from ..documents import ABSENT, get_path
 from .bundle import (
     MODEL_FILE,
+    TRACE_FILE,
     Bundle,
     Evidence,
     SpecBundleError,
@@ -53,9 +54,6 @@ REFINEMENT = (
     "is a behavior of the model"
 )
 _TAG = "spec-conform"
-TRACE_FILE = "trace.jsonl"
-# What a batch worker writes in a run folder: :func:`conform_folder` of the run.
-CONFORMANCE_FILE = "conform.json"
 # The run statuses of a run that reached its verdict: the only runs conform_folder checks.
 CHECKED_RUN_STATUSES = ("PASS", "FAIL")
 
@@ -692,8 +690,9 @@ def conform_folder(folder: str, tools: Optional[TlaTools], unavailable: str = ""
     Each entry is :func:`check_run`'s result and whether the bundle's claims are ``approved``. A run that did
     not reach its verdict (it ended ERROR or SKIP_UNSUPPORTED) is ``not_run``, and one that took no mapped step
     is ``unexercised``: its plan names the bundle, but nothing it did shows the protocol (a replication chaos
-    wave that only stalls a replica briefly). Without ``tools``, a bundle that :func:`needs_tlc` is
-    ``skipped``, with ``unavailable`` as the reason.
+    wave that only stalls a replica briefly). Without ``tools``, a bundle that :func:`needs_tlc` cannot be
+    checked, with ``unavailable`` as the reason: a draft is ``skipped``, and an approved bundle is an ``error``,
+    since its claims decide the run.
     """
 
     path = os.path.join(folder, "report.json")
@@ -712,7 +711,11 @@ def conform_folder(folder: str, tools: Optional[TlaTools], unavailable: str = ""
         if report.get("status") not in CHECKED_RUN_STATUSES:
             entry.update(status="not_run", reason=f"the run ended {report.get('status')}, before its verdict")
         elif tools is None and needs_tlc(bundle):
-            entry.update(status="skipped", reason=unavailable or "no java and tla2tools.jar")
+            reason = unavailable or "no java and tla2tools.jar"
+            if entry["approved"]:
+                entry.update(status="error", error=reason)
+            else:
+                entry.update(status="skipped", reason=reason)
         else:
             entry.update(check_run(bundle, _report_run(path, report), tools))
             if entry.pop("unexercised", False):
@@ -749,7 +752,6 @@ def _groups(results: Sequence[Mapping[str, Any]], keys: Sequence[str], targets: 
 __all__ = [
     "CHECKED_RUN_STATUSES",
     "CHECKS",
-    "CONFORMANCE_FILE",
     "REFINEMENT",
     "ObservedRun",
     "RunEvidence",

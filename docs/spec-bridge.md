@@ -18,8 +18,20 @@ does not prove that Valkey implements the model.
 All three tools need Java 11 or later and `tla2tools.jar` (pass
 `--tla2tools`, or set `TLA2TOOLS_JAR`; CI pins v1.7.4 with TLC 2.19),
 except `conform` of a bundle that gives TLC nothing to evaluate (every
-property `conform: excluded`, and no targets). Each
-writes a JSON report with `--output`, and each takes `--timeout SECONDS`
+property `conform: excluded`, and no targets). Nothing else needs them:
+`pip install` brings no Java, and `run`, `validate` and `batch` work
+without them, including the shipped experiments that name a bundle
+(`spec: cluster-election`), since reading a bundle's mapping needs no TLC.
+The one exception is a batch run of an approved bundle that needs TLC
+([In a batch](#in-a-batch)). Without them a `spec` command exits `2` and
+says what is missing and where to get the jar:
+
+```text
+$ valkey-fuzzer spec check cluster-election
+Error: tla2tools.jar not found and java not found on PATH: the spec bridge needs Java 11 or later on PATH and tla2tools.jar (pass --tla2tools or set TLA2TOOLS_JAR). Get the jar CI pins with: curl -fsSL -o tla2tools.jar https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
+```
+
+Each tool writes a JSON report with `--output`, and each takes `--timeout SECONDS`
 (default 3600, one hour): once the command has run that long, SANY or TLC is
 killed with its whole process group and that run fails. Reports and translated scenarios name the
 bundle by its protocol, its files by their paths inside the bundle, and the
@@ -290,8 +302,10 @@ model is checked wherever its experiments run. The run's worker does it as
 soon as the run ends, before a passing run's folder is pruned, so the trace
 is still there: the same check as `spec conform BUNDLE RUN`, written to the
 run folder's `conform.json`. TLC comes from `$TLA2TOOLS_JAR` and `java` on
-`PATH`; without them, a bundle that needs TLC is `skipped` (the summary
-says why), and one that does not is still checked. A run that ended
+`PATH`. Without them, a bundle that needs TLC is not checked, and the
+summary says why: a draft bundle is `skipped`, and an approved one is an
+error, so the run is an `ERROR` (its claims decide the run, and nothing
+checked them). A bundle that needs no TLC is still checked. A run that ended
 `ERROR` or `SKIP_UNSUPPORTED` did not reach its verdict, and is `not_run`.
 A run that took no mapped step is `unexercised`, never a pass: its plan
 names the bundle, but nothing it did shows the protocol (a replication chaos
@@ -301,7 +315,7 @@ run an error.
 | Conform result | Approved claims | Draft claims |
 | --- | --- | --- |
 | a claimed property violated | the run `FAIL`s | reported only |
-| an error (no mapped evidence, a record it cannot apply, TLC failed) | the run is an `ERROR` | reported only |
+| an error (no mapped evidence, a record it cannot apply, TLC failed, or no TLC for a bundle that needs it) | the run is an `ERROR` | reported only (`skipped` without TLC) |
 | no `conform.json` (the worker ended before it checked the run) | the run is an `ERROR` | reported only |
 | a violation outside the claim, a pass | reported only | reported only |
 
