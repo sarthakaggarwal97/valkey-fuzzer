@@ -15,6 +15,7 @@ from valkey_fuzzer.catalog import (
     DuplicateExperimentError,
     load_experiment_yaml,
 )
+from valkey_fuzzer.compiler import Overrides
 from valkey_fuzzer.deployment.local.rerun import binary_drift
 from valkey_fuzzer.environment import EnvironmentSpec
 from valkey_fuzzer.plan import ExecutionPlan, ExperimentSpec, RunMode
@@ -224,13 +225,13 @@ def test_the_service_changes_a_deployment_only_through_its_providers_hooks(tmp_p
     assert prepared.scenario["deployment"] == {"mode": "standalone", "provider": "example.deployment.plain"}
     assert prepared.notes == ()
     with pytest.raises(ScenarioCompileError, match=r"'example\.deployment\.plain' cannot run another Valkey binary"):
-        draw("plain", valkey_binary="/opt/valkey-server")
+        draw("plain", overrides=Overrides(binary="/opt/valkey-server"))
     plan_path = tmp_path / "plan.json"
     plan_path.write_text(prepared.plan.to_json(), encoding="utf-8")
     with pytest.raises(ScenarioCompileError, match="cannot run another Valkey binary"):
-        service.prepare_replay(str(plan_path), valkey_binary="/opt/valkey-server", allow_drift=True)
+        service.prepare_replay(str(plan_path), overrides=Overrides(binary="/opt/valkey-server"), allow_drift=True)
 
-    prepared = draw("hooked", valkey_binary="/opt/valkey-server")
+    prepared = draw("hooked", overrides=Overrides(binary="/opt/valkey-server"))
     assert prepared.scenario["deployment"] == {
         "mode": "standalone",
         "provider": "example.deployment.hooked",
@@ -241,9 +242,8 @@ def test_the_service_changes_a_deployment_only_through_its_providers_hooks(tmp_p
     # A batch's binary is only for scenarios that name none.
     base = {"deployment": {"provider": "example.deployment.hooked", "build": "/own/valkey-server"}}
     for keep, build in ((True, "/own/valkey-server"), (False, "/opt/valkey-server")):
-        prepared = service.prepare_random(
-            seed=1, experiment="example.random", base=base, valkey_binary="/opt/valkey-server", keep_own_binary=keep
-        )
+        overrides = Overrides(binary="/opt/valkey-server", keep_own_binary=keep)
+        prepared = service.prepare_random(seed=1, experiment="example.random", base=base, overrides=overrides)
         assert prepared.scenario["deployment"]["build"] == build
 
 

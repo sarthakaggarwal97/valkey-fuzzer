@@ -15,6 +15,7 @@ import yaml
 from tests.support import make_plan, recorded_report
 from valkey_fuzzer import provenance, reports
 from valkey_fuzzer.cli import main
+from valkey_fuzzer.compiler import Overrides
 from valkey_fuzzer.differential import Differential, compare_outcomes, differential_status
 from valkey_fuzzer.minimize import failure_signature, same_failure
 from valkey_fuzzer.reports import InputError, ReportWriteError, export_scenario, write_plan
@@ -302,7 +303,7 @@ def test_report_json_leads_with_the_verdict_and_keeps_every_key_a_tool_reads(ser
 
 
 def test_the_report_records_the_command_and_binary_that_reproduce_it(service, canned_runs, tmp_path):
-    prepared = service.prepare_run(EXAMPLE, valkey_binary="/opt/my builds/valkey")
+    prepared = service.prepare_run(EXAMPLE, overrides=Overrides(binary="/opt/my builds/valkey"))
     record = service.execute(prepared.plan, scenario=prepared.scenario, report_dir=str(tmp_path / "r"))
     report = json.loads((tmp_path / "r" / "report.json").read_text())
     assert report["reproduce"] == report["reproducer"]["command"]

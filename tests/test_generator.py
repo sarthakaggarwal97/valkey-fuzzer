@@ -8,6 +8,7 @@ import yaml
 
 from valkey_fuzzer._data import to_plain_data
 from valkey_fuzzer.catalog import Catalog, register_valkey_components
+from valkey_fuzzer.compiler import Overrides
 from valkey_fuzzer.components import EXPERIMENT_DIRECTORY, config_space, experiments
 from valkey_fuzzer.components.config_space import build_config_table
 from valkey_fuzzer.deployment.local import processes
@@ -223,7 +224,7 @@ def test_a_hook_pool_draws_its_share_of_the_keys_its_hook_offers_each_chosen_by_
     runtime = _runtime(tmp_path, {"pools": pools}, hooks={"keys": hook}, startup_overlays=[overlay])
     counts, ranges = [], set()
     for seed in range(40):
-        generated = _generate(runtime, seed, valkey_binary="/tests/src/valkey-server")
+        generated = _generate(runtime, seed, overrides=Overrides(binary="/tests/src/valkey-server"))
         config = generated.scenario["deployment"]["server_config"]
         chosen = generated.draws["pools.tests.pool.hooked.keys"]
         # A listed pool comes before a hook pool, and an overlay's key is never drawn: neither is chosen.
@@ -242,7 +243,7 @@ def test_a_hook_pool_draws_its_share_of_the_keys_its_hook_offers_each_chosen_by_
         assert {key: value for key, value in after.items() if key != "tests-key-new"} == config
     # A derived scenario keeps the keys it pins, whatever its seed draws.
     pinned = {"pools.tests.pool.hooked.keys": ["tests-key-5", "tests-range"]}
-    derived = _generate(runtime, 99, pinned=pinned)
+    derived = _generate(runtime, 99, overrides=Overrides(pinned=pinned))
     assert derived.draws["pools.tests.pool.hooked.keys"] == ["tests-key-5", "tests-range"]
 
 
@@ -336,7 +337,7 @@ def test_every_shipped_experiment_draws_the_config_space_of_its_build_after_the_
         spec = service.catalog.experiments.resolve(experiment)
         overlaid = {key for overlay in spec.startup_overlays for key in overlay.server_config}
         for seed in range(8):
-            generated = service.generate(seed, experiment=experiment, valkey_binary=binary)
+            generated = service.generate(seed, experiment=experiment, overrides=Overrides(binary=binary))
             keys = set(generated.draws["pools.valkey.pool.config-space.keys"])
             assert keys <= table_only - overlaid, experiment
             drawn |= keys
@@ -494,14 +495,14 @@ def test_a_pinned_draw_is_kept_and_the_hooks_drawn_after_a_redrawn_dimension_are
     assert parent.provenance["draws"] == parent.draws
 
     # Every draw kept: only the seed differs.
-    same = _generate(runtime, 2, pinned=parsed.kept(parent.draws, None))
+    same = _generate(runtime, 2, overrides=Overrides(pinned=parsed.kept(parent.draws, None)))
     assert same.draws == parent.draws and same.scenario["seed"] == 2
 
     # count drawn again: every other draw kept, the hooks after it drawn again and consistent with it.
     pinned = parsed.kept(parent.draws, "inputs.count")
     assert set(pinned) == set(parent.draws) - {"inputs.count", "inputs.waves", "hook"}
     for seed in range(2, 12):
-        child = _generate(runtime, seed, pinned=pinned)
+        child = _generate(runtime, seed, overrides=Overrides(pinned=pinned))
         assert all(child.draws[name] == value for name, value in pinned.items())
         assert set(child.scenario["experiment"]["inputs"]["waves"]) == {child.draws["inputs.count"]}
         assert child.draws["hook"] != parent.draws["hook"]

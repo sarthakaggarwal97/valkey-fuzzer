@@ -29,7 +29,14 @@ from typing import Any, Callable, Optional
 
 from ._data import error_record, to_plain_data
 from .catalog import Catalog, ExperimentDirectory, build_catalog
-from .compiler import ScenarioCompiler, binary_fields, deployment_registration, with_valkey_binary
+from .compiler import (
+    NO_OVERRIDES,
+    Overrides,
+    ScenarioCompiler,
+    binary_fields,
+    deployment_registration,
+    with_valkey_binary,
+)
 from .differential import Differential, run_differential
 from .documents import merge
 from .generator import Exclusion, Generated, find_profile, generate
@@ -362,17 +369,17 @@ class RunService:
         self,
         path: str,
         *,
-        valkey_binary: Optional[str] = None,
-        artifacts: Optional[Mapping[str, str]] = None,
-        base_port: Optional[int] = None,
+        overrides: Overrides = NO_OVERRIDES,
     ) -> PreparedRun:
-        """Read and compile one scenario file; the recorded scenario includes a ``valkey_binary`` override, the
+        """Read and compile one scenario file; the recorded scenario includes the ``overrides``: the binary, the
         ``artifacts`` path overrides (``--artifact NAME=PATH``), and a ``base_port`` (``--base-port``)."""
 
         scenario = with_valkey_binary(
-            self.catalog, plain_config(load_yaml_mapping(read_scenario(path), source_name=str(path))), valkey_binary
+            self.catalog,
+            plain_config(load_yaml_mapping(read_scenario(path), source_name=str(path))),
+            overrides.binary,
         )
-        scenario = with_base_port(with_artifact_paths(scenario, artifacts or {}), base_port)
+        scenario = with_base_port(with_artifact_paths(scenario, overrides.artifacts), overrides.base_port)
         return PreparedRun(scenario=scenario, plan=self.compile(scenario))
 
     def generate(
@@ -383,15 +390,13 @@ class RunService:
         excludes: Sequence[Exclusion] = (),
         base: Optional[Mapping[str, Any]] = None,
         profile: Optional[str] = None,
-        valkey_binary: Optional[str] = None,
-        keep_own_binary: bool = False,
-        pinned: Optional[Mapping[str, Any]] = None,
+        overrides: Overrides = NO_OVERRIDES,
     ) -> Generated:
         """A valid scenario drawn from ``seed`` for ``experiment`` (one of the opted-in ones when None).
 
         ``profile`` names the installed search profile that samples the experiment's legal space;
-        ``valkey_binary`` is the binary the drawn deployment runs, which hooks see (with
-        ``keep_own_binary``, only when ``base`` names none); ``pinned`` holds the draws it keeps.
+        ``overrides.binary`` is the binary the drawn deployment runs, which hooks see (with
+        ``overrides.keep_own_binary``, only when ``base`` names none); ``overrides.pinned`` holds the draws it keeps.
         """
 
         catalog = self.catalog
@@ -403,9 +408,7 @@ class RunService:
             excludes=excludes,
             base=base,
             profile=None if profile is None else find_profile(catalog, profile),
-            valkey_binary=valkey_binary,
-            keep_own_binary=keep_own_binary,
-            pinned=pinned,
+            overrides=overrides,
             cores=self._cores,
         )
 
@@ -423,36 +426,31 @@ class RunService:
         experiment: Optional[str] = None,
         excludes: Sequence[Exclusion] = (),
         base: Optional[Mapping[str, Any]] = None,
-        valkey_binary: Optional[str] = None,
         profile: Optional[str] = None,
         free_ports: bool = True,
-        keep_own_binary: bool = False,
-        pinned: Optional[Mapping[str, Any]] = None,
-        base_port: Optional[int] = None,
+        overrides: Overrides = NO_OVERRIDES,
     ) -> PreparedRun:
         """Generate and compile one scenario (``run --random`` / ``run --seed``); a random seed when None.
 
-        ``base`` is a partial scenario that overrides the draws; a
-        ``valkey_binary`` override is applied before the hooks run, so they
-        see the binary; with ``keep_own_binary`` (a batch's binary for
-        scenarios that name none) only when ``base`` names none; ``pinned`` holds the draws it keeps
+        ``base`` is a partial scenario that overrides the draws; the
+        ``overrides.binary`` is applied before the hooks run, so they
+        see the binary; with ``overrides.keep_own_binary`` (a batch's binary for
+        scenarios that name none) only when ``base`` names none; ``overrides.pinned`` holds the draws it keeps
         (:meth:`generate`). ``free_ports`` moves a scenario whose planned ports
         are busy to free ones (the deployment provider's ``relocate_ports``
         hook); the batch runner turns it off, because its workers own their
-        port blocks. A ``base_port`` (``--base-port``) overrides the ``base``'s.
+        port blocks. ``overrides.base_port`` (``--base-port``) overrides the ``base``'s.
         """
 
-        if base_port is not None:
-            base = with_base_port(base or {}, base_port)
+        if overrides.base_port is not None:
+            base = with_base_port(base or {}, overrides.base_port)
         drawn = self.generate(
             _new_seed() if seed is None else seed,
             experiment=experiment,
             excludes=excludes,
             base=base,
             profile=profile,
-            valkey_binary=valkey_binary,
-            keep_own_binary=keep_own_binary,
-            pinned=pinned,
+            overrides=overrides,
         )
         relocate = deployment_registration(drawn.plan, self.catalog).relocate_ports
         moved, note = relocate(drawn.plan) if free_ports and relocate is not None else ({}, None)
@@ -469,11 +467,11 @@ class RunService:
             raise InputError(f"{path} must hold a partial scenario mapping")
         return plain_config(document)
 
-    def validate(self, path: str, *, valkey_binary: Optional[str] = None) -> ExecutionPlan:
+    def validate(self, path: str, *, overrides: Overrides = NO_OVERRIDES) -> ExecutionPlan:
         """Compile a scenario and check it without provisioning."""
 
         document = load_yaml_mapping(read_scenario(path), source_name=str(path))
-        plan = self.compile(with_valkey_binary(self.catalog, document, valkey_binary))
+        plan = self.compile(with_valkey_binary(self.catalog, document, overrides.binary))
         self.validate_plan(plan)
         return plan
 
@@ -594,8 +592,7 @@ class RunService:
         self,
         path: str,
         *,
-        valkey_binary: Optional[str] = None,
-        artifacts: Optional[Mapping[str, str]] = None,
+        overrides: Overrides = NO_OVERRIDES,
         allow_drift: bool = False,
     ) -> ReplayPlan:
         """Load a run report (or a bare plan) and check it against this environment.
@@ -605,10 +602,10 @@ class RunService:
         components (their import path or code),
         deployment provider, or Valkey binary differ from the recorded run, or
         when the report's scenario does not compile to the plan it records,
-        unless ``allow_drift``. A ``valkey_binary`` override
+        unless ``allow_drift``. An ``overrides.binary``
         is intentional, so it is recorded rather than treated as drift, and
         the replay's scenario uses it, as ``run --valkey-binary`` records it.
-        ``artifacts`` (``--artifact NAME=PATH``) resolves local-binary and local-module
+        ``overrides.artifacts`` (``--artifact NAME=PATH``) resolves local-binary and local-module
         artifacts at other paths; it is recorded, and what runs is still
         digested and compared with the recorded run after it.
         """
@@ -620,31 +617,31 @@ class RunService:
                 "so a replay cannot show it reproduces the original run; replay the run's report.json, "
                 "or pass --allow-drift to replay it unverified"
             )
-        artifacts = dict(artifacts or {})
+        binary, artifacts = overrides.binary, dict(overrides.artifacts)
         provenance: dict[str, Any] = {
             "source": path,
             "verified": recorded is not None,
             "drift": [],
             "drift_allowed": allow_drift,
             "not_verified": [],
-            "valkey_binary_override": valkey_binary or None,
+            "valkey_binary_override": binary or None,
             "artifact_overrides": artifacts,
         }
         if recorded is None:
             provenance["not_verified"].append("everything: the file holds no reproducer")
         else:
             provenance["drift"], provenance["not_verified"] = self._report_drift(
-                plan, scenario, recorded, valkey_binary, allow_drift=allow_drift
+                plan, scenario, recorded, overrides, allow_drift=allow_drift
             )
-        if valkey_binary:
+        if binary:
             data = to_plain_data(plan)
             data["deployment"] = merge(
-                data["deployment"], binary_fields(deployment_registration(plan, self.catalog), valkey_binary)
+                data["deployment"], binary_fields(deployment_registration(plan, self.catalog), binary)
             )
             plan = ExecutionPlan.from_data(data)
             # The replay report then minimizes and replays with the binary it ran.
             if scenario is not None:
-                scenario = with_valkey_binary(self.catalog, scenario, valkey_binary)
+                scenario = with_valkey_binary(self.catalog, scenario, binary)
         if artifacts:
             plan = _plan_with_artifact_paths(plan, artifacts)
             if scenario is not None:
@@ -656,14 +653,14 @@ class RunService:
         plan: ExecutionPlan,
         scenario: Optional[Mapping[str, Any]],
         recorded: Mapping[str, Any],
-        valkey_binary: Optional[str],
+        overrides: Overrides,
         *,
         allow_drift: bool,
     ) -> tuple[list[dict[str, Any]], list[str]]:
         """:func:`~valkey_fuzzer.provenance.report_drift`; raises :class:`ReplayDriftError` on drift, unless
         ``allow_drift``."""
 
-        drift, unchecked = report_drift(self.catalog, self.compile, plan, scenario, recorded, valkey_binary)
+        drift, unchecked = report_drift(self.catalog, self.compile, plan, scenario, recorded, overrides.binary)
         if drift and not allow_drift:
             raise ReplayDriftError("this environment differs from the recorded run", drift)
         return drift, unchecked
@@ -692,24 +689,24 @@ class RunService:
         path: str,
         *,
         seed: Optional[int] = None,
-        valkey_binary: Optional[str] = None,
-        artifacts: Optional[Mapping[str, str]] = None,
-        base_port: Optional[int] = None,
+        overrides: Overrides = NO_OVERRIDES,
         timeout: Optional[float] = None,
         on_variant: Optional[Callable[[str, RunOutcome], None]] = None,
     ) -> SessionResult:
         """Run a differential document's variants and compare their evidence.
 
-        ``artifacts`` (``--artifact NAME=PATH``) resolves the base scenario's local-binary artifacts at other
-        paths, and ``base_port`` (``--base-port``) moves its ports.
+        ``overrides.artifacts`` (``--artifact NAME=PATH``) resolves the base scenario's local-binary artifacts at
+        other paths, and ``overrides.base_port`` (``--base-port``) moves its ports.
         """
 
         differential = Differential.from_document(load_document(path))
         if seed is not None:
             differential.base["seed"] = seed
         # Variants patch the base, so a variant that sets its own binary keeps it.
-        differential.base = with_valkey_binary(self.catalog, differential.base, valkey_binary)
-        differential.base = with_base_port(with_artifact_paths(differential.base, artifacts or {}), base_port)
+        differential.base = with_valkey_binary(self.catalog, differential.base, overrides.binary)
+        differential.base = with_base_port(
+            with_artifact_paths(differential.base, overrides.artifacts), overrides.base_port
+        )
         # Every variant compiles before the first runs; a bad one leaves no folder.
         session = _Session(self, "differential", differential.differential_id, timeout)
 
@@ -728,7 +725,7 @@ class RunService:
         return SessionResult(report=report, report_dir=session.folder())
 
     def prepare_minimization(
-        self, path: str, *, valkey_binary: Optional[str] = None, allow_drift: bool = False
+        self, path: str, *, overrides: Overrides = NO_OVERRIDES, allow_drift: bool = False
     ) -> Minimization:
         """Load a failing run's report: its scenario and the failure signature a reduction must keep.
 
@@ -743,10 +740,10 @@ class RunService:
             raise InputError("report does not contain the original scenario; minimize needs a 'run' report")
         reference_outcome = RunOutcome.from_data(report["outcome"])
         plan = reference_outcome.plan
-        self._report_drift(plan, scenario, report, valkey_binary, allow_drift=allow_drift)
+        self._report_drift(plan, scenario, report, overrides, allow_drift=allow_drift)
         required = [requirement.evidence_id for requirement in plan.required_evidence]
         return Minimization(
-            scenario=with_valkey_binary(self.catalog, scenario, valkey_binary),
+            scenario=with_valkey_binary(self.catalog, scenario, overrides.binary),
             plan=plan,
             reference=failure_signature(reference_outcome, required),
             required_evidence=required,

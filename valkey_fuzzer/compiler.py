@@ -12,7 +12,7 @@ their defaults, so a report shows exactly what ran.
 
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Optional, Union
 
 from ._data import to_plain_data
@@ -471,6 +471,26 @@ def binary_fields(registration: DeploymentProviderRegistration, path: str) -> di
             "deployment",
         )
     return dict(registration.binary_override(path))
+
+
+@dataclass(frozen=True)
+class Overrides:
+    """The run-time overrides a CLI command or batch applies over a scenario, built once and passed down.
+
+    ``binary`` is ``--valkey-binary`` (the scenario's ``deployment`` binary fields and the report's
+    ``valkey_binary_override``); ``artifacts`` is ``--artifact NAME=PATH``; ``base_port`` is ``--base-port``.
+    ``keep_own_binary`` and ``pinned`` are for generation: a batch's binary applies only to scenarios that name
+    none, and ``pinned`` holds the draws an earlier scenario's child keeps. A method ignores the fields it has no use for.
+    """
+
+    binary: Optional[str] = None
+    artifacts: Mapping[str, str] = field(default_factory=dict)
+    base_port: Optional[int] = None
+    keep_own_binary: bool = False
+    pinned: Optional[Mapping[str, Any]] = None
+
+
+NO_OVERRIDES = Overrides()
 
 
 def with_valkey_binary(

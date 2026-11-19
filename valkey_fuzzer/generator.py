@@ -107,7 +107,7 @@ import yaml
 from . import capacity
 from ._data import to_plain_data
 from .catalog import Catalog
-from .compiler import with_valkey_binary
+from .compiler import NO_OVERRIDES, Overrides, with_valkey_binary
 from .documents import ABSENT, get_path, merge
 from .fields import is_number
 from .plan import ExecutionPlan, ExperimentSpec
@@ -1025,22 +1025,20 @@ def generate(
     excludes: Sequence[Exclusion] = (),
     base: Optional[Mapping[str, Any]] = None,
     profile: Optional[Profile] = None,
-    valkey_binary: Optional[str] = None,
-    keep_own_binary: bool = False,
-    pinned: Optional[Mapping[str, Any]] = None,
+    overrides: Overrides = NO_OVERRIDES,
     cores: Optional[float] = None,
 ) -> Generated:
     """A valid scenario for ``experiment`` (drawn from the opted-in ones when None) from ``seed``.
 
     ``base`` is a partial scenario merged over every draw and hook; ``profile``
-    is the search profile that samples the experiment's legal space; ``pinned``
+    is the search profile that samples the experiment's legal space; ``overrides.pinned``
     holds values of an earlier scenario's draws (:attr:`Generated.draws`) that
     this one keeps, every other dimension drawn from ``seed``; ``cores``
     is how many cores the run may use, which its deployment must fit (None:
     any number);
-    ``valkey_binary`` is the binary the deployment runs, set before the hooks
+    ``overrides.binary`` is the binary the deployment runs, set before the hooks
     run (:func:`~valkey_fuzzer.compiler.with_valkey_binary`); with
-    ``keep_own_binary``, only when the base names none.
+    ``overrides.keep_own_binary``, only when the base names none.
     ``compile_fn`` compiles (and may statically validate) a candidate; one it
     rejects (a ``ValueError``, as every compile or config error is, or the
     :class:`~valkey_fuzzer.runner.RunnerError` of a failed plan check in the
@@ -1054,7 +1052,7 @@ def generate(
     hooks = _hooks(catalog, block.hook_ids)
 
     def with_binary(scenario: Mapping[str, Any]) -> dict[str, Any]:
-        return with_valkey_binary(catalog, scenario, valkey_binary, override=not keep_own_binary)
+        return with_valkey_binary(catalog, scenario, overrides.binary, override=not overrides.keep_own_binary)
 
     last = "no attempt was made"
     # The first candidate that needed more cores than the run may use: the scenario when none fits.
@@ -1068,7 +1066,7 @@ def generate(
             base=base,
             profile=profile,
             with_binary=with_binary,
-            pinned=pinned,
+            pinned=overrides.pinned,
         )
         try:
             plan = compile_fn(scenario)

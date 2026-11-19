@@ -14,6 +14,7 @@ import traceback
 from collections.abc import Mapping
 from typing import Any, Optional
 
+from ..compiler import Overrides
 from ..outcomes import EXIT_HARNESS_ERROR, EXIT_SUCCESS
 from ..plan import ExecutionPlan
 from ..reports import InputError
@@ -85,7 +86,7 @@ def _validate_file(
     service: RunService, path: str, binary: Optional[str], strict: bool = False
 ) -> tuple[dict[str, Any], Optional[ExecutionPlan], Optional[Exception]]:
     try:
-        plan = service.validate(path, valkey_binary=binary)
+        plan = service.validate(path, overrides=Overrides(binary=binary))
     except INVALID_SCENARIO_ERRORS as exc:
         row = {"file": path, "ok": False, "errors": [{"path": error_location(exc), "message": str(exc)}]}
         return row, None, exc

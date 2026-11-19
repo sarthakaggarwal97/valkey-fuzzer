@@ -90,7 +90,7 @@ from typing import Any, Callable, Optional
 from ._data import canonical_json, error_record, exception_type
 from .capacity import usable_cores
 from .catalog import Catalog
-from .compiler import with_valkey_binary
+from .compiler import Overrides, with_valkey_binary
 from .corpus import CORPUS_FILE, Corpus, mutation, parent
 from .coverage import gcov_features
 from .deployment.local.config import CLUSTER_BUS_PORT_OFFSET, MAX_TCP_PORT
@@ -599,11 +599,9 @@ def run_worker(task_path: str) -> int:
                 experiment=draw["experiment"],
                 excludes=[Exclusion.parse(item) for item in draw["excludes"]],
                 base=merge(draw["base"], isolation),
-                valkey_binary=task["valkey_binary"],
-                keep_own_binary=True,
                 profile=draw["profile"],
                 free_ports=False,
-                pinned=draw.get("pinned"),
+                overrides=Overrides(binary=task["valkey_binary"], keep_own_binary=True, pinned=draw.get("pinned")),
             )
         else:
             scenario = merge(
@@ -1366,9 +1364,7 @@ class BatchRunner:
                     excludes=excludes,
                     base=source["base"],
                     profile=self.options.profile,
-                    valkey_binary=self.options.valkey_binary,
-                    keep_own_binary=True,
-                    pinned=pinned,
+                    overrides=Overrides(binary=self.options.valkey_binary, keep_own_binary=True, pinned=pinned),
                 )
             except GeneratorError:
                 picked[parent(entry)] += 1

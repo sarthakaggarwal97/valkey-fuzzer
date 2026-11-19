@@ -4,6 +4,7 @@ import argparse
 import sys
 from typing import Any
 
+from ..compiler import Overrides
 from ..outcomes import EXIT_FAILURE, EXIT_HARNESS_ERROR, exit_code
 from ..reports import ReportWriteError, write_document
 from ..service import ReplayDriftError
@@ -35,7 +36,9 @@ def replay_command(args: argparse.Namespace) -> int:
     artifacts = artifact_paths(args)
     try:
         prepared = service.prepare_replay(
-            args.plan, valkey_binary=args.valkey_binary, artifacts=artifacts, allow_drift=args.allow_drift
+            args.plan,
+            overrides=Overrides(binary=args.valkey_binary, artifacts=artifacts),
+            allow_drift=args.allow_drift,
         )
     except ReplayDriftError as exc:
         print("Error: refusing to replay because this environment differs from the recorded run:", file=sys.stderr)
