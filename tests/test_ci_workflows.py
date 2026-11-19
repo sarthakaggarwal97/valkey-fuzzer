@@ -96,8 +96,7 @@ def _fuzzer_commands(name):
 @pytest.mark.parametrize("name", WORKFLOW_NAMES)
 def test_every_valkey_fuzzer_command_in_a_workflow_parses_with_the_cli(name):
     # The workflows that only run pytest or ruff name no valkey-fuzzer command.
-    # search-abort-probes runs a probe script, not the fuzzer CLI.
-    no_cli = ("lint.yml", "test.yml", "valkey-experiments-live.yml", "search-abort-probes.yml")
+    no_cli = ("lint.yml", "test.yml", "valkey-experiments-live.yml")
     assert _fuzzer_commands(name) or name in no_cli
 
 
