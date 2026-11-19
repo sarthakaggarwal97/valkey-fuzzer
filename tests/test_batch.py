@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 import yaml
@@ -667,7 +667,8 @@ def test_spec_conform_of_an_approved_bundle_decides_the_run_and_a_drafts_is_only
     assert kept == {"report.json", "scenario.yaml", "conform.json"}
 
     replication = summary["conformance"]["replication"]
-    assert (replication["status"], replication["approved"]) == ("fail", True)
+    # The digest reads the claims as shipped, a draft today; the run verdicts above came from the workers' entries.
+    assert (replication["status"], replication["approved"]) == ("fail", False)
     assert replication["counts"] == {"pass": 1, "fail": 1, "error": 1, "skipped": 1}
     assert replication["violations"] == [
         {"run": ids[1], "property": "OneHistoryPerId", "claimed": True, "first": {"state": 3, "why": "Promote"}}
@@ -710,18 +711,43 @@ def test_a_worker_checks_its_run_against_the_bundles_its_plan_names(tmp_path, wo
     assert summary["conformance"]["replication"]["status"] == "unexercised"
 
 
-def test_a_run_whose_plan_names_a_bundle_but_whose_worker_wrote_no_conformance_is_an_error(tmp_path):
+def test_a_run_whose_plan_names_a_bundle_but_whose_worker_wrote_no_conformance_is_an_error(tmp_path, monkeypatch):
     plan = {"components": [{"use": "valkey.observer.log-trigger", "id": "steps", "config": {"spec": "replication"}}]}
     report = {"status": "PASS", "outcome": {"plan": plan}}
+    # The entry says whether the claims are approved, as the worker's would: replication's are a draft.
     assert batch._conformance(str(tmp_path), report) == {
         "replication": {
             "status": "error",
             "error": "no conform.json: the worker ended before spec conform checked the run",
+            "approved": False,
         }
     }
     assert batch._conformance(str(tmp_path), {**report, "status": "ERROR"}) == {}
     (tmp_path / "conform.json").write_text("{")
     assert "conform.json cannot be read" in batch._conformance(str(tmp_path), report)["replication"]["error"]
+    # A bundle that does not load is held against the run: nothing says its claims are a draft.
+    assert batch._approved("no-such-bundle") is True
+    monkeypatch.setattr(batch, "load_bundle", lambda name: Mock(claims=Mock(status="approved")))
+    assert batch._approved("replication") is True
+
+
+def test_a_missing_conformance_is_held_against_the_run_only_for_approved_claims(tmp_path, workers, stub, monkeypatch):
+    # The worker wrote no conform.json: the batch's own error entry decides by the bundle's claims.
+    monkeypatch.setattr(batch, "conform_folder", lambda folder, tools, unavailable="": {})
+    runner = _batch(tmp_path, [_random(1, experiments=[REPLICATION])])
+    runner.run()
+    (draft,) = _results(runner).values()
+    assert draft["status"] == "PASS" and draft["signature"] is None
+    assert draft["conformance"]["replication"]["approved"] is False
+    assert "no conform.json" in draft["conformance"]["replication"]["error"]
+
+    monkeypatch.setattr(batch, "_approved", lambda name: True)
+    runner = _batch(tmp_path, [_random(1, experiments=[REPLICATION])], name="approved")
+    runner.run()
+    (approved,) = _results(runner).values()
+    assert approved["status"] == "ERROR"
+    assert approved["summary"].startswith("spec conform replication: no conform.json: the worker ended before")
+    assert approved["signature"]["failures"]["spec-conform:replication"]["status"] == "ERROR"
 
 
 @pytest.mark.slow

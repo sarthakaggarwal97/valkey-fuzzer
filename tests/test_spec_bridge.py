@@ -451,7 +451,7 @@ def test_conform_folder_checks_a_run_against_each_bundle_its_plan_names(tmp_path
     assert list(checked) == ["replication", "register"]
     # Every replication property is excluded and it has no target: TLC has nothing to evaluate, so no tools.
     replication = checked["replication"]
-    assert (replication["status"], replication["approved"]) == ("pass", True)
+    assert (replication["status"], replication["approved"]) == ("pass", False)
     assert replication["actions"] == {"Disconnect": 1, "PartialSync": 1} and replication["properties"] == {}
     assert checked["register"] == {"approved": False, "status": "skipped", "reason": "tla2tools.jar not found"}
     # Known-bad: a run that never reached its verdict, a bundle that is gone, and a run of no bundle.
@@ -459,6 +459,8 @@ def test_conform_folder_checks_a_run_against_each_bundle_its_plan_names(tmp_path
     assert errored["replication"]["status"] == "not_run" and "ended ERROR" in errored["replication"]["reason"]
     gone = conform_folder(_run_folder(tmp_path / "gone", "PASS", ["no-such-bundle"]), None)
     assert gone["no-such-bundle"]["status"] == "error" and "no-such-bundle" in gone["no-such-bundle"]["error"]
+    # A bundle that does not load is held against the run: nothing says its claims are a draft.
+    assert gone["no-such-bundle"]["approved"] is True
     assert conform_folder(_run_folder(tmp_path / "none", "PASS", []), None) == {}
     # A run that took no mapped step is unexercised: never a pass, and no error of the check either.
     empty = conform_folder(_run_folder(tmp_path / "empty", "PASS", ["replication"]), None)

@@ -42,6 +42,18 @@ def test_every_guard_the_model_relies_on_has_a_control_that_breaks_it():
     assert all(not item.conform and item.conform_note for item in bundle.claims.properties)
 
 
+def test_the_claims_conditions_are_what_conform_pins():
+    # The three constants are fixes Valkey does not have (the cfg-only controls are Valkey as it is); mapping.yaml
+    # pins them to the claims' values, so a run is checked as claimed, as cluster-election pins FlushBeforeSave.
+    bundle = load_bundle("slot-migration")
+    pinned = {name: str(spec["value"]) for name, spec in bundle.mapping.constants.items() if "value" in spec}
+    claimed = {"CancelKeepsPause": "TRUE", "ExpiryAfterClaim": "FALSE", "ClaimReachesReplica": "TRUE"}
+
+    assert bundle.property("OneWriter").holds_when == {k: claimed[k] for k in ("CancelKeepsPause", "ExpiryAfterClaim")}
+    assert bundle.property("NoAckedWriteLost").holds_when == claimed
+    assert {name: pinned[name] for name in claimed} == claimed
+
+
 @pytest.mark.parametrize(
     "line, evidence",
     [

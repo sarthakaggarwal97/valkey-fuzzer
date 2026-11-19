@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Changed: the replication and slot-migration claims say what their mapping pins
+
+- `formal/replication/claims.yaml` claimed its properties under `AdoptOnLoad = TRUE`, a fix Valkey does not have,
+  while `mapping.yaml` pinned `AdoptOnLoad` to `FALSE` for every run. The claims now hold for Valkey as it is over one
+  channel (`holds_when: {DualChannel: false, AdoptOnLoad: false}`, what `model.cfg` checks and what the mapping
+  pins); over two channels the properties hold only with the fix (`dual-channel.cfg`). The bundle goes back to
+  `status: draft`: no property can be checked on a run (every variable both read is hidden in the mapping, so
+  conform could never fail them), and the approval enforced nothing. No shipped bundle is approved now.
+- `formal/slot-migration/mapping.yaml` pinned `CancelKeepsPause`, `ExpiryAfterClaim`, and `ClaimReachesReplica` to
+  Valkey as it is, the reverse of every property's `holds_when`, so no run could ever be checked as claimed. It now
+  pins the claims' values, as `cluster-election` pins `FlushBeforeSave`: a run in which Valkey as it is lets two
+  nodes write, or loses an acknowledged write, violates the claim once a property is conformed.
+- A batch's conform entry for a run whose worker wrote no `conform.json` (or whose bundle does not load) now says
+  whether the bundle's claims are `approved`, as the worker's entries do, and the verdict reads it instead of
+  defaulting to approved: a draft bundle's missing check is reported, an approved bundle's is an `ERROR` for the run,
+  and a bundle that does not load is held against the run.
+
 ### Removed: unreferenced example scenarios
 
 - `examples/valkey/replication_full_resync.yaml` and `replication_partial_resync.yaml` only pinned a seed, ports and

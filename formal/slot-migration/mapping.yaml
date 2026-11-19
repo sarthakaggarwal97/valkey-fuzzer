@@ -128,6 +128,12 @@ state:
 constants:
   MaxWrites: {value: 3, why: "No property is checked on observed states; the model's bound."}
   MaxFaults: {max_of: [faults], at_least: 3}
-  CancelKeepsPause: {value: "FALSE", why: "Valkey as it is: a cancel after the grant unpauses."}
-  ExpiryAfterClaim: {value: "TRUE", why: "Valkey as it is: the pause ends at its timeout."}
-  ClaimReachesReplica: {value: "FALSE", why: "Valkey as it is: the replica learns the claim on the bus."}
+  # Every property claims these three, which are fixes Valkey does not have
+  # (claims.yaml, assumptions), so a run is checked as claimed, as
+  # cluster-election pins FlushBeforeSave: once a property is conformed, a run
+  # in which Valkey as it is lets two nodes write, or loses an acknowledged
+  # write, violates the claim and fails, as it should. Pinned to Valkey as it
+  # is, no run could ever meet holds_when and no violation would count.
+  CancelKeepsPause: {value: "TRUE", why: "The claims' condition; whether a cancel unpauses is not in the mapped lines."}
+  ExpiryAfterClaim: {value: "FALSE", why: "The claims' condition; the pause's end and the claim are on different nodes."}
+  ClaimReachesReplica: {value: "TRUE", why: "The claims' condition; how the replica learned the claim is not logged."}

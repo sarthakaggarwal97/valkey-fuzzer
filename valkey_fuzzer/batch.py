@@ -731,8 +731,11 @@ def job_result(
     summary = report["summary"] if report is not None else f"{error['type']}: {error['message']}"
     conformance = _conformance(run_dir, report)
     for name, entry in sorted(conformance.items()):
-        # A draft's findings are reported, not held against the run; a bundle that did not load has no claims.
-        if entry["status"] not in ("fail", "error") or not entry.get("approved", True):
+        # A draft's findings are reported, not held against the run. Every entry says whether its claims are
+        # approved: the worker's (conform_folder), and the ones made here for a run whose worker wrote no
+        # conform.json (_conformance); a bundle that does not load is held against the run, since nothing
+        # says its claims are a draft.
+        if entry["status"] not in ("fail", "error") or not entry["approved"]:
             continue
         if entry["status"] == "fail":
             violated = sorted(
@@ -786,7 +789,8 @@ def job_result(
 
 def _conformance(run_dir: str, report: Optional[Mapping[str, Any]]) -> dict[str, Any]:
     """The worker's ``conform.json``; for a run that reached its verdict and whose plan names spec bundles but
-    that has none, an error for each bundle."""
+    that has none, an error for each bundle, saying whether its claims are approved (the batch holds only those
+    against the run)."""
 
     path = os.path.join(run_dir, CONFORMANCE_FILE)
     if os.path.exists(path):
@@ -799,7 +803,17 @@ def _conformance(run_dir: str, report: Optional[Mapping[str, Any]]) -> dict[str,
     if report is None or report.get("status") not in CHECKED_RUN_STATUSES:
         return {}
     plan = (report.get("outcome") or {}).get("plan") or {}
-    return {name: {"status": "error", "error": problem} for name in plan_bundles(plan)}
+    return {name: {"status": "error", "error": problem, "approved": _approved(name)} for name in plan_bundles(plan)}
+
+
+def _approved(name: str) -> bool:
+    """Whether the claims of spec bundle ``name`` are approved. A bundle that does not load counts as approved:
+    the plan named it, and nothing says its claims are a draft, so the run is not passed over its check."""
+
+    try:
+        return load_bundle(name).claims.status == "approved"
+    except SpecBundleError:
+        return True
 
 
 def _zoo_run(job: Mapping[str, Any]) -> ZooRun:
