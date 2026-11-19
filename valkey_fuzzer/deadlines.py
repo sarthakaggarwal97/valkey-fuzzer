@@ -12,6 +12,11 @@ class CooperativeDeadlineError(RuntimeError):
     """A component crossed a runner-visible deadline."""
 
 
+class WaitInterruptedError(CooperativeDeadlineError):
+    """The run's deadline came, or the runner cancelled the call, before a wait ended: what it waited for was
+    never seen, so the call cannot say whether Valkey did it."""
+
+
 class ComponentTimeoutError(CooperativeDeadlineError):
     """A component call was still running when its deadline passed and was cancelled.
 
@@ -137,3 +142,48 @@ def abandoned_calls() -> tuple[Mapping[str, str], ...]:
     with _cancelled_calls_lock:
         _cancelled_calls[:] = [(scenario, call) for scenario, call in _cancelled_calls if call.is_alive()]
         return tuple({"scenario_id": scenario, "call": call.label} for scenario, call in _cancelled_calls)
+
+
+def pause(context: Any, seconds: float, reason: str) -> None:
+    """Sleep ``seconds`` with ``context.sleep``; without a context (provisioning, a test), a plain sleep.
+
+    Raises :class:`WaitInterruptedError` when the run's deadline comes before the sleep ends or the runner
+    cancels the call, so a cancelled wait is never mistaken for one that simply ran out of time.
+    """
+
+    if context is None:
+        time.sleep(seconds)
+        return
+    deadline = context.deadline
+    # A millisecond of slack: a timeout clamped to the deadline must end as a timeout, not on float rounding.
+    if deadline is not None and time.monotonic() + seconds > deadline + 1e-3:
+        raise WaitInterruptedError(f"the run's deadline came before the wait for {reason} ended")
+    if not context.sleep(seconds):
+        raise WaitInterruptedError(f"the run was cancelled while waiting for {reason}")
+
+
+def wait_for(
+    check: Callable[[], tuple[bool, Any]],
+    *,
+    timeout_s: float,
+    interval_s: float,
+    reason: str,
+    context: Any = None,
+) -> tuple[bool, Any]:
+    """Call ``check() -> (done, value)`` every ``interval_s`` until done or ``timeout_s`` pass: the last
+    ``(done, value)``. This is the one wait of the harness; its watchdog is ``timeout_s``.
+
+    ``check`` runs at least once. Time is measured on the monotonic clock. Running out of ``timeout_s`` is a
+    result (``done`` False); a cancelled call, or a run deadline that comes before ``timeout_s``, is not:
+    both raise :class:`WaitInterruptedError` naming ``reason`` (see :func:`pause`). A caller that wants the
+    deadline to end the wait quietly passes ``timeout_s`` already clamped to it. An exception from ``check``
+    propagates.
+    """
+
+    end = time.monotonic() + max(timeout_s, 0.0)
+    while True:
+        done, value = check()
+        left = end - time.monotonic()
+        if done or left <= 0:
+            return done, value
+        pause(context, min(max(interval_s, 0.0), left), reason)

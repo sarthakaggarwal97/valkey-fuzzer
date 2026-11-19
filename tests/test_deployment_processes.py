@@ -24,15 +24,17 @@ from tests.deployment_support import (
     process_manager,
 )
 from tests.support import VirtualClock, valkey_build
+from valkey_fuzzer import deadlines
 from valkey_fuzzer.commands.run import cleanup_logs
 from valkey_fuzzer.components.server import PrivateServer
-from valkey_fuzzer.deployment.local import cluster_nodes, processes, queries, server_config
+from valkey_fuzzer.deadlines import WaitInterruptedError
+from valkey_fuzzer.deployment.local import cluster_nodes, processes, server_config
 from valkey_fuzzer.deployment.local.formation import SETTLE_TIMEOUT_S, Formation
 from valkey_fuzzer.deployment.local.models import DeploymentMode, LocalDeploymentError
 from valkey_fuzzer.deployment.local.planner import plan_deployment
 from valkey_fuzzer.deployment.local.ports import PortUnavailableError
 from valkey_fuzzer.deployment.local.processes import VALKEY_SOURCE_REF, InstanceIdentityError, installed_valkey_binary
-from valkey_fuzzer.deployment.local.queries import WaitInterruptedError, valkey_client
+from valkey_fuzzer.deployment.local.queries import valkey_client
 from valkey_fuzzer.deployment.local.server_config import DEFAULT_MAXMEMORY, arguments_for_build
 
 
@@ -253,7 +255,7 @@ def test_the_source_build_is_pinned_parallel_and_built_aside_under_a_lock(tmp_pa
 
 
 def test_spawn_and_formation_waits_end_at_the_runs_deadline(tmp_path, monkeypatch):
-    VirtualClock().install(monkeypatch, queries)
+    VirtualClock().install(monkeypatch, deadlines)
     cancelled = Mock(deadline=None, **{"sleep.return_value": False})
     manager = process_manager(tmp_path)
     with (
@@ -560,7 +562,7 @@ def test_slot_verification_outlasts_a_failing_slot_window_a_loaded_host_stretche
     failing past the old 20 s wait (cluster-node-timeout 1000 marks a slow peer down), so provisioning failed
     a cluster that was healthy seconds later."""
 
-    clock = VirtualClock().install(monkeypatch, queries)
+    clock = VirtualClock().install(monkeypatch, deadlines)
     primary = instance("valkey-0", slot_start=0, slot_end=cluster_nodes.HASH_SLOTS - 1)
     failing = "cluster_state:ok\r\ncluster_slots_assigned:16384\r\ncluster_slots_fail:5460\r\n"
     healthy = "cluster_state:ok\r\ncluster_slots_assigned:16384\r\ncluster_slots_fail:0\r\n"
@@ -594,7 +596,7 @@ def test_the_health_wait_outlasts_a_fail_state_window_a_loaded_host_stretches(mo
     reporting cluster_state fail past the old 30 s health wait (cluster-node-timeout 1000 marks a slow peer
     down), so provisioning failed a cluster that was healthy seconds later."""
 
-    clock = VirtualClock().install(monkeypatch, queries)
+    clock = VirtualClock().install(monkeypatch, deadlines)
     last_slot = cluster_nodes.HASH_SLOTS - 1
     nodes = [
         instance("valkey-0", slot_start=0, slot_end=last_slot, cluster_node_id="n0"),
@@ -639,7 +641,7 @@ def test_cluster_meet_outlasts_a_convergence_window_a_loaded_host_stretches(monk
     meet wait (the cluster bus gossips slowly on a loaded host), so provisioning failed a cluster that
     converged seconds later."""
 
-    clock = VirtualClock().install(monkeypatch, queries)
+    clock = VirtualClock().install(monkeypatch, deadlines)
     nodes = [instance(f"valkey-{n}", port=7000 + n, cluster_node_id=f"n{n}") for n in range(2)]
 
     def client(cleared_at):
@@ -670,7 +672,7 @@ def test_each_replica_link_seen_up_counts_although_another_replicas_info_times_o
     """84 instances at load 400: every link was up 6 s in, yet one slow INFO failed each round of the old
     all-replicas poll, so provisioning never passed."""
 
-    clock = VirtualClock().install(monkeypatch, queries)
+    clock = VirtualClock().install(monkeypatch, deadlines)
     replicas = [instance(f"valkey-{n}", "replica", 7000 + n, primary_id="valkey-0") for n in (1, 2)]
     down = {**_replica_info(), "master_link_status": "down"}
     clients = {"valkey-1": Mock(), "valkey-2": Mock()}

@@ -12,10 +12,11 @@ from typing import Optional
 
 import valkey
 
+from ....deadlines import pause
 from ....protocols import RunContext
 from ..cluster_nodes import parse_cluster_nodes, parse_slot_tokens
 from ..models import DeploymentMode, InstanceInfo, LocalDeploymentError
-from ..queries import Replication, pause, query_cluster_info, query_replication, response_text, valkey_client
+from ..queries import Replication, query_cluster_info, query_replication, response_text, valkey_client
 from ..topology import DeploymentConnection, TopologyNode
 
 logger = logging.getLogger(__name__)

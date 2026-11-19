@@ -9,11 +9,12 @@ from typing import Callable, Optional
 
 import valkey
 
+from ...deadlines import WaitInterruptedError, pause
 from ...protocols import RunContext
 from .cluster_nodes import HASH_SLOTS, parse_cluster_nodes
 from .models import DeploymentMode, InstanceInfo, LocalDeploymentError
 from .processes import verify_instance_process_identity
-from .queries import WaitInterruptedError, pause, query_cluster_info, query_replication, wait_until
+from .queries import query_cluster_info, query_replication, wait_until
 
 logger = logging.getLogger(__name__)
 
@@ -328,7 +329,7 @@ class Formation:
         """Form ``mode`` on the spawned ``nodes`` and wait up to :data:`SETTLE_TIMEOUT_S` for it to be healthy.
 
         Raises :class:`LocalDeploymentError` naming what failed, or
-        :class:`~.queries.WaitInterruptedError` at the run's deadline. The
+        :class:`~valkey_fuzzer.deadlines.WaitInterruptedError` at the run's deadline. The
         clients it opened are closed when it returns or raises.
         """
         mode = DeploymentMode(mode)

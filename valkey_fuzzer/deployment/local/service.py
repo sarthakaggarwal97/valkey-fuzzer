@@ -116,7 +116,7 @@ class ValkeyDeploymentService:
 
     Its waits (failovers, state checks, restarts) end at ``context``'s run
     deadline or when the runner cancels the calling component, raising
-    :class:`~.queries.WaitInterruptedError`.
+    :class:`~valkey_fuzzer.deadlines.WaitInterruptedError`.
     """
 
     def __init__(self, processes: ProcessManager, deployment: LocalDeployment, context: Optional[RunContext] = None):

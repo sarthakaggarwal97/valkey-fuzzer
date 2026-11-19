@@ -21,6 +21,7 @@ from tests.deployment_support import (
     planned_cluster_instances,
     process_manager,
 )
+from valkey_fuzzer.deadlines import WaitInterruptedError
 from valkey_fuzzer.deployment.local.cluster_nodes import parse_cluster_nodes
 from valkey_fuzzer.deployment.local.formation import Formation
 from valkey_fuzzer.deployment.local.models import (
@@ -31,7 +32,7 @@ from valkey_fuzzer.deployment.local.models import (
 )
 from valkey_fuzzer.deployment.local.ports import PortUnavailableError, busy_planned_ports
 from valkey_fuzzer.deployment.local.provider import LOCAL_DEPLOYMENT_PROVIDER_ID, LocalDeploymentProvider
-from valkey_fuzzer.deployment.local.queries import Replication, WaitInterruptedError
+from valkey_fuzzer.deployment.local.queries import Replication
 from valkey_fuzzer.deployment.local.service import VALKEY_DEPLOYMENT_SERVICE, ValkeyDeploymentService
 from valkey_fuzzer.deployment.local.topology import TopologyNode
 from valkey_fuzzer.deployment.local.validation.replication import _recorded_primary

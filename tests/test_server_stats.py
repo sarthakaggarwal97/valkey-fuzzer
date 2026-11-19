@@ -8,6 +8,7 @@ import pytest
 from tests.fakes import FakeClient
 from tests.support import VirtualClock
 from tests.valkey_experiments_support import evidence_values, fake_context, resolved, unit_plan
+from valkey_fuzzer import deadlines
 from valkey_fuzzer.components import polling, server_stats
 from valkey_fuzzer.components.server_stats import ErrorCountersOracle, QuietEndOracle, risen
 from valkey_fuzzer.plan import ComponentSpec
@@ -76,7 +77,7 @@ def _evidence(evidence_id, value, source="component"):
 def clock(monkeypatch):
     """Time that passes only as the oracles wait."""
 
-    return VirtualClock().install(monkeypatch, server_stats, polling)
+    return VirtualClock().install(monkeypatch, server_stats, polling, deadlines)
 
 
 # valkey.oracle.error-counters

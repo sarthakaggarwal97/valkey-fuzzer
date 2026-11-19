@@ -267,6 +267,14 @@ operations that way.
   the same way. The runner still tears down, undoes every open obligation
   (an interrupt during one undo does not skip the rest), and cleans up the
   deployment, and then exits `130`.
+- Every wait in the harness (a poll, a retried read, a pause between attempts) is
+  `deadlines.wait_for` or `deadlines.pause`, with a timeout of its own. Running
+  out of that timeout is a result: the wait returns `done` false. A cancelled
+  call, or a run deadline that comes before the timeout, **raises**
+  `WaitInterruptedError` naming what it waited for, so a cancel is never
+  mistaken for a timeout and no wait hides a hang. A component that wants the
+  deadline to end its wait as a timeout clamps the timeout to
+  `context.deadline` first (`polling.poll_until` does).
 - With a run deadline, the subscribers of the events the runner publishes
   also run on a watched thread. Dispatch is still synchronous, so a fault
   still fires right after its trigger. Teardown and cleanup events

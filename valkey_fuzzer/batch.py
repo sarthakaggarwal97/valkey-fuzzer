@@ -93,6 +93,7 @@ from .catalog import Catalog
 from .compiler import Overrides, with_valkey_binary
 from .corpus import CORPUS_FILE, Corpus, mutation, parent
 from .coverage import gcov_features
+from .deadlines import wait_for
 from .deployment.local.config import CLUSTER_BUS_PORT_OFFSET, MAX_TCP_PORT
 from .deployment.local.ports import LOCK_DIRECTORY, ephemeral_overlap
 from .documents import SCENARIO_SECTIONS, merge, set_path
@@ -1083,9 +1084,7 @@ class BatchRunner:
             if owner is not None and owner.alive():
                 self.log(f"stopping worker {entry['pid']} of {entry['job']}, left running by an interrupted batch")
                 _signal_worker(entry["pid"], signal.SIGKILL)
-                deadline = time.monotonic() + 30
-                while owner.alive() and time.monotonic() < deadline:
-                    time.sleep(POLL_S)
+                wait_for(lambda owner=owner: (not owner.alive(), None), timeout_s=30, interval_s=POLL_S, reason="the worker")
             leftovers = self._sweep(entry["slot"], entry["owner"])
             if leftovers:
                 self.log(f"interrupted job {entry['job']}: {_swept(leftovers)}")

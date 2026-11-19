@@ -18,9 +18,10 @@ from typing import Any, Callable, Optional
 
 import valkey
 
+from ....deadlines import WaitInterruptedError, pause
 from ....protocols import RunContext
 from ..models import DeploymentMode, InstanceInfo
-from ..queries import WaitInterruptedError, pause, query_replication, valkey_client, wait_until
+from ..queries import query_replication, valkey_client, wait_until
 from ..topology import DeploymentConnection
 from .cluster_state import check_cluster_status, check_slot_coverage
 from .config import StateValidationConfig
@@ -207,7 +208,7 @@ class DeploymentStateCheck:
     attempt in which a running instance did not answer, the time ran out, or
     a check broke is inconclusive: it judges nothing, and is retried. Its
     waits end at the run's deadline or a cancellation of ``context``'s call,
-    raising :class:`~..queries.WaitInterruptedError`.
+    raising :class:`~valkey_fuzzer.deadlines.WaitInterruptedError`.
     """
 
     def __init__(

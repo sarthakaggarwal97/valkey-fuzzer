@@ -15,6 +15,7 @@ from valkey.exceptions import DataError, ResponseError
 from tests import fakes
 from tests.support import VirtualClock
 from tests.valkey_experiments_support import evidence_values, fake_context, registration_for, resolved, unit_plan
+from valkey_fuzzer import deadlines
 from valkey_fuzzer.catalog import load_experiment_yaml
 from valkey_fuzzer.compiler import ScenarioCompileError
 from valkey_fuzzer.components import actions, component_registrations, instances, polling, processes
@@ -190,7 +191,7 @@ def _spec(component_id, component, **config):
 def clock(monkeypatch):
     """Time that passes only as the components wait: retries and timeouts take no real time."""
 
-    return VirtualClock().install(monkeypatch, instances, polling, processes, actions)
+    return VirtualClock().install(monkeypatch, instances, polling, deadlines, processes, actions)
 
 
 # Observers
@@ -569,7 +570,7 @@ def test_a_poll_that_could_not_read_is_an_error_and_one_that_saw_the_wrong_value
     handle.clients = {node_id: FakeClient(error=errors.get(node_id)) for node_id in ("valkey-0", "valkey-1")}
     spec = _spec("valkey.action.poll", "poll", command=["PING"], predicate={"equals": "PONG"}, timeout_s=2)
     result = registration_for("valkey.action.poll").factory().run(clock.drive(fake_context(handle, spec)), spec)
-    assert (result.status.value, result.summary) == (status, summary) and clock.elapsed >= 2
+    assert (result.status.value, result.summary) == (status, summary) and clock.elapsed >= 2 - 1e-6
 
 
 def test_an_event_that_never_came_is_an_error_of_the_wait_not_a_failure():

@@ -262,13 +262,14 @@ class ElectionAction:
         """The shard's new primary once it has been the only one for ``settle_s`` (None if none was), and the
         running nodes whose view the last round could not read."""
 
-        deadline = time.monotonic() + remaining(context, timeout)
         stable_since = None
         leader = None
         unread: list[str] = []
-        while time.monotonic() < deadline:
+
+        def stable() -> tuple[bool, Optional[str]]:
+            nonlocal stable_since, leader
             owners = []
-            unread = []
+            unread.clear()
             for instance_id in members:
                 if instance_id == old_primary or not handle.is_alive(instance_id):
                     continue
@@ -279,14 +280,13 @@ class ElectionAction:
                     owners.append(instance_id)
             current = owners[0] if len(owners) == 1 else None
             if current is not None and current == leader:
-                if time.monotonic() - stable_since >= config["settle_s"]:
-                    return current, []
-            else:
-                leader = current
-                stable_since = time.monotonic()
-            if not context.sleep(0.05):
-                break
-        return None, unread
+                return time.monotonic() - stable_since >= config["settle_s"], current
+            leader = current
+            stable_since = time.monotonic()
+            return False, None
+
+        done, winner = poll_until(stable, timeout_s=timeout, interval_s=0.05, context=context)
+        return (winner, []) if done else (None, unread)
 
     def _wait_demoted(self, context: Any, handle: Any, instance_id: str, timeout: float) -> bool:
         def check() -> tuple[bool, None]:

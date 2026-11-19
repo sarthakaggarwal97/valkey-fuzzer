@@ -2,7 +2,6 @@
 
 import logging
 import re
-import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -10,6 +9,7 @@ from typing import Any, Callable, Optional, TypeVar
 
 import valkey
 
+from ...deadlines import wait_for
 from ...protocols import RunContext
 from .cluster_nodes import parse_cluster_nodes
 
@@ -34,24 +34,6 @@ def replication_role(info: Mapping[str, Any]) -> Optional[str]:
     return _REPLICATION_ROLES.get(response_text(info.get("role", "")).lower())
 
 
-class WaitInterruptedError(RuntimeError):
-    """The run's deadline came, or the runner cancelled the call, before a wait ended: what it waited for was
-    never seen, so the call cannot say whether Valkey did it."""
-
-
-def pause(context: Optional[RunContext], seconds: float, what: str) -> None:
-    """Sleep ``seconds`` with ``context.sleep``, raising :class:`WaitInterruptedError` instead when the run's deadline
-    comes first or the runner cancels the call; without a run (provisioning, a test), a plain sleep."""
-    if context is None:
-        time.sleep(seconds)
-        return
-    deadline = context.deadline
-    if deadline is not None and time.monotonic() + seconds > deadline:
-        raise WaitInterruptedError(f"the run's deadline came before the wait for {what} ended")
-    if not context.sleep(seconds):
-        raise WaitInterruptedError(f"the run was cancelled while waiting for {what}")
-
-
 def wait_until(
     check: Callable[[], bool],
     *,
@@ -61,25 +43,17 @@ def wait_until(
     retry: tuple[type[Exception], ...] = (),
     context: Optional[RunContext] = None,
 ) -> bool:
-    """Call ``check`` until it returns True (then True) or ``timeout`` seconds pass (then False).
+    """:func:`~valkey_fuzzer.deadlines.wait_for` on a ``check`` that returns a bool: True once it does, False
+    after ``timeout`` seconds. An exception of a ``retry`` type counts as not yet; any other propagates."""
 
-    Time is measured on the monotonic clock, so a wall clock that moves
-    never cuts a wait short or stretches it. ``check`` runs at least once; an
-    exception of a ``retry`` type counts as not yet, any other propagates.
-    Each pause is :func:`pause`: the run's deadline or a cancellation raises
-    :class:`WaitInterruptedError`.
-    """
-    deadline = time.monotonic() + max(timeout, 0.0)
-    while True:
+    def attempt() -> tuple[bool, None]:
         try:
-            if check():
-                return True
+            return check(), None
         except retry as exc:
             logger.debug("%s: not yet: %s", what, exc)
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return False
-        pause(context, min(max(interval, 0.0), remaining), what)
+            return False, None
+
+    return wait_for(attempt, timeout_s=timeout, interval_s=interval, reason=what, context=context)[0]
 
 
 def _int(value: Any) -> Optional[int]:
