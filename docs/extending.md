@@ -2,7 +2,8 @@
 
 This guide is for people who add tests: a data-only experiment, a new
 component, or a provider. The Valkey components and experiments are part of
-the fuzzer, in `valkey_fuzzer/components/`. The formats are in
+the fuzzer, in `valkey_fuzzer/components/`; components for another target
+ship in a [pack](#ship-a-pack) of their own. The formats are in
 [Scenarios and experiments](scenarios-and-experiments.md), the existing
 components in [Valkey components](components.md), and the framework's
 structure in [Architecture](architecture.md).
@@ -14,6 +15,7 @@ structure in [Architecture](architecture.md).
 - [The local deployment service](#the-local-deployment-service)
 - [Write a provider](#write-a-provider)
 - [Register components and experiments](#register-components-and-experiments)
+- [Ship a pack](#ship-a-pack)
 - [Testing](#testing)
 
 ## Choose what to write
@@ -508,7 +510,9 @@ providers, one per mode.
 
 ## Register components and experiments
 
-`register_valkey_components` in `valkey_fuzzer/catalog.py` registers what
+The Valkey components are the `valkey` [pack](#ship-a-pack): `register` in
+`valkey_fuzzer/components/__init__.py`, which `pyproject.toml` declares as
+the `valkey` entry point of the `valkey_fuzzer.packs` group, registers what
 `valkey_fuzzer/components/` lists:
 
 | What | Where |
@@ -559,6 +563,158 @@ appear in a plan. `valkey-fuzzer list generators` prints them.
   command. Experiments from `--experiment-dir` register after the shipped
   ones, and may extend their fragments. After registration the catalog is
   frozen.
+
+## Ship a pack
+
+A pack is a Python package of your own that adds components, providers,
+fragments, generator hooks, and experiments, with no edit to the fuzzer.
+Every command, and every batch worker, builds its catalog the same way: the
+local deployment providers, then each installed pack, then the
+`--experiment-dir` directories. A pack is an entry point of the
+`valkey_fuzzer.packs` group whose value is a `register(catalog)` function;
+packs run in entry-point name order.
+
+This pack, `toy-pack`, tests a TCP echo server. It ships a deployment
+provider for its own deployment mode, `echo`, one oracle, and one experiment:
+
+```
+toy-pack/
+  pyproject.toml
+  toy_pack/__init__.py
+  toy_pack/experiments/toy.echo.yaml
+```
+
+```toml
+# pyproject.toml
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "toy-pack"
+version = "0.1.0"
+dependencies = ["valkey-fuzzer"]
+
+[project.entry-points."valkey_fuzzer.packs"]
+toy = "toy_pack:register"
+
+[tool.setuptools]
+packages = ["toy_pack"]
+
+[tool.setuptools.package-data]
+toy_pack = ["experiments/*.yaml"]
+```
+
+```yaml
+# toy_pack/experiments/toy.echo.yaml
+id: toy.echo
+mode: smoke
+deployment: {modes: [echo]}
+components:
+  - {use: toy.oracle.echo, id: echo}
+```
+
+```python
+# toy_pack/__init__.py
+"""toy-pack: a TCP echo server, the deployment provider that starts it, one oracle, and one experiment."""
+
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+from valkey_fuzzer.catalog import load_experiment_directory
+from valkey_fuzzer.declarations import Declarations
+from valkey_fuzzer.protocols import ComponentRole, ProvisionedDeployment
+from valkey_fuzzer.registrations import ComponentRegistration, DeploymentProviderRegistration
+from valkey_fuzzer.results import ComponentStatus, make_result
+
+SERVER = (
+    "import socketserver, sys\n"
+    "class Echo(socketserver.StreamRequestHandler):\n"
+    "    def handle(self):\n"
+    "        for line in self.rfile: self.wfile.write(line)\n"
+    "socketserver.TCPServer.allow_reuse_address = True\n"
+    "socketserver.TCPServer(('127.0.0.1', int(sys.argv[1])), Echo).serve_forever()\n"
+)
+
+
+class EchoDeployment:
+    def __init__(self):
+        self.process = None
+
+    def validate(self, plan):
+        pass
+
+    def provision(self, context):
+        port = context.plan.deployment["port"]
+        self.process = subprocess.Popen([sys.executable, "-c", SERVER, str(port)])
+        time.sleep(0.5)
+        return ProvisionedDeployment(services={"port": port}, metadata={"pid": self.process.pid})
+
+    def rollback(self, context):
+        if self.process:
+            self.process.kill()
+
+    def cleanup(self, context, deployment):
+        self.process.kill()
+        self.process.wait()
+
+
+class EchoOracle:
+    def evaluate(self, context, spec, evidence):
+        with socket.create_connection(("127.0.0.1", context.services["deployment"]["port"]), timeout=5) as conn:
+            conn.sendall(b"hello\n")
+            echoed = conn.makefile().readline()
+        status = ComponentStatus.PASS if echoed == "hello\n" else ComponentStatus.FAIL
+        return make_result(spec, status, f"echoed {echoed!r}")
+
+
+def register(catalog):
+    catalog.register(
+        components=[ComponentRegistration("toy.oracle.echo", ComponentRole.ORACLE, EchoOracle, declares=Declarations())],
+        deployment_providers=[DeploymentProviderRegistration("echo", "toy.deployment.echo", EchoDeployment)],
+        experiments=load_experiment_directory(Path(__file__).parent / "experiments", fragments=catalog.fragments),
+    )
+```
+
+Build the wheel, install it next to the fuzzer, and run a scenario:
+
+```bash
+pip wheel --no-deps --wheel-dir dist ./toy-pack
+pip install dist/toy_pack-0.1.0-py3-none-any.whl
+valkey-fuzzer list experiments          # toy.echo [echo]
+cat > echo.yaml <<'EOF'
+scenario_id: echo
+seed: 1
+experiment: {id: toy.echo}
+deployment: {mode: echo, port: 7999}
+EOF
+valkey-fuzzer run echo.yaml             # Status: PASS
+```
+
+Rules:
+
+- **Name the entry point after your IDs' namespace.** `toy` registers
+  `toy.*`. A scenario that uses `toy.oracle.echo` where no pack registers
+  `toy.*` fails with `no installed pack registers toy.* components; install
+  the package whose 'valkey_fuzzer.packs' entry point is named 'toy'`.
+- **Register once.** Call `catalog.register` once with everything, so the
+  pack registers as one transaction. Its IDs must not clash with another
+  installed pack's: a duplicate stops every command.
+- **Fragments of other packs.** `catalog.fragments` holds the fragments of
+  the packs before yours in name order. An experiment that extends another
+  pack's fragments can always go in a directory passed with
+  `--experiment-dir`, which loads after every pack.
+- **A mode the local deployment runs.** A provider for `standalone` or
+  `cluster` sits next to the local one, so a scenario selects it with
+  `deployment.provider`. A mode of your own, as `echo` here, needs none.
+- **Test without installing.** `valkey_fuzzer.testing.run_experiment` runs
+  your components and experiments in a catalog of their own (see
+  [Testing](#testing)).
+- **An editable install** (`pip install -e .`) records the entry points when
+  it installs; reinstall after you add or rename one.
 
 ## Testing
 

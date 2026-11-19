@@ -7,9 +7,9 @@ import pytest
 import yaml
 
 from valkey_fuzzer._data import to_plain_data
-from valkey_fuzzer.catalog import Catalog, register_valkey_components
+from valkey_fuzzer.catalog import Catalog
 from valkey_fuzzer.compiler import Overrides
-from valkey_fuzzer.components import EXPERIMENT_DIRECTORY, config_space, experiments
+from valkey_fuzzer.components import EXPERIMENT_DIRECTORY, config_space, experiments, register
 from valkey_fuzzer.components.config_space import build_config_table
 from valkey_fuzzer.deployment.local import processes
 from valkey_fuzzer.deployment.local.provider import local_deployment_provider_registrations
@@ -51,7 +51,7 @@ def _runtime(tmp_path, generator, *, inputs=_INPUTS, hooks=None, **experiment):
     )
     catalog = Catalog()
     catalog.deployment_providers.register_many(local_deployment_provider_registrations().values())
-    register_valkey_components(catalog)
+    register(catalog)
     catalog.register(generators=registrations)
     catalog.load_experiment_directories([directory])
     catalog.freeze()

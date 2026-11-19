@@ -3,6 +3,7 @@
 import copy
 import json
 from dataclasses import replace
+from importlib.metadata import EntryPoint, entry_points
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from tests.support import component_registration, deployment_registrations, make
 from valkey_fuzzer import hoststate
 from valkey_fuzzer._data import file_sha256
 from valkey_fuzzer.catalog import (
+    PACK_GROUP,
     Catalog,
     DuplicateExperimentError,
     load_experiment_yaml,
@@ -153,6 +155,54 @@ def test_registered_components_and_directory_experiments_compile_and_run_on_a_fr
     assert catalog.experiment_directory("example.feature") == str(tmp_path)
     with pytest.raises(FrozenRegistryError):
         service.catalog.register(components=(component_registration("example.action.late"),))
+
+
+_TOY_PACK = """\
+from tests.support import component_registration
+from valkey_fuzzer.registrations import DeploymentProviderRegistration
+from valkey_fuzzer.results import ComponentResult, ComponentStatus
+from valkey_fuzzer.testing import FakeDeploymentProvider
+
+
+class Echo:
+    def run(self, context, spec):
+        return ComponentResult(spec.id, ComponentStatus.PASS, context.services["deployment"]["greeting"])
+
+
+def register(catalog):
+    catalog.register(
+        components=(component_registration("toy.action.echo", factory=Echo),),
+        deployment_providers=(
+            DeploymentProviderRegistration("toy", "toy.deployment.fake", lambda: FakeDeploymentProvider({"greeting": "hi"})),
+        ),
+    )
+"""
+
+
+def test_build_catalog_registers_every_installed_pack_and_names_the_pack_of_an_unknown_component(tmp_path, monkeypatch):
+    # A pack is a ``valkey_fuzzer.packs`` entry point of an installed distribution: a register(catalog) function.
+    (tmp_path / "tests_toy_pack.py").write_text(_TOY_PACK, encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    (tmp_path / "experiments").mkdir()
+    (tmp_path / "experiments" / "toy.yaml").write_text(
+        "id: toy.echo\nmode: smoke\ndeployment: {modes: [toy]}\ncomponents: [{use: toy.action.echo, id: echo}]\n"
+    )
+    scenario = {"scenario_id": "toy", "seed": 1, "experiment": {"id": "toy.echo"}, "deployment": {"mode": "toy"}}
+    installed = tuple(point for point in entry_points(group=PACK_GROUP) if point.name != "toy")
+    assert "valkey" in [point.name for point in installed]
+
+    points = (*installed, EntryPoint("toy", "tests_toy_pack:register", PACK_GROUP))
+    monkeypatch.setattr("valkey_fuzzer.catalog.entry_points", lambda group: points)
+    service = _service(tmp_path / "experiments")
+    assert {"toy.action.echo", "valkey.action.sleep"} <= set(service.catalog.components.registered_ids)
+    outcome = service.runner.run(service.compile(scenario))
+    assert (outcome.status, outcome.component_results[0].summary) == (OutcomeStatus.PASS, "hi")
+
+    # Without the toy pack, the error names the pack to install rather than a Valkey component.
+    monkeypatch.setattr("valkey_fuzzer.catalog.entry_points", lambda group: installed)
+    hint = r"no installed pack registers toy\.\* components; install the package whose 'valkey_fuzzer\.packs' entry point is named 'toy'"
+    with pytest.raises(ScenarioCompileError, match=rf"uses 'toy\.action\.echo', which is not registered; {hint}"):
+        _service(tmp_path / "experiments").compile(scenario)
 
 
 @pytest.mark.parametrize(

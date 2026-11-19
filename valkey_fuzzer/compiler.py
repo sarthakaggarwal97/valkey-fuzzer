@@ -16,7 +16,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Optional, Union
 
 from ._data import to_plain_data
-from .catalog import Catalog, ComponentRegistry
+from .catalog import PACK_GROUP, Catalog, ComponentRegistry
 from .documents import ABSENT, get_path, merge
 from .environment import (
     EnvironmentProviderRegistry,
@@ -146,6 +146,21 @@ def _hint(hint: str) -> str:
     return f"; {hint}" if hint else ""
 
 
+def _unknown_component_hint(component_id: str, components: ComponentRegistry) -> str:
+    """The closest registered IDs; or, when nothing of ``component_id``'s namespace is registered, the pack that
+    would register it (``<namespace>.<role>.<name>`` IDs come from the pack named after their namespace)."""
+
+    namespace = component_id.split(".")[0]
+    if component_id.count(".") != 2 or any(
+        registered.split(".")[0] == namespace for registered in components.registered_ids
+    ):
+        return did_you_mean(component_id, components.registered_ids)
+    return (
+        f"no installed pack registers {namespace}.* components; "
+        f"install the package whose {PACK_GROUP!r} entry point is named {namespace!r}"
+    )
+
+
 def _component_role(component: ComponentSpec, components: ComponentRegistry) -> ComponentRole:
     """The role ``component``'s registration has; an explicit role must agree with it."""
 
@@ -154,7 +169,7 @@ def _component_role(component: ComponentSpec, components: ComponentRegistry) -> 
         raise located(
             ScenarioCompileError(
                 f"component {component.id!r} uses {component.use!r}, which is not registered"
-                + _hint(did_you_mean(component.use, components.registered_ids))
+                + _hint(_unknown_component_hint(component.use, components))
             ),
             f"components.{component.id}.use",
         )
@@ -317,7 +332,7 @@ def resolve_components(plan: ExecutionPlan, components: ComponentRegistry) -> Ex
             raise located(
                 ScenarioCompileError(
                     f"component {component.use!r} is not registered"
-                    + _hint(did_you_mean(component.use, components.registered_ids))
+                    + _hint(_unknown_component_hint(component.use, components))
                 ),
                 f"components.{component.id}.use",
             )

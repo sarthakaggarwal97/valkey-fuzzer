@@ -2,13 +2,15 @@
 
 :class:`Catalog` owns everything one run service registers. Data-only
 experiment documents are parsed here (fragments merged in through
-``extends``); :func:`build_catalog` registers the Valkey components and the
+``extends``); :func:`build_catalog` registers every installed pack (the
+``valkey_fuzzer.packs`` entry points; the Valkey components are one) and the
 experiments of any experiment directories.
 """
 
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import partial
+from importlib.metadata import entry_points
 from os import PathLike
 from pathlib import Path
 from types import MappingProxyType
@@ -38,6 +40,10 @@ from .schema import (
 )
 
 ExperimentDirectory = Union[str, "PathLike[str]"]
+
+# The entry-point group packs register through: each entry point is a ``register(catalog)`` function, and is named
+# after the namespace of the IDs it registers (``valkey`` registers ``valkey.*``).
+PACK_GROUP = "valkey_fuzzer.packs"
 
 
 class DuplicateExperimentError(ExperimentError):
@@ -503,20 +509,13 @@ class Catalog:
         self._frozen = True
 
 
-def register_valkey_components(catalog: Catalog) -> None:
-    """Register the Valkey components, generator hooks, environment providers, experiment fragments, and experiments."""
+def installed_packs() -> dict[str, Callable[[Catalog], None]]:
+    """``{name: register}`` for every installed pack: the ``valkey_fuzzer.packs`` entry points, loaded, in name order."""
 
-    # The components import the engine, so they are imported only once it is loaded.
-    from . import components
-
-    fragments = components.experiment_fragments()
-    catalog.register(
-        components=components.component_registrations(),
-        generators=components.GENERATORS,
-        experiments=components.experiments(fragments),
-        environment_providers=components.ENVIRONMENT_PROVIDERS,
-        fragments=fragments,
-    )
+    # shortcut: a pack sees only the fragments of packs before it in name order; give packs a declared order (or
+    # register fragments in a first pass) when one pack's experiments must extend a later pack's fragments.
+    points = sorted(entry_points(group=PACK_GROUP), key=lambda point: point.name)
+    return {point.name: point.load() for point in points}
 
 
 def build_catalog(
@@ -524,18 +523,20 @@ def build_catalog(
     *,
     deployment_providers: Optional[Iterable[DeploymentProviderRegistration]] = None,
 ) -> Catalog:
-    """A frozen catalog: the deployment providers, the Valkey components, then ``experiment_directories``.
+    """A frozen catalog: the deployment providers, every installed pack, then ``experiment_directories``.
 
-    ``deployment_providers`` default to the local deployment's. The
+    ``deployment_providers`` default to the local deployment's. Each pack's
+    ``register(catalog)`` runs in name order (:func:`installed_packs`). The
     experiment directories load last, since data-only experiments may extend
-    the Valkey experiment fragments.
+    a pack's experiment fragments.
     """
 
     catalog = Catalog()
     if deployment_providers is None:
         deployment_providers = local_deployment_provider_registrations().values()
     catalog.deployment_providers.register_many(deployment_providers)
-    register_valkey_components(catalog)
+    for register in installed_packs().values():
+        register(catalog)
     catalog.load_experiment_directories(experiment_directories)
     catalog.freeze()
     return catalog
