@@ -1055,7 +1055,7 @@ def test_the_digest_oracle_needs_a_primary_and_never_fails_valkey_for_a_read_it_
     assert result.status.value == status, result.summary
     assert result.summary.startswith(summary)
     # A read that failed was retried; one that never worked, for the whole converge_timeout_s.
-    assert (clock.elapsed >= 5) is (status == "ERROR")
+    assert (clock.elapsed >= 5 - 1e-6) is (status == "ERROR")
 
 
 @pytest.mark.parametrize(

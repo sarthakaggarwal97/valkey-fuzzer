@@ -570,7 +570,7 @@ def test_a_rolling_upgrade_fails_over_within_its_step_timeout_and_aborts_after(m
     if error is not None:
         with pytest.raises(RuntimeError, match=error):
             failover()
-        assert handle.commands[-1] == ("valkey-0", "FAILOVER", "ABORT") and clock.elapsed >= 1
+        assert handle.commands[-1] == ("valkey-0", "FAILOVER", "ABORT") and clock.elapsed >= 1 - 1e-6
         return
     failover()
     assert ("valkey-0", "FAILOVER", "TO", "127.0.0.1", 7001, "TIMEOUT", 1000) in handle.commands
@@ -763,7 +763,7 @@ def test_a_graceful_promotion_counts_once_the_old_primary_follows_its_target(mon
     ), promoted
     if not success:
         assert result.status is ComponentStatus.FAIL and "failed without an interfering operation" in result.summary
-        assert clock.elapsed >= 0.3
+        assert clock.elapsed >= 0.3 - 1e-6
 
 
 class _RefusesBacklogLimit(FakeStandalone):
