@@ -114,10 +114,9 @@ execution plan again:
 valkey-fuzzer replay report.json
 ```
 
-Replay uses the fuzzer and binaries installed now. It refuses to run when the
-fuzzer, the experiment, the components, or the Valkey binary
-differ from the recorded run, unless you pass `--allow-drift`, and it does not
-reproduce timing.
+Replay uses the fuzzer and binaries installed now. When the fuzzer, the experiment, the components, or the
+Valkey binary differ from the recorded run, it still runs, warns, and records the difference in the report.
+It does not reproduce timing.
 
 Run one generated cluster chaos scenario (3 primaries with 1 replica each, a
 process kill and a failover, about 30 seconds):

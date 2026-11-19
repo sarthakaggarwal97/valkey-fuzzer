@@ -267,8 +267,7 @@ executing, writing report folders and run reports, the reproducer, replay
 with its provenance and binary drift checks, differential runs, and
 minimization. It never parses arguments or prints: methods take
 plain arguments, report progress through callbacks, and raise
-`RunServiceError` subclasses (`InputError`, `ReportWriteError`,
-`ReplayDriftError`) or the compiler's errors.
+`RunServiceError` subclasses (`InputError`, `ReportWriteError`) or the compiler's errors.
 
 The handlers in `valkey_fuzzer/commands/` (`run.py` for `run` and
 `cleanup-logs`; `batch.py`; `validate.py`; `listing.py`; `replay.py`;

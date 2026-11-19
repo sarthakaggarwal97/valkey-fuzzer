@@ -20,7 +20,6 @@ from valkey_fuzzer.differential import Differential, compare_outcomes, different
 from valkey_fuzzer.minimize import failure_signature, same_failure
 from valkey_fuzzer.reports import InputError, ReportWriteError, export_scenario, write_plan
 from valkey_fuzzer.results import ComponentResult, ComponentStatus, Evidence, OutcomeStatus, RunOutcome
-from valkey_fuzzer.service import ReplayDriftError
 
 GENERATED = ["--seed", "9", "--experiment", "valkey.cluster-chaos"]
 EXAMPLE = str(Path(__file__).resolve().parents[1] / "examples" / "valkey" / "snapshot_equivalence.yaml")
@@ -81,15 +80,15 @@ def _seed(report):
         (None, _seed, "the report's scenario and plan"),
     ],
 )
-def test_replay_refuses_a_report_whose_code_or_plan_changed(service, tmp_path, monkeypatch, changed, edit, item):
+def test_replay_records_drift_of_a_report_whose_code_or_plan_changed(
+    service, tmp_path, monkeypatch, changed, edit, item
+):
     recorded = recorded_report(service, tmp_path, edit)
     assert edit or service.prepare_replay(recorded).verified
     if changed is not None:
         changed(tmp_path, monkeypatch)
 
-    with pytest.raises(ReplayDriftError) as raised:
-        service.prepare_replay(recorded)
-    entries = {entry["item"]: entry for entry in raised.value.drift}
+    entries = {entry["item"]: entry for entry in service.prepare_replay(recorded).drift}
     assert item in entries and entries[item]["recorded"] != entries[item]["replay"]
 
 
@@ -98,10 +97,8 @@ def test_replay_treats_code_without_a_recorded_digest_as_drift(service, tmp_path
         report["reproducer"]["fuzzer_digest"] = None
 
     recorded = recorded_report(service, tmp_path, drop_digests)
-    with pytest.raises(ReplayDriftError) as raised:
-        service.prepare_replay(recorded)
-    assert {"item": "fuzzer code", "recorded": None, "replay": raised.value.drift[0]["replay"]} in raised.value.drift
-    assert service.prepare_replay(recorded, allow_drift=True).drift
+    drift = service.prepare_replay(recorded).drift
+    assert {"item": "fuzzer code", "recorded": None, "replay": drift[0]["replay"]} in drift
 
 
 def test_a_digest_missing_on_both_sides_is_drift(service, tmp_path, monkeypatch):
@@ -112,9 +109,7 @@ def test_a_digest_missing_on_both_sides_is_drift(service, tmp_path, monkeypatch)
     recorded = recorded_report(service, tmp_path, drop_digests)
     monkeypatch.setattr(provenance, "_fuzzer_digest", lambda: None)
     monkeypatch.setattr(provenance, "_experiment_digest", lambda experiment: None)
-    with pytest.raises(ReplayDriftError) as raised:
-        service.prepare_replay(recorded)
-    items = {entry["item"]: entry for entry in raised.value.drift}
+    items = {entry["item"]: entry for entry in service.prepare_replay(recorded).drift}
     assert items["fuzzer code"]["recorded"] is None and items["fuzzer code"]["replay"] is None
     assert any(item.endswith(" digest") and "experiment" in item for item in items)
 
@@ -134,12 +129,7 @@ def test_replay_compares_the_python_minor_version_and_the_platform(service, tmp_
         report["reproducer"][key] = value
 
     recorded = recorded_report(service, tmp_path, edit)
-    if drifts:
-        with pytest.raises(ReplayDriftError) as raised:
-            service.prepare_replay(recorded)
-        assert [entry["item"] for entry in raised.value.drift] == [item]
-    else:
-        assert not service.prepare_replay(recorded).drift
+    assert [entry["item"] for entry in service.prepare_replay(recorded).drift] == ([item] if drifts else [])
 
 
 def test_a_report_recording_no_python_or_platform_leaves_them_unchecked(service, tmp_path):
@@ -152,14 +142,12 @@ def test_a_report_recording_no_python_or_platform_leaves_them_unchecked(service,
     )
 
 
-def test_a_bare_plan_is_refused_unless_provenance_sits_beside_it_or_drift_is_allowed(service, tmp_path):
+def test_a_bare_plan_replays_unverified_unless_provenance_sits_beside_it(service, tmp_path):
     plan = service.compile(yaml.safe_load(Path(EXAMPLE).read_text()))
     bare = tmp_path / "bare" / "plan.json"
     bare.parent.mkdir()
     bare.write_text(plan.to_json())
-    with pytest.raises(InputError, match=r"bare plan.*--allow-drift"):
-        service.prepare_replay(str(bare))
-    assert not service.prepare_replay(str(bare), allow_drift=True).verified
+    assert not service.prepare_replay(str(bare)).verified
 
     # The run's own folder verifies: reproducer.json beside plan.json, even for a run that never finished.
     folder = tmp_path / "run"
@@ -170,16 +158,13 @@ def test_a_bare_plan_is_refused_unless_provenance_sits_beside_it_or_drift_is_all
     reproducer = json.loads((folder / "reproducer.json").read_text())
     reproducer["fuzzer_digest"] = "0" * 64
     (folder / "reproducer.json").write_text(json.dumps(reproducer))
-    with pytest.raises(ReplayDriftError):
-        service.prepare_replay(str(folder / "plan.json"))
-    # --allow-drift on a verifiable folder still records the drift it found.
-    assert service.prepare_replay(str(folder / "plan.json"), allow_drift=True).drift
+    assert service.prepare_replay(str(folder / "plan.json")).drift
 
     # An older fuzzer's reproducer.json that lacks keys is an input error, not a crash.
     del reproducer["python"]
     (folder / "reproducer.json").write_text(json.dumps(reproducer))
     with pytest.raises(InputError, match="not a complete reproducer"):
-        service.prepare_replay(str(folder / "plan.json"), allow_drift=True)
+        service.prepare_replay(str(folder / "plan.json"))
 
 
 def _failing(*results, diagnostics=None):

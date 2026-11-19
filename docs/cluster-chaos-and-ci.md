@@ -449,8 +449,8 @@ root, and that every action is pinned.
    Instance logs are in the run folder's `logs/`.
 
 `--valkey-binary` tells replay that the binary is chosen on purpose, so a
-build at a different path is not drift. Replay still refuses to run if your
-fuzzer, experiment, or components differ from the CI run's; check out
-the fuzzer commit the workflow used, or pass `--allow-drift` and keep the
-difference in mind. A rerun repeats the same cluster, failovers, and kill
+build at a different path is not drift. If your fuzzer, experiment, or
+components differ from the CI run's, replay still runs but warns and records
+the difference under `provenance.drift`; check out the fuzzer commit the
+workflow used to remove it. A rerun repeats the same cluster, failovers, and kill
 settings, but not the timing, so a race may need several runs.

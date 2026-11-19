@@ -216,8 +216,8 @@ valkey-fuzzer replay report.json
 
 Replay runs the recorded execution plan again with the fuzzer and
 Valkey binaries installed now. It first compares them with the provenance the
-report recorded and refuses to run if any differ; `--allow-drift` replays
-anyway and records the differences. The seed fixes every random choice the
+report recorded. If any differ it still runs, warns, and records the
+differences in the replay report. The seed fixes every random choice the
 components make, but not timing, so a fault that races with the server can
 land differently in a replay. Details are in [replay](cli.md#replay).
 

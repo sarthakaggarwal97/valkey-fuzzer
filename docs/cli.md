@@ -60,9 +60,9 @@ rejects it:
 | --- | --- |
 | `0` | `PASS`, or `SKIP_UNSUPPORTED` with `--allow-unsupported` |
 | `1` | `FAIL` |
-| `2` | `ERROR`, or the command itself failed (a compile error, replay or minimize drift, `minimize` keeping no reduction, a report that cannot be written) |
+| `2` | `ERROR`, or the command itself failed (a compile error, `minimize` keeping no reduction, a report that cannot be written) |
 | `3` | `SKIP_UNSUPPORTED` |
-| `64` | usage or input error (`EX_USAGE`): a bad option or option mix, no command, a missing or unreadable input file, or a bare `plan.json` replayed without `--allow-drift`. Nothing was judged. |
+| `64` | usage or input error (`EX_USAGE`): a bad option or option mix, no command, or a missing or unreadable input file. Nothing was judged. |
 | `130` | interrupted (Ctrl-C or `SIGTERM`; the run is cleaned up first) |
 
 Errors and warnings go to stderr, so stdout (`--format json`, say) holds only the command's output.
@@ -80,9 +80,8 @@ These hold for `run`, `replay`, and `diff`. The other cases:
   `0` when it kept a reduction or the run had nothing to minimize, and `2` when
   no reduction kept the failure (the reference failure did not reproduce, or the
   scenario is already minimal).
-- A `replay` that runs on another Valkey binary or artifact than the recorded run
-  keeps the outcome's code when it `FAIL`s (exit `1`, the drift recorded in the
-  report's `provenance.drift`); any other outcome exits `2`, unless `--allow-drift` was given.
+- `replay` and `minimize` never refuse because of drift. A `replay` that drifted but ran exits with the run's own
+  code (`0`, `1`, `2` or `3`); the drift is in the report's `provenance.drift` and on stderr.
 - `batch` and `validate` keep `2` for their own bad input; the `64` above is for the other commands.
 - `cleanup-logs` exits `0`, or `2` when the prompt is declined or a file could
   not be deleted.
@@ -643,35 +642,32 @@ Before it starts anything, replay compares this environment with the report's
 | each artifact, by the SHA-256 its provider recorded (after the run) | `outcome.diagnostics.environment_report` |
 
 The report's scenario must also compile, here, to the plan it records. If
-anything differs, replay prints the differences and exits `2` without
-running:
+anything differs, replay still runs. It prints each difference to stderr as a warning and records it in the
+replay report under `provenance.drift` (see [run reports](#run-reports)):
 
 ```text
-Error: refusing to replay because this environment differs from the recorded run:
-  - fuzzer code: recorded 3f1c9a0e5b2d..., replay uses 8d07e4c1a96f...
-Pass --allow-drift to replay anyway, or --valkey-binary to choose a binary on purpose.
+Warning: drift from the recorded run: fuzzer code: recorded 3f1c9a0e5b2d..., replay uses 8d07e4c1a96f...
 ```
 
 | Option | Meaning |
 | --- | --- |
-| `--allow-drift` | Replay anyway. The differences are printed and recorded in the replay report's `provenance`. A different deployment provider identity still stops the run, as `ERROR`. |
 | `--valkey-binary PATH` | Run the instances that use the deployment's default binary on this binary instead. It is recorded as an intentional override, not as drift; instances with their own `instance_binaries` entry are still compared. The replay report's `scenario` carries it as `deployment.valkey_binary`, so `minimize` and `replay` of that report run it too. |
-| `--artifact NAME=PATH` | Resolve the recorded plan's `valkey.artifact.local-binary` or `valkey.artifact.local-module` artifact `NAME` at `PATH` (a downloaded CI batch's `artifacts.parent` or `artifacts.module`, rebuilt here). Recorded under `provenance.artifact_overrides` and in the replay report's `scenario`; the binary that ran is still digested and compared with the recorded run after it, so a rebuild whose bytes differ is reported as drift, which `--allow-drift` accepts. |
+| `--artifact NAME=PATH` | Resolve the recorded plan's `valkey.artifact.local-binary` or `valkey.artifact.local-module` artifact `NAME` at `PATH` (a downloaded CI batch's `artifacts.parent` or `artifacts.module`, rebuilt here). Recorded under `provenance.artifact_overrides` and in the replay report's `scenario`; the binary that ran is still digested and compared with the recorded run after it, so a rebuild whose bytes differ is reported as drift. |
 | `--output PATH` | Save a copy of the replay report. |
 
 A binary that an artifact provider supplies is only known once the replay's
 deployment runs, so it is compared after the run, and so is every artifact
 whose provider recorded a `sha256` in its provenance (such as an upgrade
-target no instance starts on); a difference makes replay exit `2` unless
-`--allow-drift` was given (or exit `1` when the replay `FAIL`ed). When the recorded run lists no
+target no instance starts on); a difference is warned about and recorded like the rest; it does not change the exit code. A
+deployment provider whose identity differs from the plan's still stops the run, as `ERROR`. When the recorded run lists no
 instances at all, the Valkey git SHA is compared after the run instead. What
 could not be compared, such as an instance recorded without a digest, is
 printed as `Note: not verified: ...`. A digest missing on either side, and a
 different Python `major.minor` or platform, are drift. A run writes
 `reproducer.json` beside its `plan.json` before it starts, so `replay
 <folder>/plan.json` is verified (against the folder's `report.json` when it has
-one). A bare `plan.json` with neither beside it has no provenance: replay refuses
-it (exit `64`) unless `--allow-drift` is given, and then verifies nothing.
+one). A bare `plan.json` with neither beside it has no provenance: replay runs it,
+warns that nothing could be verified, and records `provenance.verified` as `false`.
 
 Replay is not hermetic even when nothing drifted: the seed fixes each
 component's random choices, not timing.
@@ -784,8 +780,8 @@ After a kept reduction the search starts over from the first candidate.
 `--max-attempts` (default 30, at least 1) bounds the runs; a candidate that
 does not compile does not count. Before anything runs, minimize compares this
 environment with the report's `reproducer` as [replay](#replay) does, and
-refuses (exit `2`) when anything differs, since a reduction that fails the
-same way on other code proves nothing; `--allow-drift` minimizes anyway. The minimized scenario goes to `--output`, or to
+warns on stderr when anything differs: a reduction that fails the
+same way on other code proves less. It still runs. The minimized scenario goes to `--output`, or to
 stdout. Each candidate run gets a report folder under `<root>/minimize/`.
 
 ## cleanup-logs
@@ -892,7 +888,7 @@ data a tool reads. Tools should read keys by name, not by position.
 | `outcome` | The full outcome: `plan` (the execution plan), `status`, `summary`, `component_results`, `evidence`, `diagnostics`, `started_at`, `ended_at`, and `valkey_sha`. |
 | `coverage` | The run's coverage `key` (a digest of its `tuple`), the `tuple`, `status`, and the evidence IDs observed. |
 | `reproducer` | `python`, `platform`, `experiment` (`id`, `digest`), `fuzzer_digest`, `components` (`component_id`, `role`, `implementation`), `deployment_provider` (`provider_id`, `implementation`, `implementation_digest`), `plan_digest`, `valkey_sha`, `command` (the same as the top-level `reproduce`), and `valkey_binary` (the binary the run used, or `null` when the server came from `PATH`); for a generated scenario also `generated` (`seed`, `experiment`, `attempt`, `excludes`, `boundary`, `profile`). |
-| `provenance` | For a replay: `source`, `verified`, `drift`, `drift_allowed`, `not_verified`, `valkey_binary_override`, and `artifact_overrides` (the `--artifact` paths by artifact name). `null` otherwise. |
+| `provenance` | For a replay: `source`, `verified`, `drift`, `not_verified`, `valkey_binary_override`, and `artifact_overrides` (the `--artifact` paths by artifact name). `null` otherwise. `drift` is a list, empty when nothing differed, of `{"item", "recorded", "replay"}`: what differed, the value the recorded run had, and the value this replay has. It includes differences only running reveals (a binary or artifact digest). Replay and `minimize` never refuse because of it. |
 
 Each entry of `outcome.component_results` has `component_id`, `status`,
 `summary`, `evidence`, `diagnostics`, `started_at`, and `ended_at`; a

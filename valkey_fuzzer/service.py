@@ -24,7 +24,7 @@ import os
 import random
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from ._data import error_record, to_plain_data
@@ -51,7 +51,6 @@ from .reports import (
     REPORT_FILE,
     SCENARIO_FILE,
     InputError,
-    RunServiceError,
     as_run_report,
     export_scenario,
     load_document,
@@ -66,15 +65,6 @@ from .reports import (
 from .results import OutcomeStatus, RunOutcome
 from .runner import PreflightError, Runner
 from .schema import load_yaml_mapping, plain_config
-
-
-class ReplayDriftError(RunServiceError):
-    """This environment differs from the recorded run, and drift was not allowed."""
-
-    def __init__(self, message: str, drift: Sequence[Mapping[str, Any]]):
-        super().__init__(message)
-        self.drift = [dict(entry) for entry in drift]
-
 
 # The deadline of a run that names none and has no search-profile budget (seconds).
 DEFAULT_TIMEOUT_S = 1200.0
@@ -209,7 +199,8 @@ class ReplayPlan:
 
 @dataclass(frozen=True)
 class ReplayResult:
-    """A replayed run; ``late_drift`` is binary drift only the replay's own deployment could reveal."""
+    """A replayed run; ``late_drift`` is drift only running it could reveal (already added to the report's
+    ``provenance["drift"]``)."""
 
     record: RunRecord
     late_drift: list[dict[str, Any]]
@@ -231,6 +222,7 @@ class Minimization:
     plan: ExecutionPlan
     reference: dict[str, Any]
     required_evidence: list[str]
+    drift: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def needed(self) -> bool:
@@ -593,16 +585,13 @@ class RunService:
         path: str,
         *,
         overrides: Overrides = NO_OVERRIDES,
-        allow_drift: bool = False,
     ) -> ReplayPlan:
-        """Load a run report (or a bare plan) and check it against this environment.
+        """Load a run report (or a bare plan) and compare it with this environment.
 
-        Raises :class:`InputError` for a bare plan with no provenance beside it, unless ``allow_drift``, and
-        :class:`ReplayDriftError` when the fuzzer, experiment,
-        components (their import path or code),
-        deployment provider, or Valkey binary differ from the recorded run, or
-        when the report's scenario does not compile to the plan it records,
-        unless ``allow_drift``. An ``overrides.binary``
+        Never refuses on drift: when the fuzzer, experiment, components (their import path or code),
+        deployment provider, or Valkey binary differ from the recorded run, or the report's scenario does
+        not compile to the plan it records, the differences are returned in ``provenance["drift"]``. A bare
+        plan with no provenance beside it replays with ``verified`` false. An ``overrides.binary``
         is intentional, so it is recorded rather than treated as drift, and
         the replay's scenario uses it, as ``run --valkey-binary`` records it.
         ``overrides.artifacts`` (``--artifact NAME=PATH``) resolves local-binary and local-module
@@ -611,18 +600,11 @@ class RunService:
         """
 
         plan, scenario, recorded = recorded_run(path)
-        if recorded is None and not allow_drift:
-            raise InputError(
-                f"{path} is a bare plan with no recorded provenance (no report.json or reproducer.json beside it), "
-                "so a replay cannot show it reproduces the original run; replay the run's report.json, "
-                "or pass --allow-drift to replay it unverified"
-            )
         binary, artifacts = overrides.binary, dict(overrides.artifacts)
         provenance: dict[str, Any] = {
             "source": path,
             "verified": recorded is not None,
             "drift": [],
-            "drift_allowed": allow_drift,
             "not_verified": [],
             "valkey_binary_override": binary or None,
             "artifact_overrides": artifacts,
@@ -630,8 +612,8 @@ class RunService:
         if recorded is None:
             provenance["not_verified"].append("everything: the file holds no reproducer")
         else:
-            provenance["drift"], provenance["not_verified"] = self._report_drift(
-                plan, scenario, recorded, overrides, allow_drift=allow_drift
+            provenance["drift"], provenance["not_verified"] = report_drift(
+                self.catalog, self.compile, plan, scenario, recorded, binary
             )
         if binary:
             data = to_plain_data(plan)
@@ -647,23 +629,6 @@ class RunService:
             if scenario is not None:
                 scenario = with_artifact_paths(scenario, artifacts)
         return ReplayPlan(plan=plan, scenario=scenario, provenance=provenance, recorded=recorded)
-
-    def _report_drift(
-        self,
-        plan: ExecutionPlan,
-        scenario: Optional[Mapping[str, Any]],
-        recorded: Mapping[str, Any],
-        overrides: Overrides,
-        *,
-        allow_drift: bool,
-    ) -> tuple[list[dict[str, Any]], list[str]]:
-        """:func:`~valkey_fuzzer.provenance.report_drift`; raises :class:`ReplayDriftError` on drift, unless
-        ``allow_drift``."""
-
-        drift, unchecked = report_drift(self.catalog, self.compile, plan, scenario, recorded, overrides.binary)
-        if drift and not allow_drift:
-            raise ReplayDriftError("this environment differs from the recorded run", drift)
-        return drift, unchecked
 
     def replay(self, prepared: ReplayPlan, *, timeout: Optional[float] = None) -> ReplayResult:
         """Run a prepared replay and record its provenance, including drift found only by running it."""
@@ -724,14 +689,11 @@ class RunService:
         write_document(os.path.join(session.folder(), "differential.json"), report)
         return SessionResult(report=report, report_dir=session.folder())
 
-    def prepare_minimization(
-        self, path: str, *, overrides: Overrides = NO_OVERRIDES, allow_drift: bool = False
-    ) -> Minimization:
+    def prepare_minimization(self, path: str, *, overrides: Overrides = NO_OVERRIDES) -> Minimization:
         """Load a failing run's report: its scenario and the failure signature a reduction must keep.
 
-        Raises :class:`ReplayDriftError` when this environment differs from
-        the recorded run, as replay does, unless ``allow_drift``: a reduction
-        is kept when it fails the same way, which on other code proves nothing.
+        Drift from the recorded run is returned in ``Minimization.drift``, not refused: a reduction
+        is kept when it fails the same way, which on other code proves less.
         """
 
         report = as_run_report(load_document(path), path)
@@ -740,13 +702,14 @@ class RunService:
             raise InputError("report does not contain the original scenario; minimize needs a 'run' report")
         reference_outcome = RunOutcome.from_data(report["outcome"])
         plan = reference_outcome.plan
-        self._report_drift(plan, scenario, report, overrides, allow_drift=allow_drift)
+        drift, _ = report_drift(self.catalog, self.compile, plan, scenario, report, overrides.binary)
         required = [requirement.evidence_id for requirement in plan.required_evidence]
         return Minimization(
             scenario=with_valkey_binary(self.catalog, scenario, overrides.binary),
             plan=plan,
             reference=failure_signature(reference_outcome, required),
             required_evidence=required,
+            drift=drift,
         )
 
     def minimize(
