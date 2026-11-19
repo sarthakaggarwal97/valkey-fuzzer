@@ -44,7 +44,8 @@ zoo/
 A case with a `patch.diff` is build-level. A case without one is
 configuration-level: its `overrides` break a clean build. The loader and the
 verdict are in `valkey_fuzzer/zoo.py`; the cases run through the
-[batch runner](cli.md#batch).
+[batch runner](cli.md#batch) as its `zoo` plug-in
+(`valkey_fuzzer/batch/zoo_plugin.py`).
 
 ## case.yaml
 

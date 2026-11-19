@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Changed: `batch.py` is the `valkey_fuzzer.batch` package; the zoo and spec conformance are its plug-ins
+
+- The 1,467-line module is split by concern: `spec.py` (options, sources), `sources.py` (random, matrix, scenarios,
+  failures), `jobs.py`, `worker.py`, `results.py`, `pool.py` (`BatchRunner`), `summary.py`. The names callers
+  import (`BatchOptions`, `BatchRunner`, `expand`, `load_spec`, `normalize_source`, `job_result`, `signature_key`,
+  `signature_label`, `run_worker`, `main`) stay importable from `valkey_fuzzer.batch`, and the worker command is
+  still `python -m valkey_fuzzer.batch TASK`.
+- `batch/hooks.py` is one plug-in interface: a `BatchSource` (a kind of `sources` entry) and a `BatchPlugin` with
+  the steps around a run (`after_run` in the worker, `judge` and `record` on a finished job, `summarize`). The bug
+  zoo (`batch/zoo_plugin.py`) and spec conformance (`batch/conform_plugin.py`) are registered through it; the batch
+  loop no longer names either. `Expansion.zoo` is `Expansion.recorded["zoo"]`.
+- No change to `batch.json`, `jobs.json`, `results/*.json`, `conformance/*.json`, `summary.json`, `batch.log`, the
+  console output, or the exit codes for the same seeds. The one visible difference is the order of the source kinds
+  in the error for an unknown source (`zoo` is now listed last).
+
 ### Changed: packs register through the `valkey_fuzzer.packs` entry point
 
 - `build_catalog` no longer imports the Valkey components by name: it calls the `register(catalog)` of every entry

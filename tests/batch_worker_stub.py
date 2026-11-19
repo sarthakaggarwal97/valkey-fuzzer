@@ -20,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from valkey_fuzzer import batch, hoststate
+from valkey_fuzzer.batch import pool
 from valkey_fuzzer.hoststate import TITLE_TAG, Owner, current_owner, tag_directory
 from valkey_fuzzer.results import ComponentResult, ComponentStatus, OutcomeStatus, RunOutcome
 from valkey_fuzzer.service import RunService
@@ -124,13 +125,13 @@ class InProcessWorkers:
         monkeypatch.setattr(RunService, "run_plan", run_plan)
         monkeypatch.setattr(sys.modules[__name__], "_exit", self._exit)
         monkeypatch.setattr(
-            batch,
+            pool,
             "subprocess",
             type("Subprocess", (), {"Popen": self._popen, "STDOUT": subprocess.STDOUT, "DEVNULL": subprocess.DEVNULL}),
         )
-        monkeypatch.setattr(batch, "owner_of", self.owner)
-        monkeypatch.setattr(batch, "_signal_worker", self._signal)
-        monkeypatch.setattr(batch, "POLL_S", 0.01)
+        monkeypatch.setattr(pool, "owner_of", self.owner)
+        monkeypatch.setattr(pool, "_signal_worker", self._signal)
+        monkeypatch.setattr(pool, "POLL_S", 0.01)
         # Until a run leaks a server, no process carries an owner of these workers, so the sweep's process listing
         # (a ps call each) can find none.
         _SERVERS.clear()

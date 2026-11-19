@@ -143,7 +143,7 @@ def test_main_maps_no_command_an_interrupt_and_an_unexpected_error_to_exit_codes
     ("target", "call"),
     [
         ("valkey_fuzzer.commands.run.run_command", lambda: _cli("run", "s.yaml")),
-        ("valkey_fuzzer.batch.run_worker", lambda: batch.main(["task.json"])),
+        ("valkey_fuzzer.batch.worker.run_worker", lambda: batch.main(["task.json"])),
     ],
     ids=["cli", "batch-worker"],
 )

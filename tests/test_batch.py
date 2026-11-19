@@ -25,14 +25,21 @@ from valkey_fuzzer.batch import (
     BatchError,
     BatchOptions,
     BatchRunner,
+    conform_plugin,
     expand,
+    hooks,
+    jobs,
     normalize_source,
+    pool,
+    results,
+    worker,
 )
 from valkey_fuzzer.cli import main
 from valkey_fuzzer.commands import batch as batch_command
 from valkey_fuzzer.deployment.local import ports
 from valkey_fuzzer.hoststate import OWNER_FILE, sweep
 from valkey_fuzzer.results import OutcomeStatus, RunOutcome
+from valkey_fuzzer.schema import ConfigField, ConfigSchema
 
 from .batch_worker_stub import InProcessWorkers
 from .valkey_experiments_support import valkey_service
@@ -56,8 +63,8 @@ def stub(tmp_path, monkeypatch):
     monkeypatch.setenv("BATCH_STUB_PLAN", str(plan))
     monkeypatch.setenv("BATCH_STUB_LOG", str(log))
     # Test processes running at once (other checkouts' suites) would otherwise refuse each other's batches.
-    monkeypatch.setattr(batch, "HOST_LOCK", str(tmp_path / "host-batch.lock"))
-    monkeypatch.setattr(batch, "WORKER_COMMAND", tuple(STUB))
+    monkeypatch.setattr(pool, "HOST_LOCK", str(tmp_path / "host-batch.lock"))
+    monkeypatch.setattr(pool, "WORKER_COMMAND", tuple(STUB))
     return type("Stub", (), {
         "behave": staticmethod(lambda **items: plan.write_text(json.dumps({str(k).replace("_", "-"): v for k, v in items.items()}))),
         "runs": staticmethod(lambda: [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []),
@@ -151,7 +158,7 @@ def test_the_worker_isolates_its_run_keeps_a_zoo_build_and_refuses_a_scenario_to
                               "32768-60999, .*: pick a port_base of at most 22528")):  # fmt: skip
         with pytest.raises(BatchError, match=message):
             BatchOptions(**options).check()
-    monkeypatch.setattr(batch, "PORT_BLOCK", 5)
+    monkeypatch.setattr(worker, "PORT_BLOCK", 5)
     assert (
         task(
             {
@@ -188,7 +195,7 @@ def test_a_batch_folder_keeps_the_experiments_its_runs_load(tmp_path):
 def test_a_run_that_leaks_crashes_or_hangs_is_an_error_and_the_sweep_removes_what_it_left(
     tmp_path, workers, stub, monkeypatch
 ):
-    monkeypatch.setattr(batch, "DEADLINE_GRACE_S", 0.0)
+    monkeypatch.setattr(pool, "DEADLINE_GRACE_S", 0.0)
     behaviors = {
         "0": "leak-server",
         "1": "leak-dir",
@@ -230,10 +237,10 @@ def test_a_run_that_leaks_crashes_or_hangs_is_an_error_and_the_sweep_removes_wha
 def test_a_worker_is_interrupted_alone_and_only_a_kill_reaches_its_process_group(monkeypatch):
     # The worker's servers share its process group; its run stops them, so SIGINT and SIGTERM are its alone.
     sent = []
-    monkeypatch.setattr(batch.os, "kill", lambda pid, sig: sent.append(("kill", pid, sig)))
-    monkeypatch.setattr(batch.os, "killpg", lambda pid, sig: sent.append(("killpg", pid, sig)))
+    monkeypatch.setattr(pool.os, "kill", lambda pid, sig: sent.append(("kill", pid, sig)))
+    monkeypatch.setattr(pool.os, "killpg", lambda pid, sig: sent.append(("killpg", pid, sig)))
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGKILL):
-        batch._signal_worker(7, sig)
+        pool._signal_worker(7, sig)
     assert sent == [("kill", 7, signal.SIGINT), ("kill", 7, signal.SIGTERM), ("killpg", 7, signal.SIGKILL)]
 
 
@@ -402,7 +409,7 @@ def test_a_batch_removes_what_dead_fuzzers_left_on_the_host_before_its_first_job
     # nobody configured, and a FAIL Valkey did not cause.
     runner, swept = _batch(tmp_path, [_random(1)]), []
     chain = hoststate.Leftover("chain", "VF-1-000000-00000000", "1-000000", None)
-    worker_sweep = batch.sweep
+    worker_sweep = pool.sweep
 
     def host_sweep(roots=None, *, owners=None, **options):
         if owners is not None:
@@ -410,7 +417,7 @@ def test_a_batch_removes_what_dead_fuzzers_left_on_the_host_before_its_first_job
         swept.append(roots)
         return hoststate.SweepReport(dry_run=False, leftovers=[chain])
 
-    monkeypatch.setattr(batch, "sweep", host_sweep)
+    monkeypatch.setattr(pool, "sweep", host_sweep)
     chain.action, chain.reason = "failed", "iptables: busy"
     with pytest.raises(BatchError, match=r"could not remove 1 leftover.*iptables: busy.*sweep the host"):
         runner.run()
@@ -432,7 +439,7 @@ def test_a_report_the_batch_cannot_read_is_an_error_but_a_bug_in_its_signature_i
     scenario = {"scenario_id": "j", "seed": 1, "experiment": {"id": SNAPSHOT}, "deployment": {"mode": "standalone"}}
     outcome = RunOutcome(plan=valkey_service().compile(scenario), status=OutcomeStatus.FAIL, summary="lost keys")
     (tmp_path / "report.json").write_text(json.dumps({**report, "outcome": to_plain_data(outcome)}))
-    monkeypatch.setattr(batch, "failure_signature", lambda *args: {}["missing"])
+    monkeypatch.setattr(results, "failure_signature", lambda *args: {}["missing"])
     with pytest.raises(KeyError):
         batch.job_result(job, str(tmp_path), exit_code=1, timed_out=False, leaks=[], extra={})
 
@@ -441,7 +448,7 @@ def test_a_second_ctrl_c_sends_the_next_signal_at_once(tmp_path, workers, stub):
     runner = _batch(tmp_path, [_random(1)])
     worker = type("Worker", (), {"pid": 42})()
     now = time.monotonic()
-    item = batch._Running(job=runner.jobs[0], slot=0, process=worker, owner="42-000000", started=now,
+    item = pool._Running(job=runner.jobs[0], slot=0, process=worker, owner="42-000000", started=now,
                           deadline=now + 600, load_start=0.0)  # fmt: skip
     runner._running[0] = item
     runner._request_stop(signal.SIGINT, None)
@@ -483,7 +490,7 @@ def test_a_matrix_case_that_does_not_compile_keeps_the_batch_from_passing(tmp_pa
 
 
 def test_a_batch_over_the_job_limit_is_refused_while_its_sources_expand(monkeypatch):
-    monkeypatch.setattr(batch, "MAX_JOBS", 3)
+    monkeypatch.setattr(jobs, "MAX_JOBS", 3)
     service, compiled = valkey_service(), []
     monkeypatch.setattr(service, "compile", compiled.append)
     base = {"seed": 1, "experiment": {"id": SNAPSHOT}, "deployment": {"mode": "standalone"}}
@@ -498,7 +505,7 @@ def test_a_batch_over_the_job_limit_is_refused_while_its_sources_expand(monkeypa
 def test_a_second_batch_on_the_host_is_refused_before_it_starts_a_job(tmp_path, workers, stub):
     # Every batch's workers use loopback blocks 1, 2, ...: a second batch's jobs would all fail to claim them.
     runner = _batch(tmp_path, [_random(1)])
-    with open(batch.HOST_LOCK, "w") as other:
+    with open(pool.HOST_LOCK, "w") as other:
         fcntl.flock(other, fcntl.LOCK_EX)
         with pytest.raises(BatchError, match="another batch is running on this host"):
             runner.run()
@@ -576,12 +583,12 @@ def test_a_profile_sets_the_seeds_and_deadline_and_pruning_keeps_a_passing_runs_
 def test_each_run_draws_for_its_workers_share_of_the_cores_the_batch_was_created_with(
     tmp_path, workers, stub, monkeypatch
 ):
-    monkeypatch.setattr(batch, "usable_cores", lambda: 6.0)
+    monkeypatch.setattr(pool, "usable_cores", lambda: 6.0)
     sources = [normalize_source({"random": {"experiments": [SNAPSHOT], "seeds": 3, "first_seed": 0,
                                             "excludes": EXCLUDES}}, "/")]  # fmt: skip
     runner = _batch(tmp_path, sources, workers=3)
     # The cores are the creating host's, kept for a resume elsewhere.
-    monkeypatch.setattr(batch, "usable_cores", lambda: 48.0)
+    monkeypatch.setattr(pool, "usable_cores", lambda: 48.0)
     runner.run()
     assert json.loads(Path(runner.folder, "batch.json").read_text())["cores"] == 6.0
     assert [run["cores"] for run in stub.runs()] == [2.0, 2.0, 2.0]
@@ -644,7 +651,7 @@ def test_spec_conform_of_an_approved_bundle_decides_the_run_and_a_drafts_is_only
         3: {"replication": {"approved": True, "status": "error", "error": "2 mapped record(s) could not be applied"}},
         4: {"replication": {"approved": True, "status": "skipped", "reason": "tla2tools.jar not found"}},
     }
-    monkeypatch.setattr(batch, "conform_folder", lambda folder, tools, unavailable="": canned[_seed(folder)])
+    monkeypatch.setattr(conform_plugin, "conform_folder", lambda folder, tools, unavailable="": canned[_seed(folder)])
     sources = [_random(5, experiments=[REPLICATION])]
     runner = _batch(tmp_path, sources, prune_pass=True, serial_reruns=1)
     summary = runner.run()
@@ -715,25 +722,25 @@ def test_a_run_whose_plan_names_a_bundle_but_whose_worker_wrote_no_conformance_i
     plan = {"components": [{"use": "valkey.observer.log-trigger", "id": "steps", "config": {"spec": "replication"}}]}
     report = {"status": "PASS", "outcome": {"plan": plan}}
     # The entry says whether the claims are approved, as the worker's would: replication's are a draft.
-    assert batch._conformance(str(tmp_path), report) == {
+    assert conform_plugin._conformance(str(tmp_path), report) == {
         "replication": {
             "status": "error",
             "error": "no conform.json: the worker ended before spec conform checked the run",
             "approved": False,
         }
     }
-    assert batch._conformance(str(tmp_path), {**report, "status": "ERROR"}) == {}
+    assert conform_plugin._conformance(str(tmp_path), {**report, "status": "ERROR"}) == {}
     (tmp_path / "conform.json").write_text("{")
-    assert "conform.json cannot be read" in batch._conformance(str(tmp_path), report)["replication"]["error"]
+    assert "conform.json cannot be read" in conform_plugin._conformance(str(tmp_path), report)["replication"]["error"]
     # A bundle that does not load is held against the run: nothing says its claims are a draft.
-    assert batch._approved("no-such-bundle") is True
-    monkeypatch.setattr(batch, "load_bundle", lambda name: Mock(claims=Mock(status="approved")))
-    assert batch._approved("replication") is True
+    assert conform_plugin._approved("no-such-bundle") is True
+    monkeypatch.setattr(conform_plugin, "load_bundle", lambda name: Mock(claims=Mock(status="approved")))
+    assert conform_plugin._approved("replication") is True
 
 
 def test_a_missing_conformance_is_held_against_the_run_only_for_approved_claims(tmp_path, workers, stub, monkeypatch):
     # The worker wrote no conform.json: the batch's own error entry decides by the bundle's claims.
-    monkeypatch.setattr(batch, "conform_folder", lambda folder, tools, unavailable="": {})
+    monkeypatch.setattr(conform_plugin, "conform_folder", lambda folder, tools, unavailable="": {})
     runner = _batch(tmp_path, [_random(1, experiments=[REPLICATION])])
     runner.run()
     (draft,) = _results(runner).values()
@@ -741,7 +748,7 @@ def test_a_missing_conformance_is_held_against_the_run_only_for_approved_claims(
     assert draft["conformance"]["replication"]["approved"] is False
     assert "no conform.json" in draft["conformance"]["replication"]["error"]
 
-    monkeypatch.setattr(batch, "_approved", lambda name: True)
+    monkeypatch.setattr(conform_plugin, "_approved", lambda name: True)
     runner = _batch(tmp_path, [_random(1, experiments=[REPLICATION])], name="approved")
     runner.run()
     (approved,) = _results(runner).values()
@@ -752,8 +759,8 @@ def test_a_missing_conformance_is_held_against_the_run_only_for_approved_claims(
 
 @pytest.mark.slow
 def test_real_workers_run_in_parallel_in_isolation_and_a_leaked_or_hung_one_is_cleaned_up(tmp_path, stub, monkeypatch):
-    monkeypatch.setattr(batch, "DEADLINE_GRACE_S", 0.0)
-    monkeypatch.setattr(batch, "STOP_GRACE_S", (0.5, 0.5))
+    monkeypatch.setattr(pool, "DEADLINE_GRACE_S", 0.0)
+    monkeypatch.setattr(pool, "STOP_GRACE_S", (0.5, 0.5))
     stub.behave(**{"0": "sleep:0.6", "1": "sleep:0.6", "2": "sleep:0.6", "3": "leak-server", "4": "hang"})
     started = time.monotonic()
     summary = (runner := _batch(tmp_path, [_random(5)], workers=3, timeout_s=3)).run()
@@ -783,7 +790,7 @@ def test_real_workers_run_in_parallel_in_isolation_and_a_leaked_or_hung_one_is_c
     assert not any(Path(runner.folder, "work").glob("w*/*")), "worker scratch is wiped after every job"
 
 
-_DRIVER = "import sys; sys.path.insert(0, {root!r}); from tests.test_batch import STUB; from valkey_fuzzer import batch; batch.WORKER_COMMAND = tuple(STUB); batch.BatchRunner({folder!r}).run()"
+_DRIVER = "import sys; sys.path.insert(0, {root!r}); from tests.test_batch import STUB; from valkey_fuzzer.batch import pool; pool.WORKER_COMMAND = tuple(STUB); pool.BatchRunner({folder!r}).run()"
 
 
 @pytest.mark.slow
@@ -864,3 +871,74 @@ def test_a_resume_refuses_random_jobs_that_the_installed_code_would_draw_differe
     with patch("sys.argv", resume):
         assert main() == 0
     assert len(stub.runs()) == 2
+
+
+def test_a_plug_in_takes_part_at_every_point_of_the_batch_and_its_jobs_are_its_own_to_judge(
+    tmp_path, workers, stub, monkeypatch
+):
+    def toy_jobs(value, index, service, options, expansion):
+        expansion.recorded["toy"] = {"seeds": value["seeds"]}
+        for seed in value["seeds"]:
+            scenario = {"scenario_id": f"toy-{seed}", "seed": seed, "experiment": {"id": SNAPSHOT},
+                        "deployment": {"mode": "standalone"}}  # fmt: skip
+            expansion.add(
+                {"id": f"toy-{seed}", "source": "toy", "label": "toy", "scenario": scenario, "toy": {"seed": seed}}
+            )
+
+    class Toy(hooks.BatchPlugin):
+        name = "toy"
+        kept_when_pruned = ("toy.txt",)
+        source = hooks.BatchSource(
+            "toy",
+            ConfigSchema({"seeds": ConfigField(list, items=ConfigField(int))}),
+            lambda settings, base_dir, where: settings,
+            toy_jobs,
+            shorthand=lambda value: {"seeds": value} if isinstance(value, list) else None,
+        )
+
+        def after_run(self, report_dir):
+            Path(report_dir, "toy.txt").write_text("checked")
+
+        def judge(self, job, run_dir, report, verdict):
+            # Before the leaks count: the verdict of the batch's own jobs; the plug-in's are recorded instead.
+            if "toy" in job:
+                return None
+            verdict.summary = f"toy: {verdict.summary}"
+            return Path(run_dir, "toy.txt").read_text()
+
+        def record(self, job, run_dir, report, result):
+            return result["status"] if "toy" in job else None
+
+        def summarize(self, runner, results, main):
+            own = sorted(result["id"] for result in results.values() if result["source"] == "toy")
+            return {"jobs": own, "counted": len(main)}, ["SKIP_UNSUPPORTED"]
+
+    monkeypatch.setattr(hooks, "PLUGINS", list(hooks.PLUGINS))
+    monkeypatch.setattr(hooks, "SOURCES", dict(hooks.SOURCES))
+    hooks.register(Toy())
+    stub.behave(**{"7": "fail:data"})
+    sources = [_random(2), normalize_source({"toy": [7, 8]}, "/")]
+    runner = _batch(tmp_path, sources, prune_pass=True, serial_reruns=1)
+    assert [job["id"] for job in runner.jobs] == [_id(0), _id(1), "toy-7", "toy-8"]
+    assert json.loads(Path(runner.folder, "batch.json").read_text())["toy"] == {"seeds": [7, 8]}
+
+    summary = runner.run()
+
+    results = _results(runner)
+    # The worker ran the plug-in after each run, and pruning kept what it wrote.
+    assert {item.name for item in Path(runner.folder, "runs", _id(0)).iterdir()} == {
+        "report.json",
+        "scenario.yaml",
+        "toy.txt",
+    }
+    assert results[_id(0)]["toy"] == "checked" and results[_id(0)]["summary"] == "toy: PASS"
+    assert results["toy-7"]["toy"] == "FAIL" and results["toy-8"]["toy"] == "PASS"
+    # Its jobs are neither counted, grouped, re-run serially, nor sampled by a later batch's failures source.
+    assert summary["counts"] == {"PASS": 2} and summary["signatures"] == [] and runner.serial_jobs() == []
+    assert not [job for job in results if job.startswith("serial-")]
+    assert batch.failure_samples(runner.folder) == []
+    assert summary["toy"] == {"jobs": ["toy-7", "toy-8"], "counted": 2}
+    # The statuses it adds count toward the batch's.
+    assert summary["status"] == "SKIP_UNSUPPORTED" and summary["exit_code"] == 3
+    with pytest.raises(ValueError, match="already registered"):
+        hooks.register(Toy())

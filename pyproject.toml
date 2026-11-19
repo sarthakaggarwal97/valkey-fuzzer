@@ -58,6 +58,7 @@ valkey = "valkey_fuzzer.components:register"
 [tool.setuptools]
 packages = [
     "valkey_fuzzer",
+    "valkey_fuzzer.batch",
     "valkey_fuzzer.commands",
     "valkey_fuzzer.components",
     "valkey_fuzzer.deployment",
