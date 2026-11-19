@@ -26,7 +26,6 @@ from valkey_fuzzer.batch import (
     BatchOptions,
     BatchRunner,
     expand,
-    load_spec,
     normalize_source,
 )
 from valkey_fuzzer.cli import main
@@ -34,7 +33,6 @@ from valkey_fuzzer.commands import batch as batch_command
 from valkey_fuzzer.deployment.local import ports
 from valkey_fuzzer.hoststate import OWNER_FILE, sweep
 from valkey_fuzzer.results import OutcomeStatus, RunOutcome
-from valkey_fuzzer.service import RunService
 
 from .batch_worker_stub import InProcessWorkers
 from .valkey_experiments_support import valkey_service
@@ -798,7 +796,7 @@ RESUME_REFUSES = [
     ["--dry-run"], ["--timeout", "5"], ["--profile", "adversarial"], ["--base-port", "15000"],
     ["--serial-reruns", "1"], ["--prune-pass"], ["--valkey-binary", "/other/valkey-server"],
     ["--batch-id", "x"], ["--out", "elsewhere"], ["--experiment-dir", "experiments"],
-    ["--artifact-dir", "artifacts"], ["--random", SNAPSHOT], ["--seeds", "3"], ["--corpus-from", "earlier"],
+    ["--artifact-dir", "artifacts"], ["--random", SNAPSHOT], ["--seeds", "3"],
 ]  # fmt: skip
 
 
@@ -840,169 +838,3 @@ def test_a_resume_refuses_random_jobs_that_the_installed_code_would_draw_differe
     with patch("sys.argv", resume):
         assert main() == 0
     assert len(stub.runs()) == 2
-
-
-@pytest.fixture
-def coverage(workers, monkeypatch):
-    """Fake code coverage: ``reach(plan)`` is what a run reaches; by default one feature per drawn value."""
-
-    plans, canned = [], RunService.run_plan
-
-    def run_plan(self, plan, **kwargs):
-        plans.append(plan)
-        return canned(self, plan, **kwargs)
-
-    fake = {"reach": lambda plan: [f"{name}={value}" for name, value in plan.inputs.items()]}
-    monkeypatch.setattr(RunService, "run_plan", run_plan)
-    # The worker reads its run's coverage right after the run, in this process.
-    monkeypatch.setattr(batch, "gcov_features", lambda directory: fake["reach"](plans[-1]))
-    return fake
-
-
-def _drawn(runner, job_id):
-    return json.loads(Path(runner.folder, "runs", job_id, "report.json").read_text())["reproducer"]["generated"]
-
-
-def _kept(draws, changed):
-    """The draws a derivation keeps: every one but ``changed``, and but the config churn's keys when they come after
-    it, since they are taken anew from the pools drawn (snapshot-equivalence has no hooks)."""
-
-    order = list(draws)
-    after = order.index(changed) if changed in order else len(order)
-    derived = "inputs.config_churn_keys"
-    return {
-        name: draws[name]
-        for index, name in enumerate(order)
-        if name != changed and not (name == derived and index > after)
-    }
-
-
-def test_a_guided_batch_derives_its_runs_from_those_that_reached_new_code(tmp_path, workers, stub, coverage):
-    runner = _batch(tmp_path, [_random(3, guided=6)])
-    summary = runner.run()
-
-    results = _results(runner)
-    guided = [job for job in runner.jobs if job["source"] == "guided"]
-    assert summary["complete"] and summary["counts"] == {"PASS": 9} and len(guided) == 6
-    corpus = json.loads(Path(runner.folder, "corpus.json").read_text())
-    entries = [entry["job"] for entry in corpus["entries"]]
-    # The first run reaches everything first; a run's new features are those no run before it reached.
-    assert entries[0] == _id(0) and all(results[job]["code_coverage"]["new"] > 0 for job in entries)
-    assert summary["code_coverage"] == {"covered": corpus["covered"], "corpus": len(entries)}
-    assert sum(result["code_coverage"]["new"] for result in results.values()) == corpus["covered"]
-    for job in guided:
-        parent, changed = job["guided"]["parent"], job["guided"]["mutation"]
-        assert parent in entries and results[job["id"]]["guided"] == job["guided"]
-        before, after = _drawn(runner, parent), _drawn(runner, job["id"])
-        # A new seed, and every draw but the one it changes, and what derives from it, kept.
-        assert after["seed"] == job["generate"]["seed"] != before["seed"]
-        assert job["generate"]["pinned"] == _kept(before["draws"], changed)
-        assert all(after["draws"][name] == value for name, value in job["generate"]["pinned"].items())
-        assert changed == "seed" or changed in before["draws"]
-    # Only the job lines: without root the host sweep logs an "unchecked" line first (iptables needs root).
-    assert all(" coverage +" in line for line in _log(runner) if line.startswith("["))
-
-
-def test_a_guided_batch_without_coverage_draws_fresh_seeds_and_a_resume_draws_the_rest(
-    tmp_path, workers, stub, coverage, monkeypatch
-):
-    def unreadable(plan):
-        raise OSError("gcov: not found")
-
-    coverage["reach"] = unreadable
-    runner = _batch(tmp_path, [_random(1, guided=3)])
-    # Stopped once it drew its first guided job, before that job starts.
-    drawn = BatchRunner._next_guided
-
-    def stop_after(self):
-        job = drawn(self)
-        self.stop_requested = True
-        return job
-
-    with monkeypatch.context() as stopping:
-        stopping.setattr(BatchRunner, "_next_guided", stop_after)
-        assert not runner.run()["complete"]
-    assert [job["source"] for job in runner.jobs] == ["random", "guided"] and len(_results(runner)) == 1
-
-    summary = BatchRunner(runner.folder).run()
-
-    jobs = json.loads(Path(runner.folder, "jobs.json").read_text())
-    assert summary["complete"] and summary["counts"] == {"PASS": 4} and len(stub.runs()) == 4
-    assert [job["source"] for job in jobs] == ["random"] + ["guided"] * 3 and len({job["id"] for job in jobs}) == 4
-    # With no corpus, a guided job is a fresh seed; a run whose coverage cannot be read keeps its result.
-    assert all(job["guided"]["parent"] is None and "pinned" not in job["generate"] for job in jobs[1:])
-    assert all(result["code_coverage"] is None for result in _results(runner).values())
-    assert summary["code_coverage"] == {"covered": 0, "corpus": 0}
-    assert (
-        "No code coverage: OSError: gcov: not found"
-        in Path(runner.folder, "runs", jobs[1]["id"], "console.log").read_text()
-    )
-
-
-def _files(folder):
-    return {path: path.read_bytes() for path in Path(folder).rglob("*") if path.is_file()}
-
-
-def test_a_guided_batch_starts_from_an_earlier_batchs_corpus_and_adds_only_what_is_new_to_both(
-    tmp_path, workers, stub, coverage
-):
-    earlier = _batch(tmp_path, [_random(2, guided=2)], name="earlier")
-    earlier.run()
-    before = _files(earlier.folder)
-    old = json.loads(Path(earlier.folder, "corpus.json").read_text())
-    runner = _batch(tmp_path, [_random(1, guided=3)], name="later", corpus_from=earlier.folder)
-
-    # Created with the earlier corpus: each entry with its run folder and what that run drew.
-    seeded = json.loads(Path(runner.folder, "corpus.json").read_text())
-    assert seeded["covered"] == old["covered"] and len(seeded["entries"]) == len(old["entries"])
-    for entry, imported in zip(old["entries"], seeded["entries"]):
-        run = os.path.join(earlier.folder, "runs", entry["job"])
-        assert imported == {**entry, "run": run, "draws": _drawn(earlier, entry["job"])["draws"]}
-    summary = runner.run()
-
-    assert summary["complete"] and summary["counts"] == {"PASS": 4}
-    results = _results(runner)
-    # Seed 0 draws what the earlier batch's seed 0 drew: nothing new to the combined corpus, so no entry,
-    # although an imported entry has its job ID.
-    assert results[_id(0)]["code_coverage"]["reached"] > 0 and results[_id(0)]["code_coverage"]["new"] == 0
-    corpus = json.loads(Path(runner.folder, "corpus.json").read_text())
-    assert corpus["entries"][: len(seeded["entries"])] == seeded["entries"]
-    assert all(entry["job"] != _id(0) for entry in corpus["entries"][len(seeded["entries"]) :])
-    assert summary["code_coverage"]["covered"] == old["covered"] + sum(
-        r["code_coverage"]["new"] for r in results.values()
-    )
-    # The first guided job can only derive from an imported entry: it names that entry's run folder.
-    first = next(job for job in runner.jobs if job["source"] == "guided")
-    parent, changed = first["guided"]["parent"], first["guided"]["mutation"]
-    assert parent in {entry["run"] for entry in seeded["entries"]}
-    drawn = _drawn(earlier, os.path.basename(parent))["draws"]
-    assert first["generate"]["pinned"] == _kept(drawn, changed)
-    assert results[first["id"]]["guided"] == first["guided"]
-    # The earlier batch is only read.
-    assert _files(earlier.folder) == before
-
-    # A batch after it brings the entries it imported as they are, and its own with their run folders.
-    after = _batch(tmp_path, [_random(1, guided=1)], name="next", corpus_from=runner.folder)
-    chained = json.loads(Path(after.folder, "corpus.json").read_text())
-    assert chained["covered"] == corpus["covered"]
-    assert chained["entries"][: len(seeded["entries"])] == seeded["entries"]
-    assert all(
-        entry["run"] == os.path.join(runner.folder, "runs", entry["job"])
-        for entry in chained["entries"][len(seeded["entries"]) :]
-    )
-
-
-def test_corpus_from_needs_an_earlier_corpus_and_a_guided_source(tmp_path, workers, stub):
-    plain = _batch(tmp_path, [_random(1)], name="plain")
-    for folder in (str(tmp_path / "missing"), plain.folder):
-        with pytest.raises(BatchError, match=f"corpus_from {folder} holds no corpus"):
-            _batch(tmp_path, [_random(1, guided=1)], name="later", corpus_from=folder)
-    Path(plain.folder, "corpus.json").write_text("{not json")
-    with pytest.raises(BatchError, match="holds no corpus to start from: JSONDecodeError"):
-        _batch(tmp_path, [_random(1, guided=1)], name="later", corpus_from=plain.folder)
-    with pytest.raises(BatchError, match="needs a random source with guided runs"):
-        _batch(tmp_path, [_random(1)], name="later", corpus_from=plain.folder)
-    assert not (tmp_path / "later").exists()
-    spec = tmp_path / "spec.yaml"
-    spec.write_text("corpus_from: plain\nsources: []\n")
-    assert load_spec(str(spec))[0]["corpus_from"] == str(tmp_path / "plain")

@@ -135,7 +135,7 @@ what to try next.
 | Command | Does |
 | --- | --- |
 | `run FILE` / `run --seed N` | Run one scenario, or the one a seed draws. |
-| `batch --random all --seeds 5` | Run many scenarios in parallel. Add `--guided N` for a coverage-guided batch that steers by the Valkey code each run reached (needs a gcov build; see [Coverage-guided batches](docs/cli.md#coverage-guided-batches)). |
+| `batch --random all --seeds 5` | Run many scenarios in parallel. |
 | `validate FILE` | Check a scenario without starting anything. `--strict` also warns when only shared fragments supply the required evidence. |
 | `replay REPORT` | Run a recorded run again. |
 | `diff FILE` | Compare one seeded scenario across builds or settings; `--artifact NAME=PATH` picks the builds. |

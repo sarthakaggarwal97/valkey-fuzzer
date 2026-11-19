@@ -388,7 +388,7 @@ class RunService:
 
         ``profile`` names the installed search profile that samples the experiment's legal space;
         ``overrides.binary`` is the binary the drawn deployment runs, which hooks see (with
-        ``overrides.keep_own_binary``, only when ``base`` names none); ``overrides.pinned`` holds the draws it keeps.
+        ``overrides.keep_own_binary``, only when ``base`` names none).
         """
 
         catalog = self.catalog
@@ -427,8 +427,7 @@ class RunService:
         ``base`` is a partial scenario that overrides the draws; the
         ``overrides.binary`` is applied before the hooks run, so they
         see the binary; with ``overrides.keep_own_binary`` (a batch's binary for
-        scenarios that name none) only when ``base`` names none; ``overrides.pinned`` holds the draws it keeps
-        (:meth:`generate`). ``free_ports`` moves a scenario whose planned ports
+        scenarios that name none) only when ``base`` names none (:meth:`generate`). ``free_ports`` moves a scenario whose planned ports
         are busy to free ones (the deployment provider's ``relocate_ports``
         hook); the batch runner turns it off, because its workers own their
         port blocks. ``overrides.base_port`` (``--base-port``) overrides the ``base``'s.

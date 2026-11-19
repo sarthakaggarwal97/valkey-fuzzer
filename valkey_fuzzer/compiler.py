@@ -479,15 +479,14 @@ class Overrides:
 
     ``binary`` is ``--valkey-binary`` (the scenario's ``deployment`` binary fields and the report's
     ``valkey_binary_override``); ``artifacts`` is ``--artifact NAME=PATH``; ``base_port`` is ``--base-port``.
-    ``keep_own_binary`` and ``pinned`` are for generation: a batch's binary applies only to scenarios that name
-    none, and ``pinned`` holds the draws an earlier scenario's child keeps. A method ignores the fields it has no use for.
+    ``keep_own_binary`` is for generation: a batch's binary applies only to scenarios that name none. A method
+    ignores the fields it has no use for.
     """
 
     binary: Optional[str] = None
     artifacts: Mapping[str, str] = field(default_factory=dict)
     base_port: Optional[int] = None
     keep_own_binary: bool = False
-    pinned: Optional[Mapping[str, Any]] = None
 
 
 NO_OVERRIDES = Overrides()

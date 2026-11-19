@@ -14,7 +14,7 @@ from valkey_fuzzer.components.config_space import build_config_table
 from valkey_fuzzer.deployment.local import processes
 from valkey_fuzzer.deployment.local.provider import local_deployment_provider_registrations
 from valkey_fuzzer.documents import merge
-from valkey_fuzzer.generator import MAX_ATTEMPTS, Exclusion, GeneratorBlock, GeneratorError, generate, installed_pools
+from valkey_fuzzer.generator import MAX_ATTEMPTS, Exclusion, GeneratorError, generate, installed_pools
 from valkey_fuzzer.registrations import GeneratorRegistration
 from valkey_fuzzer.runner import RunnerError
 from valkey_fuzzer.schema import ScenarioCompileError
@@ -226,10 +226,9 @@ def test_a_hook_pool_draws_its_share_of_the_keys_its_hook_offers_each_chosen_by_
     for seed in range(40):
         generated = _generate(runtime, seed, overrides=Overrides(binary="/tests/src/valkey-server"))
         config = generated.scenario["deployment"]["server_config"]
-        chosen = generated.draws["pools.tests.pool.hooked.keys"]
         # A listed pool comes before a hook pool, and an overlay's key is never drawn: neither is chosen.
         assert config["tests-key-0"] == "listed" and "tests-key-1" not in config
-        assert chosen == sorted(key for key in config if key in offered and key != "tests-key-0")
+        chosen = sorted(key for key in config if key in offered and key != "tests-key-0")
         counts.append(len(chosen))
         ranges |= {config["tests-range"]} if "tests-range" in config else set()
     # The hook sees the scenario's binary; a quarter of the 63 keys it leaves, on average.
@@ -241,10 +240,6 @@ def test_a_hook_pool_draws_its_share_of_the_keys_its_hook_offers_each_chosen_by_
     for seed, config in before.items():
         after = _generate(runtime, seed).scenario["deployment"]["server_config"]
         assert {key: value for key, value in after.items() if key != "tests-key-new"} == config
-    # A derived scenario keeps the keys it pins, whatever its seed draws.
-    pinned = {"pools.tests.pool.hooked.keys": ["tests-key-5", "tests-range"]}
-    derived = _generate(runtime, 99, overrides=Overrides(pinned=pinned))
-    assert derived.draws["pools.tests.pool.hooked.keys"] == ["tests-key-5", "tests-range"]
 
 
 def test_a_drawn_value_takes_the_configs_its_pool_requires_with_it(tmp_path):
@@ -306,11 +301,7 @@ def test_a_pools_input_takes_the_keys_the_scenario_drew_from_those_pools_with_th
         generated = _generate(runtime, seed, excludes=excludes)
         # Not tests-b (the listed pool drew it), tests-c (the overlay sets it), or tests-e (another pool's).
         churned = generated.scenario["experiment"]["inputs"]["churned"]
-        assert churned == generated.draws["inputs.churned"] == {"tests-a": ["1", "3"], "tests-d": ["d"]}
-    # A scenario derived from it takes the input anew when it draws an earlier dimension anew.
-    block = GeneratorBlock.parse(runtime.catalog.experiments.resolve("tests.random"), installed_pools(runtime.catalog))
-    kept = block.kept(generated.draws, "deployment.mode")
-    assert "inputs.churned" not in kept and "inputs.count" in kept
+        assert churned == {"tests-a": ["1", "3"], "tests-d": ["d"]}
     unknown = {"inputs": {"churned": {"pools": ["tests.pool.nope"]}}}
     hooked = {"inputs": {"churned": {"pools": ["valkey.pool.config-space"]}}}
     for generator, message in (
@@ -338,11 +329,12 @@ def test_every_shipped_experiment_draws_the_config_space_of_its_build_after_the_
         overlaid = {key for overlay in spec.startup_overlays for key in overlay.server_config}
         for seed in range(8):
             generated = service.generate(seed, experiment=experiment, overrides=Overrides(binary=binary))
-            keys = set(generated.draws["pools.valkey.pool.config-space.keys"])
-            assert keys <= table_only - overlaid, experiment
+            configs = _configs(generated.scenario["deployment"])
+            keys = {key for config in configs for key in config} & table_only
+            assert not keys & overlaid, experiment
             drawn |= keys
             # Valkey refuses to start with prefer-forkless unless forkless-infrastructure-enabled is yes.
-            for config in _configs(generated.scenario["deployment"]):
+            for config in configs:
                 if config.get("forkless-policy") == "prefer-forkless":
                     assert config["forkless-infrastructure-enabled"] == "yes", experiment
                     preferred += 1
@@ -479,33 +471,3 @@ def test_a_base_mapping_replaces_a_drawn_reference_instead_of_merging_into_it():
     drawn = {"deployment": {"server_config": {"$ref": "inputs.config"}, "replicas_per_primary": 1}}
     base = {"deployment": {"server_config": {"maxmemory": "1mb"}}}
     assert merge(drawn, base) == {"deployment": {"server_config": {"maxmemory": "1mb"}, "replicas_per_primary": 1}}
-
-
-def test_a_pinned_draw_is_kept_and_the_hooks_drawn_after_a_redrawn_dimension_are_drawn_again(tmp_path):
-    # waves derives from count, and the scenario hook from every input: both must follow a changed count.
-    hooks = {
-        "waves": lambda rng, scenario: [scenario["experiment"]["inputs"]["count"]] * rng.randint(1, 3),
-        "label": lambda rng, scenario: {"experiment": {"inputs": {"label": f"{rng.random()}"}}},
-    }
-    block = {"hook": "tests.generator.label", "inputs": {"waves": {"hook": "tests.generator.waves"}}}
-    runtime = _runtime(tmp_path, block, hooks=hooks)
-    parsed = GeneratorBlock.parse(runtime.catalog.experiments.resolve("tests.random"), installed_pools(runtime.catalog))
-    parent = _generate(runtime, 1)
-    assert next(iter(parent.draws)) == "deployment.mode" and list(parent.draws)[-2:] == ["inputs.waves", "hook"]
-    assert parent.provenance["draws"] == parent.draws
-
-    # Every draw kept: only the seed differs.
-    same = _generate(runtime, 2, overrides=Overrides(pinned=parsed.kept(parent.draws, None)))
-    assert same.draws == parent.draws and same.scenario["seed"] == 2
-
-    # count drawn again: every other draw kept, the hooks after it drawn again and consistent with it.
-    pinned = parsed.kept(parent.draws, "inputs.count")
-    assert set(pinned) == set(parent.draws) - {"inputs.count", "inputs.waves", "hook"}
-    for seed in range(2, 12):
-        child = _generate(runtime, seed, overrides=Overrides(pinned=pinned))
-        assert all(child.draws[name] == value for name, value in pinned.items())
-        assert set(child.scenario["experiment"]["inputs"]["waves"]) == {child.draws["inputs.count"]}
-        assert child.draws["hook"] != parent.draws["hook"]
-
-    # A hooked input drawn again keeps every draw before it, and the scenario hook after it is drawn again.
-    assert set(parsed.kept(parent.draws, "inputs.waves")) == set(parent.draws) - {"inputs.waves", "hook"}
