@@ -1735,7 +1735,7 @@ def test_a_replica_of_node_0_reaches_the_primarys_digest(builds):
 
 
 def test_a_replica_whose_digest_stays_apart_diverged(builds, monkeypatch):
-    monkeypatch.setattr(checks, "_SYNC_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(checks, "SYNC_TIMEOUT_S", 0.2)
     # The fake replica never receives the write.
     _replicating(lambda server: b"d2" if ("SET", "k", "v") in server.sent else b"d1")
     result, value = run(builds, [{"command": ["SET", "k", "v"]}], checks={"replica": True})
@@ -1917,7 +1917,7 @@ def test_the_faults_check_skips_a_sequence_that_manages_auth(builds, command):
 def test_the_faults_check_skips_a_sequence_that_delays_saves_or_loads(
     builds, monkeypatch, commands, server_config, skipped
 ):
-    monkeypatch.setattr(checks, "_SYNC_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(checks, "SYNC_TIMEOUT_S", 0.2)
     # The walk's aaeee8d5b replayed: 100,000 keys at rdb-key-save-delay 10000 made the check's DEBUG RELOAD a
     # 1,000 s save, and it timed out.
     commands = [{"command": command} for command in commands] or [{"command": ["PING"]}]
@@ -2244,7 +2244,7 @@ def test_a_node_holding_what_may_expire_is_not_judged_across_a_fault(builds, mon
 
 def test_a_replica_that_stays_apart_after_a_restart_in_the_faults_check_diverged(builds, monkeypatch):
     monkeypatch.setattr(checks, "_FAULTS", ("restart",))
-    monkeypatch.setattr(checks, "_SYNC_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(checks, "SYNC_TIMEOUT_S", 0.2)
 
     def replication(server):
         # A restarted replica never catches up with its primary's offset again.
@@ -2501,7 +2501,7 @@ def test_the_acl_check_leaves_out_a_command_no_rule_refuses(builds):
     ],
 )
 def test_the_acl_check_knows_the_errors_valkey_replies_before_it(error, before):
-    assert bool(checks._BEFORE_ACL.match(error)) is before
+    assert bool(checks.BEFORE_ACL.match(error)) is before
 
 
 def test_the_acl_check_skips_a_sequence_that_manages_users(builds):
@@ -2519,7 +2519,7 @@ def test_private_servers_take_ports_above_the_ephemeral_range(monkeypatch, ephem
     monkeypatch.setattr(command_sequence, "_GIVEN", set())
     command_sequence._private_port_span.cache_clear()
     try:
-        ports = command_sequence._free_ports(20)
+        ports = command_sequence.free_ports(20)
     finally:
         command_sequence._private_port_span.cache_clear()
     assert len(set(ports)) == 20
@@ -2559,7 +2559,7 @@ def test_a_batch_worker_takes_private_ports_from_its_own_slice_and_never_twice(m
     monkeypatch.setattr(command_sequence, "_GIVEN", set())
     command_sequence._private_port_span.cache_clear()
     try:
-        first, second = command_sequence._free_ports(10, block=3), command_sequence._free_ports(10, block=3)
+        first, second = command_sequence.free_ports(10, block=3), command_sequence.free_ports(10, block=3)
     finally:
         command_sequence._private_port_span.cache_clear()
     low = 61000 + 2 * command_sequence._PRIVATE_SLICE
@@ -2576,7 +2576,7 @@ def test_private_ports_outside_a_slice_are_drawn_from_the_runs_rng(monkeypatch):
         draws = []
         for _ in range(2):
             monkeypatch.setattr(command_sequence, "_GIVEN", set())
-            draws.append(command_sequence._free_ports(5, rng=random.Random(7)))
+            draws.append(command_sequence.free_ports(5, rng=random.Random(7)))
     finally:
         command_sequence._private_port_span.cache_clear()
     assert draws[0] == draws[1] and len(set(draws[0])) == 5
@@ -2670,7 +2670,7 @@ def _saving(build):
     [(True, True, None), (False, True, "compat-load"), (True, False, "compat-sync")],
 )
 def test_the_parents_data_loads_and_replicates_into_the_candidate(builds, monkeypatch, loads, syncs, reason):
-    monkeypatch.setattr(checks, "_SYNC_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(checks, "SYNC_TIMEOUT_S", 0.2)
 
     def digest(server):
         if server.build is BUILDS[builds["parent"]]:
@@ -2711,7 +2711,7 @@ def test_the_parents_data_loads_and_replicates_into_the_candidate(builds, monkey
 
 
 def test_the_candidate_is_asked_nothing_until_it_loaded_the_parents_rdb(builds, monkeypatch):
-    monkeypatch.setattr(checks, "_SYNC_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(checks, "SYNC_TIMEOUT_S", 0.2)
     # The walk's test of valkey#1317 replayed (fuzzer#117): under the sequence's key-load-delay the candidate
     # still loaded the parent's RDB, and DEBUG DIGEST answered LOADING.
     persistence = ("INFO", "persistence")
@@ -2741,7 +2741,7 @@ def test_the_parents_data_need_not_load_when_the_merge_changes_what_a_write_make
 ):
     # As in the walk's test of valkey-io/valkey#4880 (fuzzer#67): the parent overflows a relative expire into a
     # negative one, the merge refuses it, and drops any negative expire it loads, so the parent's key never loads.
-    monkeypatch.setattr(checks, "_SYNC_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(checks, "SYNC_TIMEOUT_S", 0.2)
     write = ("SET", "k", "v", "PX", "9223372036854775807")
     parent = BUILDS[builds["parent"]]
 
@@ -2779,7 +2779,7 @@ def test_a_load_the_merge_hardens_to_refuse_is_skipped_not_a_crash(builds, monke
     # the merge hardens the RDB loader to reject, so the candidate logs a fatal "Terminating server after rdb
     # file reading failure." loading the parent's data. That controlled refusal is not a crash; it is skipped
     # when the merge changed what a write makes, not reported as a crash the candidate suffered.
-    monkeypatch.setattr(checks, "_SYNC_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(checks, "SYNC_TIMEOUT_S", 0.2)
     write = ("RESTORE", "k", "0", "mangled")
     parent = BUILDS[builds["parent"]]
     candidate = BUILDS[builds["candidate"]]
@@ -2817,7 +2817,7 @@ def test_a_sync_the_merge_hardens_to_refuse_is_skipped_not_a_crash(builds, monke
     # As in the walk's test of valkey-io/valkey#4073 (fuzzer#84): the parent accepts a stream whose consumers share
     # a pending entry, which the merge's loader refuses, so the candidate replicating the parent exits loading its
     # data with "Terminating server after rdb file reading failure."; a crash loading it is still a finding.
-    monkeypatch.setattr(checks, "_SYNC_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(checks, "SYNC_TIMEOUT_S", 0.2)
     write = ("RESTORE", "k", "0", "mangled")
     parent, candidate = BUILDS[builds["parent"]], BUILDS[builds["candidate"]]
 
@@ -2852,7 +2852,7 @@ def test_a_parent_rdb_version_the_candidate_reads_as_redis_is_skipped(builds, mo
     # The walk's tests of valkey-io/valkey#660 and #662 on unstable (fuzzer#129): their parent, a development build
     # of 8.0, wrote RDB version 12, which later Valkey reads as Redis's and refuses. Refusing a version Valkey
     # released (11) is still a finding.
-    monkeypatch.setattr(checks, "_SYNC_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(checks, "SYNC_TIMEOUT_S", 0.2)
     candidate = BUILDS[builds["candidate"]]
     candidate.rdb_load_exits = f"1:M 12 Nov 2026 05:25:25.460 # Can't handle RDB format version {version}\n"
     _replicating(lambda server: b"d0" if ("SET", "k0", "v") in server.sent else b"empty")
@@ -2867,7 +2867,7 @@ def test_a_parent_rdb_version_the_candidate_reads_as_redis_is_skipped(builds, mo
 
 def test_a_parent_that_crashes_making_the_replicas_rdb_fails_no_candidate(builds, monkeypatch):
     # The parent's fork child asserts saving data the merge fixed, so no RDB reaches the candidate (fuzzer#63).
-    monkeypatch.setattr(checks, "_SYNC_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(checks, "SYNC_TIMEOUT_S", 0.2)
 
     def digest(server):
         replica = server.build is BUILDS[builds["candidate"]] and any(sent[0] == "REPLICAOF" for sent in server.sent)
@@ -2894,7 +2894,7 @@ def test_a_parent_that_crashes_making_the_replicas_rdb_fails_no_candidate(builds
 def test_the_parents_data_may_become_what_the_candidate_makes_of_the_sequence(builds, monkeypatch):
     # The merge drops the key on purpose, when it writes it and when it loads it: the parent's data loads and
     # replicates into what the candidate holds after the same sequence, not into the parent's.
-    monkeypatch.setattr(checks, "_SYNC_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(checks, "SYNC_TIMEOUT_S", 0.2)
 
     def digest(server):
         if server.build is BUILDS[builds["parent"]]:

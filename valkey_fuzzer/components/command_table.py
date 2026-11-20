@@ -131,7 +131,7 @@ _DOMAINS = {
 }
 
 
-def _pairs(flat: Sequence[Any]) -> dict[str, Any]:
+def pairs(flat: Sequence[Any]) -> dict[str, Any]:
     """A RESP2 map (``[key, value, key, value, ...]``) as a dict."""
 
     return dict(zip(flat[::2], flat[1::2]))
@@ -142,7 +142,7 @@ def _arguments(doc: Mapping[str, Any]) -> list[dict[str, Any]]:
 
     arguments = []
     for flat in doc.get("arguments") or ():
-        argument = _pairs(flat)
+        argument = pairs(flat)
         argument["arguments"] = _arguments(argument)
         arguments.append(argument)
     return arguments
@@ -154,11 +154,11 @@ def read_command_table(info: Sequence[Any], docs: Sequence[Any]) -> tuple[list[t
     container's (``CONFIG GET``); a container itself is never sent."""
 
     documented = {}
-    for name, flat in _pairs(docs).items():
-        doc = _pairs(flat)
+    for name, flat in pairs(docs).items():
+        doc = pairs(flat)
         documented[name] = doc
-        for subname, subflat in _pairs(doc.get("subcommands") or ()).items():
-            documented[subname] = _pairs(subflat)
+        for subname, subflat in pairs(doc.get("subcommands") or ()).items():
+            documented[subname] = pairs(subflat)
     table, skipped = [], []
     entries = list(info)
     while entries:
@@ -568,3 +568,19 @@ REGISTRATIONS = (
         declares=Declarations(),
     ),
 )
+
+__all__ = [
+    "ADMIN_READS",
+    "EVIDENCE",
+    "EXCLUDED",
+    "KNOWN_GAPS",
+    "LEAVES",
+    "OUTCOMES",
+    "REGISTRATIONS",
+    "CommandGenerator",
+    "CommandTableWorkload",
+    "ReplySchemaOracle",
+    "answered",
+    "pairs",
+    "read_command_table",
+]

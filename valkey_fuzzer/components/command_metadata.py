@@ -71,7 +71,7 @@ _WRITES = frozenset({"RW", "OW", "RM", "insert", "update", "delete"})
 # even without a replica (a cluster node has none here), and no AOF rewrite or PING to its replicas, which would
 # move them when no command did.
 _NODE_OPTIONS = {
-    **checks._QUICK_SYNC,
+    **checks.QUICK_SYNC,
     "appendonly": "yes",
     "auto-aof-rewrite-percentage": 0,
     "repl-ping-replica-period": 3600,
@@ -93,13 +93,13 @@ def read_metadata(info: Sequence[Any]) -> dict[str, dict[str, Any]]:
             continue
         specs = []
         for flat in entry[8] if len(entry) > 8 else ():
-            spec = command_table._pairs(flat)
-            begin, find = command_table._pairs(spec["begin_search"]), command_table._pairs(spec["find_keys"])
+            spec = command_table.pairs(flat)
+            begin, find = command_table.pairs(spec["begin_search"]), command_table.pairs(spec["find_keys"])
             specs.append(
                 {
                     "flags": set(spec.get("flags") or ()),
-                    "begin": (begin["type"], command_table._pairs(begin["spec"])),
-                    "find": (find["type"], command_table._pairs(find["spec"])),
+                    "begin": (begin["type"], command_table.pairs(begin["spec"])),
+                    "find": (find["type"], command_table.pairs(find["spec"])),
                 }
             )
         metadata[entry[0].upper().replace("|", " ")] = {
@@ -268,7 +268,7 @@ class _Run:
         names them and the shard channels its key specs declare; None when they are not known."""
 
         metadata = self.metadata[name]
-        record = checks._ask(self.side, 0, "COMMAND", "GETKEYS", *words)
+        record = checks.ask(self.side, 0, "COMMAND", "GETKEYS", *words)
         if "no key arguments" in str(record.get("error", "")):
             named: Optional[list[str]] = []
         else:
@@ -331,7 +331,7 @@ class _Run:
         return (
             "readonly" in metadata["flags"]
             and not any(spec["flags"] & _WRITES for spec in metadata["specs"])
-            and words[0].upper() not in checks._RUNS_OTHERS
+            and words[0].upper() not in checks.RUNS_OTHERS
         )
 
     def state(self, digest_last: bool) -> Optional[dict[str, Any]]:
@@ -339,10 +339,10 @@ class _Run:
         digest ahead of a command and after it behind one, so whatever moved a digest or an offset between the
         two digests lies between the two readings of the counters."""
 
-        digest = None if digest_last else checks._ask(self.side, 0, "DEBUG", "DIGEST")
-        info = checks._ask(self.side, 0, "INFO", "replication", "stats", "persistence", "keyspace")
+        digest = None if digest_last else checks.ask(self.side, 0, "DEBUG", "DIGEST")
+        info = checks.ask(self.side, 0, "INFO", "replication", "stats", "persistence", "keyspace")
         if digest_last:
-            digest = checks._ask(self.side, 0, "DEBUG", "DIGEST")
+            digest = checks.ask(self.side, 0, "DEBUG", "DIGEST")
         if "reply" not in info or "reply" not in digest:
             return None
         fields = info_fields(info["reply"])
@@ -394,7 +394,7 @@ class _Run:
         error = str(reply.get("error", ""))
         refused = error.startswith("READONLY")
         # An error Valkey replies before it looks at the command's flags (its arity) is no answer to them.
-        if not refused and checks._BEFORE_ACL.match(error.removeprefix("ERR ")):
+        if not refused and checks.BEFORE_ACL.match(error.removeprefix("ERR ")):
             return
         self.judged["replica"] += 1
         if refused != ("write" in flags):
@@ -474,19 +474,19 @@ class CommandMetadataOracle:
             return make_result(spec, ComponentStatus.ERROR, str(exc))
         side_config = {"nodes": 2, "resp": 2, "timeout_s": config["timeout_s"], "cluster": cluster}
         ports = iter(
-            command_sequence._free_ports(
-                4 if cluster else 2, command_sequence._port_block(context), context.rng(spec.id, "ports")
+            command_sequence.free_ports(
+                4 if cluster else 2, command_sequence.port_block(context), context.rng(spec.id, "ports")
             )
         )
         side = command_sequence.new_side("metadata", binary, side_config, (), ports)
         side.options.update({**_NODE_OPTIONS, **instance_modules(context, instance_id)})
         run = _Run(side, cluster)
         try:
-            failed = side.start(context, spec, command_sequence._PRIVATE_SERVER_DEFAULTS, {})
+            failed = side.start(context, spec, command_sequence.PRIVATE_SERVER_DEFAULTS, {})
             if not failed:
                 failed = self._join(context, side, cluster, config["timeout_s"])
             if not failed:
-                info, docs = checks._ask(side, 0, "COMMAND"), checks._ask(side, 0, "COMMAND", "DOCS")
+                info, docs = checks.ask(side, 0, "COMMAND"), checks.ask(side, 0, "COMMAND", "DOCS")
                 if "reply" not in info or "reply" not in docs:
                     failed = f"could not read the command table: {info.get('error') or docs.get('error')}"
             if not failed:
@@ -555,16 +555,16 @@ class CommandMetadataOracle:
 
         if cluster:
             return side.form_cluster(context, timeout_s) or ""
-        sent = checks._ask(side, 1, "REPLICAOF", "127.0.0.1", side.nodes[0].options["port"])
+        sent = checks.ask(side, 1, "REPLICAOF", "127.0.0.1", side.nodes[0].options["port"])
         if "reply" not in sent:
             return f"REPLICAOF failed on the replica: {sent.get('error')}"
 
         def linked() -> tuple[bool, Any]:
-            fields = info_fields(checks._ask(side, 1, "INFO", "replication").get("reply", ""))
+            fields = info_fields(checks.ask(side, 1, "INFO", "replication").get("reply", ""))
             return fields.get("master_link_status") == "up", fields.get("master_link_status")
 
-        done, status = poll_until(linked, timeout_s=checks._SYNC_TIMEOUT_S, interval_s=0.05, context=context)
-        return "" if done else f"the replica's link is {status} {checks._SYNC_TIMEOUT_S:g}s after REPLICAOF"
+        done, status = poll_until(linked, timeout_s=checks.SYNC_TIMEOUT_S, interval_s=0.05, context=context)
+        return "" if done else f"the replica's link is {status} {checks.SYNC_TIMEOUT_S:g}s after REPLICAOF"
 
 
 def _validate(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -> None:

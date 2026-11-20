@@ -23,8 +23,8 @@ from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
 from valkey_fuzzer.schema import BASE64_KEY, ConfigError, ConfigField, plain_config
 
 from .capabilities import resolve_binary
-from .command_sequence import _PRIVATE_SERVER_DEFAULTS, _free_ports, _is_binary, _port_block, _text
-from .command_sequence import _Side as _ServerSide
+from .command_sequence import PRIVATE_SERVER_DEFAULTS, free_ports, is_binary, port_block, text
+from .command_sequence import Side as _ServerSide
 from .oracles import CRASH_PATTERNS, crash_cause
 from .predicates import PREDICATE_FIELDS, compare, validate_predicate
 from .registration import component_registration
@@ -98,7 +98,7 @@ def _validate_tools(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -> N
     for name, content in config["files"].items():
         if not name or name in (".", "..") or "/" in name or "\0" in name:
             raise ConfigError(f"files: {name!r} must be a plain file name in the working directory")
-        if not (isinstance(content, str) or _is_binary(content)):
+        if not (isinstance(content, str) or is_binary(content)):
             raise ConfigError(f"files.{name} must be text or a !!binary value")
     for index, pattern in enumerate(config["ignore"]):
         try:
@@ -116,7 +116,7 @@ def _validate_tools(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -> N
                 raise ConfigError(f"{where}.args: {item!r} names a path outside the working directory")
             if not config["server"] and any(name in str(item) for name in _PLACEHOLDERS):
                 raise ConfigError(f"{where}.args: {item!r} names the private server, which needs server")
-        if run["stdin"] is not None and not (isinstance(run["stdin"], str) or _is_binary(run["stdin"])):
+        if run["stdin"] is not None and not (isinstance(run["stdin"], str) or is_binary(run["stdin"])):
             raise ConfigError(f"{where}.stdin must be text or a !!binary value")
         for name, value in run["env"].items():
             if not isinstance(name, str) or not _ENV_NAME.fullmatch(name):
@@ -135,7 +135,7 @@ def _validate_tools(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -> N
 def _content(value: Any) -> bytes:
     """A file's or stdin's bytes: a ``!!binary`` value decoded, text as UTF-8."""
 
-    return base64.b64decode(value[BASE64_KEY]) if _is_binary(value) else str(value).encode("utf-8")
+    return base64.b64decode(value[BASE64_KEY]) if is_binary(value) else str(value).encode("utf-8")
 
 
 class _Side:
@@ -224,7 +224,7 @@ class _Side:
                     pattern = rf"\b(?:{re.escape(node.id)}\b|{re.escape(node.id[:8])}\.\.\.)"
                     data = re.sub(pattern.encode(), f"<node.{index}.id>".encode(), data)
             streams.append(data)
-        record["stdout"], record["stderr"] = _text(streams[0]), _text(streams[1])
+        record["stdout"], record["stderr"] = text(streams[0]), text(streams[1])
         self.runs.append(record)
         self.output.append((streams[0], streams[1]))
         lines = [line for data in streams for line in data.decode("utf-8", "replace").splitlines()]
@@ -250,7 +250,7 @@ def _compared(side: _Side, index: int, mode: str, ignore: Sequence["re.Pattern[b
             data = pattern.sub(b"", data)
         if mode == "unordered":
             data = b"\n".join(sorted(data.splitlines()))
-        compared[name] = _text(data)
+        compared[name] = text(data)
     return compared
 
 
@@ -302,7 +302,7 @@ class ToolsAction:
         try:
             if config["server"]:
                 ports = iter(
-                    _free_ports(4 if config["cluster"] else 2, _port_block(context), context.rng(spec.id, "ports"))
+                    free_ports(4 if config["cluster"] else 2, port_block(context), context.rng(spec.id, "ports"))
                 )
                 for side in sides:
                     side.port = next(ports)
@@ -313,7 +313,7 @@ class ToolsAction:
                         options["cluster-port"] = next(ports)
                         side.server.options["cluster-enabled"] = "yes"
                     side.server.nodes[0].options = options
-                    failed = side.server.start(context, spec, _PRIVATE_SERVER_DEFAULTS, {})
+                    failed = side.server.start(context, spec, PRIVATE_SERVER_DEFAULTS, {})
                     if not failed and config["cluster"]:
                         failed = side.server.form_cluster(context, config["timeout_s"]) or ""
                     if failed:
