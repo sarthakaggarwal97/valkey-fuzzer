@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager, nullcontext
+from pathlib import Path
 from unittest.mock import Mock, call, patch
 
 import pytest
@@ -224,8 +225,10 @@ def test_the_source_build_is_pinned_parallel_and_built_aside_under_a_lock(tmp_pa
     # Concurrent batch workers without a binary must not race on one clone, or build an unpinned HEAD.
     commands, timeouts, outputs = [], [], []
 
-    def run(command, cwd=None, check=False, timeout=None, stdout=None, stderr=None):
+    def run(command, cwd=None, check=False, timeout=None, stdout=None, stderr=None, capture_output=False, text=False):
         commands.append((command, cwd))
+        if "rev-parse" in command:
+            return subprocess.CompletedProcess(command, 0, f"{processes.VALKEY_SOURCE_SHA}\n", "")
         timeouts.append(timeout)
         outputs.append((stdout.name, stderr))
         if command[0] == "make":
@@ -241,9 +244,11 @@ def test_the_source_build_is_pinned_parallel_and_built_aside_under_a_lock(tmp_pa
     ):
         binary = manager.resolve_valkey_binary(base_dir=str(tmp_path / "build"), build_timeout=600.0)
 
-    (clone, _), (make, make_dir) = commands
+    (clone, _), (resolve, _), (make, make_dir) = commands
     assert clone[:2] == ["git", "clone"] and "--depth" in clone
     assert clone[clone.index("--branch") + 1] == VALKEY_SOURCE_REF
+    # The tag is movable: the commit it resolved to is checked against the pin, and recorded in the build log.
+    assert resolve == ["git", "-C", clone[-1], "rev-parse", "HEAD"]
     assert make[0] == "make" and make[1].startswith("-j")
     assert make_dir == clone[-1] != str(tmp_path / "build" / "valkey"), "built aside, then renamed into place"
     assert binary == str(tmp_path / "build" / "valkey" / "src" / "valkey-server") and os.path.isfile(binary)
@@ -253,6 +258,26 @@ def test_the_source_build_is_pinned_parallel_and_built_aside_under_a_lock(tmp_pa
     # The clone and make output goes to one file beside the build, not the terminal.
     build_log = str(tmp_path / "build" / "build.log")
     assert outputs == [(build_log, subprocess.STDOUT)] * 2 and os.path.isfile(build_log)
+    assert f"valkey {VALKEY_SOURCE_REF} is commit {processes.VALKEY_SOURCE_SHA}" in Path(build_log).read_text()
+
+
+def test_a_source_build_whose_tag_moved_off_the_pinned_commit_is_refused(tmp_path):
+    def run(command, cwd=None, **options):
+        if "rev-parse" in command:
+            return subprocess.CompletedProcess(command, 0, "f" * 40 + "\n", "")
+        return None
+
+    with (
+        patch(f"{PROCESSES}.subprocess.run", side_effect=run),
+        patch(f"{PROCESSES}.fcntl.flock"),
+        pytest.raises(
+            LocalDeploymentError, match=rf"resolved to commit {'f' * 40}, not the pinned {processes.VALKEY_SOURCE_SHA}"
+        ),
+    ):
+        processes.build_valkey(str(tmp_path / "build"))
+    # Nothing half-built is left where a later build would find it: only the log and the lock remain.
+    assert not (tmp_path / "build" / "valkey").exists()
+    assert sorted(item.name for item in (tmp_path / "build").iterdir()) == [".lock", "build.log"]
 
 
 def test_spawn_and_formation_waits_end_at_the_runs_deadline(tmp_path, monkeypatch):

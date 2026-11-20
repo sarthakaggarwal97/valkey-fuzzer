@@ -2,6 +2,7 @@
 
 import copy
 import json
+import sys
 from dataclasses import replace
 from importlib.metadata import EntryPoint, entry_points
 from pathlib import Path
@@ -9,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from tests.support import component_registration, deployment_registrations, make_plan
-from valkey_fuzzer import hoststate
+from valkey_fuzzer import hoststate, provenance
 from valkey_fuzzer._data import file_sha256
 from valkey_fuzzer.catalog import (
     PACK_GROUP,
@@ -179,8 +180,10 @@ def register(catalog):
 """
 
 
-def test_build_catalog_registers_every_installed_pack_and_names_the_pack_of_an_unknown_component(tmp_path, monkeypatch):
-    # A pack is a ``valkey_fuzzer.packs`` entry point of an installed distribution: a register(catalog) function.
+def _toy_service(tmp_path, monkeypatch):
+    """A service whose catalog holds the installed packs and a toy pack (a module written to ``tmp_path``), with
+    the toy experiment; returns it with the scenario that uses the toy component."""
+
     (tmp_path / "tests_toy_pack.py").write_text(_TOY_PACK, encoding="utf-8")
     monkeypatch.syspath_prepend(str(tmp_path))
     (tmp_path / "experiments").mkdir()
@@ -193,16 +196,42 @@ def test_build_catalog_registers_every_installed_pack_and_names_the_pack_of_an_u
 
     points = (*installed, EntryPoint("toy", "tests_toy_pack:register", PACK_GROUP))
     monkeypatch.setattr("valkey_fuzzer.catalog.entry_points", lambda group: points)
-    service = _service(tmp_path / "experiments")
+    return _service(tmp_path / "experiments"), scenario
+
+
+def test_build_catalog_registers_every_installed_pack_and_names_the_pack_of_an_unknown_component(tmp_path, monkeypatch):
+    # A pack is a ``valkey_fuzzer.packs`` entry point of an installed distribution: a register(catalog) function.
+    service, scenario = _toy_service(tmp_path, monkeypatch)
     assert {"toy.action.echo", "valkey.action.sleep"} <= set(service.catalog.components.registered_ids)
     outcome = service.runner.run(service.compile(scenario))
     assert (outcome.status, outcome.component_results[0].summary) == (OutcomeStatus.PASS, "hi")
 
     # Without the toy pack, the error names the pack to install rather than a Valkey component.
+    installed = tuple(point for point in entry_points(group=PACK_GROUP) if point.name != "toy")
     monkeypatch.setattr("valkey_fuzzer.catalog.entry_points", lambda group: installed)
     hint = r"no installed pack registers toy\.\* components; install the package whose 'valkey_fuzzer\.packs' entry point is named 'toy'"
     with pytest.raises(ScenarioCompileError, match=rf"uses 'toy\.action\.echo', which is not registered; {hint}"):
         _service(tmp_path / "experiments").compile(scenario)
+
+
+def test_the_code_digest_covers_the_package_of_every_component_the_plan_uses(tmp_path, monkeypatch):
+    service, scenario = _toy_service(tmp_path, monkeypatch)
+    plan = service.compile(scenario)
+    recorded = reproducer(service.catalog, plan)
+    assert provenance_drift(service.catalog, plan, recorded) == ([], [])
+    # A plan on the fuzzer's own components digests the fuzzer alone, as before.
+    own = reproducer(service.catalog, service.prepare_run(EXAMPLE).plan)["fuzzer_digest"]
+    assert own == provenance.source_digest(["valkey_fuzzer"]) != recorded["fuzzer_digest"]
+
+    # The toy pack's code changes (loaded from an edited copy): the digest, and so the replay, drift.
+    edited = tmp_path / "edited"
+    edited.mkdir()
+    (edited / "tests_toy_pack.py").write_text(_TOY_PACK + "\n# changed\n", encoding="utf-8")
+    monkeypatch.setattr(sys.modules["tests_toy_pack"], "__file__", str(edited / "tests_toy_pack.py"))
+    drift, _ = provenance_drift(service.catalog, plan, recorded)
+    # The toy pack also defines the deployment provider, whose own digest drifts as before.
+    assert [entry["item"] for entry in drift] == ["fuzzer code", "deployment provider for toy code"]
+    assert drift[0]["recorded"] == recorded["fuzzer_digest"] != drift[0]["replay"]
 
 
 @pytest.mark.parametrize(

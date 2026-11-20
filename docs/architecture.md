@@ -336,7 +336,8 @@ touches nothing else. `provision`:
    the instances are spawned, and for one instance before it restarts;
 3. **resolves the binary**: the configured `valkey_binary`, `valkey-server`
    on `PATH`, a previous build at `/tmp/valkey-build/valkey/src/valkey-server`,
-   or a shallow clone of `valkey-io/valkey` at release 9.1.3, built with
+   or a shallow clone of `valkey-io/valkey` at release 9.1.3 (checked against
+   the pinned commit, since a tag can move), built with
    `make -j` aside and moved into place, under a lock so concurrent runs build
    it once, within 30 minutes and the run's deadline. Every
    `instance_binaries` entry is resolved to an absolute path, and the git SHA

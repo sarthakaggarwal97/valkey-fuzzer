@@ -53,8 +53,9 @@ The local deployment looks for `valkey-server` in this order:
 2. `valkey-server` on `PATH`;
 3. a previous build at `/tmp/valkey-build/valkey/src/valkey-server`;
 4. otherwise it clones release 9.1.3 of `https://github.com/valkey-io/valkey.git`
-   and builds it with `make` into `/tmp/valkey-build/valkey`, one build at a
-   time.
+   (the tag must resolve to the commit pinned in the code, `29173b6`, or the
+   build is refused: a moved tag is not built) and builds it with `make` into
+   `/tmp/valkey-build/valkey`, one build at a time.
 
 Only four experiments probe the binary before the deployment starts
 (`valkey.capability.build-probe`): `valkey.cluster-election-durability`,

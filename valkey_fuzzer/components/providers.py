@@ -101,8 +101,14 @@ class LocalBinaryProvider:
             )
         expected_sha = (resolved_config["expected_sha"] or "").lower()
         if expected_sha:
+            # At least 7 hex characters, as git abbreviates: anything shorter matches too many builds to pin one.
+            if not re.fullmatch(r"[0-9a-f]{7,64}", expected_sha):
+                raise ValueError(
+                    f"artifact {spec.id!r}: expected_sha {expected_sha!r} must be 7 to 64 hex characters, a prefix "
+                    "of the git SHA or of the file's SHA-256"
+                )
             candidates = [value for value in (record["git_sha"], record["sha256"]) if value]
-            if not any(value.startswith(expected_sha) or expected_sha.startswith(value) for value in candidates):
+            if not any(value.startswith(expected_sha) for value in candidates):
                 raise ValueError(
                     f"artifact {spec.id!r} ({path}) does not match expected_sha {expected_sha!r}: "
                     f"git sha {record['git_sha']!r}, sha256 {record['sha256'][:16]}..."
