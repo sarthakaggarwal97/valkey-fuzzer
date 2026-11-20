@@ -97,8 +97,8 @@ def _fuzzer_commands(name):
 
 @pytest.mark.parametrize("name", WORKFLOW_NAMES)
 def test_every_valkey_fuzzer_command_in_a_workflow_parses_with_the_cli(name):
-    # The workflows that only run pytest or ruff name no valkey-fuzzer command.
-    no_cli = ("lint.yml", "test.yml", "valkey-experiments-live.yml")
+    # The workflows that only run pytest or ruff, or build the package, name no valkey-fuzzer command.
+    no_cli = ("lint.yml", "release.yml", "test.yml", "valkey-experiments-live.yml")
     assert _fuzzer_commands(name) or name in no_cli
 
 
@@ -145,8 +145,13 @@ def test_every_workflow_pins_its_actions_to_a_commit(name):
         assert action.startswith("./") or re.fullmatch(r"[\w.-]+/[\w./-]+@[0-9a-f]{40} # v\d+(\.\d+)*", action), action
 
 
-# The one job that writes: it posts the PR comment the read-only summarize job rendered.
-WRITING_JOBS = {("valkey-pr-fuzzer.yml", "comment"): {"issues": "write", "pull-requests": "write"}}
+# The jobs that write: the one that posts the PR comment the read-only summarize job rendered, and the two of a
+# release that post the built distributions to a GitHub release and to PyPI (its OIDC token).
+WRITING_JOBS = {
+    ("valkey-pr-fuzzer.yml", "comment"): {"issues": "write", "pull-requests": "write"},
+    ("release.yml", "github-release"): {"contents": "write"},
+    ("release.yml", "pypi"): {"id-token": "write"},
+}
 
 
 @pytest.mark.parametrize("name", WORKFLOW_NAMES)
@@ -856,6 +861,32 @@ def test_the_bug_zoo_runs_daily_and_on_dispatch_and_fails_a_case_below_its_rate(
     # Without these the batch would not run the zoo's builds, or would hide a bug no oracle sees.
     assert "go -C porcupine build" in scripts and "--allow-unsupported" not in scripts
     assert any(step.get("uses", "").startswith("actions/upload-artifact@") for step in job["steps"])
+
+
+def test_the_release_publishes_only_a_pushed_tag_through_trusted_publishing():
+    workflow = _workflow("release.yml")
+    assert workflow["on"] == {"push": {"tags": ["v*"]}, "workflow_dispatch": None}
+    build, release, pypi = (workflow["jobs"][name] for name in ("build", "github-release", "pypi"))
+    scripts = "\n".join(step["run"] for step in build["steps"] if "run" in step)
+    assert "python -m build\n" in scripts and "twine check --strict dist/*" in scripts
+    # A tag that does not name valkey_fuzzer.__version__ releases nothing.
+    (check,) = [step for step in build["steps"] if "GITHUB_REF_NAME#v" in step.get("run", "")]
+    assert check["if"] == "github.ref_type == 'tag'"
+    # A dispatch (a dry run of the build) and anything but a v* tag reach neither the release nor PyPI.
+    gate = "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')"
+    assert release["needs"] == "build" and release["if"] == gate and release["permissions"] == {"contents": "write"}
+    # The release is posted through the API from the downloaded distributions, and never creates the tag.
+    (post,) = [step for step in release["steps"] if step.get("uses", "").startswith("actions/github-script@")]
+    assert "github.rest.repos.createRelease" in post["with"]["script"] and "tag_name: tag" in post["with"]["script"]
+    assert (
+        "github.rest.repos.uploadReleaseAsset" in post["with"]["script"]
+        and post["env"]["TAG"] == "${{ github.ref_name }}"
+    )
+    assert pypi["needs"] == "github-release" and pypi["if"] == gate
+    # Trusted publishing: the OIDC token of the `pypi` environment the publisher registered on PyPI names, no secret.
+    assert pypi["permissions"] == {"id-token": "write"} and pypi["environment"]["name"] == "pypi"
+    (publish,) = [step for step in pypi["steps"] if step.get("uses", "").startswith("pypa/gh-action-pypi-publish@")]
+    assert "with" not in publish and "secrets." not in (WORKFLOWS / "release.yml").read_text()
 
 
 def test_the_spec_check_runs_on_every_change_to_main():

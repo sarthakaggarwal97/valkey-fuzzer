@@ -1,0 +1,112 @@
+name: Release
+
+# A pushed tag v<version> (docs/releasing.md) builds the sdist and the wheel,
+# attaches them to a GitHub release of the tag, and publishes them to PyPI
+# through trusted publishing: no API token, the `pypi` environment's OIDC
+# token. A dispatch only builds: a dry run of the packaging on any ref.
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        persist-credentials: false
+
+    - name: Set up Python
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      with:
+        python-version: '3.12'
+        cache: pip
+        cache-dependency-path: pyproject.toml
+
+    - name: Build the sdist and the wheel
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install build twine
+        python -m build
+        python -m twine check --strict dist/*
+
+    # The tag names the version the package carries (valkey_fuzzer.__version__), or nothing is released.
+    - name: Check the tag names the built version
+      if: github.ref_type == 'tag'
+      run: test -f "dist/valkey_fuzzer-${GITHUB_REF_NAME#v}.tar.gz"
+
+    - name: Keep the distributions
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: dist
+        path: dist/
+        if-no-files-found: error
+
+  github-release:
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The one job with a write token checks out nothing and runs no shell: it downloads what build made and
+    # posts it through the API.
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        name: dist
+        path: dist/
+
+    - name: Create the GitHub release with the distributions attached
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+      env:
+        TAG: ${{ github.ref_name }}
+      with:
+        github-token: ${{ github.token }}
+        script: |
+          const fs = require('fs');
+          const tag = process.env.TAG;
+          const {owner, repo} = context.repo;
+          // The tag exists: this job runs only on its push, so no tag is created here.
+          const {data: release} = await github.rest.repos.createRelease({
+            owner, repo, tag_name: tag, name: tag,
+            body: `The changes are in [CHANGELOG.md](https://github.com/${owner}/${repo}/blob/${tag}/CHANGELOG.md).`,
+          });
+          for (const name of fs.readdirSync('dist').sort()) {
+            const data = fs.readFileSync(`dist/${name}`);
+            await github.rest.repos.uploadReleaseAsset({
+              owner, repo, release_id: release.id, name, data,
+              headers: {'content-type': 'application/octet-stream', 'content-length': data.length},
+            });
+            core.info(`attached ${name} (${data.length} bytes)`);
+          }
+
+  pypi:
+    needs: github-release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The trusted publisher registered on PyPI names this repository, this file and this environment
+    # (docs/releasing.md, "One-time setup").
+    environment:
+      name: pypi
+      url: https://pypi.org/project/valkey-fuzzer/
+    permissions:
+      id-token: write
+    steps:
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        name: dist
+        path: dist/
+
+    - name: Publish to PyPI
+      uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
