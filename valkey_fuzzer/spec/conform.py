@@ -45,7 +45,6 @@ zoo see a failure only the model finds. A batch reuses that section
 (:mod:`~valkey_fuzzer.batch.conform_plugin`).
 """
 
-import copy
 import glob
 import json
 import os
@@ -68,6 +67,7 @@ from .bundle import (
     SpecBundleError,
     SpecMapping,
     StateVar,
+    derive_constants,
     field_ref,
     load_bundle,
     where_matches,
@@ -423,7 +423,9 @@ class ObservedRun:
 
     def replay(self) -> list[dict[str, Any]]:
         state = self.initial()
-        self.states = [copy.deepcopy(state)]
+        # A state is a dict of values no step writes into (_apply replaces a function rather than write a key
+        # of it), so an appended state is a copy of the dict alone and shares the values with its neighbours.
+        self.states = [dict(state)]
         self.steps = [{"state": 1, "why": "initial state"}]
         self.reports = [
             {"state": 1, "why": "initial state", "kind": "init", "action": None, "repeats": False}
@@ -499,7 +501,6 @@ class ObservedRun:
     def _step(
         self, state: dict[str, Any], evidence: Evidence, record: Mapping[str, Any], fields: Mapping[str, Any]
     ) -> None:
-        before = copy.deepcopy(state)
         reported: list[tuple] = []
         for update in evidence.updates:
             # Each update stands alone: a node outside the process set one update ranges over still
@@ -510,19 +511,20 @@ class ObservedRun:
                 self._note(f"{evidence.name}: {update.op} {update.var} skipped: {exc}")
             except _SkipError as exc:
                 self.unapplied.append(f"{evidence.name}: {update.op} {update.var}: {exc}")
+        changed = any(item[3] for item in reported)
         if evidence.action:
             self.actions[evidence.action] += 1
         step = {
-            "state": len(self.states) + (state != before),
+            "state": len(self.states) + changed,
             "why": evidence.action or f"{evidence.name} sample",
             "evidence": evidence.name,
             "t": record.get("t"),
             "fields": {key: value for key, value in fields.items()},
         }
-        if state != before:
-            self.states.append(copy.deepcopy(state))
+        if changed:
+            self.states.append(dict(state))
             self.steps.append(step)
-        if state != before or evidence.action:
+        if changed or evidence.action:
             # A mapped action that changed nothing observed is still a step the model must allow.
             self.reports.append({**step, **self._report(evidence, reported)})
 
@@ -545,7 +547,7 @@ class ObservedRun:
             "unchanged": [evidence.step["unchanged"]] if evidence.step.get("unchanged") else [],
             "repeats": bool(evidence.step.get("repeats")),
         }
-        for path, op, value in reported:
+        for path, op, value, _ in reported:
             if evidence.action and op == "add":
                 relation, item = "has", (path, value)
             elif evidence.action and op == "remove":
@@ -574,15 +576,18 @@ class ObservedRun:
         record: Mapping[str, Any],
     ) -> list[tuple]:
         """Apply ``update`` to ``state``; for each path it wrote, ``(var,)`` or ``(var, key)``: the path, the
-        update's op, and the value it set, added, or removed."""
+        update's op, the value it set, added, or removed, and whether the write changed the value. A function
+        is replaced by a copy with the key written, never written into: the states already appended share it."""
 
         var = self.mapping.state[update.var]
         if var.hidden is not None:
             raise _SkipError(f"{var.name} is hidden; it cannot be updated")
         targets = self._keys(var, update.key, fields) if var.over else [None]
         value = None if update.value is None else self._value(update.value, fields)
+        written = TlaFunction(state[var.name]) if var.over else None
+        reported = []
         for key in targets:
-            current = state[var.name] if key is None else state[var.name][key]
+            current = state[var.name] if key is None else written[key]
             if update.op == "set":
                 new = value
                 if evidence.sample and self._set_by.get((var.name, key)) == "event" and current != new:
@@ -602,9 +607,12 @@ class ObservedRun:
             if key is None:
                 state[var.name] = new
             else:
-                state[var.name][key] = new
+                written[key] = new
             self._set_by[(var.name, key)] = "sample" if evidence.sample else "event"
-        return [((var.name,) if key is None else (var.name, key), update.op, value) for key in targets]
+            reported.append(((var.name,) if key is None else (var.name, key), update.op, value, current != new))
+        if written is not None:
+            state[var.name] = written
+        return reported
 
     def _mismatch(
         self, evidence: Evidence, record: Mapping[str, Any], var: str, key: Any, inferred: Any, sampled: Any
@@ -624,43 +632,25 @@ class ObservedRun:
     # -- constants ------------------------------------------------------------
 
     def constants(self) -> dict[str, str]:
-        values: dict[str, str] = {}
-        for name in self.mapping.processes:
-            values[name] = render(TlaSet(self.identities(name)))
-        for name, spec in self.mapping.constants.items():
-            if "value" in spec:
-                values[name] = str(spec["value"])
-            elif "config" in spec:
-                seen = [
-                    info.get("config", {}).get(spec["config"])
-                    for info in (self.run.header.get("nodes") or {}).values()
-                    if spec["config"] in (info.get("config") or {})
-                ]
-                if not seen:
-                    raise TlaError(f"constant {name} needs {spec['config']!r} from the trace header's node configs")
-                values[name] = render(all(item == spec["equals"] for item in seen))
-            elif "input" in spec:
-                # The experiment sets the configuration from this input; the run records its value.
-                inputs = self.run.meta.get("inputs") or {}
-                if spec["input"] not in inputs:
-                    raise TlaError(f"constant {name} needs input {spec['input']!r}, which the run does not record")
-                values[name] = render(inputs[spec["input"]] == spec["equals"])
-            elif "field" in spec:
-                # The largest value of the field in the run's records of that evidence (the quorum an ACK line
-                # logs), at_least when no record carries it.
-                numbers = [
-                    spec.get("at_least", 0),
-                    *self._field_values(spec["field"]["evidence"], spec["field"]["name"]),
-                ]
-                values[name] = str(max(numbers))
-            else:
-                numbers = [spec.get("at_least", 0)]
-                for state in self.states:
-                    for var in spec["max_of"]:
-                        value = state[var]
-                        numbers.extend(value.values() if isinstance(value, dict) else [value])
-                values[name] = str(max(item for item in numbers if isinstance(item, int)))
-        return values
+        """The process sets and the constants :func:`derive_constants` reads off the trace header's node configs,
+        the run's inputs, the observed states, and the records; a constant it cannot derive is a :class:`TlaError`."""
+
+        values = {name: render(TlaSet(self.identities(name))) for name in self.mapping.processes}
+        derived, unknown = derive_constants(
+            self.mapping,
+            {node: info.get("config") or {} for node, info in (self.run.header.get("nodes") or {}).items()},
+            self.run.meta.get("inputs") or {},
+            states=self.states,
+            field_values={
+                name: self._field_values(spec["field"]["evidence"], spec["field"]["name"])
+                for name, spec in self.mapping.constants.items()
+                if "field" in spec
+            },
+        )
+        if unknown:
+            name, why = next(iter(unknown.items()))
+            raise TlaError(f"constant {name} {why}")
+        return values | derived
 
     def _field_values(self, evidence_name: str, field_name: str) -> list[int]:
         """The integer values of field ``field_name`` in the run's records of evidence ``evidence_name``."""

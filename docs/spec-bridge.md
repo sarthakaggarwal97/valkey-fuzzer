@@ -254,7 +254,10 @@ on a pattern that matches none.
   that expression; the transition check starts it there and lets the model
   move it.
 - `constants`: every other model constant, as a literal `value`, as a
-  per-node `config` that `equals` a value (read from the trace header), as a
+  per-node `config` that `equals` a value (read from the trace header: `TRUE`
+  when every node's setting is known and equals it, `FALSE` once one differs,
+  and an error while a node's setting is missing and none differs, since the
+  node nobody could read may be the one that differs), as a
   scenario `input` that `equals` a value (for an experiment that sets the
   configuration from that input), as the `max_of` some state variables, or
   as a `field` of the run's records of one evidence (`{field: {evidence:

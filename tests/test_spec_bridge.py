@@ -21,7 +21,7 @@ from valkey_fuzzer.commands import spec as spec_command
 from valkey_fuzzer.commands._common import add_common_options
 from valkey_fuzzer.service import RunService
 from valkey_fuzzer.spec import conform, tla, translate
-from valkey_fuzzer.spec.bundle import SpecBundleError, load_bundle, load_spec_mapping
+from valkey_fuzzer.spec.bundle import SpecBundleError, derive_constants, load_bundle, load_spec_mapping
 from valkey_fuzzer.spec.check import check_bundle, log_patterns_gate
 from valkey_fuzzer.spec.conform import ObservedRun, check_run, collect_runs, conform_folder, conform_runs
 from valkey_fuzzer.spec.tla import (
@@ -1256,6 +1256,43 @@ def test_conform_maps_an_election_run_onto_the_model(tmp_path):
     assert sorted(final["granted"]["cand_valkey_1"]) == ["prim_valkey_0", "prim_valkey_3"]
     assert dict(observed.actions) == {"StartElection": 2, "HandleRequest": 2, "ReceiveVote": 2, "Crash": 1, "Win": 1}
     assert observed.constants()["PersistBeforeAck"] == "FALSE"
+
+
+def test_a_config_constant_is_unknown_while_a_nodes_setting_is_and_no_known_one_differs(tmp_path):
+    # One derivation serves spec conform (the trace header's configs) and the election oracle (live CONFIG GET):
+    # a node whose setting is missing may be the one that differs, so TRUE needs every node's; FALSE needs one.
+    mapping = load_bundle("cluster-election").mapping
+    sync = {"cluster-config-save-behavior": "sync"}
+    values, unknown = derive_constants(mapping, {"valkey-0": sync, "valkey-1": sync}, {})
+    assert values == {"PersistBeforeAck": "TRUE", "FlushBeforeSave": "FALSE"}
+    # Without observed states or the run's records, the bounds are unknown, never at_least.
+    assert set(unknown) == {"MaxEpoch", "MaxCrashes", "Quorum"}
+    best_effort = {"cluster-config-save-behavior": "best-effort"}
+    values, unknown = derive_constants(mapping, {"valkey-0": sync, "valkey-1": {}}, {})
+    assert "PersistBeforeAck" not in values
+    assert unknown["PersistBeforeAck"] == "needs 'cluster-config-save-behavior', and the setting of valkey-1 is unknown"
+    assert derive_constants(mapping, {"valkey-0": best_effort, "valkey-1": {}}, {})[0]["PersistBeforeAck"] == "FALSE"
+    assert "the setting of every node is unknown" in derive_constants(mapping, {}, {})[1]["PersistBeforeAck"]
+    # With the states and the records' field values, the bounds are the largest value seen, at least at_least.
+    epochs = {"currentEpoch": {"a": 3}, "lastVote": {"a": 0}, "diskEpoch": {"a": 1}, "electionEpoch": {"a": 0}}
+    states = [{**epochs, "crashes": 0}]
+    values, unknown = derive_constants(mapping, {}, {}, states=states, field_values={"Quorum": [2, 3]})
+    assert (values["MaxEpoch"], values["MaxCrashes"], values["Quorum"]) == ("3", "1", "3")
+    assert set(unknown) == {"PersistBeforeAck"}
+    # An input the run does not record is unknown too.
+    register = load_bundle(str(BUNDLE)).mapping
+    _, unknown = derive_constants(register, {}, {})
+    assert unknown["SyncBeforeAck"] == "needs input 'appendonly', which the run does not record"
+    assert derive_constants(register, {}, {"appendonly": "yes"})[0]["SyncBeforeAck"] == "TRUE"
+    # spec conform, which judges the run under the constants, stops on an unknown one and names the node.
+    nodes = {n: {"node_id": ID[n], "config": {} if n == "valkey-1" else sync} for n in ID}
+    records = [{"kind": "header", "scenario_id": "unit", "seed": 1, "nodes": nodes}, *ELECTION_OBSERVATIONS]
+    path = tmp_path / "trace.jsonl"
+    path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+    observed = ObservedRun(mapping, collect_runs([str(path)])[0])
+    observed.replay()
+    with pytest.raises(TlaError, match=r"constant PersistBeforeAck needs .* the setting of valkey-1 is unknown"):
+        observed.constants()
 
 
 def test_conform_never_makes_up_the_vars_a_crash_restarts_with(tmp_path):

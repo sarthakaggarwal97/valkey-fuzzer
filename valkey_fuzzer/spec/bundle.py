@@ -521,6 +521,74 @@ def field_refs(spec: Any) -> list[tuple[str, Optional[str]]]:
     return []
 
 
+def derive_constants(
+    mapping: SpecMapping,
+    configs: Mapping[str, Mapping[str, Any]],
+    inputs: Mapping[str, Any],
+    *,
+    states: Sequence[Mapping[str, Any]] = (),
+    field_values: Mapping[str, Sequence[int]] = MappingProxyType({}),
+) -> tuple[dict[str, str], dict[str, str]]:
+    """The model constants ``mapping.constants`` derives from a run, as TLA+ text, and the ones it cannot:
+    ``({name: value}, {name: why it is unknown})``.
+
+    ``configs`` is every node's settings, ``{node: {config name: value}}``; ``inputs`` the scenario's; ``states``
+    the observed states (``max_of``); ``field_values`` the int values a ``field`` constant's field took in the
+    run's records, by constant name. A ``value`` is its text. A ``config`` that ``equals`` a value is FALSE once
+    a node's setting differs, TRUE when every node's setting is known and equals, and unknown when a node's
+    setting is missing and none differs: the node nobody could read may be the one that differs. An ``input``
+    the run does not record, a ``max_of`` without states, and a ``field`` without its values are unknown.
+    """
+
+    values: dict[str, str] = {}
+    unknown: dict[str, str] = {}
+    for name, spec in mapping.constants.items():
+        if "value" in spec:
+            values[name] = str(spec["value"])
+        elif "config" in spec:
+            seen = {node: settings.get(spec["config"]) for node, settings in configs.items()}
+            if any(value is not None and value != spec["equals"] for value in seen.values()):
+                values[name] = tla.render(False)
+            elif seen and all(value is not None for value in seen.values()):
+                values[name] = tla.render(True)
+            else:
+                missing = sorted(node for node, value in seen.items() if value is None) or ["every node"]
+                unknown[name] = f"needs {spec['config']!r}, and the setting of {', '.join(missing)} is unknown"
+        elif "input" in spec:
+            if spec["input"] not in inputs:
+                unknown[name] = f"needs input {spec['input']!r}, which the run does not record"
+            else:
+                values[name] = tla.render(inputs[spec["input"]] == spec["equals"])
+        elif "field" in spec:
+            # The largest value of the field in the run's records of that evidence (the quorum an ACK line logs),
+            # at_least when no record carries it.
+            if name not in field_values:
+                unknown[name] = "needs the run's records"
+            else:
+                values[name] = str(max([spec.get("at_least", 0), *field_values[name]]))
+        elif not states:
+            unknown[name] = "needs the observed states"
+        else:
+            numbers = [spec.get("at_least", 0)]
+            for state in states:
+                for var in spec["max_of"]:
+                    value = state[var]
+                    numbers.extend(value.values() if isinstance(value, dict) else [value])
+            values[name] = str(max(item for item in numbers if isinstance(item, int)))
+    return values, unknown
+
+
+def claimed_under(prop: Optional[Property], constants: Mapping[str, str]) -> Optional[bool]:
+    """Whether ``prop`` is claimed under ``constants`` (its ``holds_when``); None when one it needs is unknown,
+    and True for a property the claims do not list (nothing conditions it)."""
+
+    if prop is None:
+        return True
+    if any(key not in constants for key in prop.holds_when):
+        return None
+    return prop.holds_under(constants)
+
+
 _FIELD_SPEC = _record({"type": ConfigField(str, choices=FIELD_TYPES)}, {"path": str, "default": object, "map": dict})
 _UPDATE = _record({}, {**dict.fromkeys(UPDATE_OPS, str), "key": object, "value": object})
 _EVIDENCE = _record(
@@ -1041,7 +1109,7 @@ def load_bundle(reference: str) -> Bundle:
     model_text = _read(path / MODEL_FILE)
     if tla.module_name(model_text) != "model":
         raise SpecBundleError(f"{path / MODEL_FILE} must declare MODULE model")
-    claims = parse_claims(_yaml(path / CLAIMS_FILE)[1], tla.symbols(model_text))
+    claims = load_spec_claims(str(path))
     mapping = load_spec_mapping(str(path))
     safe = tuple(sorted(item.name for item in path.glob("*.cfg")))
     if not safe:
