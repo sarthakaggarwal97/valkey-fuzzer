@@ -1,0 +1,151 @@
+# A module's data under faults: its keys written before and while a replica is
+# killed, stopped or restarted (and the primary stalled), then read back on
+# every instance, and every replica's values digested against its primary's.
+# The shape .github/scripts/module_chaos.py gives valkey-json, valkey-bloom
+# and valkey-search, with the module's own commands as inputs, so a module
+# repository supplies data, not Python: the reusable workflow
+# .github/workflows/module-fuzz.yml runs it (docs/module-repos.md).
+#
+# The module is loaded by the deployment (`deployment.server_config.loadmodule`,
+# set by the workflow, or by a `--base` file beside any option the module
+# needs at start); the build probe skips a deployment without it, or whose
+# build lacks `module_command`. `load`, `during` and `verify` are
+# valkey.action.commands items (`{command: [...], expect: {...}}`,
+# docs/components.md#valkeyactioncommands); `verify` runs on every instance,
+# so a reply it expects must be the same on the primary and its replicas.
+# A line of an instance's log that matches a `forbidden_logs` pattern fails
+# the run, through the liveness oracle.
+#
+#   valkey-fuzzer batch --random example.module-chaos --seeds 20 \
+#     --base base.yaml --experiment-dir examples/valkey/experiments
+#
+# with base.yaml holding the module and its commands:
+#
+#   deployment:
+#     server_config: {loadmodule: /path/to/libjson.so}
+#   experiment:
+#     inputs:
+#       module_command: JSON.SET
+#       load: [{command: [JSON.SET, j:1, $, '{"a": 1}'], expect: {equals: OK}}]
+#       during: [{command: [JSON.SET, j:1, $.a, "2"]}]
+#       verify: [{command: [JSON.GET, j:1, $.a], expect: {equals: "[2]"}}]
+extends: [valkey.base]
+id: example.module-chaos
+deployment:
+  modes: [standalone]
+  replicas_per_primary: {minimum: 1}
+metadata:
+  description: A module's data written before and while a replica is killed, stopped or restarted (and the primary stalled); every instance must hold the same data after
+  generator:
+    deployment:
+      standalone:
+        replicas_per_primary: {minimum: 1, maximum: 3}
+    inputs:
+      signal: {values: [SIGKILL, SIGTERM, SIGSTOP]}
+      restart_mode: {values: [immediate, background]}
+      restart_delay_s: {minimum: 0, maximum: 3}
+      pause_s: {minimum: 0.5, maximum: 5}
+      primary_pause_s: {minimum: 0, maximum: 4}
+      mutation_rate: {minimum: 50, maximum: 1500}
+    server_config: [valkey.pool.replication]
+inputs:
+  required: [module_command, load, during, verify]
+  properties:
+    module_command:
+      type: string
+      description: a command of the module; a build without it, or a deployment that loads no module, is skipped
+    load:
+      type: array
+      description: the commands that write the module's data before the faults (valkey.action.commands items)
+    during:
+      type: array
+      description: the commands that write while the replica is hit and the primary stalled
+    verify:
+      type: array
+      description: the reads, with the replies they expect, sent to every instance once the replicas are linked
+    forbidden_logs:
+      type: array
+      default: []
+      description: "patterns ({pattern: ...}) a line of an instance's log may not match"
+    signal: {type: string, enum: [SIGKILL, SIGTERM, SIGSTOP], default: SIGKILL}
+    restart_mode: {type: string, enum: [immediate, background], default: immediate}
+    restart_delay_s: {type: number, minimum: 0, maximum: 60, default: 0}
+    pause_s: {type: number, minimum: 0, maximum: 60, default: 2}
+    primary_pause_s: {type: number, minimum: 0, maximum: 60, default: 0}
+components:
+  - use: valkey.capability.build-probe
+    id: build
+    config:
+      commands: [{$ref: inputs.module_command}]
+      deployment_config: [loadmodule]
+  - use: valkey.observer.log
+    id: logs
+    config:
+      forbidden: {$ref: inputs.forbidden_logs}
+  - use: valkey.action.commands
+    id: load
+    config:
+      timeout_s: 60
+      commands: {$ref: inputs.load}
+  # The faults fire once the load is in: a sleep that follows the load publishes the event they wait for.
+  - use: valkey.action.sleep
+    id: loaded
+    depends_on: [load, hit-replica, stall-primary]
+    config: {seconds: 1}
+  - use: valkey.fault.process-signal
+    id: hit-replica
+    config:
+      when_event: loaded.completed
+      instance: replica
+      signal: {$ref: inputs.signal}
+      restart_mode: {$ref: inputs.restart_mode}
+      restart_delay_s: {$ref: inputs.restart_delay_s}
+      pause_s: {$ref: inputs.pause_s}
+  - use: valkey.fault.process-signal
+    id: stall-primary
+    config:
+      when_event: loaded.completed
+      instance: primary
+      signal: SIGSTOP
+      pause_s: {$ref: inputs.primary_pause_s}
+  - use: valkey.action.commands
+    id: during
+    depends_on: [loaded]
+    config:
+      timeout_s: 60
+      commands: {$ref: inputs.during}
+  - use: valkey.action.sleep
+    id: settle
+    depends_on: [during]
+    config: {seconds: 5}
+  - use: valkey.action.poll
+    id: links-up
+    depends_on: [settle]
+    config:
+      instances: replicas
+      section: replication
+      field: master_link_status
+      predicate: {equals: up}
+      timeout_s: 120
+  - use: valkey.action.commands
+    id: verify
+    depends_on: [links-up]
+    config:
+      instances: all
+      timeout_s: 60
+      commands: {$ref: inputs.verify}
+  - use: valkey.oracle.dataset-digest
+    id: digest
+    depends_on: [verify]
+    config:
+      include_replicas: true
+      converge_timeout_s: 60
+  # The ledger may lose what a SIGKILLed instance acknowledged within its fsync window.
+  - use: valkey.oracle.ledger
+    id: data
+    config:
+      workload: writes
+      loss_window_s: 2.5
+required_events: [loaded.completed]
+required_evidence:
+  - {evidence_id: valkey.fault.injected, source: hit-replica}

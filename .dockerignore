@@ -1,0 +1,16 @@
+# The Dockerfile copies pyproject.toml, README.md, LICENSE, valkey_fuzzer/, formal/, examples/ and porcupine/;
+# everything else only slows the build context down.
+.git
+.github
+.venv
+work
+build
+dist
+*.egg-info
+__pycache__
+docs
+tests
+zoo
+reports
+CHANGELOG.md
+changelog.d

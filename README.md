@@ -53,6 +53,12 @@ export PATH="$HOME/.local/bin:$PATH"
 If the build cannot reach `proxy.golang.org` (a corporate TLS proxy, for
 example), run it as `GOPROXY=direct GOSUMDB=off go -C porcupine build ...`.
 
+**Or use the image.** `docker build -t valkey-fuzzer .` from the checkout
+(the [`Dockerfile`](Dockerfile)) holds the fuzzer, Valkey 9.1.3, `porcupine`
+and the faults' tools; `docker run --rm -v "$PWD:/work" valkey-fuzzer run
+/work/scenario.yaml` runs a scenario. [Fuzzing a module from its own
+repository](docs/module-repos.md#the-image) says which faults need root.
+
 ## Quickstart
 
 Until this code lands in `valkey-io/valkey-fuzzer`, clone the branch
