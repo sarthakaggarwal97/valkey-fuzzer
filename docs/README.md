@@ -37,7 +37,6 @@ first group.
 | Page | For | One line |
 | --- | --- | --- |
 | [Adding tests](extending.md) | experiment and component authors | writing experiments, components, and providers, registering them, shipping a pack, testing |
-| [Second target](second-target.md) | pack authors | Redis OSS as a pack of its own (`packs/redis`): why, what it ships, what the core assumed about Valkey, and how to add a third target |
 | [Architecture](architecture.md) | framework contributors | code layout, the compiler and runner, the local deployment provider, the wave engine |
 | [Releasing](releasing.md) | maintainers | the version, the release steps, what the sdist and the wheel hold, the release workflow, the one-time PyPI setup, the porcupine checker binaries |
 | [Spec bridge](spec-bridge.md) | model and experiment authors | TLA+ bundles: `spec check`, `spec translate`, `spec conform`, the assurance report |
