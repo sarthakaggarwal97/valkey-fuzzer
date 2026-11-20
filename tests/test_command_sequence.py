@@ -508,7 +508,12 @@ def test_an_expect_both_builds_violate_alike_is_disputed_not_fail(builds):
     result, _ = run(builds, commands)
 
     assert result.status.value == "ERROR"
+    assert result.summary == (
+        "expectations both builds violate alike, so they are not about the change: 0 (LRANGE l 0 -1)"
+    )
     # pre_existing: the batch files what both builds do alike once, not against the change.
+    assert list(result.diagnostics) == ["reason", "pre_existing", "commands"]
+    assert list(result.diagnostics["commands"][0]) == ["index", "command", "expect", "candidate", "parent"]
     assert to_plain_data(result.diagnostics) == {
         "reason": "expect-disputed",
         "pre_existing": True,
@@ -561,10 +566,21 @@ def test_a_candidate_reply_that_never_came_leaves_the_run_untested(builds):
     result, value = run(builds, [{"command": ["SLOW"]}, {"command": ["PING"]}])
 
     assert result.status.value == "ERROR"
-    assert "command 0 (SLOW) got no reply" in result.summary
+    assert result.summary == "command 0 (SLOW) got no reply: TimeoutError: Timeout reading from socket"
+    assert dict(result.diagnostics) == {}
     # The sequence stops there: the connection's state is unknown.
     assert _replies(value["candidate"]) == [{"error": "TimeoutError: Timeout reading from socket", "unanswered": True}]
     assert "exited" not in value["candidate"]
+
+
+def test_a_parent_reply_that_never_came_leaves_the_run_untested(builds):
+    BUILDS[builds["parent"]].replies = {("SLOW",): TIMEOUT}
+    result, value = run(builds, [{"command": ["SLOW"]}, {"command": ["PING"]}])
+
+    assert result.status.value == "ERROR"
+    assert result.summary == "the parent did not answer command 0 (SLOW): TimeoutError: Timeout reading from socket"
+    assert dict(result.diagnostics) == {}
+    assert value["uncompared"] == 0 and "exited" not in value["parent"]
 
 
 def test_marked_commands_whose_replies_are_equal_did_not_reach_the_change(builds):
@@ -573,7 +589,9 @@ def test_marked_commands_whose_replies_are_equal_did_not_reach_the_change(builds
 
     assert result.status.value == "ERROR"
     assert dict(result.diagnostics) == {"reason": "unreached-change"}
-    assert "did not reach the change: 0 (PING)" in result.summary
+    assert result.summary == (
+        "marked commands reply the same on both builds, so the sequence did not reach the change: 0 (PING)"
+    )
     assert value["reached"] == []
 
 
@@ -588,6 +606,9 @@ def test_an_unmarked_difference_is_an_unexplained_difference_with_both_replies(b
     result, value = run(builds, commands)
 
     assert result.status.value == "ERROR"
+    assert result.summary == "unmarked commands reply differently on the two builds: 1 (LRANGE l 0 -1)"
+    assert list(result.diagnostics) == ["reason", "commands"]
+    assert list(result.diagnostics["commands"][0]) == ["index", "command", "candidate", "parent"]
     assert to_plain_data(result.diagnostics) == {
         "reason": "unexplained-difference",
         "commands": [
@@ -617,6 +638,11 @@ def test_a_parent_that_dies_on_a_marked_command_reached_the_change(builds):
     result, value = run(builds, commands)
 
     assert result.status.value == "PASS", result.summary
+    assert result.summary == (
+        "2 commands on both builds, 1 marked command(s) reached the change, "
+        "1 command(s) after the parent died not compared: 1 (PING)"
+    )
+    assert dict(result.diagnostics) == {}
     assert value["reached"] == [0] and value["parent"]["exited"] == -11
     assert _replies(value["parent"]) == [{"error": "ConnectionError: Connection closed by server.", "unanswered": True}]
     assert "exited" not in value["candidate"]
@@ -650,7 +676,10 @@ def test_commands_after_the_parent_died_are_counted_and_named(builds):
 
     assert value["uncompared"] == 7
     assert result.status.value == "PASS", result.summary
-    assert "7 command(s) after the parent died not compared: 3 (SET k3 v), 4 (SET k4 v)" in result.summary
+    assert result.summary == (
+        "10 commands on both builds, 1 marked command(s) reached the change, 7 command(s) after the parent died not "
+        "compared: 3 (SET k3 v), 4 (SET k4 v), 5 (SET k5 v), 6 (SET k6 v), 7 (SET k7 v), 8 (SET k8 v), 9 (SET k9 v)"
+    )
 
 
 def test_a_marked_command_after_the_parent_died_is_an_error(builds):
@@ -658,6 +687,9 @@ def test_a_marked_command_after_the_parent_died_is_an_error(builds):
     result, value = _die_at(builds, 1, 5, marked=(1, 3))
 
     assert result.status.value == "ERROR"
+    assert result.summary == (
+        "the parent died before marked commands ran on it, so they were not compared: 3 (SET k3 v)"
+    )
     assert result.diagnostics["reason"] == "uncompared-change" and list(result.diagnostics["commands"]) == [3]
     assert value["uncompared"] == 3
 
@@ -707,7 +739,7 @@ def test_an_option_the_parent_rejects_is_dropped_on_both_sides_and_recorded(buil
         assert running[running.index("--list-max-listpack-size") + 1] == "4"
         assert running[running.index("--sanitize-dump-payload") + 1] == "yes"
         assert running[running.index("--enable-debug-command") + 1] == "yes"
-    assert "dropped new-option" in result.summary
+    assert result.summary == "1 commands on both builds, 0 marked command(s) reached the change, dropped new-option"
 
 
 def test_a_build_that_does_not_start_leaves_the_run_untested(builds):
@@ -1416,7 +1448,7 @@ def test_variants_compare_replies_as_multisets_of_their_resp2_values(builds):
         "encodings": {"outcome": "pass"},
         "protocol": {"outcome": "pass"},
     }
-    assert result.summary.endswith(", variants pass")
+    assert result.summary == "5 commands on both builds, 0 marked command(s) reached the change, variants pass"
     encodings, protocol = [server for server in SERVERS.values() if server.node][2:]
     assert [encodings.option(name) for name in ("set-max-intset-entries", "list-max-listpack-size")] == ["0", "0"]
     assert {wire.resp for wire in protocol.wires} == {3} and protocol.option("hash-max-listpack-entries") is None

@@ -22,7 +22,7 @@ import shutil
 import socket
 import subprocess
 import threading
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any, ClassVar, Optional
 
 import valkey
@@ -361,6 +361,12 @@ def _validate_sequence_item(item: Mapping[str, Any], where: str, config: Mapping
 
 def _argument(item: Any) -> Any:
     return base64.b64decode(item[BASE64_KEY]) if is_binary(item) else item
+
+
+def argument_bytes(item: Any) -> bytes:
+    """A binary argument's bytes, or a string as UTF-8: what a file, or a tool's stdin, is written from."""
+
+    return _argument(item) if is_binary(item) else item.encode()
 
 
 def _packed(arguments: Sequence[Any]) -> bytes:
@@ -958,6 +964,24 @@ class Side:
         if connection is not None:
             connection.close()
 
+    def close(self) -> None:
+        """Close every connection to every node; the nodes run on."""
+
+        for node in self.nodes:
+            for connection in node.connections.values():
+                connection.close()
+
+    def client_view(self) -> "Side":
+        """One more client of this side's nodes: a target for :func:`run_sequence` with connections of its own, the
+        same placeholder values, and no names, so its replies are not masked (a concurrent client's are never
+        compared)."""
+
+        view = Side(self.label, self.binary, len(self.nodes), self.resp, self.timeout_s)
+        for mine, theirs in zip(view.nodes, self.nodes):
+            mine.server, mine.options = theirs.server, theirs.options
+        view.values = self.values
+        return view
+
     def substitute(self, argument: Any) -> Any:
         """``argument`` with every placeholder in it replaced by this side's value."""
 
@@ -984,9 +1008,7 @@ class Side:
     def finish(self, context: Any, spec: ComponentSpec, commands: Sequence[Mapping[str, Any]]) -> None:
         """Note whether a node exited (a lost connection waits for its node), keep every node's logs, stop them."""
 
-        for node in self.nodes:
-            for connection in node.connections.values():
-                connection.close()
+        self.close()
         if self.replies and self.replies[-1].get("unanswered"):
             lost = self.nodes[commands[self.replies[-1]["index"]]["node"]].server
             if lost is not None and lost.process is not None:
@@ -1181,11 +1203,7 @@ class CommandsAction:
     def _run_compared(self, context: Any, spec: ComponentSpec, config: Mapping[str, Any]):
         commands = config["commands"]
         try:
-            candidate_binary = resolve_binary(plain_config(context.plan.deployment).get("valkey_binary") or "")
-            # Without compare_with, both servers run the deployment's binary and differ by their modules.
-            parent_binary = (
-                candidate_binary if config["compare_with"] is None else resolve_binary(config["compare_with"])
-            )
+            binaries = two_builds(context, config["compare_with"])
         except OSError as exc:
             return make_result(spec, ComponentStatus.ERROR, str(exc))
         server_config = {**PRIVATE_SERVER_DEFAULTS, **canonicalize_server_config(config["server_config"])}
@@ -1200,13 +1218,10 @@ class CommandsAction:
                 context.rng(spec.id, "ports"),
             )
         )
-        candidate = new_side("candidate", candidate_binary, config, modules["candidate"], ports)
-        parent = new_side("parent", parent_binary, config, modules["parent"], ports)
+        candidate = new_side("candidate", binaries["candidate"], config, modules["candidate"], ports)
+        parent = new_side("parent", binaries["parent"], config, modules["parent"], ports)
 
-        files = {
-            name: _argument(content) if is_binary(content) else content.encode()
-            for name, content in config["files"].items()
-        }
+        files = {name: argument_bytes(content) for name, content in config["files"].items()}
 
         def starts(server: Side, options: Mapping[str, Any]) -> Probed:
             probed = {**options, **server.options, **server.nodes[0].options}
@@ -1286,7 +1301,7 @@ class CommandsAction:
             from .checks import run_checks
 
             checks, check_logs = run_checks(
-                context, spec, config, candidate, parent_binary, server_config, files, differing
+                context, spec, config, candidate, binaries["parent"], server_config, files, differing
             )
             record["checks"] = checks
         failed = next((outcome for outcome in checks.values() if outcome["outcome"] == "fail"), None)
@@ -1310,6 +1325,10 @@ class CommandsAction:
         violations = [
             text for index, text in zip(_violating(commands, candidate.replies), violations) if index not in disputed
         ]
+
+        def named(index: int) -> str:
+            return f"{index} ({step_text(commands[index])})"
+
         if candidate.exited is not None:
             cause = candidate.crash_cause()
             at = candidate.replies[-1]["index"] if candidate.replies else None
@@ -1361,71 +1380,106 @@ class CommandsAction:
                 spec,
                 ComponentStatus.ERROR,
                 "the parent died before marked commands ran on it, so they were not compared: "
-                + ", ".join(f"{index} ({step_text(commands[index])})" for index in unexamined),
+                + ", ".join(map(named, unexamined)),
                 evidence=evidence,
                 diagnostics={"reason": "uncompared-change", "commands": unexamined},
             )
-        if disputed:
-            commands_disputed = [
-                {
-                    "index": index,
-                    "command": step_text(commands[index]),
-                    "expect": plain_config(commands[index]["expect"]),
-                    "candidate": reply_at(candidate.replies, index),
-                    "parent": reply_at(parent.replies, index),
-                }
-                for index in disputed
-            ]
-            return make_result(
-                spec,
-                ComponentStatus.ERROR,
-                "expectations both builds violate alike, so they are not about the change: "
-                + ", ".join(f"{item['index']} ({item['command']})" for item in commands_disputed),
-                evidence=evidence,
-                # pre_existing: whatever is wrong here is in the parent too, so the batch can file it once.
-                diagnostics={"reason": "expect-disputed", "pre_existing": True, "commands": commands_disputed},
-            )
-        if unexplained:
-            differences = [
-                {
-                    "index": index,
-                    "command": step_text(commands[index]),
-                    "candidate": reply_at(candidate.replies, index),
-                    "parent": reply_at(parent.replies, index),
-                }
-                for index in unexplained
-            ]
-            return make_result(
-                spec,
-                ComponentStatus.ERROR,
-                "unmarked commands reply differently on the two builds: "
-                + ", ".join(f"{item['index']} ({item['command']})" for item in differences),
-                evidence=evidence,
-                diagnostics={"reason": "unexplained-difference", "commands": differences},
-            )
-        if unreached:
-            return make_result(
-                spec,
-                ComponentStatus.ERROR,
-                "marked commands reply the same on both builds, so the sequence did not reach the change: "
-                + ", ".join(f"{index} ({step_text(commands[index])})" for index in unreached),
-                evidence=evidence,
-                diagnostics={"reason": "unreached-change"},
-            )
-        return make_result(
+
+        def both(index: int, **extra: Any) -> dict[str, Any]:
+            return {
+                "index": index,
+                "command": step_text(commands[index]),
+                **extra,
+                "candidate": reply_at(candidate.replies, index),
+                "parent": reply_at(parent.replies, index),
+            }
+
+        return compared_verdict(
             spec,
-            ComponentStatus.PASS,
-            f"{len(commands)} commands on both builds, {len(reached)} marked command(s) reached the change"
-            + (f", dropped {', '.join(dropped)}" if dropped else "")
+            evidence,
+            "command",
+            named,
+            disputed=[both(index, expect=plain_config(commands[index]["expect"])) for index in disputed],
+            unexplained=[both(index) for index in unexplained],
+            unreached=unreached,
+            differ="unmarked commands reply differently on the two builds: ",
+            same="marked commands reply the same on both builds, so the sequence did not reach the change: ",
+            total=len(commands),
+            reached=len(reached),
+            extra=(f", dropped {', '.join(dropped)}" if dropped else "")
             + (
                 f", {len(after_death)} command(s) after the parent died not compared: "
-                + ", ".join(f"{index} ({step_text(commands[index])})" for index in after_death)
+                + ", ".join(map(named, after_death))
                 if after_death
                 else ""
             )
             + "".join(f", {name} {outcome['outcome']}" for name, outcome in checks.items()),
-            evidence=evidence,
         )
+
+
+def compared_verdict(
+    spec: ComponentSpec,
+    evidence: Any,
+    kind: str,
+    named: Callable[[int], str],
+    *,
+    disputed: Sequence[Mapping[str, Any]],
+    unexplained: Sequence[Mapping[str, Any]],
+    unreached: Sequence[int],
+    differ: str,
+    same: str,
+    total: int,
+    reached: int,
+    extra: str = "",
+):
+    """The verdict once the candidate neither crashed, violated an ``expect`` the parent met, nor left anything
+    unanswered: ERROR ``expect-disputed``, ``unexplained-difference`` (worded ``differ``), or ``unreached-change``
+    (``same``), in that order, else PASS (``total`` of ``kind``, ``reached`` marked ones that differed, ``extra``
+    after). The batch groups failures by these summaries. ``disputed`` and ``unexplained`` are the diagnostics'
+    items, each with its ``index``; ``named(index)`` names one in a summary."""
+
+    units = f"{kind}s"
+    if disputed:
+        return make_result(
+            spec,
+            ComponentStatus.ERROR,
+            "expectations both builds violate alike, so they are not about the change: "
+            + ", ".join(named(item["index"]) for item in disputed),
+            evidence=evidence,
+            # pre_existing: whatever is wrong here is in the parent too, so the batch can file it once.
+            diagnostics={"reason": "expect-disputed", "pre_existing": True, units: list(disputed)},
+        )
+    if unexplained:
+        return make_result(
+            spec,
+            ComponentStatus.ERROR,
+            differ + ", ".join(named(item["index"]) for item in unexplained),
+            evidence=evidence,
+            diagnostics={"reason": "unexplained-difference", units: list(unexplained)},
+        )
+    if unreached:
+        return make_result(
+            spec,
+            ComponentStatus.ERROR,
+            same + ", ".join(map(named, unreached)),
+            evidence=evidence,
+            diagnostics={"reason": "unreached-change"},
+        )
+    return make_result(
+        spec,
+        ComponentStatus.PASS,
+        f"{total} {units} on both builds, {reached} marked {kind}(s) reached the change" + extra,
+        evidence=evidence,
+    )
+
+
+def two_builds(context: Any, compare_with: Optional[str]) -> dict[str, str]:
+    """The deployment's binary (the ``candidate``) and ``compare_with`` (the ``parent``), resolved; without a parent,
+    the candidate twice (both servers then run the deployment's binary and differ by their modules). OSError when
+    one is not there."""
+
+    candidate = resolve_binary(plain_config(context.plan.deployment).get("valkey_binary") or "")
+    return {"candidate": candidate, "parent": candidate if compare_with is None else resolve_binary(compare_with)}
 
 
 def _record(
@@ -1661,7 +1715,9 @@ __all__ = [
     "CommandsAction",
     "RawConnection",
     "Side",
+    "argument_bytes",
     "compare",
+    "compared_verdict",
     "free_ports",
     "is_binary",
     "new_side",
@@ -1671,6 +1727,7 @@ __all__ = [
     "reply_at",
     "run_sequence",
     "step_text",
+    "two_builds",
     "validate_sequence_command",
     "without_index",
 ]

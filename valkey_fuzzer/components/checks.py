@@ -663,39 +663,37 @@ def _categories(side: Any, words: Sequence[str]) -> Optional[set[str]]:
     return container | set(info[6])
 
 
-class _Worker:
-    """One of the concurrency check's clients: the sequence on the side's nodes, on connections of its own."""
+def replicate(
+    primary: tuple[Any, int], replica: tuple[Any, int], context: Any, digests: bool = True
+) -> tuple[bool, dict[str, Any]]:
+    """Make ``replica`` (a side and a node's index) a replica of ``primary``, and wait until it caught up (see
+    :func:`converged`)."""
 
-    def __init__(self, side: Any):
-        self.side = side
-        self.connections: dict[tuple[int, str], Any] = {}
-        self.replies: list[dict[str, Any]] = []
+    side, index = primary
+    sent = ask(*replica, "REPLICAOF", "127.0.0.1", side.nodes[index].options["port"])
+    if "reply" not in sent:
+        return False, {"replicaof": sent}
+    return converged(primary, replica, context, digests)
 
-    def run(self, commands: Sequence[Mapping[str, Any]], context: Any) -> None:
-        self.replies = command_sequence.run_sequence(self, commands, context)
 
-    def connection(self, node: int, name: str) -> Any:
-        if (node, name) not in self.connections:
-            self.connections[node, name] = command_sequence.open_raw_connection(
-                self.side.resp, self.side.timeout_s, path=self.side.nodes[node].server.socket_path
-            )
-        return self.connections[node, name]
+def converged(
+    primary: tuple[Any, int], replica: tuple[Any, int], context: Any, digests: bool = True
+) -> tuple[bool, dict[str, Any]]:
+    """Wait until ``replica``'s link is up and it has ``primary``'s replication offset and (with ``digests``)
+    ``DEBUG DIGEST``: whether it did, and the last state read."""
 
-    def survives(self, node: int) -> bool:
-        return self.side.survives(node)
+    def attempt() -> tuple[bool, dict[str, Any]]:
+        state: dict[str, Any] = {}
+        for role, (side, index) in (("primary", primary), ("replica", replica)):
+            info = parse_info_text(ask(side, index, "INFO", "replication").get("reply", ""))
+            state[role] = {"offset": info.get("master_repl_offset"), "digest": ask(side, index, "DEBUG", "DIGEST")}
+        state["link"] = info.get("master_link_status")
+        if not digests:
+            return state["link"] == "up" and state["primary"]["offset"] == state["replica"]["offset"], state
+        done = state["link"] == "up" and state["primary"] == state["replica"]
+        return done and "reply" in state["primary"]["digest"], state
 
-    def forget(self, node: int, name: str) -> None:
-        self.connections.pop((node, name)).close()
-
-    def substitute(self, argument: Any) -> Any:
-        return self.side.substitute(argument)
-
-    def mask(self, value: Any) -> Any:
-        return value
-
-    def close(self) -> None:
-        for connection in self.connections.values():
-            connection.close()
+    return poll_until(attempt, timeout_s=SYNC_TIMEOUT_S, interval_s=0.1, context=context)
 
 
 class _Checks:
@@ -811,37 +809,6 @@ class _Checks:
             {"check": check, **diagnostics, "crashes": {"candidate": cause}},
             crash=True,
         )
-
-    def replicate(
-        self, primary: tuple[Any, int], replica: tuple[Any, int], digests: bool = True
-    ) -> tuple[bool, dict[str, Any]]:
-        """Make ``replica`` (a side and a node's index) a replica of ``primary``, and wait until it caught up (see
-        :meth:`converged`)."""
-
-        side, index = primary
-        sent = ask(*replica, "REPLICAOF", "127.0.0.1", side.nodes[index].options["port"])
-        if "reply" not in sent:
-            return False, {"replicaof": sent}
-        return self.converged(primary, replica, digests)
-
-    def converged(
-        self, primary: tuple[Any, int], replica: tuple[Any, int], digests: bool = True
-    ) -> tuple[bool, dict[str, Any]]:
-        """Wait until ``replica``'s link is up and it has ``primary``'s replication offset and (with ``digests``)
-        ``DEBUG DIGEST``: whether it did, and the last state read."""
-
-        def attempt() -> tuple[bool, dict[str, Any]]:
-            state: dict[str, Any] = {}
-            for role, (side, index) in (("primary", primary), ("replica", replica)):
-                info = parse_info_text(ask(side, index, "INFO", "replication").get("reply", ""))
-                state[role] = {"offset": info.get("master_repl_offset"), "digest": ask(side, index, "DEBUG", "DIGEST")}
-            state["link"] = info.get("master_link_status")
-            if not digests:
-                return state["link"] == "up" and state["primary"]["offset"] == state["replica"]["offset"], state
-            done = state["link"] == "up" and state["primary"] == state["replica"]
-            return done and "reply" in state["primary"]["digest"], state
-
-        return poll_until(attempt, timeout_s=SYNC_TIMEOUT_S, interval_s=0.1, context=self.context)
 
     @staticmethod
     def diverged(check: str, reason: str, synced: bool, state: Mapping[str, Any], **diagnostics: Any) -> dict:
@@ -959,13 +926,13 @@ class _Checks:
         synced, state = False, {}
         try:
             if not failed:
-                synced, state = self.replicate((side, 0), (side, 1))
+                synced, state = replicate((side, 0), (side, 1), self.context)
                 if not synced:
                     failed = f"the replica did not sync before the sequence: {canonical_json(state)}"
             if not failed:
                 _set_on_replica(side, self.commands, self.words)
                 side.replies = command_sequence.run_sequence(side, self.commands, self.context)
-                synced, state = self.converged((side, 0), (side, 1))
+                synced, state = converged((side, 0), (side, 1), self.context)
         finally:
             self.finish(side)
         return self.judge("replica", side, failed) or self.diverged("replica", "replica-diverged", synced, state)
@@ -1090,21 +1057,26 @@ class _Checks:
         # With a replica too, as the replica check would run one (see replica).
         replica = self.config["checks"]["replica"] and self.replica_blocker() is None
         side, failed = self.start("candidate.concurrency", **({"nodes": 2, "options": QUICK_SYNC} if replica else {}))
-        workers: list[_Worker] = []
+        # Each client sees the side through a view of its own: its own connections, and its replies unmasked.
+        workers: list[Any] = []
         hung = []
         # Whether each node a command went unanswered on answers a PING; one that exited crashed (finish finds it).
         answering: dict[int, bool] = {}
         synced, state = True, {}
         try:
             if not failed and replica:
-                synced, state = self.replicate((side, 0), (side, 1))
+                synced, state = replicate((side, 0), (side, 1), self.context)
                 if not synced:
                     failed = f"the replica did not sync before the sequence: {canonical_json(state)}"
                 else:
                     _set_on_replica(side, commands, words)
             if not failed:
-                workers = [_Worker(side) for _ in range(count)]
-                threads = [threading.Thread(target=worker.run, args=(commands, self.context)) for worker in workers]
+                workers = [side.client_view() for _ in range(count)]
+
+                def run(worker: Any) -> None:
+                    worker.replies = command_sequence.run_sequence(worker, commands, self.context)
+
+                threads = [threading.Thread(target=run, args=(worker,)) for worker in workers]
                 for thread in threads:
                     thread.start()
                 for thread in threads:
@@ -1128,7 +1100,7 @@ class _Checks:
                             }
                         )
                 if replica and not hung:
-                    synced, state = self.converged((side, 0), (side, 1))
+                    synced, state = converged((side, 0), (side, 1), self.context)
         finally:
             for worker in workers:
                 worker.close()
@@ -1192,7 +1164,7 @@ class _Checks:
         synced, state, problem, exact = True, {}, None, True
         try:
             if not failed and replica is not None:
-                synced, state = self.replicate((side, 0), (side, replica))
+                synced, state = replicate((side, 0), (side, replica), self.context)
                 if not synced:
                     failed = f"the replica did not sync before the sequence: {canonical_json(state)}"
                 _set_on_replica(side, self.commands, self.words)
@@ -1215,7 +1187,7 @@ class _Checks:
                         break
                 answered = not (side.replies and side.replies[-1].get("unanswered"))
                 if problem is None and answered and replica is not None:
-                    synced, state = self.converged((side, 0), (side, replica), exact)
+                    synced, state = converged((side, 0), (side, replica), self.context, exact)
         finally:
             self.finish(side)
         decided = self.judge("faults", side, failed, faults=schedule, persistence=persistence)
@@ -1258,7 +1230,7 @@ class _Checks:
         node, what = fault["node"], "DEBUG RELOAD" if fault["fault"] == "reload" else "a restart"
         if node == replica:
             # The replica's data before the fault is the primary's: it must have caught up first.
-            synced, state = self.converged((side, 0), (side, replica), exact)
+            synced, state = converged((side, 0), (side, replica), self.context, exact)
             if not synced:
                 return self.diverged("faults", "replica-diverged", synced, state, fault=dict(fault))
         # The sequence's own restart returns once the node answers, while it may still load its data (the walk's
@@ -1325,7 +1297,7 @@ class _Checks:
         if node == replica and fault["fault"] == "restart":
             # The replica starts as a primary: REPLICAOF was a command, not its configuration.
             # Restarted as a primary, it dropped what expired: its digest then need not match (see faults).
-            synced, state = self.replicate((side, 0), (side, replica), exact and not _volatile(side, 0))
+            synced, state = replicate((side, 0), (side, replica), self.context, exact and not _volatile(side, 0))
             _set_on_replica(side, self.commands, self.words)
             if not synced:
                 return self.diverged("faults", "replica-diverged", synced, state, fault=dict(fault))
@@ -1439,7 +1411,7 @@ class _Checks:
         refused = None
         try:
             if not failed:
-                synced, state = self.replicate((parent, 0), (side, 0))
+                synced, state = replicate((parent, 0), (side, 0), self.context)
             if not synced:
                 refused = _foreign_rdb_refusal(side)
         finally:
@@ -1488,7 +1460,9 @@ __all__ = [
     "RUNS_OTHERS",
     "SYNC_TIMEOUT_S",
     "ask",
+    "converged",
     "limits_memory",
+    "replicate",
     "run_checks",
     "sets_replication",
     "words",

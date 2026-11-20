@@ -94,6 +94,7 @@ def test_each_side_runs_its_own_tool_in_its_working_directory(builds):
     result, value, folder = run(builds, [cli("cwd", "out:café", "err:warn", "exit:3")])
 
     assert result.status.value == "PASS", result.summary
+    assert result.summary == "1 runs on both builds, 0 marked run(s) reached the change"
     record = value["candidate"]["runs"][0]
     assert record == {"index": 0, "tool": "valkey-cli", "exit": 3, "stdout": "$dir\ncafé\n", "stderr": "warn\n"}
     assert value["parent"]["runs"] == value["candidate"]["runs"]
@@ -167,6 +168,10 @@ def test_a_marked_run_that_differs_reached_the_change_and_its_twin_did_not(build
     result, value, _ = run(builds, runs)
 
     assert result.status.value == "ERROR" and result.diagnostics["reason"] == "unreached-change"
+    assert result.summary == (
+        "marked runs are the same on both builds, so they did not reach the change: 1 (valkey-cli out:same)"
+    )
+    assert dict(result.diagnostics) == {"reason": "unreached-change"}
     assert value["reached"] == [0]
     assert value["candidate"]["digest"] != value["parent"]["digest"]
 
@@ -175,7 +180,10 @@ def test_an_unmarked_run_that_differs_is_an_unexplained_difference_with_both_sid
     result, value, _ = run(builds, [cli("err:warning@parent", "out:OK")])
 
     assert result.status.value == "ERROR" and result.diagnostics["reason"] == "unexplained-difference"
+    assert result.summary == "unmarked runs differ on the two builds: 0 (valkey-cli err:warning@parent out:OK)"
+    assert list(result.diagnostics) == ["reason", "runs"]
     difference = to_plain_data(result.diagnostics["runs"])[0]
+    assert list(difference) == ["index", "run", "candidate", "parent"]
     assert difference["run"] == "0 (valkey-cli err:warning@parent out:OK)"
     assert (difference["candidate"]["stderr"], difference["parent"]["stderr"]) == ("", "warning\n")
     assert value["unexplained"] == [0]
@@ -212,7 +220,11 @@ def test_an_expect_the_candidate_violates_and_the_parent_meets_is_fail(builds):
     result, value, _ = run(builds, [cli("exit:1@candidate", expect={"exit": {"equals": 0}})])
 
     assert result.status.value == "FAIL" and not result.crash
-    assert result.summary.startswith("run 0 (valkey-cli exit:1@candidate) gave {")
+    assert result.summary == (
+        'run 0 (valkey-cli exit:1@candidate) gave {"exit":1,"stderr":"","stdout":"","tool":"valkey-cli"}, '
+        'not {"exit":{"equals":0}}'
+    )
+    assert dict(result.diagnostics) == {}
     assert value["violating"] == [0]
 
 
@@ -220,8 +232,15 @@ def test_an_expect_both_builds_violate_alike_is_disputed(builds):
     result, value, _ = run(builds, [cli("exit:1", expect={"exit": {"equals": 0}})])
 
     assert result.status.value == "ERROR" and result.diagnostics["reason"] == "expect-disputed"
+    assert result.summary == (
+        "expectations both builds violate alike, so they are not about the change: 0 (valkey-cli exit:1)"
+    )
     assert result.diagnostics["pre_existing"] is True
-    assert to_plain_data(result.diagnostics["runs"])[0]["expect"] == {"exit": {"equals": 0}}
+    assert list(result.diagnostics) == ["reason", "pre_existing", "runs"]
+    disputed = to_plain_data(result.diagnostics["runs"])[0]
+    assert list(disputed) == ["index", "run", "expect", "candidate", "parent"]
+    assert disputed["expect"] == {"exit": {"equals": 0}}
+    assert disputed["run"] == "0 (valkey-cli exit:1)"
     assert value["violating"] == [0]
 
 
@@ -236,6 +255,7 @@ def test_a_candidate_tool_that_crashes_is_a_fail(builds, steps, cause):
     result, value, _ = run(builds, [cli("out:first"), cli(*steps)])
 
     assert result.status.value == "FAIL" and result.crash, result.summary
+    assert result.summary == f"the candidate crashed: run 1: {cause}"
     assert dict(result.diagnostics["crashes"]) == {"run 1": cause}
     assert len(value["candidate"]["runs"]) == 2
 
@@ -271,6 +291,8 @@ def test_a_parent_tool_that_crashes_on_a_marked_run_reached_the_change(builds):
     result, value, _ = run(builds, [marked])
 
     assert result.status.value == "PASS", result.summary
+    assert result.summary == "1 runs on both builds, 1 marked run(s) reached the change"
+    assert dict(result.diagnostics) == {}
     assert value["parent"]["runs"][0]["signal"] == 11 and value["parent"]["runs"][0]["exit"] is None
     assert value["reached"] == [0]
 
@@ -280,12 +302,24 @@ def test_a_run_that_never_exits_is_killed_and_recorded(builds):
 
     assert result.status.value == "ERROR"
     assert result.summary == "run 0 (valkey-cli out:started hang@candidate) did not exit within 1s"
+    assert dict(result.diagnostics) == {}
     assert value["candidate"]["runs"][0]["timed_out"] is True
 
     result, value, _ = run(
         builds, [cli("hang@parent", expect_difference=True, expect={"exit": {"equals": 0}})], timeout_s=1
     )
     assert result.status.value == "PASS" and value["reached"] == [0]
+
+
+def test_a_run_cancelled_before_every_run_ran_is_an_error(builds):
+    spec = _spec(compare_with=builds["parent"], runs=[cli("out:first"), cli("out:second")])
+    context = FakeContext(spec, deployment={"valkey_binary": builds["candidate"]})
+    context.cancel()
+    result = tools.ToolsAction().run(context, spec)
+
+    assert result.status.value == "ERROR"
+    assert result.summary == "cancelled before every run ran"
+    assert to_plain_data(result.evidence[0].value)["candidate"]["runs"] == []
 
 
 def test_a_build_without_the_tool_is_untested(builds):
