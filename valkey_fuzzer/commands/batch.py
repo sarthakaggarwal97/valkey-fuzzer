@@ -8,7 +8,7 @@ from typing import Any
 from ..batch import BatchError, BatchOptions, BatchRunner, expand, hooks, load_spec, normalize_source
 from ..outcomes import EXIT_SUCCESS, exit_code
 from ..reports import new_report_folder
-from ._common import add_common_options, exclusion, positive_count, service_for
+from ._common import EXCLUDE_OPTION, add_common_options, positive_count, service_for
 
 
 def register(subparsers: Any) -> None:
@@ -29,13 +29,7 @@ def register(subparsers: Any) -> None:
     sources.add_argument("--seeds", type=positive_count, metavar="N", help="Seeds per experiment (default: profile's)")
     sources.add_argument("--first-seed", type=int, metavar="N", help="First seed (default: a fresh one)")
     sources.add_argument(
-        "--exclude",
-        dest="excludes",
-        action="append",
-        default=[],
-        type=exclusion,
-        metavar="PATH=VALUE",
-        help="Never generate VALUE at PATH in a random job; may be repeated",
+        "--exclude", help="Never generate VALUE at PATH in a random job; may be repeated", **EXCLUDE_OPTION
     )
     sources.add_argument("--base", metavar="FILE", help="Partial scenario merged over every random draw")
     sources.add_argument(

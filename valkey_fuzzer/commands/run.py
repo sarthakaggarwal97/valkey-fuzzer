@@ -22,7 +22,7 @@ from ..outcomes import EXIT_FAILURE, EXIT_HARNESS_ERROR, EXIT_SUCCESS, EXIT_USAG
 from ..reports import SCENARIO_FILE, ReportWriteError, export_scenario, replay_command, write_document
 from ..results import OutcomeStatus
 from ..service import PreparedRun
-from ._common import add_common_options, artifact_paths, exclusion, print_conform, print_header, service_for
+from ._common import EXCLUDE_OPTION, add_common_options, artifact_paths, print_conform, print_header, service_for
 
 
 def register(subparsers: Any) -> None:
@@ -45,13 +45,9 @@ def register(subparsers: Any) -> None:
     )
     generated.add_argument(
         "--exclude",
-        dest="excludes",
-        action="append",
-        default=[],
-        type=exclusion,
-        metavar="PATH=VALUE",
         help="Never generate VALUE at PATH (inputs.<name>, deployment.<field>, server_config.<key>, or "
         "experiment); may be repeated",
+        **EXCLUDE_OPTION,
     )
     generated.add_argument(
         "--base", metavar="FILE", help="Partial scenario whose fields override the draws (a second build, say)"

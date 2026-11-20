@@ -206,16 +206,16 @@ def test_a_base_install_needs_java_and_the_jar_only_when_a_spec_tool_runs(tmp_pa
     loaded = """
 import sys
 from valkey_fuzzer import batch
-from valkey_fuzzer.cli import create_parser
+from valkey_fuzzer.cli import create_parser, main
 from valkey_fuzzer.spec.tla import TOOLS_HINT
 import yaml
 from tests.valkey_experiments_support import valkey_service
-parser = create_parser()
+create_parser()
 with open("examples/valkey/cluster_election_durability.yaml") as handle:
     plan = valkey_service().compile(yaml.safe_load(handle))
 assert any(component.config.get("spec") == "cluster-election" for component in plan.components)
-args = parser.parse_args(["spec", "check", "cluster-election"])
-assert args.handler(args) == 2
+sys.argv = ["valkey-fuzzer", "spec", "check", "cluster-election"]
+assert main() == 2
 print(TOOLS_HINT)
 """
     environment = {key: value for key, value in os.environ.items() if key != "TLA2TOOLS_JAR"}

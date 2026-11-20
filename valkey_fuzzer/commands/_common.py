@@ -57,6 +57,11 @@ def exclusion(text: str) -> Exclusion:
         raise argparse.ArgumentTypeError(str(exc)) from None
 
 
+# The repeatable ``--exclude PATH=VALUE`` option of run and batch, but for its help: ``add_argument("--exclude",
+# help=..., **EXCLUDE_OPTION)``.
+EXCLUDE_OPTION = {"dest": "excludes", "action": "append", "default": [], "type": exclusion, "metavar": "PATH=VALUE"}
+
+
 def artifact_path(text: str) -> tuple[str, str]:
     """A ``--artifact NAME=PATH`` argument."""
 
