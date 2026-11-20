@@ -327,6 +327,78 @@ compile to the same inputs are dropped. A counterexample that takes some of
 the mapped fault actions but not all is refused: the experiment's other
 fault components would still fire, so the scenario would not follow it.
 
+### Searching the model
+
+```bash
+valkey-fuzzer spec translate cluster-election --reach VoteLostInCrash --mutate --out scenarios/
+valkey-fuzzer spec translate BUNDLE --reach all --tlc-timeout 120 --max-scenarios 20 --out scenarios/
+```
+
+A negative control gives one counterexample, so one scenario family. With
+`--reach` and `--mutate` the command searches the model for counterexamples
+instead, and translates each distinct one the same way:
+
+- `--reach TARGET` (repeatable; `all` for every target of `claims.yaml`)
+  runs TLC on each safe config with the invariant `~TARGET` (a module
+  `reach.tla` that extends the model with `NotTARGET == ~TARGET`, checked
+  along with the config's own invariants, which a safe config never
+  violates), so the counterexample is a shortest path that reaches the
+  target, and translates that path: a scenario that drives the real system
+  to the state the target names, under the safe config's constants. A target
+  no safe config reaches is `unreachable`: the election's
+  `VoteLostInCrash` needs best-effort saves, which no safe config has. A
+  path that takes none of the mapped faults is `no-fault`, and one the
+  mapping cannot express (its fault follows no mapped trigger) is
+  `untranslatable`, with the reason.
+- `--mutate` runs TLC on each safe config with each boolean constant flipped,
+  one at a time, and then with each pair flipped when the single flips were
+  cheap (every run finished, and together they took no longer than one run's
+  budget). Each violation found is translated under the flipped constants (a
+  flipped `SyncBeforeAck` maps to `appendonly: "no"` through the mapping's
+  `scenario.inputs`); a mutation under which every check holds is reported as
+  `held`. A flip that gives another safe config's constants is `skipped`: TLC
+  found no error there already. TLC reports the shallowest violation, which
+  may take none of the mapped fault actions (under best-effort saves the
+  election's first violation is a vote sent before its save, four states, no
+  crash): the experiment has nothing to inject for it, so it is set aside
+  (`without_fault`) and the mutation runs again without that property, until
+  a violation with a fault is found (`violated`), or none of the claimed
+  properties is left to violate (`no-fault`).
+- Traces are deduplicated by their action sequence: a path two configs or
+  mutations both find is translated once, and the others point at it
+  (`duplicate`, `same_as`). Two traces with different actions can still
+  compile to the same inputs (the election's pair flip adds a `LearnEpoch`
+  step the scenario cannot see); those are kept.
+- Each TLC run of the search may take `--tlc-timeout` seconds (default 300,
+  the limit a batch's `conform_tlc_timeout_s` gives TLC), within the
+  command's `--timeout`; a run that runs out is `timed_out`, recorded, and the
+  search goes on to the next. `--max-scenarios` (default 50) caps the
+  scenarios written: the last translation gets the variants that fit, and the
+  runs after it are `not-run`, with the reason.
+
+`translation.json` is then a search report (`kind: spec-search`) rather than
+one translation: `targets` (per target, per safe config: `reached`,
+`unreachable`, `duplicate`, `no-fault`, `untranslatable`, `timed_out`,
+`error`, or `not-run`, with the run's seconds, states, depth, the path's
+actions, and the scenarios written), `mutations` (per safe config, per flip:
+`violated` with the property, `held`, `no-fault`, `skipped`, `duplicate`,
+`untranslatable`, `timed_out`, `error`, or `not-run`), the summary lists
+`unreachable` and `held`, why the search `stopped` early, the `translations`
+(each as the single-counterexample report, plus its `source`), and every
+scenario id. Each scenario's header says what found it. The exit code is 2
+when a TLC run failed or never started; a search that found nothing to
+translate exits 0 with the report.
+
+On the shipped bundles, `--reach all --mutate` takes 12 s on
+`cluster-election` (15 scenarios from three counterexamples, each found in
+about 2 s after a vote-before-save violation was set aside; the two deep
+negative controls that give the same scenarios take 31 and 34 s each), 19 s
+on `replication` (two scenarios; the two flips that hold each exhaust
+565,000 states in 7 s), 15 s on `slot-migration` (three scenarios; five
+flips violate only without a crash), and nothing on `persistence` (no
+boolean constant, no target). Only `cluster-election` names a target, and
+its `VoteLostInCrash` is unreachable under its safe config (4 s).
+
 ## spec conform
 
 ```bash

@@ -35,6 +35,7 @@ _MODULE_OF = {
     "TlaTools": "tla",
     "TranslateError": "translate",
     "bundle_service": "translate",
+    "search_model": "translate",
     "translate_trace": "translate",
 }
 

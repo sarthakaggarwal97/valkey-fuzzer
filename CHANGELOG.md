@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Added: `spec translate` searches the model for counterexamples (PR-P2-a)
+
+- `spec translate` took one counterexample, from a negative control or a saved TLC output, so a bundle gave one
+  scenario family per control. It now searches the model as well: `--reach TARGET` (repeatable, `all` for every
+  target of `claims.yaml`) runs TLC on each safe config with the invariant `~TARGET`, so the counterexample is a
+  shortest path that reaches the target, and translates it; `--mutate` runs each safe config with each boolean
+  constant flipped, and with each pair flipped when the single flips were cheap, and translates every violation.
+  A violation that takes none of the mapped faults (the experiment has nothing to inject) is set aside and the
+  mutation runs again without that property, until a violation with a fault, or none, is found. Traces with the
+  same action sequence are translated once. `--tlc-timeout` (default 300 s, as a batch's `conform_tlc_timeout_s`)
+  bounds each TLC run of the search, within `--timeout`; a run that runs out is recorded and the search goes on.
+  `--max-scenarios` (default 50) caps the scenarios written. `translation.json` is then a `spec-search` report:
+  each target's and mutation's outcome (`reached`, `unreachable`, `violated`, `held`, `no-fault`, `duplicate`,
+  `untranslatable`, `timed_out`, `skipped`, `not-run`), the summary lists `unreachable` and `held`, the
+  translations with their `source`, and the scenario ids. `--control` and `--trace` work as before, with the same
+  output. On the shipped bundles `--reach all --mutate` writes 15 election scenarios in 12 s (the two deep
+  controls that give the same scenarios take 31 and 34 s each), two replication scenarios in 19 s, and three
+  slot-migration scenarios in 15 s (`docs/spec-bridge.md`, "Searching the model").
 ### Added: a run checks itself against its spec bundles, and the result is in its report (PR-P2-b)
 
 - A run whose plan names a spec bundle (a component's `spec`) ran `spec conform` only in a batch, whose worker

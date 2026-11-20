@@ -744,6 +744,7 @@ evidence, not leftovers (`cleanup-logs` removes them).
 ```text
 valkey-fuzzer spec check BUNDLE [--tla2tools JAR] [--workers N] [--require-approved] [--output FILE]
 valkey-fuzzer spec translate BUNDLE (--control NAME | --trace TLC_OUTPUT --config CFG) --out DIR [--variants N] [--seed N]
+valkey-fuzzer spec translate BUNDLE (--reach TARGET... | --mutate | both) --out DIR [--tlc-timeout SECONDS] [--max-scenarios N]
 valkey-fuzzer spec conform BUNDLE RUN... [--tla2tools JAR] [--group-by INPUT,...] [--no-transitions] [--output FILE]
 ```
 
@@ -753,13 +754,15 @@ its claims on the states a run shows, and (unless `--no-transitions`) that
 the steps a run shows are steps of the model. `--tla2tools` defaults to
 `$TLA2TOOLS_JAR`. `translate` takes the
 catalog option (`--experiment-dir`) to compile what it
-writes. Exit codes: 0 pass, 1 a gate failed, a claimed property was
+writes; with `--reach` or `--mutate` it searches the model for
+counterexamples itself ([spec translate](spec-bridge.md#spec-translate)).
+Exit codes: 0 pass, 1 a gate failed, a claimed property was
 violated, or a step the model cannot take, 2 a harness error (no java or jar, which the command names with
 the jar's download command; a bundle that does not exist, a
 SANY or TLC run that never started or was cut short by `--timeout`, a run
 without mapped evidence or with a mapped record it cannot apply, or a
 `translate` whose experiments do not load, whose TLC run timed out, or that
-has no counterexample). A failed gate outranks an error. See [Spec bridge](spec-bridge.md).
+has no counterexample; a search whose TLC run failed). A failed gate outranks an error. See [Spec bridge](spec-bridge.md).
 
 ## Run reports
 
