@@ -59,6 +59,7 @@ that Valkey does; the negative controls are the part that describes Valkey.
 | `model.tla` | the model and the three properties |
 | `model.cfg` | single-channel replication (the default), Valkey as it is: must find no error |
 | `dual-channel.cfg` | dual-channel replication with the fix of fuzzer issue #133 (`AdoptOnLoad`): must find no error |
+| `nightly/model.cfg`, `nightly/dual-channel.cfg` | the two above with a second crash: too slow for a pull request under dual channel, checked by the nightly workflow (`spec check replication --configs nightly`) |
 | `negative-controls/keep_old_id_on_load.cfg` | Valkey as it is: must violate `OneHistoryPerId` (#133) |
 | `negative-controls/keep_id_without_backlog.tla` | freeing the backlog keeps the ID: must violate `OneHistoryPerId` |
 | `negative-controls/no_shift_on_promotion.tla` | a promoted replica keeps its ID: must violate `OneHistoryPerId` |
@@ -83,6 +84,13 @@ as they stand.
 `valkey-fuzzer spec check replication` passes every gate in about three minutes on 12 cores: `model.cfg` has
 564,909 distinct states and `dual-channel.cfg` 7,368,305, with no error; each control's counterexample is 3 to 10
 states long (`write_without_offset` violates `SameOffsetSameData` at the third state: a full sync, then a write).
+
+A second crash (`MaxCrashes = 2`) is where a bug that needs one node to crash twice, or two nodes to crash, lives.
+It is checked nightly, not on every pull request: on four TLC workers `model.cfg` goes from 564,909 distinct
+states (13 s) to 743,973 (16 s), but `dual-channel.cfg` from 7,368,305 (145 s; 297 s on CI's four-core runner)
+to 10,186,888 (184 s here, past the five minutes a pull-request run may take on the runner), and the claims'
+bounds hold for every safe config at once. `nightly/model.cfg` and `nightly/dual-channel.cfg` hold the raised
+bound; the [TLA+ Model Check (nightly)](../../.github/workflows/tla-model-check-nightly.yml) workflow runs them.
 
 `keep_old_id_on_load` is Valkey today, and it is a bug: when a dual-channel replica's snapshot finishes loading
 before the main channel's `+CONTINUE`, `replicaAfterLoadPrimaryRDB` creates a backlog after the replica's old offset

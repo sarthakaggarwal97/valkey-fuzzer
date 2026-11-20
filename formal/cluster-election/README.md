@@ -3,7 +3,8 @@
 A [spec bridge](../../docs/spec-bridge.md) bundle. `model.tla` models the failover vote on the Valkey cluster bus:
 replicas of a failed primary request votes in a new epoch, each primary votes
 at most once per epoch (`lastVoteEpoch`, saved in `nodes.conf`), and a replica
-with a majority wins. Messages can be lost, delayed or reordered, and a
+with `Quorum` votes wins (Valkey's `needed_quorum`, a majority of the
+slot-owning primaries). Messages can be lost, delayed or reordered, and a
 primary can crash and restart from `nodes.conf`.
 
 | Model action    | Valkey code (`src/cluster_legacy.c`)                                                                  |
@@ -33,7 +34,8 @@ Every property has a live check: the election-safety oracle in the experiments t
 | File | Holds |
 | --- | --- |
 | `model.tla` | The model, its invariants, and the target `VoteLostInCrash` |
-| `model.cfg` | `sync`, and no vote written before its save: must find no error |
+| `model.cfg` | `sync`, and no vote written before its save, epochs ≤ 2 and 2 crashes: must find no error |
+| `nightly/model.cfg` | `model.cfg` with epochs ≤ 3: too slow for a pull request, checked by the nightly workflow (`spec check cluster-election --configs nightly`) |
 | `negative-controls/vote-before-save.cfg`, `flush-before-save.cfg` | must violate `OneWinnerPerEpoch` |
 | `negative-controls/double-vote.cfg` | must violate `VoteOncePerEpoch` |
 | `negative-controls/vote-sent-before-save.cfg` | must violate `VotesSavedBeforeSent` |
@@ -53,20 +55,44 @@ echo "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88  tla2tool
 valkey-fuzzer spec check cluster-election --tla2tools tla2tools.jar --output assurance.json
 ```
 
-`spec check` runs SANY, TLC on `model.cfg` (no error, 220,138 distinct
+`spec check` runs SANY, TLC on `model.cfg` (no error, 330,207 distinct
 states), and TLC on each negative control, which must report its property
-violated; on a 12-core laptop the whole check takes about three minutes.
+violated; with four TLC workers the whole check takes about three and a half
+minutes, almost all of it the two controls that find a 17-step
+counterexample.
 [`.github/workflows/tla-model-check.yml`](../../.github/workflows/tla-model-check.yml)
 runs it on every push and pull request to `generic-fuzzer`. In the safe config `BioWrite` and `FlushEarly` never fire:
 `sync` (`PersistBeforeAck = TRUE`) disables the first, and
 `FlushBeforeSave = FALSE` the second.
 
-## Results (3 primaries, 2 replicas, epochs ≤ 2, 1 crash)
+The bounds, and what they cost on four TLC workers (TLC 2.19):
+
+| Config | `MaxEpoch` | `MaxCrashes` | Distinct states | Generated | Time | Checked |
+| --- | --- | --- | --- | --- | --- | --- |
+| `model.cfg` before this bound | 2 | 1 | 220,138 | 3,307,964 | 8.5 s | (was PR CI) |
+| `model.cfg` | 2 | 2 | 330,207 | 5,127,049 | 15 s | every PR |
+| epochs ≤ 3, 1 crash | 3 | 1 | 22,495,044 | 454,957,731 | 11 min | not checked |
+| `nightly/model.cfg` | 3 | 2 | 33,742,566 | 699,307,879 | 17 min | nightly |
+| `vote-before-save.cfg` | 2 | 1 | 5,980,369 | 70,385,341 | 95 s | every PR |
+| `flush-before-save.cfg` | 2 | 1 | 7,104,772 | 94,762,045 | 116 s | every PR |
+| `vote-before-save.cfg` with 2 crashes | 2 | 2 | 14,274,146 | 158,835,697 | 192 s | not used |
+| `flush-before-save.cfg` with 2 crashes | 2 | 2 | 15,758,030 | 197,659,932 | 236 s | not used |
+
+The pull-request budget is five minutes per TLC run and fifteen for the
+whole job on CI's four-core runner, which is about 1.4 times slower than the
+host above; `MaxEpoch = 3` takes 100 times the states of `MaxEpoch = 2` and
+is the nightly config. The second crash is where a bug that needs one
+primary to crash twice, or two primaries to crash, lives, so the safe config
+has it. The negative controls keep one crash: their counterexamples need one,
+and a second only doubles the search for the same 17-step trace.
+
+## Results (3 primaries, 2 replicas, quorum 2, epochs ≤ 2, 2 crashes)
 
 - `model.cfg`: `nodes.conf` is saved before the vote leaves, as with
   `cluster-config-save-behavior sync` (the default) when no vote is written
-  before that save. No violation in 220,138
-  distinct states. This config also checks `VotesSavedBeforeSent` (every vote
+  before that save. No violation in 330,207
+  distinct states (22,495,044 with a third epoch and one crash, 33,742,566
+  with two, `nightly/model.cfg`). This config also checks `VotesSavedBeforeSent` (every vote
   in flight is already on disk), which is why the crash cannot undo a vote,
   and `NoVoteLostInCrash` (no vote that left is missing from its voter's
   memory), the form of it a live run observes exactly.
@@ -132,6 +158,7 @@ pattern Valkey never logs cannot silently blind both readers.
 | `ReceiveVote(c)` | `acked`: `Failover auth ACK from … (ACKs N, quorum Q)`, logged by the candidate: the vote left the voter |
 | `Win(c)`, `winners` | `won`: `Failover election won: I'm the new primary.`, at the epoch of the winner's latest `started` (`after: ... take: [epoch]`); Valkey logs `configEpoch set to N after successful failover` only when the winner's `configEpoch` was below `N`, so that line would miss a win |
 | `Crash(p)` | `crash`: the `*.injected` event of `valkey.fault.process-signal` (`kill-voter`) or of the `kill_primary` trigger of `valkey.action.cluster-election`, with the `nodes.conf` vars read at the kill |
+| `Quorum` | the `quorum` of the `acked` lines (`Failover auth ACK ... (ACKs N, quorum Q)`), the largest the run logs; `1` in a run with no ACK line, whose `Win` is never enabled anyway |
 | `currentEpoch`, `diskEpoch`, `diskVote` | `sample`: `valkey.observer.trace` (`trace`) samples of `CLUSTER INFO` and the `vars` line of `nodes.conf`, read from the file (the mapping's `sample:` section asks for `cluster` and `nodes_conf`) |
 | `SaveConfig`, `BioWrite`, `FlushEarly`, `LearnEpoch` | unobservable (not logged) |
 | `bio` | hidden: queued background saves are not observable |
@@ -176,12 +203,16 @@ each `started`, `granted`, `acked`, `won` and `crash` line must be the model's
 `StartElection`, `HandleRequest`, `ReceiveVote`, `Win` or `Crash`, with at
 most one unobservable step (`SaveConfig`, `BioWrite`, `LearnEpoch`) between
 two lines. A win without a quorum, or an ACK of a vote that the crash lost
-under `sync`, is a transition violation. The check holds on the shipped
-experiments' runs with one election; a run with a second election after a
-promotion can report a violation at its `Win`, because `IsMajority` counts
-`Primaries`, which the mapping fills with every node that ever voted, while
-Valkey's quorum counts the slot-owning primaries at the time (the `quorum`
-of the ACK line): a model constant for the quorum is the fix.
+under `sync`, is a transition violation. The quorum is the model's `Quorum`
+constant, which the mapping reads from the `quorum` the candidate's ACK lines
+log: Valkey's `needed_quorum` is a majority of the slot-owning primaries at
+the time, while the mapping's `Primaries` holds every node that ever voted,
+so after a promotion (the shipped experiments' second election) a majority of
+`Primaries` would ask for more votes than Valkey did, and the second `Win`
+would have no model step. With the constant the check holds on all four smoke
+traces of the shipped experiments, one and two elections (35 to 65 observed
+states, `Quorum = 3` with five shards, 333 to 2,085 TLC states), and a win
+with fewer votes than the logged quorum is still a violation.
 
 ## Live batch results
 

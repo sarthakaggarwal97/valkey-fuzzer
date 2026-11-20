@@ -39,6 +39,7 @@ import posixpath
 import re
 import time
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from typing import Any, Callable, Optional
 
 from .bundle import (
@@ -58,6 +59,9 @@ SCOPE = (
     "Model-checking evidence for the bundle's model within its declared bounds and assumptions. "
     "It does not show that Valkey implements the model; see `spec conform` for runs."
 )
+# The bundle subdirectory whose configs raise a bound past what PR CI checks in time; the nightly workflow
+# (tla-model-check-nightly.yml) runs ``spec check --configs nightly`` on every bundle that has one.
+NIGHTLY_DIRECTORY = "nightly"
 
 Progress = Callable[[str], None]
 
@@ -76,6 +80,21 @@ def _flat(name: str) -> str:
     """A bundle file's name in the one directory a tool runs in (``negative-controls/x.cfg`` -> ``x.cfg``)."""
 
     return posixpath.basename(name)
+
+
+def _raised(config: str) -> bool:
+    """Whether a safe config is from a subdirectory (:func:`with_configs`), where a bound may be raised."""
+
+    return "/" in config
+
+
+def _at_least(actual: str, bound: str) -> bool:
+    """Whether ``actual`` is an integer no smaller than the integer ``bound`` (both TLA+ value text)."""
+
+    try:
+        return int(normalize(actual)) >= int(normalize(bound))
+    except ValueError:
+        return False
 
 
 def _files(bundle: Bundle, *names: Optional[str]) -> dict[str, str]:
@@ -145,19 +164,44 @@ def log_patterns_gate(bundle: Bundle) -> dict[str, Any]:
     return gate
 
 
+def with_configs(bundle: Bundle, directory: str) -> Bundle:
+    """``bundle`` with the ``.cfg`` files of its subdirectory ``directory`` as its safe configs: the larger
+    bounds a nightly job checks (:data:`NIGHTLY_DIRECTORY`), where PR CI checks the bundle's own configs. A
+    :class:`SpecBundleError` when the directory holds no config."""
+
+    path = os.path.join(bundle.path, directory)
+    names = sorted(
+        f"{directory}/{name}" for name in (os.listdir(path) if os.path.isdir(path) else ()) if name.endswith(".cfg")
+    )
+    if not names:
+        raise SpecBundleError(f"{path} has no .cfg: a bundle without a {directory}/ directory has only its own configs")
+    files = dict(bundle.files)
+    for name in names:
+        try:
+            with open(os.path.join(bundle.path, name), encoding="utf-8") as handle:
+                files[name] = handle.read()
+        except OSError as exc:
+            raise SpecBundleError(f"cannot read {os.path.join(bundle.path, name)}: {exc}") from exc
+    return replace(bundle, safe_configs=tuple(names), files=files)
+
+
 def check_bundle(
     reference: str,
     tools: TlaTools,
     *,
     require_approved: bool = False,
     experiment_dirs: Sequence[str] = (),
+    configs: Optional[str] = None,
     progress: Optional[Progress] = None,
 ) -> dict[str, Any]:
     """Run every gate on the bundle at ``reference`` and return the assurance report.
 
     The time limit of ``tools`` bounds the whole check; ``experiment_dirs`` say
     which experiments, besides the Valkey ones and the bundle's own, the
-    translated scenarios compile against.
+    translated scenarios compile against. With ``configs``, a subdirectory of
+    the bundle, its ``.cfg`` files are the safe configs checked instead of the
+    bundle's own (:func:`with_configs`); they may raise an integer bound of the
+    claims, never lower or change one.
     """
 
     say = progress or (lambda message: None)
@@ -167,10 +211,12 @@ def check_bundle(
         "bundle": reference,
         "scope": SCOPE,
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started)),
-        "tools": tools.identity(),
+        "tools": {**tools.identity(), **({"warnings": list(tools.warnings)} if tools.warnings else {})},
         "timeout_s": tools.timeout_s,
         "gates": {},
     }
+    if configs:
+        report["configs"] = configs
     try:
         find_bundle(reference)
     except SpecBundleError as exc:
@@ -178,6 +224,8 @@ def check_bundle(
         return _finish(report, started)
     try:
         bundle = load_bundle(reference)
+        if configs:
+            bundle = with_configs(bundle, configs)
     except SpecBundleError as exc:
         report["gates"]["bundle"] = {"status": "fail", "error": str(exc)}
         return _finish(report, started)
@@ -288,8 +336,13 @@ def _model_gates(bundle: Bundle, tools: TlaTools, report: dict[str, Any], say: P
             problems.append(f"{item.name}: no safe config checks it with {item.holds_when or 'any constants'}")
     for constant, value in claims.bounds.items():
         for name, config in configs.items():
-            if normalize(config.constants.get(constant, "")) != normalize(value):
-                problems.append(f"bound {constant} = {value}, but {name} sets {config.constants.get(constant)!r}")
+            actual = config.constants.get(constant, "")
+            if normalize(actual) == normalize(value) or (_raised(name) and _at_least(actual, value)):
+                continue
+            problems.append(
+                f"bound {constant} = {value}, but {name} sets {config.constants.get(constant)!r}"
+                + ("; a config outside the bundle's own may only raise an integer bound" if _raised(name) else "")
+            )
     gates["claims_checked"] = {"status": "fail" if problems else "pass", "problems": problems}
 
     # model_checked + model_coverage
@@ -298,7 +351,7 @@ def _model_gates(bundle: Bundle, tools: TlaTools, report: dict[str, Any], say: P
     gates["model_checked"] = {"status": "fail", "configs": checked}
     for name in bundle.safe_configs:
         say(f"TLC: {name}")
-        result, run = tlc(tools, MODEL_FILE, name, _files(bundle, name), coverage=True)
+        result, run = tlc(tools, MODEL_FILE, _flat(name), _files(bundle, name), coverage=True)
         entry = {"status": "pass" if result.no_error else "fail", "checks": list(configs[name].checked)}
         entry.update(_tlc_summary(result, run))
         if not result.no_error:
@@ -307,7 +360,8 @@ def _model_gates(bundle: Bundle, tools: TlaTools, report: dict[str, Any], say: P
         checked[name] = entry
         if run.harness_error:
             _stop(gates["model_checked"], entry, run.harness_error)
-        report["tools"].setdefault("tlc_version", result.version)
+        if report["tools"].get("tlc_version") is None:
+            report["tools"]["tlc_version"] = result.version  # tools that were not probed: the banner's version
         for action, counts in result.coverage.items():
             total = coverage.setdefault(action, {"distinct": 0, "generated": 0, "configs": []})
             total["distinct"] += counts["distinct"]
@@ -345,6 +399,7 @@ def _negative_controls(bundle: Bundle, tools: TlaTools, report: dict[str, Any], 
             "config": control.config,
             "module": control.module or MODEL_FILE,
             "trace_length": len(result.trace),
+            "trace_format": result.trace_format,
             **_tlc_summary(result, run),
         }
         controls[control.name] = entry
@@ -445,4 +500,4 @@ def _finish(report: dict[str, Any], started: float) -> dict[str, Any]:
     return report
 
 
-__all__ = ["SCOPE", "check_bundle", "log_patterns_gate", "run_control"]
+__all__ = ["NIGHTLY_DIRECTORY", "SCOPE", "check_bundle", "log_patterns_gate", "run_control", "with_configs"]

@@ -39,6 +39,19 @@ $ valkey-fuzzer spec check cluster-election
 Error: tla2tools.jar not found and java not found on PATH: the spec bridge needs Java 11 or later on PATH and tla2tools.jar (pass --tla2tools or set TLA2TOOLS_JAR). Get the jar CI pins with: curl -fsSL -o tla2tools.jar https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
 ```
 
+Before anything runs, the jar is probed (`java -cp tla2tools.jar tlc2.TLC -h`)
+for TLC's version and for `-dumpTrace`: a jar that does not run TLC, or runs
+one older than 2.19 (the version the bridge is tested with), is an error,
+exit `2`, naming the jar. The jar's SHA-256 is looked up among the releases
+the bridge knows (`TLA_TOOLS_RELEASES` in `valkey_fuzzer/spec/tla.py`: v1.7.4,
+the one CI pins, and v1.8.0, the first whose TLC dumps traces as JSON); another
+jar runs with a warning on stderr, since its TLC may print what the bridge
+reads differently, or is an error with `--strict`, which the model-check
+workflows pass. `spec check` prints what it ran with (`Tools: TLC 2.19 from
+tla2tools.jar (v1.7.4, sha256 ...)`) and records it in the report's `tools`:
+`jar`, `sha256`, `release` (null for an unknown jar), `tlc_version`,
+`json_trace`, and any `warnings`.
+
 Each tool writes a JSON report with `--output`, and each takes `--timeout SECONDS`
 (default 3600, one hour): once the command has run that long, SANY or TLC is
 killed with its whole process group and that run fails. Reports and translated scenarios name the
@@ -166,8 +179,10 @@ experiment and runs on Valkey (see
   cannot decide the property;
 - `targets`: named state predicates of the model that a counterexample
   reaches. `conform` counts the runs that reach each one;
-- `assumptions`, `bounds` (the constants every safe config must use), and
-  `exclusions` (what the model leaves out);
+- `assumptions`, `bounds` (the constants every safe config must use; a
+  config in the bundle's `nightly/` directory may raise an integer bound,
+  see [spec check](#spec-check)), and `exclusions` (what the model leaves
+  out);
 - `max_unobserved_steps` (default `1`): how many steps of the mapping's
   `unobservable` actions `conform`'s [transition check](#the-transition-check)
   allows between two records; and `transitions: {excluded: <why>}` when the
@@ -239,8 +254,11 @@ on a pattern that matches none.
 - `constants`: every other model constant, as a literal `value`, as a
   per-node `config` that `equals` a value (read from the trace header), as a
   scenario `input` that `equals` a value (for an experiment that sets the
-  configuration from that input), or as the `max_of` some state variables,
-  never below `at_least`. A constant can say `why` it has that form.
+  configuration from that input), as the `max_of` some state variables, or
+  as a `field` of the run's records of one evidence (`{field: {evidence:
+  acked, name: quorum}}`, an `int` field: the largest value any such record
+  carries, the quorum Valkey's ACK line logs), never below `at_least`. A
+  constant can say `why` it has that form.
 - `scenario`: what `translate` writes. It names the experiment, maps
   deployment fields and inputs to model constants (`count`, or `constant`
   with a `map`), and lists the `faults`: the model action, the evidence it
@@ -276,12 +294,26 @@ a failure, when the bundle does not exist, or when SANY or TLC never started
 (a corrupt jar) or was cut short by `--timeout`: such a run says nothing
 about the model. A failed gate outranks an error.
 
+A bound TLC cannot check in a pull request's time lives in a second config:
+`<bundle>/nightly/*.cfg`, which `spec check <bundle> --configs nightly`
+checks instead of the bundle's own `*.cfg` (the negative controls and the
+other gates run as always). Such a config may raise an integer bound of
+`claims.yaml` (`MaxEpoch = 3` where the claim says `2`), never lower or
+change one. The [TLA+ Model Check (nightly)](../.github/workflows/tla-model-check-nightly.yml)
+workflow runs it daily on every bundle that has a `nightly/` directory.
+The budget for the pull-request check is five minutes per TLC run and
+fifteen for the whole job on CI's four-core runner; `cluster-election` keeps
+`MaxEpoch = 2` with two crashes there (330,207 distinct states, 15 s on four
+workers) and checks a third epoch nightly (33.7 million states, 17 minutes),
+and `replication` checks a second crash nightly (10.2 million states under
+dual channel, 3 minutes; on the runner, past five).
+
 | Gate | Passes when |
 | --- | --- |
 | `bundle` | `claims.yaml` and `mapping.yaml` parse and agree with the model text. |
 | `log_patterns` | Every `log` pattern of `mapping.yaml` matches at least one line of the bundle's `sample.log`. The observers that publish the lines, the oracles, and `conform` all read their patterns from the mapping, so a pattern Valkey never logs would blind them all without a line to match. A mapping with no log pattern passes with a note. |
 | `parsed` | Every module extends or instantiates only the standard modules (`Bags`, `FiniteSets`, `Integers`, `Naturals`, `RealTime`, `Reals`, `Sequences`, `TLC`) and the bundle's own, and SANY accepts `model.tla` and every mutated control module. |
-| `claims_checked` | Every property is checked by a safe config whose constants meet its `holds_when`, and every bound equals the safe configs' value. |
+| `claims_checked` | Every property is checked by a safe config whose constants meet its `holds_when`, and every bound equals the safe configs' value (a `--configs` config may raise an integer bound). |
 | `model_checked` | TLC finds no error in any safe config. |
 | `negative_controls` | Each control's TLC run reports its named property as violated. A control that passes means the claim cannot fail as configured (vacuous). |
 | `experiment` | Each control's counterexample translates into scenarios of the mapped experiment that compile, and each mapped fault is a fault component of the compiled plan. A counterexample without a mapped fault action is listed as `no-fault`; at least one control must translate. A bundle with its own `experiments/` must be the bundle its protocol name finds. A mapping without a `scenario` section passes with a note. |
@@ -289,11 +321,13 @@ about the model. A failed gate outranks an error.
 | `model_coverage` | TLC reported coverage; an `error` when it printed none, which says nothing about the bundle. The report lists, per action, the distinct and generated states, and the actions that `never_fired` in a safe config. |
 | `approved_claim` | `pass` for approved claims, and `skip` (printed as `[SKIP]`) for a draft; it records the approval status. With `--require-approved`, a draft fails. A `skip` does not fail the check. |
 
-The assurance report (`kind: spec-assurance`) records the tool jar's SHA-256
-and TLC version, the claims (status, scope, properties, assumptions, bounds,
+The assurance report (`kind: spec-assurance`) records the tools (the jar's
+SHA-256 and release, TLC's version, whether it dumps JSON traces, and any
+warning), the `configs` directory when one was given, the claims (status,
+scope, properties, assumptions, bounds,
 exclusions), the mapping's SHA-256, and one entry per gate. Each TLC entry
 has its exit code, its violation, its state counts and depth, its trace
-length, and the output tail when it fails. A run cut short by the time limit
+length and format (`json` or `text`), and the output tail when it fails. A run cut short by the time limit
 is marked `timed_out`; it, or a run whose tool never started, gives its gate
 the status `error`, the report gets an `error`, and the check stops at that
 gate. The `scope` field states the
@@ -308,9 +342,21 @@ valkey-fuzzer spec translate cluster-election --control vote-before-save --out s
 valkey-fuzzer spec translate BUNDLE --trace tlc.out --config the.cfg --out scenarios/
 ```
 
-The command takes TLC's text counterexample, either by running a negative
-control or from a saved TLC output. (The pinned TLC 2.19 has no
-`-dumpTrace json`.) It writes one direct scenario, up to `--variants` nearby
+The command takes TLC's counterexample, either by running a negative
+control or from a saved TLC output: its text, or the file a TLC that can
+(v1.8.0 and later) writes with `-dumpTrace json`. When the probed jar can,
+every TLC run of the bridge asks for that dump and reads the trace from it;
+otherwise, and when the dump cannot be read (an error the report shows), the
+trace is read from the `State N: <Action ...>` blocks of the text. JSON keeps
+less than the text: a model value and a string are both strings, a set and a
+sequence both arrays, a function and a record both objects. The reader
+(`read_json_trace`) gives the names the config declares as model values
+(`Primaries = {p1, p2, p3}`) back their type, reads an object keyed only by
+them or by integers as a function, and an array as a sequence in the order
+TLC wrote it (TLC writes a set's elements in a fixed order, so equal sets read
+equal); the translation of a counterexample is the same from either. The
+pinned TLC 2.19 has no `-dumpTrace`, so CI reads the text.
+It writes one direct scenario, up to `--variants` nearby
 variants, and `translation.json`. Each scenario's header and
 `translation.json` name the bundle by protocol and the config by its path in
 the bundle. The bundle's own `experiments/` are loaded with the installed
@@ -516,7 +562,12 @@ refinement, and three things stay unchecked:
 The check is only as sharp as the mapping's observed state. `cluster-election`
 observes most of its model, so a win without a quorum, a vote that leaves
 before its save under `sync`, or an ACK of a vote that a crash lost is a
-violation. `persistence` observes only `crashes` and `slot-migration`
+violation. The quorum is the model's `Quorum` constant, read from the
+`quorum` the candidate's ACK lines log (a `field` constant of the mapping):
+Valkey needs a majority of the slot-owning primaries, while the mapping's
+`Primaries` holds every node that ever voted, so after a promotion a majority
+of `Primaries` would ask for more votes than Valkey does and a second
+election's win would have no model step. `persistence` observes only `crashes` and `slot-migration`
 only `faults`, so their checks say little more than that the faults happened
 when the model allows them. `replication` excludes the check
 (`transitions: {excluded: ...}` in `claims.yaml`): its samples carry

@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+### Changed: the spec bridge's TLC layer: bounds under a budget, a checked jar, JSON traces, the election quorum (PR-P2-c)
+
+- `formal/cluster-election/model.cfg` checks two crashes (`MaxCrashes = 2`; 330,207 distinct states, 15 s on four
+  TLC workers, from 220,138 and 8.5 s): a bug that needs one primary to crash twice, or two to crash, is where the
+  bound matters. A third epoch (`MaxEpoch = 3`) is 100 times the states (33.7 million with two crashes, 17 minutes)
+  and lives in `nightly/model.cfg`; `formal/replication/nightly/` holds `MaxCrashes = 2` for both of its safe
+  configs (10.2 million states under dual channel, 3 minutes here and past five on CI's runner). `spec check
+  --configs nightly` checks a bundle's `nightly/*.cfg` instead of its own, which may raise an integer bound of
+  `claims.yaml` and nothing else; the new `tla-model-check-nightly.yml` workflow runs it daily on every bundle
+  that has the directory. The pull-request budget is five minutes per TLC run and fifteen for the job. The
+  election's negative controls keep one crash: their counterexamples need one, and a second doubles the search
+  for the same trace.
+- The jar is probed before anything runs (`java -cp tla2tools.jar tlc2.TLC -h`): a jar that does not run TLC, or
+  runs one older than 2.19, is an error naming the jar; its SHA-256 is looked up among the releases the bridge
+  knows (`TLA_TOOLS_RELEASES`: v1.7.4, the one CI pins, and v1.8.0), and another jar runs with a warning, or not
+  at all with the new `--strict`, which the model-check workflows pass. `spec check` prints the tools it ran with
+  and records `release`, `tlc_version`, `json_trace` and `warnings` in the report's `tools`.
+- A TLC that can (`-dumpTrace json`, v1.8.0 and later) writes the counterexample as JSON, and the bridge reads the
+  trace from that file (`read_json_trace`), with the config's model values given back their type; otherwise, and
+  when the dump cannot be read (an error the result shows), from the text as before. The text reader now takes the
+  action's name alone from a 2026 TLC's `<Win(r1) line ...>` labels. `spec translate --trace` takes the JSON file
+  too. Both readers are covered by recorded fixtures of one TLC 2026 run, and translate gives the same scenarios
+  from either.
+- `formal/cluster-election/model.tla` has a `Quorum` constant: `Win` needs `Quorum` votes (`HasQuorum`), Valkey's
+  `needed_quorum`, instead of a majority of `Primaries`. The mapping reads it from the `quorum` the candidate's
+  ACK lines log (a new `field` constant form: `{field: {evidence: acked, name: quorum}}`, the largest value any
+  such record carries, `at_least` without one), since the mapping's `Primaries` holds every node that ever voted
+  and a majority of them overshoots after a promotion. The two-election smoke traces of PR #205 now hold (they
+  violated at the second `Win`); the known-bad runs and the negative controls still fail. `claims.yaml` bounds
+  gain `Quorum: 2`.
+
 ### Changed: keyspace snapshots read each SCAN batch in two round trips, and the workload draws a value in one call (PR-R3-3)
 
 - `keyspace_snapshot` (`valkey_fuzzer.components.keyspace`), which `valkey.oracle.dataset-digest` reads from every

@@ -543,8 +543,20 @@ _PROCESS = _record(
 )
 _HIDDEN_STATE = _record({"hidden": object, "why": object})
 _VISIBLE_STATE = _record({"init": object}, {"over": _TEXTS})
+# A constant read from a field of the run's records of one evidence: {field: {evidence: acked, name: quorum}}.
+_FROM_FIELD = _record({"evidence": str, "name": str})
 _CONSTANT = _record(
-    {}, {"value": object, "config": str, "input": str, "equals": object, "max_of": _TEXTS, "at_least": int, "why": str}
+    {},
+    {
+        "value": object,
+        "config": str,
+        "input": str,
+        "equals": object,
+        "max_of": _TEXTS,
+        "field": _FROM_FIELD,
+        "at_least": int,
+        "why": str,
+    },
 )
 # A scenario value drawn from a model constant: {constant: C, map: {...}} or {count: C}.
 _FROM_CONSTANT = _record({}, {"constant": str, "map": dict, "count": str})
@@ -782,14 +794,22 @@ def parse_mapping(document: Mapping[str, Any], model: tla.ModelSymbols, *, path:
                 f"{where}.constants must give every model constant that is not a process set; {name!r} is missing"
             )
         spec = raw_constants[name]
-        forms = [key for key in ("value", "config", "input", "max_of") if key in spec]
+        forms = [key for key in ("value", "config", "input", "max_of", "field") if key in spec]
         if len(forms) != 1:
-            raise SpecBundleError(f"{where}.constants.{name} needs exactly one of value, config, input, max_of")
+            raise SpecBundleError(f"{where}.constants.{name} needs exactly one of value, config, input, max_of, field")
         for form in ("config", "input"):
             if form in spec and "equals" not in spec:
                 raise SpecBundleError(f"{where}.constants.{name}.{form} needs equals")
         if "max_of" in spec and not set(_texts(spec["max_of"], f"{where}.constants.{name}.max_of")) <= set(state):
             raise SpecBundleError(f"{where}.constants.{name}.max_of must name state variables")
+        if "field" in spec:
+            source = evidence.get(spec["field"]["evidence"])
+            if source is None or spec["field"]["name"] not in source.fields:
+                raise SpecBundleError(
+                    f"{where}.constants.{name}.field must name an evidence entry and one of its fields"
+                )
+            if source.fields[spec["field"]["name"]].type != "int":
+                raise SpecBundleError(f"{where}.constants.{name}.field must name an int field")
         constant_specs[name] = spec
 
     scenario = document.get("scenario")

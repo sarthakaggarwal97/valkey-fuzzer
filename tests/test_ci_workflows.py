@@ -22,7 +22,7 @@ from valkey_fuzzer.cli import create_parser
 from valkey_fuzzer.generator import GeneratorBlock, generate, installed_pools, opted_in
 from valkey_fuzzer.reports import write_document
 from valkey_fuzzer.results import ComponentResult, ComponentStatus, OutcomeStatus, RunOutcome
-from valkey_fuzzer.spec.tla import TLA_TOOLS_VERSION
+from valkey_fuzzer.spec.tla import TLA_TOOLS_RELEASES, TLA_TOOLS_VERSION
 
 from .generator_support import generate_scenario
 from .valkey_experiments_support import valkey_service
@@ -738,10 +738,25 @@ def test_the_spec_check_runs_on_every_change_to_main():
     assert all("paths" not in (triggers[event] or {}) for event in ("push", "pull_request"))
 
 
+def test_the_nightly_spec_check_runs_every_bundles_raised_bounds():
+    # The bounds a PR check cannot afford live in each bundle's nightly/ configs; without this job nothing runs them.
+    workflow = _workflow("tla-model-check-nightly.yml")
+    assert "workflow_dispatch" in workflow["on"] and workflow["on"]["schedule"]
+    (job,) = workflow["jobs"].values()
+    assert job["if"] == "github.event_name != 'schedule' || github.repository == 'valkey-io/valkey-fuzzer'"
+    scripts = "\n".join(_run_scripts(workflow))
+    assert "for nightly in formal/*/nightly; do" in scripts
+    (check,) = [args for args in _fuzzer_commands("tla-model-check-nightly.yml") if args.spec_command == "check"]
+    assert check.configs == "nightly" and check.strict
+    nightly = sorted(path.parent.name for path in (ROOT / "formal").glob("*/nightly/*.cfg"))
+    assert nightly, "no bundle has a nightly config; drop the workflow or add one"
+
+
 # Each job that runs tests backed by TLC, or a batch that checks its runs against the spec bundles they exercise,
 # and the pytest and batch steps in it that need TLC.
 TLC_JOBS = {
     ("tla-model-check.yml", "tlc"): 1,
+    ("tla-model-check-nightly.yml", "tlc"): 0,
     ("test.yml", "server-tests"): 2,
     ("valkey-experiments-live.yml", "valkey-experiments-live"): 1,
     ("fuzzer-pr-batch.yml", "batch"): 1,
@@ -755,8 +770,10 @@ def test_every_job_with_tlc_backed_tests_has_java_and_the_pinned_tla_tools(name,
     workflow = _workflow(name)
     pinned = {key: _workflow("tla-model-check.yml")["env"][key] for key in ("TLA_TOOLS_VERSION", "TLA_TOOLS_SHA256")}
     assert {key: workflow.get("env", {}).get(key) for key in pinned} == pinned
-    # The hint the spec commands print without the jar names the same release.
+    # The hint the spec commands print without the jar names the same release, and `spec check --strict` (which the
+    # model-check workflows pass) knows the pinned jar by its digest.
     assert pinned["TLA_TOOLS_VERSION"] == TLA_TOOLS_VERSION
+    assert TLA_TOOLS_RELEASES[pinned["TLA_TOOLS_SHA256"]] == TLA_TOOLS_VERSION
     steps = workflow["jobs"][job]["steps"]
     assert any(step.get("uses", "").startswith("actions/setup-java@") for step in steps)
     (download,) = [step["run"] for step in steps if "tla2tools.jar" in step.get("run", "") and "curl" in step["run"]]
