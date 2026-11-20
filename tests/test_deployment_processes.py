@@ -221,6 +221,20 @@ def test_components_find_valkey_server_and_read_slot_ranges_as_the_deployment_do
     assert cluster_nodes.parse_slots_in_flight(["0-5", "[8->-abc]", "[9-<-def]", "[x->-abc]"]) == {8, 9}
 
 
+def test_slot_ranges_merge_overlap_and_format_as_cluster_nodes_shows_them():
+    assert cluster_nodes.merge_slot_ranges([(5, 9), (0, 4), (0, 2), (11, 11)]) == [(0, 9), (11, 11)]
+    # Two primaries' ranges overlap on 5-9 and 20; a's own ranges overlapping each other are no split.
+    shared = cluster_nodes.shared_slots({"a": [(0, 9), (3, 20)], "b": [(5, 9), (20, 25)], "c": [(30, 40)]})
+    assert shared == {**{slot: {"a", "b"} for slot in range(5, 10)}, 20: {"a", "b"}}
+    assert cluster_nodes.format_slot_ranges([(0, 5460), (5462, 5462)]) == "0-5460, 5462"
+    assert cluster_nodes.group_slots_into_ranges([5462, 0, 1, 2]) == "0-2, 5462"
+    assert cluster_nodes.group_slots_into_ranges([]) == ""
+    assert (
+        cluster_nodes.group_slots_into_ranges(range(0, 24, 2))
+        == "0, 2, 4, 6, 8, 10, 12, 14, 16, 18... (12 ranges total)"
+    )
+
+
 def test_the_source_build_is_pinned_parallel_and_built_aside_under_a_lock(tmp_path):
     # Concurrent batch workers without a binary must not race on one clone, or build an unpinned HEAD.
     commands, timeouts, outputs = [], [], []
