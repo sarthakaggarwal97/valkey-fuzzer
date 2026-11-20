@@ -19,7 +19,9 @@ on:
         type: string
         default: valkey-io/valkey
       valkey_ref:
-        description: Ref to build and test, for example refs/pull/123/merge
+        description: >-
+          Commit SHA or ref to build and test. A ref such as refs/pull/123/merge is resolved when the build starts,
+          so a caller that runs on a trusted event (a maintainer's label) passes the SHA that event carried.
         required: true
         type: string
       pr_number:
@@ -90,10 +92,11 @@ on:
         type: number
         default: 10
 
+# Read-only by default. The jobs that build and run the PR's code hold this token and no secrets; only the
+# comment job raises it, and that job checks out nothing and runs no shell (docs/cluster-chaos-and-ci.md,
+# "Trust model").
 permissions:
   contents: read
-  issues: write
-  pull-requests: write
 
 concurrency:
   # Lightweight guard keyed off the resolved target. The resolve-inputs
@@ -110,6 +113,7 @@ jobs:
     permissions:
       contents: read
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       valkey_repository: ${{ steps.resolve.outputs.valkey_repository }}
       valkey_ref: ${{ steps.resolve.outputs.valkey_ref }}
@@ -155,6 +159,7 @@ jobs:
     permissions:
       contents: read
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       run_count: ${{ steps.matrix.outputs.run_count }}
       runs: ${{ steps.matrix.outputs.runs }}
@@ -323,11 +328,12 @@ jobs:
       - prepare-matrix
       - build-valkey
       - random-fuzzer
+    # Read-only: the artifacts it renders were written on runners that ran the PR's code. The comment job
+    # holds the write token and gets only the rendered file.
     permissions:
       contents: read
-      issues: write
-      pull-requests: write
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     concurrency:
       group: ${{ needs.resolve-inputs.outputs.concurrency_key }}
       cancel-in-progress: false
@@ -353,6 +359,7 @@ jobs:
           PREPARE_MATRIX_RESULT: ${{ needs.prepare-matrix.result }}
           RUN_COUNT: ${{ needs.prepare-matrix.outputs.run_count }}
           BUILD_RESULT: ${{ needs.build-valkey.result }}
+          RUNS_RESULT: ${{ needs.random-fuzzer.result }}
           RESOLVED_SHA: ${{ needs.build-valkey.outputs.resolved_sha }}
           FUZZER_REPOSITORY: ${{ needs.resolve-inputs.outputs.fuzzer_repository }}
           FUZZER_REF: ${{ needs.resolve-inputs.outputs.fuzzer_ref }}
@@ -364,17 +371,56 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: python .github/scripts/ci.py summarize
 
-      - name: Comment on PR with fuzzer results
+      # Written by ci.py summarize when there is a PR; the comment job posts it.
+      - name: Upload the PR comment
         if: ${{ needs.resolve-inputs.outputs.pr_number != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: valkey-pr-fuzzer-comment
+          if-no-files-found: error
+          path: pr-comment.md
+
+      - name: Fail when a run failed or is missing
+        if: steps.summary.outputs.overall_failed == 'true'
+        run: exit 1
+
+  comment:
+    name: Comment on the PR
+    # Posts the comment summarize rendered, after it, whether or not the runs passed. The only job with a write
+    # token: it checks out nothing, runs no shell, and reads one file the read-only summarize job uploaded.
+    if: >-
+      ${{ always() && needs.resolve-inputs.outputs.pr_number != ''
+          && contains(fromJSON('["success", "failure"]'), needs.summarize.result) }}
+    needs:
+      - resolve-inputs
+      - summarize
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: ${{ needs.resolve-inputs.outputs.concurrency_key }}-comment
+      cancel-in-progress: false
+    steps:
+      - name: Download the PR comment
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: valkey-pr-fuzzer-comment
+          path: ${{ runner.temp }}/comment
+
+      - name: Comment on PR with fuzzer results
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
+          COMMENT_FILE: ${{ runner.temp }}/comment/pr-comment.md
           PR_NUMBER: ${{ needs.resolve-inputs.outputs.pr_number }}
           VALKEY_REPOSITORY: ${{ needs.resolve-inputs.outputs.valkey_repository }}
         with:
           github-token: ${{ github.token }}
           script: |
             const fs = require('fs');
-            const body = fs.readFileSync('pr-comment.md', 'utf8');
+            const body = fs.readFileSync(process.env.COMMENT_FILE, 'utf8');
             // ci.py summarize writes the marker as the comment's first line.
             const marker = body.split('\n', 1)[0];
             const issue_number = Number(process.env.PR_NUMBER);
@@ -420,7 +466,3 @@ jobs:
                 body,
               });
             }
-
-      - name: Fail when a run failed or is missing
-        if: steps.summary.outputs.overall_failed == 'true'
-        run: exit 1

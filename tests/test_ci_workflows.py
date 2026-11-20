@@ -145,10 +145,83 @@ def test_every_workflow_pins_its_actions_to_a_commit(name):
         assert action.startswith("./") or re.fullmatch(r"[\w.-]+/[\w./-]+@[0-9a-f]{40} # v\d+(\.\d+)*", action), action
 
 
+# The one job that writes: it posts the PR comment the read-only summarize job rendered.
+WRITING_JOBS = {("valkey-pr-fuzzer.yml", "comment"): {"issues": "write", "pull-requests": "write"}}
+
+
 @pytest.mark.parametrize("name", WORKFLOW_NAMES)
-def test_every_workflow_sets_its_token_permissions(name):
-    # Without a permissions block a workflow gets the repository's default token, which may be able to write.
-    assert "contents" in _workflow(name).get("permissions", {}), name
+def test_every_workflow_holds_a_read_only_token_except_the_job_that_posts_the_comment(name):
+    # Without a permissions block a workflow gets the repository's default token, which may be able to write; a
+    # write token must never be in a job that checks out or runs anything, since the PR's code ran on the runners
+    # whose artifacts the jobs read.
+    workflow = _workflow(name)
+    assert workflow["permissions"] == {"contents": "read"}, name
+    for job_name, job in workflow["jobs"].items():
+        raised = {scope: level for scope, level in job.get("permissions", {}).items() if level != "read"}
+        assert raised == WRITING_JOBS.get((name, job_name), {}), (name, job_name)
+        if raised:
+            assert not any("run" in step or "checkout" in step.get("uses", "") for step in job["steps"]), job_name
+
+
+@pytest.mark.parametrize("name", WORKFLOW_NAMES)
+def test_every_workflow_serializes_its_runs_and_bounds_every_job(name):
+    # Without a concurrency group a schedule that outlasts its interval runs beside itself; without a timeout a hung
+    # job holds a runner for six hours.
+    workflow = _workflow(name)
+    assert workflow["concurrency"]["group"] and workflow["concurrency"]["cancel-in-progress"] is False, name
+    for job_name, job in workflow["jobs"].items():
+        assert isinstance(job.get("timeout-minutes"), int), (name, job_name)
+
+
+OWNING_REPOSITORIES = ("valkey-io/valkey-fuzzer", "sarthakaggarwal97/valkey-fuzzer")
+
+
+@pytest.mark.parametrize("name", [name for name in WORKFLOW_NAMES if "schedule" in _workflow(name)["on"]])
+def test_every_scheduled_workflow_runs_its_schedule_only_in_the_repositories_that_own_it(name):
+    # A fork that enables Actions would otherwise run every schedule; a dispatch runs anywhere.
+    for job_name, job in _workflow(name)["jobs"].items():
+        guard = job.get("if", "")
+        assert re.fullmatch(r"github\.event_name != 'schedule'( \|\| github\.repository == '[^']+')+", guard), (
+            name,
+            job_name,
+        )
+        assert set(re.findall(r"github\.repository == '([^']+)'", guard)) <= set(OWNING_REPOSITORIES), (name, job_name)
+
+
+@pytest.mark.parametrize("name", WORKFLOW_NAMES)
+def test_every_download_a_workflow_installs_is_checked_against_a_pinned_digest(name):
+    # The jar and the .deb are run or installed as root: a release asset that changed must fail the step.
+    for script in _run_scripts(_workflow(name)):
+        if "curl " in script:
+            assert "sha256sum -c" in script, (name, script)
+        for install in re.findall(r"^\s*sudo dpkg -i (\S+)", script, re.M):
+            check = re.search(rf'\$\{{\w+_SHA256\}}  {re.escape(install)}" \| sha256sum -c -', script)
+            assert check and check.start() < script.index(f"sudo dpkg -i {install}"), (name, install)
+
+
+def test_the_pr_fuzzer_posts_its_comment_from_a_job_that_never_meets_the_prs_code():
+    workflow = _workflow("valkey-pr-fuzzer.yml")
+    summarize, comment = workflow["jobs"]["summarize"], workflow["jobs"]["comment"]
+    # summarize renders what the runs wrote with a read-only token and hands over one file.
+    assert summarize["permissions"] == {"contents": "read"}
+    (upload,) = [step for step in summarize["steps"] if step.get("uses", "").startswith("actions/upload-artifact@")]
+    assert upload["with"]["path"] == "pr-comment.md" and upload["with"]["if-no-files-found"] == "error"
+    assert upload["if"] == "${{ needs.resolve-inputs.outputs.pr_number != '' }}"
+    # The verdict is summarize's own, after the upload, so a FAIL still gets its comment.
+    assert summarize["steps"][-1]["run"] == "exit 1" and "overall_failed == 'true'" in summarize["steps"][-1]["if"]
+    # comment downloads that file and posts it, after summarize whether it passed or failed, and nothing else.
+    assert "summarize" in comment["needs"] and "always()" in comment["if"]
+    assert 'contains(fromJSON(\'["success", "failure"]\'), needs.summarize.result)' in comment["if"]
+    download, post = comment["steps"]
+    assert (
+        download["uses"].startswith("actions/download-artifact@") and download["with"]["name"] == upload["with"]["name"]
+    )
+    assert post["uses"].startswith("actions/github-script@")
+    assert post["env"]["COMMENT_FILE"] == f"{download['with']['path']}/pr-comment.md"
+    assert "readFileSync(process.env.COMMENT_FILE" in post["with"]["script"]
+    # The runs job's result reaches the verdict, so a run's metadata alone cannot make the workflow pass.
+    (summary,) = _step_env("valkey-pr-fuzzer.yml", "summarize")
+    assert summary["RUNS_RESULT"] == "${{ needs.random-fuzzer.result }}"
 
 
 @pytest.mark.parametrize("name", WORKFLOW_NAMES)
@@ -326,7 +399,8 @@ def test_every_pr_fuzzer_step_passes_the_environment_its_command_reads(tmp_path,
 
 def _summary_env(**overrides):
     env = {
-        "PREPARE_MATRIX_RESULT": "success", "RUN_COUNT": "2", "BUILD_RESULT": "success", "RESOLVED_SHA": "abc123",
+        "PREPARE_MATRIX_RESULT": "success", "RUN_COUNT": "2", "BUILD_RESULT": "success", "RUNS_RESULT": "success",
+        "RESOLVED_SHA": "abc123",
         "FUZZER_REPOSITORY": "valkey-io/valkey-fuzzer", "FUZZER_REF": "main", "VALKEY_REPOSITORY": "valkey-io/valkey",
         "VALKEY_REF": "refs/pull/7/merge", "PR_NUMBER": "7", "PR_URL": "https://github.com/valkey-io/valkey/pull/7",
         "LABEL_NAME": "run-cluster-fuzzer", "RUN_URL": "https://github.com/valkey-io/valkey-fuzzer/actions/runs/1",
@@ -343,23 +417,75 @@ def test_the_pr_fuzzer_summary_passes_when_every_run_passed():
 
     assert not failed and comment is None
     assert "- Overall result: `PASS`" in summary and "- Passed runs: 2/2" in summary
-    assert "| 2 | success | 2 | fuzzer | - | PASS | - |" in summary
+    assert "| 2 | `success` | `2` | `fuzzer` | - | `PASS` | - |" in summary
 
 
 def test_the_pr_fuzzer_summary_fails_on_a_failed_or_missing_run_and_details_them_in_the_comment():
     failing = _run_result(1, "failure", outcome="FAIL", failed_components=["chaos: lost | 3 keys\nafter wave 1"])
 
-    summary, comment, failed = CI.summarize(_summary_env(), {1: failing})
+    summary, comment, failed = CI.summarize(_summary_env(RUNS_RESULT="failure"), {1: failing})
 
     assert failed
-    assert "| 1 | failure | 1 | fuzzer | - | FAIL | chaos: lost / 3 keys after wave 1 |" in summary
+    assert "| 1 | `failure` | `1` | `fuzzer` | - | `FAIL` | `chaos: lost / 3 keys after wave 1` |" in summary
     assert "| 2 | missing | - | artifact | - | - | artifact not uploaded |" in summary
     assert comment.startswith("<!-- valkey-cluster-fuzzer-results -->\n") and "- Overall result: `FAIL`" in comment
-    assert "| 1 | failure | 1 | fuzzer | FAIL | chaos: lost / 3 keys after wave 1 |" in comment
+    assert "| 1 | `failure` | `1` | `fuzzer` | `FAIL` | `chaos: lost / 3 keys after wave 1` |" in comment
     assert (
         "Missing artifacts for runs: 2" in comment
         and "- PR: [#7](https://github.com/valkey-io/valkey/pull/7)" in summary
     )
+
+
+def test_the_pr_fuzzer_summary_shows_what_a_run_wrote_as_text_and_trusts_the_runs_job_over_it():
+    # metadata.json and the build's output were written where the PR's code ran: markdown in them must not render
+    # as a link, mention, HTML, or bare URL in the comment, and they must not turn a failed runs job into a PASS.
+    forged = _run_result(
+        1,
+        "[ok](https://evil.example) @maintainer <img src=x>",
+        failed_components=["see https://evil.example/`pwned`"],
+        seed="#1",
+    )
+    env = _summary_env(RESOLVED_SHA="abc`def", RUNS_RESULT="failure")
+
+    summary, comment, failed = CI.summarize(env, {1: forged, 2: _run_result(2)})
+
+    assert failed and "- Overall result: `FAIL`" in comment and "- Fuzzer runs: `failure`" in summary
+    assert "- Resolved SHA: `abc'def`" in comment
+    row = "| 1 | `[ok](https://evil.example) @maintainer <img src=x>` | `#1` | `fuzzer` | `PASS` | "
+    assert row + "`see https://evil.example/'pwned'` |" in comment
+    # Every value a run wrote is inside a code span, so the comment and the summary hold no bare markdown.
+    for text in (summary, comment):
+        for line in text.splitlines():
+            if line.startswith("| 1 |"):
+                assert re.fullmatch(r"\| 1 \| (`[^`]*`|-)( \| (`[^`]*`|-))+ \|", line), line
+
+    # A forged PASS: every run's metadata says success, but the runs job failed.
+    _, comment, failed = CI.summarize(env, {1: _run_result(1), 2: _run_result(2)})
+    assert failed and "- Overall result: `FAIL`" in comment and "- Passed runs: 2/2" in comment
+
+
+def test_the_pr_fuzzer_summary_takes_each_runs_id_from_its_artifact_not_from_a_file_it_wrote(tmp_path, monkeypatch):
+    # The PR's code can leave any file under its run folder; a metadata.json with another run's ID, or one in a
+    # subfolder, must not stand in for that run.
+    results = tmp_path / "collected-results"
+    for run_id, status in ((1, "failure"), (2, "success")):
+        folder = results / f"valkey-pr-fuzzer-run-{run_id}"
+        folder.mkdir(parents=True)
+        (folder / "metadata.json").write_text(json.dumps(_run_result(run_id, status)))
+    (results / "valkey-pr-fuzzer-run-2" / "metadata.json").write_text(json.dumps(_run_result(1, "success")))
+    forged = results / "valkey-pr-fuzzer-run-2" / "batch"
+    forged.mkdir()
+    (forged / "metadata.json").write_text(json.dumps(_run_result(1, "success")))
+    env = {**_summary_env(RESULTS_DIR=str(results)), "GITHUB_STEP_SUMMARY": str(tmp_path / "summary")}
+    env["GITHUB_OUTPUT"] = str(tmp_path / "output")
+    monkeypatch.chdir(tmp_path)
+
+    with patch.dict(os.environ, env, clear=True):
+        CI.main("summarize")
+
+    summary = (tmp_path / "summary").read_text(encoding="utf-8")
+    assert "| 1 | `failure` |" in summary and "| 2 | `success` |" in summary
+    assert (tmp_path / "output").read_text(encoding="utf-8") == "overall_failed=true\n"
 
 
 def test_the_pr_fuzzer_summary_fails_when_no_runs_were_queued():
@@ -885,8 +1011,10 @@ def test_the_batch_summary_lists_every_run_with_its_report_and_the_signatures(tm
 
     assert summary.startswith("## Soak\n\n- Valkey: `valkey-io/valkey` `-` `abc`\n- Batch status: `FAIL`")
     plan = outcome.plan
-    assert f"| {folder.name} | FAIL | {plan.scenario_id} | 31 | deadbeef | x | chaos: wave 1 / lost keys |" in summary
-    assert "| s7 | ERROR | - | 7 | - | WorkerExit: no run report | - |" in summary
+    assert (
+        f"| {folder.name} | FAIL | {plan.scenario_id} | 31 | deadbeef | `x` | `chaos: wave 1 / lost keys` |" in summary
+    )
+    assert "| s7 | ERROR | - | 7 | - | `WorkerExit: no run report` | - |" in summary
     assert "- Signature (1 run(s)): FAIL | valkey.cluster-chaos | chaos:FAIL" in summary
     assert "- Spec conform `replication` (approved claims): `pass` (pass 3, unexercised 1), runs by status" in summary
 

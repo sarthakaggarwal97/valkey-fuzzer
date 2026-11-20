@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   # The tla2tools.jar that tla-model-check.yml pins: the server tests, the spec
   # bridge's live test, and the conform half of the election test need it.
@@ -18,6 +22,7 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       matrix:
         python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']

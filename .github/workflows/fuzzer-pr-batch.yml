@@ -30,6 +30,12 @@ name: Valkey Fuzzer PR Batch
 # conform), with java and the tla2tools.jar that tla-model-check.yml pins.
 # The upload leaves out the write ledgers of the runs that passed, which only
 # the data oracle reads and which can make the folder too large to triage.
+#
+# Trust: whoever can dispatch this (write access to the repository) chooses the
+# commit whose build runs as root on the runner, beside the summary and the
+# upload. The token is read-only and the workflow has no secrets, so the worst
+# a bad commit can do is lie in its own batch folder; the dispatcher
+# (valkey-ci-agent) is trusted to send reviewed commits.
 
 run-name: Valkey Fuzzer PR Batch ${{ inputs.request_id }}
 
@@ -130,6 +136,11 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  # Dispatches are independent; one that repeats a request_id waits for the first.
+  group: fuzzer-pr-batch-${{ inputs.request_id || github.run_id }}
+  cancel-in-progress: false
 
 env:
   TLA_TOOLS_VERSION: v1.7.4
