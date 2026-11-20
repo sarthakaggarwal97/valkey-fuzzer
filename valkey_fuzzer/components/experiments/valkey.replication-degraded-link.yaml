@@ -11,7 +11,7 @@
 #
 # Needs Linux, tc and ip with CAP_NET_ADMIN (the fuzzer never asks for sudo),
 # and deployment.addressing: per_instance_loopback.
-extends: [valkey.base, valkey.history]
+extends: [valkey.base, valkey.history, valkey.links-up]
 id: valkey.replication-degraded-link
 deployment:
   modes: [standalone]
@@ -88,15 +88,8 @@ components:
     depends_on: [run-then-degrade]
     config: {event: degrade.healed, timeout_s: 660}
 
-  - use: valkey.action.poll
-    id: links-up
+  - id: links-up
     depends_on: [healed]
-    config:
-      instances: replicas
-      section: replication
-      field: master_link_status
-      predicate: {equals: up}
-      timeout_s: 120
 
   - use: valkey.oracle.ledger
     id: data

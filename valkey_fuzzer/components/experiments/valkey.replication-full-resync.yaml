@@ -11,7 +11,7 @@
 # a FAIL. `replication-steps` publishes the replication model's steps from
 # the logs, and `replication-trace` samples every node's replication IDs,
 # offsets and data digest (valkey.replication-steps).
-extends: [valkey.base, valkey.history, valkey.replication-steps]
+extends: [valkey.base, valkey.history, valkey.replication-steps, valkey.links-up]
 id: valkey.replication-full-resync
 deployment:
   modes: [standalone, cluster]
@@ -105,15 +105,8 @@ components:
       command: [CONFIG, SET, client-output-buffer-limit, "replica 256mb 64mb 60"]
       expect: {equals: OK}
 
-  - use: valkey.action.poll
-    id: links-up
+  - id: links-up
     depends_on: [restore-output-limit]
-    config:
-      instances: replicas
-      section: replication
-      field: master_link_status
-      predicate: {equals: up}
-      timeout_s: 120
 
   - use: valkey.oracle.ledger
     id: data

@@ -1,0 +1,15 @@
+# The `links-up` poll: wait until every replica's link to its primary is up
+# again (INFO replication, master_link_status), within 120 s. Fragments and
+# experiments list `- id: links-up` with the `depends_on` that names what the
+# poll follows (valkey.reconnect-replicas: `drop-replica-links`), and override
+# `timeout_s` when 120 s is not their bound (valkey.replication-cpu-starvation:
+# 60).
+components:
+  - use: valkey.action.poll
+    id: links-up
+    config:
+      instances: replicas
+      section: replication
+      field: master_link_status
+      predicate: {equals: up}
+      timeout_s: 120

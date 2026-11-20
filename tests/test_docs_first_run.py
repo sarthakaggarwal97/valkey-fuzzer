@@ -11,6 +11,7 @@ import pytest
 import yaml
 
 from valkey_fuzzer.cli import create_parser
+from valkey_fuzzer.components import experiments
 from valkey_fuzzer.components.porcupine import RELEASE_TAG
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -74,10 +75,11 @@ def test_the_experiments_the_pages_say_need_porcupine_are_the_ones_that_do():
 
 
 def test_the_experiments_the_pages_say_never_build_valkey_are_the_ones_that_probe():
+    # The resolved experiments: the election experiments' probe comes from the valkey.election-steps fragment.
     probing = {
-        f"valkey.{path.stem.removeprefix('valkey.')}"
-        for path in EXPERIMENTS.glob("*.yaml")
-        if "valkey.capability.build-probe" in path.read_text(encoding="utf-8")
+        experiment.experiment_id
+        for experiment in experiments()
+        if any(component.use == "valkey.capability.build-probe" for component in experiment.components)
     }
     assert len(probing) == 4
     for page in (ROOT / "README.md", ROOT / "docs" / "getting-started.md"):
