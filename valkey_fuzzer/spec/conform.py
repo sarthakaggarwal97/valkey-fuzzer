@@ -29,6 +29,7 @@ A run's records are its committed events, or a trace a component wrote: a
 JSONL file :data:`TRACE_FILE` in the component's artifact folder
 (``components/<id>/``) or anywhere under a directory given. The spec bridge
 owns this format: the first record is the header, ``{"kind": "header",
+"format_version": <:data:`~valkey_fuzzer.reports.FORMAT_VERSION`>,
 "nodes": {<node>: {"node_id": <ID>, "config": {...}}}, "scenario_id", "seed",
 "experiment_id", "inputs"}``, and every later record is one the mapping's
 evidence matches. A ``node_id`` field of the mapping resolves to its node
@@ -57,6 +58,7 @@ from typing import Any, Optional
 
 from .._data import error_record, jsonable
 from ..documents import ABSENT, get_path
+from ..reports import format_version_problem
 from ..results import ComponentResult, ComponentStatus, OutcomeStatus, RunOutcome
 from .bundle import (
     MODEL_FILE,
@@ -141,6 +143,9 @@ def _trace_run(path: str, meta: Optional[dict[str, Any]] = None) -> RunEvidence:
     if not records or records[0].get("kind") != "header":
         raise ValueError(f"{path} does not start with a trace header")
     header = records[0]
+    problem = format_version_problem(header, path)
+    if problem is not None:
+        raise ValueError(problem)
     meta = dict(meta or {})
     for key in ("scenario_id", "seed", "experiment_id", "inputs"):
         meta.setdefault(key, header.get(key))
@@ -171,6 +176,9 @@ def _report_run(path: str, report: Mapping[str, Any]) -> RunEvidence:
         "run_status": report.get("status"),
         "report": path,
     }
+    problem = format_version_problem(report, path)
+    if problem is not None:
+        return RunEvidence(source=path, header={}, records=[], meta=meta, problem=problem)
     folder = os.path.dirname(path)
     traces = sorted(glob.glob(os.path.join(folder, "components", "*", TRACE_FILE)))
     if traces:

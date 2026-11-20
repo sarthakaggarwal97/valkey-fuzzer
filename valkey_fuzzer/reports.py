@@ -29,6 +29,7 @@ from typing import Any, Optional
 
 import yaml
 
+from . import __version__
 from ._data import to_plain_data
 from .catalog import Catalog
 from .coverage import coverage_tuple
@@ -38,6 +39,12 @@ from .provenance import recorded_binary
 from .provenance import reproducer as provenance_reproducer
 from .results import ComponentStatus, RunOutcome
 from .schema import load_yaml, plain_config
+
+# The ``format_version`` of every file the fuzzer writes and reads back (``report.json``, ``plan.json``, a batch's
+# ``summary.json`` and ``batch.json``, ``conform.json``, and a ``trace.jsonl`` header). A reader accepts this
+# version, and a file without one (written before the field was), and refuses any other
+# (:func:`format_version_problem`): a key removed or renamed bumps it; a key added does not (docs/stability.md).
+FORMAT_VERSION = 1
 
 # Every run report has these keys (see :func:`run_report`), and old reports without the readable ones still load.
 REPORT_KEYS = ("generated_at", "status", "summary", "scenario", "outcome", "coverage", "reproducer", "provenance")
@@ -166,6 +173,25 @@ def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return document
 
 
+def format_version_problem(data: Any, path: str) -> Optional[str]:
+    """Why this fuzzer cannot read the file at ``path`` holding ``data``: its ``format_version`` is another
+    fuzzer's. None when it is :data:`FORMAT_VERSION`, or when the file has none (written before the field was)."""
+
+    version = data.get("format_version", FORMAT_VERSION) if isinstance(data, Mapping) else FORMAT_VERSION
+    if version == FORMAT_VERSION:
+        return None
+    return (
+        f"{path} has format_version {version!r}, which an older or newer valkey-fuzzer wrote; "
+        f"this one ({__version__}) reads format_version {FORMAT_VERSION}"
+    )
+
+
+def _check_format_version(data: Any, path: str) -> None:
+    problem = format_version_problem(data, path)
+    if problem is not None:
+        raise InputError(problem)
+
+
 def make_report_folder(path: str) -> str:
     """Create ``path``, which must not exist yet."""
 
@@ -188,7 +214,7 @@ def new_report_folder(parent: str, name: str) -> str:
 def write_plan(report_dir: str, plan: ExecutionPlan, reproducer: Optional[Mapping[str, Any]] = None) -> None:
     """Write ``plan.json`` (and ``reproducer.json``, given the run's ``reproducer``), before the run starts."""
 
-    write_document(os.path.join(report_dir, PLAN_FILE), plan.to_data())
+    write_document(os.path.join(report_dir, PLAN_FILE), {"format_version": FORMAT_VERSION, **plan.to_data()})
     if reproducer is not None:
         write_document(os.path.join(report_dir, REPRODUCER_FILE), reproducer)
 
@@ -279,10 +305,10 @@ def run_report(
     the run checked against each spec bundle its plan names, by bundle
     (:func:`~valkey_fuzzer.spec.conform.conform_run`; None when it names none).
 
-    The keys come in reading order: ``status``, ``summary``, ``failed_components`` (what did not pass, values cut to
-    :data:`MAX_VALUE_CHARS`), ``reproduce`` (the command that replays the run, given ``report_path``), ``look_at``
-    (where the files are), ``conform``, then the data a tool reads. ``reproducer`` also records the ``command`` and
-    the ``valkey_binary``.
+    The keys come in reading order: ``format_version`` (:data:`FORMAT_VERSION`), ``status``, ``summary``,
+    ``failed_components`` (what did not pass, values cut to :data:`MAX_VALUE_CHARS`), ``reproduce`` (the command
+    that replays the run, given ``report_path``), ``look_at`` (where the files are), ``conform``, then the data a
+    tool reads. ``reproducer`` also records the ``command`` and the ``valkey_binary``.
     """
 
     reproducer = provenance_reproducer(catalog, outcome.plan, outcome)
@@ -295,6 +321,7 @@ def run_report(
         reproducer["generated"] = to_plain_data(generated)
     folder = os.path.dirname(report_path) if report_path else None
     return {
+        "format_version": FORMAT_VERSION,
         "status": outcome.status.value,
         "summary": outcome.summary,
         "failed_components": failed_components(outcome),
@@ -323,12 +350,13 @@ def as_run_report(data: Any, path: str) -> Optional[Mapping[str, Any]]:
     """The run report ``data`` is, or None for anything else.
 
     A document with ``outcome`` or ``reproducer`` is a run report and must have
-    all its keys. Anything else is left to the caller, which reads it as a bare
-    plan.
+    all its keys, and this fuzzer's ``format_version``. Anything else is left
+    to the caller, which reads it as a bare plan.
     """
 
     if not isinstance(data, Mapping) or ("outcome" not in data and "reproducer" not in data):
         return None
+    _check_format_version(data, path)
     missing = _missing(data, REPORT_KEYS)
     for key, required in (("reproducer", REPRODUCER_KEYS), ("outcome", ("plan",))):
         if missing:
@@ -374,6 +402,10 @@ def recorded_run(path: str) -> tuple[ExecutionPlan, Optional[dict[str, Any]], Op
             raise InputError(
                 f"{path} is a scenario, not a run report or plan; run it with `valkey-fuzzer run {shlex.quote(path)}`"
             )
+        _check_format_version(data, path)
+        if isinstance(data, Mapping):
+            # The file's version marker is not a field of the plan it holds.
+            data = {key: value for key, value in data.items() if key != "format_version"}
         plan = ExecutionPlan.from_data(data)
         return plan, *_beside_plan(path, plan)
     outcome = report["outcome"]
