@@ -13,7 +13,7 @@ import valkey
 
 from tests.fakes import FakeHandle, fake_instances
 from tests.support import VirtualClock
-from tests.test_valkey_components_faults import Iptables
+from tests.test_valkey_components_faults import Iptables, Tc
 from tests.valkey_experiments_support import (
     chaos_operation,
     chaos_schedule,
@@ -138,7 +138,7 @@ class FakeStandalone(FakeHandle):
                 return {"role": "master", "master_replid": self.replid[instance_id],
                         "master_repl_offset": self.offset[instance_id]}  # fmt: skip
             linked = self.reachable(upstream) and self.upstream[upstream] is None
-            return {"role": "slave", "master_host": "127.0.0.1", "master_port": self.instance(upstream).port,
+            return {"role": "slave", "master_host": self.instance(upstream).host, "master_port": self.instance(upstream).port,
                     "master_link_status": "up" if linked else "down", "master_replid": self.replid[instance_id],
                     "slave_repl_offset": self.offset[instance_id]}  # fmt: skip
 
@@ -330,11 +330,14 @@ def _exits_by_itself():
          "valkey-2 exited without being killed"),
         (lambda: FakeStandalone(replicas=1), [[{"op": "partition", "target": "replica"}]], "ERROR",
          "partition operations need Linux, root, and iptables (network partitions require root)"),
+        (lambda: FakeStandalone(replicas=1), [[{"op": "degrade", "target": "replica", "loss_pct": 5}]], "ERROR",
+         "degrade operations need Linux, tc, and CAP_NET_ADMIN (tc not installed); remove them or run elsewhere"),
     ],
-    ids=["second-primary", "every-target-killed", "wave-ran-nothing", "exited-by-itself", "no-iptables"],
+    ids=["second-primary", "every-target-killed", "wave-ran-nothing", "exited-by-itself", "no-iptables", "no-netem"],
 )  # fmt: skip
 def test_replication_chaos_that_breaks_or_runs_nothing_does_not_pass(monkeypatch, handle, waves, status, summary):
     monkeypatch.setattr(replication_chaos, "iptables_supported", lambda: (False, "network partitions require root"))
+    monkeypatch.setattr(replication_chaos, "netem_supported", lambda: (False, "tc not installed"))
     result, _ = run_chaos(handle(), waves)
     assert result.status.value == status and summary in result.summary, result.summary
 
@@ -468,6 +471,39 @@ def test_a_stall_whose_undo_and_heal_fail_leaves_its_obligation_to_the_runner_an
     [left] = to_plain_data(outcome.diagnostics["obligations"])["still_active"]
     assert (left["owner"], left["kind"], left["target"]) == ("chaos", "process.paused", "valkey-1")
     assert [error["by"] for error in left["errors"]] == ["owner", "owner", "owner", "runner", "runner"]
+
+
+def test_a_degrade_wave_scopes_netem_to_the_targets_links_and_heals_them(monkeypatch, tmp_path):
+    tc = Tc().install(monkeypatch, tmp_path)
+    monkeypatch.setattr(replication_chaos, "netem_supported", lambda: (True, ""))
+    waves = [[{"op": "degrade", "target": "valkey-1", "duration_s": 0.05, "delay_ms": 30, "jitter_ms": 5, "loss_pct": 2}],
+             [{"op": "degrade", "target": "primary", "duration_s": 0.05, "rate_kbit": 256}]]  # fmt: skip
+    handle = FakeStandalone()
+    for n, instance in enumerate(handle.instances):
+        instance.host = f"127.0.0.{n + 2}"  # per-instance addresses, which a degradation requires
+    outcome = run_planned(handle, waves, addressing="per_instance_loopback")
+    assert outcome.status.value == "PASS", outcome.summary
+    assert not tc.devices and not tc.filters and not tc.ingress and not tc.marked
+    # Each wave's device of its own with its netem, redirecting only the target's four flows, removed by the operation.
+    installs = [call for call in tc.calls if call[1:3] == ("qdisc", "add") and call[4] != "lo"]
+    assert [list(call[7:]) for call in installs] == [["delay", "30ms", "5ms", "loss", "2%"], ["rate", "256kbit"]]
+    flows = [
+        tuple(call[call.index("src_ip") + 1 : call.index("src_ip") + 4 : 2])
+        for call in tc.calls
+        if call[1:3] == ("filter", "add")
+    ]
+    assert sorted(flows[:4]) == sorted(
+        (("127.0.0.3", "127.0.0.2"), ("127.0.0.2", "127.0.0.3"), ("127.0.0.3", "127.0.0.4"), ("127.0.0.4", "127.0.0.3"))
+    )
+    assert sorted(flows[4:]) == sorted(
+        (("127.0.0.2", "127.0.0.3"), ("127.0.0.3", "127.0.0.2"), ("127.0.0.2", "127.0.0.4"), ("127.0.0.4", "127.0.0.2"))
+    )
+    [value] = evidence_values(outcome.all_evidence, "valkey.chaos.schedule")
+    assert [operation["undone_by"] for operation in value["operations"]] == ["operation", "operation"]
+    owned = to_plain_data(outcome.diagnostics["obligations"])["undone"]
+    assert [(item["kind"], item["undone_by"]) for item in owned if item["kind"] == "network.degrade"] == [
+        ("network.degrade", "owner"), ("network.degrade", "owner")
+    ]  # fmt: skip
 
 
 def test_a_partition_whose_heal_fails_is_an_error_though_the_final_cleanup_removed_it(monkeypatch):

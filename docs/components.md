@@ -114,10 +114,11 @@ a retry succeeded makes the fault, and the run, `ERROR`.
 | [`valkey.action.cluster-chaos`](#valkeyactioncluster-chaos) | action | cluster | failover waves with process kills |
 | [`valkey.action.cluster-election`](#valkeyactioncluster-election) | action | cluster | forces one failover election |
 | [`valkey.action.migrate-slots`](#valkeyactionmigrate-slots) | action | cluster | moves one hash slot to another shard with `CLUSTER MIGRATESLOTS` |
-| [`valkey.action.replication-chaos`](#valkeyactionreplication-chaos) | action | standalone | waves of kills, promotions, repoints, stalls, and partitions, healed and validated |
+| [`valkey.action.replication-chaos`](#valkeyactionreplication-chaos) | action | standalone | waves of kills, promotions, repoints, stalls, partitions, and degradations, healed and validated |
 | [`valkey.fault.process-signal`](#valkeyfaultprocess-signal) | fault | any | kills, stops, or pauses an instance |
 | [`valkey.fault.syscall`](#valkeyfaultsyscall) | fault | any (needs `syscall_faults`) | kills, delays, or fails an instance at its nth matching system call |
 | [`valkey.fault.network-partition`](#valkeyfaultnetwork-partition) | fault | any (needs per-instance addresses) | drops traffic between instances |
+| [`valkey.fault.network-degrade`](#valkeyfaultnetwork-degrade) | fault | any (needs per-instance addresses) | loss, delay, reordering, duplication, or a rate limit between instances |
 | [`valkey.fault.disk-fill`](#valkeyfaultdisk-fill) | fault | any | fills the run's tmpfs |
 | [`valkey.fault.clock-skew`](#valkeyfaultclock-skew) | fault | any (needs `clock_faults`) | shifts one instance's wall clock with libfaketime |
 | [`valkey.fault.resource-pressure`](#valkeyfaultresource-pressure) | fault | any (needs a delegated cgroup v2) | limits one instance's CPU or memory with cgroup v2 |
@@ -163,7 +164,7 @@ schemas.
 | `valkey.action.failover` | none | `valkey.failover.result` | none |
 | `valkey.action.migrate-slots` | `<id>.migration-completed`<br>`<id>.migration-started` | `valkey.cluster.slot-migration.result` | none |
 | `valkey.action.poll` | none | `valkey.poll.satisfied` | none |
-| `valkey.action.replication-chaos` | `<id>.instance-killed`<br>`<id>.promoted`<br>`<id>.wave-validated` | `valkey.chaos.schedule`<br>`valkey.chaos.test-keys`<br>`valkey.data.loss-window` (many)<br>`valkey.instances.expected-down` | `network.partition`<br>`process.paused`<br>`process.stopped`<br>`server.client-pause`<br>`server.config` |
+| `valkey.action.replication-chaos` | `<id>.instance-killed`<br>`<id>.promoted`<br>`<id>.wave-validated` | `valkey.chaos.schedule`<br>`valkey.chaos.test-keys`<br>`valkey.data.loss-window` (many)<br>`valkey.instances.expected-down` | `network.degrade`<br>`network.partition`<br>`process.paused`<br>`process.stopped`<br>`server.client-pause`<br>`server.config` |
 | `valkey.action.rolling-upgrade` | `<id>.failed-over`<br>`<id>.instance-upgraded` | `valkey.upgrade.completed` | `process.stopped` |
 | `valkey.action.sleep` | none | none | none |
 | `valkey.action.tools` | none | `valkey.tool.runs` | `process.private-server` |
@@ -172,6 +173,7 @@ schemas.
 | `valkey.capability.host-probe` | none | `valkey.host.supported` | none |
 | `valkey.fault.clock-skew` | `<id>.injected`<br>`<id>.released` | `valkey.fault.injected` | `clock.skewed` |
 | `valkey.fault.disk-fill` | `<id>.injected`<br>`<id>.released` | `valkey.fault.injected` | `disk.filled` |
+| `valkey.fault.network-degrade` | `<id>.degraded`<br>`<id>.healed`<br>`<id>.injected` | `valkey.fault.injected` | `network.degrade` |
 | `valkey.fault.network-partition` | `<id>.healed`<br>`<id>.injected`<br>`<id>.partitioned` | `valkey.fault.injected` | `network.partition` |
 | `valkey.fault.process-signal` | `<id>.injected`<br>`<id>.recovered` | `valkey.fault.injected`<br>`valkey.instances.expected-down` | `process.paused`<br>`process.stopped` |
 | `valkey.fault.resource-pressure` | `<id>.injected`<br>`<id>.released` | `valkey.fault.injected` | `cgroup.limited` |
@@ -1083,6 +1085,7 @@ start of the wave; each operation draws from its own random stream,
 | `promote` | `target` (`replica`), `mode` (`graceful` or `force`; `graceful`), `split_s` (0 to 60; 0), `timeout_s` (10) | `graceful`: `FAILOVER TO` on the primary, then the other replicas follow the new primary; it succeeded when the target leads, or when the old primary follows the target with its failover state cleared (a target killed right after taking over was still promoted). A `FAILOVER TO` that got no reply, with roles that did not swap, or roles that could not be read at the end, is an `ERROR`: Valkey may never have seen it. `force`: `REPLICAOF NO ONE` on the replica; the old primary keeps serving for `split_s`, then it and every other replica follow the new primary. Refused when the target is killed, stalled, partitioned, or (for `graceful`) not linked, and for `force` when it was restarted in the wave and has not resynced: it holds only what it loaded from disk, so writes no loss window covers (from earlier terms, or WAIT-confirmed) could be lost. |
 | `repoint` | `target` (`replica`), `to` (`replica`, `primary`, or an ID; `replica`) | `REPLICAOF` from one replica to another (a chain) or to the primary. `to: replica` needs two replicas. |
 | `partition` | `target` (`replica`), `duration_s` (1) | Drops traffic between the instance and every other instance (iptables), then heals. Needs `addressing: per_instance_loopback`; on a host without Linux, root, and iptables the action is `ERROR`. |
+| `degrade` | `target` (`replica`), `duration_s` (1), `loss_pct`, `delay_ms`, `jitter_ms`, `reorder_pct`, `duplicate_pct` (all 0), `rate_kbit` (`null`) | Degrades the traffic between the instance and every other instance with `tc` netem instead of dropping it, as [`valkey.fault.network-degrade`](#valkeyfaultnetwork-degrade) does (set at least one effect; `jitter_ms` and `reorder_pct` need `delay_ms`), then heals. Needs `addressing: per_instance_loopback`; on a host without Linux, `tc`, and `CAP_NET_ADMIN` the action is `ERROR`. A degraded instance is still a promotion target: its links are slow, not cut. |
 | `stall` | `target` (`replica`), `duration_s` (1) | `SIGSTOP`, then `SIGCONT`. |
 | `backlog_pressure` | `repl_backlog_size` (16384), `output_limit` (65536 bytes), `duration_s` (1) | On the current primary: shrinks `repl-backlog-size` and the replica class of `client-output-buffer-limit`, then restores both. |
 
@@ -1096,11 +1099,12 @@ Kill safety (the standalone policy of the
 [wave engine](architecture.md#the-wave-engine)): a kill never takes the last
 instance that is not down, so one copy of the latest synced data always
 survives; promotions and repoints pick their targets after the wave's kills,
-stalls, and partitions, and avoid the replicas those disrupt.
+stalls, partitions, and degradations, and avoid the replicas those disrupt.
 
 Ownership: every change the action makes and will undo is an
 [undo obligation](contracts.md#fault-ownership) from the moment it
 applies it: a stall (`process.paused`), a partition (`network.partition`),
+a degradation (`network.degrade`, its netem device),
 each instance a `backlog_pressure` changes
 (`server.config`), a kill, which the heal or a `restart` undoes
 (`process.stopped`), and the validation's `CLIENT PAUSE`
@@ -1115,7 +1119,8 @@ undone, so no undo restores a value another fault saved or meets a process
 that is going away. A fault whose state is held by one whose undo failed is
 skipped.
 
-After every wave the action heals: it undoes stalls, then partitions, then
+After every wave the action heals: it undoes stalls, then partitions and
+degradations, then
 config changes (an undo that fails stays owned by its fault and is tried
 again by the next heal and by the final cleanup); if the primary is down it promotes the live instance with
 the highest offset in the dead primary's replication history
@@ -1277,6 +1282,81 @@ exists.
 Events: `<id>.injected`, `<id>.partitioned`, `<id>.healed`. Evidence:
 `valkey.fault.injected` (with `healed_at`), which `valkey.oracle.ledger` uses
 for loss windows.
+
+### `valkey.fault.network-degrade`
+
+Degrades the links between the selected `instances` and their `peers` instead
+of cutting them: packet loss, delay with jitter, reordering, duplication, and
+a rate limit, both ways, with `tc` netem. Clients from the harness (127.0.0.1)
+are not affected. It needs Linux, `tc` and `ip` (iproute2) with
+`CAP_NET_ADMIN` (root has it; the fuzzer never asks for `sudo`), and
+`deployment.addressing: per_instance_loopback`; pair it with
+`valkey.capability.host-probe` and `requires: [linux, netem,
+per_instance_loopback]`. The degradation heals on `heal_event`, after
+`duration_s`, or at teardown.
+
+What runs on the host, and why it can touch no other flow:
+
+1. `ip link add dev vf<pid><start><n> type ifb` and `ip link set ... up`: a
+   virtual device of the fault's own, named after the fuzzer process
+   (`vf`, its PID in six hex digits, the six characters of its start, one
+   suffix), which receives nothing by itself.
+2. `tc qdisc add dev vf... root netem <loss|delay|reorder|duplicate|rate>`:
+   netem is the root of that device, never of `lo`, so it queues only what is
+   redirected to the device.
+3. `tc qdisc add dev lo ingress`, only when `lo` has no ingress qdisc yet; a
+   marker in the shared directory (`lo-ingress.added`) records that the fuzzer
+   added it. The qdisc itself changes nothing: it only gives filters a place.
+4. One `tc filter add dev lo ingress protocol ip pref <P> handle <k> flower
+   ip_proto tcp src_ip <A> dst_ip <B> action mirred egress redirect dev vf...`
+   per direction of each instance pair. A filter matches a packet only when
+   its source and destination are both the exact addresses of the pair, so a
+   flow between two addresses of this run's instances is redirected and
+   nothing else is: not the harness's clients (127.0.0.1), not another run's
+   instances (its own 127.0.B.x block), not anything else on the host. Before
+   any call the fault refuses an address that is not an IPv4 loopback address,
+   is the harness's 127.0.0.1, or is shared by two instances. All filters of
+   one fault sit at one `pref` the fault claims (an explicit handle turns a
+   taken `pref` into `File exists`, so two runs never share one).
+
+Healing removes, in order, the filters (`tc filter del dev lo ingress protocol
+ip pref <P>`), the ingress qdisc if the fuzzer added it and no filter is left
+on it, and the device (`ip link del`, which takes its netem with it); the
+first two under a lock every fuzzer process takes, so a run never removes the
+qdisc under another run's first filter. A device whose filters could not be
+removed stays until they are (a filter whose device is gone would drop what it
+matches); its obligation (`network.degrade`) then stays open for recovery and
+the runner. Installing is all-or-nothing: if any step fails, what was
+installed is removed again and the fault is not applied; a kernel that lacks
+a module (`ifb`, `sch_netem`, `cls_flower`, `act_mirred`) is named in the error. A heal that fails is not
+raised into the event's dispatch; recovery removes the device and reports the
+failure. Every `tc` and `ip` call times out after 30 seconds. A device a
+killed fuzzer left is found by its name, with the filters that redirect to it,
+by [`valkey-fuzzer sweep`](cli.md#sweep). Netem acts on loopback's large
+segments (up to 64 kB) as single packets, so a loss percentage drops whole
+segments, and its queue holds 1000 packets; a `rate_kbit` low enough to fill
+it drops the rest.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `instances` | selector | | The instances whose links are degraded. |
+| `peers` | selector or `others` | `others` | Every instance that is not selected, or a selection. |
+| `loss_pct` | number, 0 to 100 | 0 | Packets dropped. |
+| `delay_ms` | number, 0 to 60,000 | 0 | Added to every packet, each way. |
+| `jitter_ms` | number, 0 to 60,000 | 0 | Random variation of `delay_ms`; needs `delay_ms`. |
+| `reorder_pct` | number, 0 to 100 | 0 | Packets sent at once instead of delayed, so they overtake the rest; needs `delay_ms`. |
+| `duplicate_pct` | number, 0 to 100 | 0 | Packets sent twice. |
+| `rate_kbit` | integer, 8 to 100,000,000, or null | `null` | A rate limit. |
+| `heal_event` | string or null | `null` | |
+| `duration_s` | number, 0.01 to 3600, or null | `null` | Set `heal_event` or `duration_s`, not both. |
+
+Set at least one of the five effects. Events: `<id>.injected`,
+`<id>.degraded` (`instances`, `peers`, and the `netem` arguments),
+`<id>.healed`. Evidence: `valkey.fault.injected` (the `device`, `pref`,
+`netem` arguments, `rules`, and `healed_at`). A degradation opens no loss
+window of its own: list it in `valkey.oracle.ledger`'s `loss_window_faults`
+only if the experiment accepts loss under it, and set `loss_window_faults:
+[]` when nothing else in the plan may lose writes.
 
 ### `valkey.fault.disk-fill`
 
@@ -1593,7 +1673,7 @@ scenario did:
 
 | Cause | The scenario |
 | --- | --- |
-| `links` | broke replication or cluster links: a component stopped, paused, or partitioned an instance (an [undo obligation](contracts.md#fault-ownership) of kind `process.stopped`, `process.paused`, or `network.partition`), killed one for good or moved a role (`valkey.instances.expected-down` naming an instance, `valkey.chaos.schedule`, `valkey.failover.result`, or `valkey.replication.replicaof` evidence), or is configured with a command that does (`REPLICAOF`, `SLAVEOF`, `FAILOVER`, or any `CLIENT`, `CLUSTER`, or `DEBUG` command of a [`valkey.action.command`](#valkeyactioncommand)) |
+| `links` | broke replication or cluster links: a component stopped, paused, partitioned, or degraded the links of an instance (an [undo obligation](contracts.md#fault-ownership) of kind `process.stopped`, `process.paused`, `network.partition`, or `network.degrade`), killed one for good or moved a role (`valkey.instances.expected-down` naming an instance, `valkey.chaos.schedule`, `valkey.failover.result`, or `valkey.replication.replicaof` evidence), or is configured with a command that does (`REPLICAOF`, `SLAVEOF`, `FAILOVER`, or any `CLIENT`, `CLUSTER`, or `DEBUG` command of a [`valkey.action.command`](#valkeyactioncommand)) |
 | `storage` | made writes to disk fail: an undo obligation of kind `disk.filled` or `directory.read-only` |
 | `commands` | sent a command that Valkey answered with an error reply: the [`valkey.workload.command-table`](#valkeyworkloadcommand-table) workload counted one, [`valkey.workload.config-churn`](#valkeyworkloadconfig-churn) had a `CONFIG SET` refused, a configured command's recorded reply is one, or a [`valkey.action.bgsave`](#valkeyactionbgsave) was refused (`refusals`, or status `rejected`) |
 | `memory` | set a `maxmemory` itself, in the deployment's server config, a startup overlay, or a configured `CONFIG SET`; the deployment provider's default is one no experiment's dataset reaches |

@@ -59,8 +59,9 @@ def waves(rng: random.Random, scenario: Mapping[str, Any]) -> list[list[dict[str
     deployment mode, with kills that follow that mode's kill safety so each
     has a target. Standalone: at most ``replicas`` kills per wave (one
     instance always survives), only replicas after the first, a ``restart``
-    after half of them, partitions only with per-instance loopback addresses,
-    and repoints to another replica only with two replicas or more. Cluster:
+    after half of them, partitions and degradations only with per-instance
+    loopback addresses, and repoints to another replica only with two replicas
+    or more. Cluster:
     one to three failovers per wave, of distinct shards, four in five with a
     kill before, with, or after (once it finished) the failover, and fewer
     kills in the run than there are replicas (Valkey does not restart them).
@@ -75,7 +76,7 @@ def waves(rng: random.Random, scenario: Mapping[str, Any]) -> list[list[dict[str
     if replicas >= 2:
         kinds.append("repoint")
     if document.get("addressing") == "per_instance_loopback":
-        kinds.append("partition")
+        kinds += ["partition", "degrade"]
     drawn = []
     for _ in range(rng.randint(1, 4)):
         wave: list[dict[str, Any]] = []
@@ -96,6 +97,15 @@ def waves(rng: random.Random, scenario: Mapping[str, Any]) -> list[list[dict[str
                 operation.update(target="replica", to=rng.choice(("replica", "primary")))
             elif kind in ("stall", "partition"):
                 operation.update(target=rng.choice(("primary", "replica")), duration_s=_seconds(rng, 0.5, 3))
+            elif kind == "degrade":
+                # Lossy or slow, with or without reordering, never both lossy and slow: the link must come back.
+                operation.update(target=rng.choice(("primary", "replica")), duration_s=_seconds(rng, 0.5, 3))
+                if rng.random() < 0.5:
+                    operation.update(loss_pct=rng.choice((2.0, 5.0, 10.0)))
+                else:
+                    operation.update(delay_ms=rng.choice((20.0, 50.0, 100.0)), jitter_ms=rng.choice((0.0, 10.0)))
+                    if rng.random() < 0.5:
+                        operation["reorder_pct"] = 25.0
             elif kind == "backlog_pressure":
                 operation.update(
                     repl_backlog_size=rng.choice((16384, 65536, 1048576)),

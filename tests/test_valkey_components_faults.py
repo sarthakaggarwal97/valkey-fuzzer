@@ -13,6 +13,7 @@ import pytest
 from tests.fakes import FakeClient, FakeHandle, fake_instances
 from tests.support import VirtualClock
 from tests.valkey_experiments_support import fake_context, registration_for, resolved, unit_plan
+from valkey_fuzzer import hoststate
 from valkey_fuzzer.components import capabilities, network, processes, providers, storage
 from valkey_fuzzer.components.faults import FAULT_INJECTED, ProcessSignalFault
 from valkey_fuzzer.components.ledger import fault_records
@@ -43,6 +44,153 @@ class Iptables:
         elif verb in ("-I", "-D"):
             (self.jumps.append if verb == "-I" else self.jumps.remove)(args[-1])
         return ok
+
+
+class Tc:
+    """Records ``tc`` and ``ip`` calls and keeps the devices, lo's ingress qdisc, and the filters they make.
+
+    ``fail`` maps (``"tc filter add"``, nth call of that verb) to an error text or an exception, as ``Iptables``
+    does; ``ingress`` is whether lo already has an ingress qdisc; ``taken`` are prefs another run's filters hold.
+    """
+
+    def __init__(self, fail=None, *, ingress=False, taken=()):
+        self.calls, self.fail, self.ingress = [], dict(fail or {}), ingress
+        self.devices: dict = {}  # name -> its netem arguments, once a qdisc is on it
+        self.filters: dict = {pref: [(1, "10.0.0.1", "10.0.0.2", "other0")] for pref in taken}
+
+    def tc(self, *args):
+        return self("tc", *args)
+
+    def ip(self, *args):
+        return self("ip", *args)
+
+    def __call__(self, tool, *args):
+        self.calls.append((tool, *args))
+        words = [word for word in args if not word.startswith("-")]
+        verb = " ".join((tool, *words[:2]))
+        error = self.fail.get((verb, sum(1 for call in self.calls if call[0] == tool and call[1:3] == args[:2])))
+        if isinstance(error, BaseException):
+            raise error
+        if error is not None:
+            return self._reply(1, stderr=error)
+        return getattr(self, "_" + verb.replace(" ", "_"))(words[2:])
+
+    @staticmethod
+    def _reply(returncode=0, stdout="", stderr=""):
+        return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+
+    def _ip_link_add(self, words):  # ip link add dev NAME type ifb
+        name = words[words.index("dev") + 1]
+        if name in self.devices:
+            return self._reply(2, stderr="RTNETLINK answers: File exists")
+        self.devices[name] = None
+        return self._reply()
+
+    def _ip_link_set(self, words):
+        return self._reply() if words[1] in self.devices else self._reply(1, stderr=f'Cannot find device "{words[1]}"')
+
+    def _ip_link_del(self, words):
+        if words[1] not in self.devices:
+            return self._reply(1, stderr=f'Cannot find device "{words[1]}"')
+        del self.devices[words[1]]
+        return self._reply()
+
+    def _ip_link_show(self, words):  # ip -o link show type ifb
+        lines = [f"{n + 3}: {name}: <BROADCAST,NOARP,UP,LOWER_UP> mtu 1500 qdisc netem state UNKNOWN mode DEFAULT"
+                 for n, name in enumerate(self.devices)]  # fmt: skip
+        return self._reply(stdout="\n".join(lines) + ("\n" if lines else ""))
+
+    def _tc_qdisc_add(self, words):  # tc qdisc add dev NAME root netem ...  |  tc qdisc add dev lo ingress
+        name = words[words.index("dev") + 1]
+        if name == "lo":
+            assert words[-1] == "ingress", words
+            if self.ingress:
+                return self._reply(2, stderr="Error: Exclusivity flag on, cannot modify.")
+            self.ingress = True
+            return self._reply()
+        assert name in self.devices and words[words.index("root") + 1] == "netem", words
+        self.devices[name] = words[words.index("netem") + 1 :]
+        return self._reply()
+
+    def _tc_qdisc_del(self, words):  # tc qdisc del dev lo ingress
+        assert words[words.index("dev") + 1] == "lo", words
+        if not self.ingress:
+            return self._reply(2, stderr="Error: Cannot find specified qdisc on specified device.")
+        assert not self.filters, "lo's ingress qdisc was deleted with filters on it"
+        self.ingress = False
+        return self._reply()
+
+    def _tc_qdisc_show(self, words):
+        return self._reply(
+            stdout="qdisc noqueue 0: root refcnt 2\n"
+            + ("qdisc ingress ffff: parent ffff:fff1\n" if self.ingress else "")
+        )
+
+    def _tc_filter_add(self, words):
+        assert words[:4] == ["dev", "lo", "ingress", "protocol"] and words[4] == "ip", words
+        if not self.ingress:
+            return self._reply(2, stderr="Error: Parent Qdisc doesn't exists.")
+        pref, handle = int(words[words.index("pref") + 1]), int(words[words.index("handle") + 1])
+        if any(held == handle for held, *_ in self.filters.get(pref, ())):
+            return self._reply(2, stderr="RTNETLINK answers: File exists")
+        assert words[words.index("flower") + 1 : words.index("action")] == [
+            "ip_proto", "tcp", "src_ip", words[words.index("src_ip") + 1], "dst_ip", words[words.index("dst_ip") + 1]
+        ], words  # fmt: skip
+        assert words[words.index("action") + 1 :][:4] == ["mirred", "egress", "redirect", "dev"], words
+        device = words[-1]
+        assert device in self.devices, words
+        self.filters.setdefault(pref, []).append(
+            (handle, words[words.index("src_ip") + 1], words[words.index("dst_ip") + 1], device)
+        )
+        return self._reply()
+
+    def _tc_filter_del(self, words):  # tc filter del dev lo ingress protocol ip pref P
+        pref = int(words[words.index("pref") + 1])
+        if pref not in self.filters:
+            return self._reply(2, stderr="Error: Filter with specified priority/protocol not found.")
+        del self.filters[pref]
+        return self._reply()
+
+    def _tc_filter_show(self, words):
+        lines = []
+        for pref, filters in sorted(self.filters.items()):
+            lines.append(f"filter protocol ip pref {pref} flower chain 0 ")
+            for handle, source, destination, device in filters:
+                lines += [
+                    f"filter protocol ip pref {pref} flower chain 0 handle 0x{handle:x} ",
+                    "  eth_type ipv4", "  ip_proto tcp", f"  src_ip {source}", f"  dst_ip {destination}",
+                    "  not_in_hw",
+                    f"\taction order 1: mirred (Egress Redirect to device {device}) stolen",
+                    " \tindex 1 ref 1 bind 1",
+                ]  # fmt: skip
+        return self._reply(stdout="\n".join(lines) + ("\n" if lines else ""))
+
+    def install(self, monkeypatch, tmp_path):
+        """Route the network module's tc and ip calls here, with the lock and the ingress marker in a directory
+        beside ``tmp_path`` instead of the host's shared directory."""
+
+        monkeypatch.setattr(network, "run_tc", self.tc)
+        monkeypatch.setattr(network, "run_ip", self.ip)
+        monkeypatch.setattr(hoststate, "default_root", lambda: str(tmp_path.parent / f"{tmp_path.name}-host"))
+        if self.ingress:
+            # Not the fuzzer's: no marker says it added the qdisc, so no fuzzer process removes it.
+            assert not os.path.exists(hoststate._lo_ingress_marker())
+        return self
+
+    @property
+    def marked(self):
+        """Whether the marker says the fuzzer added lo's ingress qdisc."""
+
+        return os.path.exists(hoststate._lo_ingress_marker())
+
+    def flows(self):
+        """``(source, destination, device)`` of every filter, in pref and handle order."""
+
+        return [
+            (source, destination, device)
+            for pref in sorted(self.filters)
+            for _, source, destination, device in sorted(self.filters[pref])
+        ]
 
 
 class _Handle(FakeHandle):
@@ -108,12 +256,15 @@ def _fire(fault, handle, use, component_id="fault", **config):
         (ProcessSignalFault, "valkey.fault.process-signal", {"signal": "SIGKILL"}, "process.stopped"),
         (ProcessSignalFault, "valkey.fault.process-signal", {"signal": "SIGSTOP", "pause_s": 0.0}, "process.paused"),
         (network.PartitionFault, "valkey.fault.network-partition", {"isolate": "valkey-0"}, "network.partition"),
+        (network.DegradeFault, "valkey.fault.network-degrade",
+         {"instances": "valkey-0", "loss_pct": 5, "delay_ms": 20, "jitter_ms": 5, "reorder_pct": 10}, "network.degrade"),
     ],
-    ids=["kill", "pause", "partition"],
+    ids=["kill", "pause", "partition", "degrade"],
 )  # fmt: skip
 def test_a_fault_owns_its_change_until_its_recovery_undoes_it(monkeypatch, tmp_path, make, use, config, kind):
     iptables = Iptables()
     monkeypatch.setattr(network, "run_iptables", iptables)
+    tc = Tc().install(monkeypatch, tmp_path)
     handle = _Handle(root=str(tmp_path))
     os.makedirs(handle.data_dir("valkey-0"))
     os.chmod(handle.data_dir("valkey-0"), 0o750)
@@ -128,9 +279,32 @@ def test_a_fault_owns_its_change_until_its_recovery_undoes_it(monkeypatch, tmp_p
         assert sum(call[0] == "-X" for call in iptables.calls) == 1
         # Another process's leaked chains are the sweep's to find and report, not this fault's to delete.
         assert ("-S",) not in iptables.calls
+    if make is network.DegradeFault:
+        # Netem on a device of the fault's own, named after this process; one lo ingress filter per direction
+        # between the instance and each peer, all at one pref, matching exactly the pair's addresses over TCP.
+        [device] = tc.devices
+        assert device == hoststate.netem_device_name(0) and len(device) <= 15
+        assert tc.devices[device] == ["delay", "20ms", "5ms", "loss", "5%", "reorder", "10%"]
+        assert sorted(tc.flows()) == sorted(
+            (a, b, device) for a, b in (("127.0.0.2", "127.0.0.3"), ("127.0.0.3", "127.0.0.2"),
+                                        ("127.0.0.2", "127.0.0.4"), ("127.0.0.4", "127.0.0.2"))
+        )  # fmt: skip
+        assert len(tc.filters) == 1 and tc.ingress and fault._record["pref"] in tc.filters
+        assert fault._record["netem"] == "delay 20ms 5ms loss 5% reorder 10%" and fault._record["device"] == device
+        fault._heal("event")
+        fault._heal("event")
+        # Removed in order: the filters, the ingress qdisc this fault added (now empty), the device; once.
+        removals = [
+            call[:3] for call in tc.calls if call[1:3] in (("filter", "del"), ("qdisc", "del"), ("link", "del"))
+        ]
+        assert removals == [("tc", "filter", "del"), ("tc", "qdisc", "del"), ("ip", "link", "del")]
+        assert not tc.filters and not tc.ingress and not tc.devices
+        # Another process's leaked devices are the sweep's to find, not this fault's to delete.
+        assert all(call[1:3] != ("link", "show") for call in tc.calls)
     assert fault.recover(context, spec).status is ComponentStatus.PASS
     assert _owned(context) == [("fault", kind, "owner")]
     assert handle.alive and os.stat(handle.data_dir("valkey-0")).st_mode & 0o777 == 0o750 and not iptables.chains
+    assert not tc.devices and not tc.filters
 
 
 def _paused_without_resume(monkeypatch, tmp_path):
@@ -164,6 +338,24 @@ def _partition(fail, heal=None):
         )
         if heal:
             context.event_bus.publish("heal", source="test")  # a failed heal must not raise into the dispatch
+        return context, spec, fault
+
+    return setup
+
+
+def _degrade(fail, heal=None, ingress=False):
+    """A degradation whose tc or ip calls fail as ``fail`` says, on a host whose lo has an ``ingress`` qdisc or
+    not, healed by ``heal``."""
+
+    def setup(monkeypatch, tmp_path):
+        tc = Tc(fail, ingress=ingress).install(monkeypatch, tmp_path)
+        context, spec, fault = _fire(
+            network.DegradeFault(), _Handle(), "valkey.fault.network-degrade", instances="valkey-0", loss_pct=5,
+            heal_event="heal",
+        )  # fmt: skip
+        if heal:
+            context.event_bus.publish("heal", source="test")  # a failed heal must not raise into the dispatch
+        fault._tc, fault._shared_ingress = tc, ingress
         return context, spec, fault
 
     return setup
@@ -211,6 +403,21 @@ _BUSY = "Device or resource busy"
         (_partition({("-X", 1): _BUSY}, heal=True), "ERROR", "heal failed", 0),
         (_partition("hung"), "", "timed out", 0),
         (_cancelled_fill, "", "cancelled", 0),
+        # The third filter fails: the two before it, the ingress qdisc, and the device are removed again.
+        (_degrade({("tc filter add", 3): "RTNETLINK answers: Invalid argument"}), "", "Invalid argument", 0),
+        # The kernel lacks netem: the device is removed again, and the error says what is missing.
+        (
+            _degrade({("tc qdisc add", 1): "Error: Specified qdisc kind is unknown."}),
+            "",
+            "lacks a module: ifb, sch_netem, cls_flower, or act_mirred",
+            0,
+        ),
+        (_degrade({("ip link add", 1): "RTNETLINK answers: Operation not permitted"}), "", "not permitted", 0),
+        # The device cannot be deleted: its obligation stays open for the runner, with the filters gone.
+        (_degrade({("ip link del", 1): "busy", ("ip link del", 2): "busy"}), "ERROR", "busy", 1),
+        (_degrade({("tc filter del", 1): "busy"}, heal=True), "ERROR", "heal failed", 0),
+        # An ingress qdisc lo already had is never removed, not even when the fault fails.
+        (_degrade({("tc filter add", 2): "bad"}, ingress=True), "", "bad", 0),
     ],
     ids=[
         "pause-not-resumed",
@@ -221,6 +428,12 @@ _BUSY = "Device or resource busy"
         "partition-heal-fails",
         "iptables-hangs",
         "cancelled-fill",
+        "degrade-fails-partway",
+        "degrade-no-netem",
+        "degrade-no-device",
+        "degrade-device-stays",
+        "degrade-heal-fails",
+        "degrade-fails-on-shared-ingress",
     ],
 )
 def test_a_fault_that_could_not_be_applied_or_undone_does_not_pass(
@@ -237,6 +450,11 @@ def test_a_fault_that_could_not_be_applied_or_undone_does_not_pass(
         [left] = still_active
         assert left["errors"]
     assert not list(tmp_path.iterdir()), "a cancelled fill removes its ballast"
+    tc = getattr(fault, "_tc", None)
+    if tc is not None:
+        # Nothing of the fault's is left on lo: no filter, and the ingress qdisc only if lo had it before. A device
+        # that could not be deleted is the one thing that stays, owned.
+        assert not tc.filters and len(tc.devices) == left_open and tc.ingress is fault._shared_ingress
 
 
 def test_a_busy_tmpfs_stays_owned_until_it_is_unmounted(monkeypatch, tmp_path):
@@ -394,6 +612,13 @@ _FO0 = {"op": "failover", "shard": 0}
         ("valkey.fault.network-partition", "fault", {"isolate": "valkey-0"}, "cluster", {}, "per_instance_loopback"),
         ("valkey.fault.network-partition", "fault", {"isolate": "valkey-0", "heal_event": "x", "duration_s": 1},
          "cluster", _LOOPBACK, "not both"),
+        ("valkey.fault.network-degrade", "fault", {"instances": "valkey-0", "loss_pct": 5}, "cluster", {}, "per_instance_loopback"),
+        ("valkey.fault.network-degrade", "fault", {"instances": "valkey-0"}, "cluster", _LOOPBACK, "set at least one of loss_pct"),
+        ("valkey.fault.network-degrade", "fault", {"instances": "valkey-0", "reorder_pct": 10}, "cluster", _LOOPBACK,
+         "need delay_ms"),
+        ("valkey.fault.network-degrade", "fault", {"instances": "valkey-0", "loss_pct": 101}, "cluster", _LOOPBACK, "loss_pct"),
+        ("valkey.fault.network-degrade", "fault", {"instances": "valkey-0", "loss_pct": 5, "heal_event": "x", "duration_s": 1},
+         "cluster", _LOOPBACK, "not both"),
         ("valkey.observer.log-trigger", "observer", {"rules": []}, "standalone", {}, "at least one"),
         ("valkey.observer.log-trigger", "observer", {"rules": [{"pattern": "(", "publish": "x"}]}, "standalone", {}, "not a valid regex"),
         ("valkey.observer.log-trigger", "observer", {"rules": [{"pattern": "a", "publish": "bad name"}]}, "standalone",
@@ -424,6 +649,12 @@ _FO0 = {"op": "failover", "shard": 0}
         (_RC, "action", {"waves": [[{"op": "repoint", "target": "replica", "to": "replica"}]]}, "standalone",
          {"replicas_per_primary": 1}, "replicas_per_primary >= 2"),
         (_RC, "action", {"waves": [[{"op": "partition", "target": "replica"}]]}, "standalone", _PAIR, "per_instance_loopback"),
+        (_RC, "action", {"waves": [[{"op": "degrade", "target": "replica", "loss_pct": 5}]]}, "standalone", _PAIR,
+         "a degrade needs deployment.addressing: per_instance_loopback"),
+        (_RC, "action", {"waves": [[{"op": "degrade", "target": "replica"}]]}, "standalone", {**_PAIR, **_LOOPBACK},
+         r"waves\[0\]\[0\]: set at least one of"),
+        (_RC, "action", {"waves": [[{"op": "degrade", "target": "replica", "jitter_ms": 5}]]}, "standalone",
+         {**_PAIR, **_LOOPBACK}, "need delay_ms"),
         ("valkey.action.rolling-upgrade", "action", {"to_binary": "/x"}, "standalone", {}, "replicas_per_primary >= 1"),
     ],
 )  # fmt: skip
@@ -481,6 +712,121 @@ def test_recovery_waits_for_a_background_restart_so_nothing_happens_after_it():
     # Restarted once, after restart_delay_s, and announced before recovery returned.
     assert len(restarts) == 1 and restarts[0] - started >= 0.2
     assert [event.name for event in context.event_bus.committed_history("fault.recovered")] == ["fault.recovered"]
+
+
+def test_a_degradation_takes_a_free_pref_and_leaves_lo_as_it_found_it(monkeypatch, tmp_path):
+    # lo already has an ingress qdisc, and another run's filters hold the first two prefs this one tries.
+    tc = Tc(ingress=True, taken=(10000, 10001)).install(monkeypatch, tmp_path)
+    monkeypatch.setattr(network.secrets, "randbelow", lambda n: 0)
+    context, spec, fault = _fire(
+        network.DegradeFault(), _Handle(), "valkey.fault.network-degrade", instances="valkey-1", peers="valkey-0",
+        delay_ms=50, rate_kbit=1000, duration_s=60,
+    )  # fmt: skip
+    assert fault._record["pref"] == 10002 and sorted(tc.filters) == [10000, 10001, 10002]
+    assert [flow[:2] for flow in tc.flows() if flow[2] != "other0"] == [
+        ("127.0.0.3", "127.0.0.2"), ("127.0.0.2", "127.0.0.3")
+    ]  # fmt: skip
+    [device] = tc.devices
+    assert tc.devices[device] == ["delay", "50ms", "rate", "1000kbit"]
+    assert fault.recover(context, spec).status is ComponentStatus.PASS
+    # The other run's filters and the ingress qdisc stay; the fault's pref, filters, and device are gone.
+    assert sorted(tc.filters) == [10000, 10001] and tc.ingress and not tc.devices
+    assert all(call[1:3] != ("qdisc", "del") for call in tc.calls)
+
+
+def test_two_degradations_of_one_process_get_their_own_devices(monkeypatch, tmp_path):
+    tc = Tc().install(monkeypatch, tmp_path)
+    handle = _Handle()
+    first = _fire(network.DegradeFault(), handle, "valkey.fault.network-degrade", "a", instances="valkey-1", loss_pct=1)
+    second = _fire(
+        network.DegradeFault(), handle, "valkey.fault.network-degrade", "b", instances="valkey-2", delay_ms=5
+    )
+    assert sorted(tc.devices) == [hoststate.netem_device_name(0), hoststate.netem_device_name(1)]
+    assert first[2]._record["pref"] != second[2]._record["pref"] and tc.marked
+    # The first to recover leaves the ingress qdisc: the second's filters still hang off it.
+    assert first[2].recover(*first[:2]).status is ComponentStatus.PASS
+    assert tc.ingress and len(tc.filters) == 1 and len(tc.devices) == 1
+    assert second[2].recover(*second[:2]).status is ComponentStatus.PASS
+    assert not tc.devices and not tc.filters and not tc.ingress and not tc.marked
+
+
+@pytest.mark.parametrize(
+    ("addresses", "message"),
+    [
+        ({"a": "127.0.0.1", "b": "127.0.0.3"}, "harness's own address"),
+        ({"a": "::1", "b": "127.0.0.3"}, "not an IPv4 address"),
+        ({"a": "127.0.0.2", "b": "127.0.0.2"}, "share an address"),
+        ({"a": "10.0.0.2", "b": "127.0.0.3"}, "not a loopback"),
+    ],
+)
+def test_a_degradation_refuses_addresses_its_filters_could_not_scope_before_any_call(
+    monkeypatch, tmp_path, addresses, message
+):
+    tc = Tc().install(monkeypatch, tmp_path)
+    degradation = network.Degradation(addresses, ["a"], ["b"], ["loss", "1%"])
+    with pytest.raises(network.DegradeError, match=message):
+        degradation.create_device()
+    assert tc.calls == []
+
+
+@pytest.mark.parametrize(
+    ("config", "arguments"),
+    [
+        ({"loss_pct": 5}, ["loss", "5%"]),
+        ({"delay_ms": 100, "jitter_ms": 10, "reorder_pct": 25}, ["delay", "100ms", "10ms", "reorder", "25%"]),
+        ({"delay_ms": 0.5, "duplicate_pct": 1, "rate_kbit": 512}, ["delay", "0.5ms", "duplicate", "1%", "rate", "512kbit"]),
+    ],
+)  # fmt: skip
+def test_netem_arguments_say_only_what_the_config_sets(config, arguments):
+    resolved_config = {**{name: field.default for name, field in network.DEGRADE_FIELDS.items()}, **config}
+    assert network.netem_arguments(resolved_config) == arguments
+
+
+def test_the_host_probe_skips_a_run_whose_degradations_cannot_work_here(monkeypatch):
+    monkeypatch.setattr(capabilities, "netem_supported", lambda: (False, "tc not installed"))
+    spec = resolved(
+        ComponentSpec(role=ComponentRole.CAPABILITY, use="valkey.capability.host-probe", id="h", config={"requires": ["netem"]})
+    )  # fmt: skip
+    result = capabilities.HostCapabilityProbe().probe(None, spec)
+    assert result.status is ComponentStatus.SKIP and "tc not installed" in result.summary
+    monkeypatch.setattr(capabilities, "netem_supported", lambda: (True, ""))
+    assert capabilities.HostCapabilityProbe().probe(None, spec).status is ComponentStatus.PASS
+
+
+@pytest.mark.parametrize(
+    ("which", "cap_eff", "tc_ok", "reason"),
+    [
+        ({"tc": None, "ip": "/sbin/ip"}, "0000003fffffffff", True, "tc not installed"),
+        ({"tc": "/sbin/tc", "ip": None}, "0000003fffffffff", True, "ip not installed"),
+        ({"tc": "/sbin/tc", "ip": "/sbin/ip"}, "0000000000000000", True, "requires CAP_NET_ADMIN"),
+        ({"tc": "/sbin/tc", "ip": "/sbin/ip"}, "0000000000001000", False, "tc is not usable"),
+        ({"tc": "/sbin/tc", "ip": "/sbin/ip"}, "0000000000001000", True, ""),
+    ],
+    ids=["no-tc", "no-ip", "no-cap-net-admin", "tc-unusable", "supported"],
+)
+def test_netem_support_needs_tc_ip_and_cap_net_admin_and_never_sudo(
+    monkeypatch, tmp_path, which, cap_eff, tc_ok, reason
+):
+    monkeypatch.setattr(capabilities.providers, "on_linux", lambda: True)
+    monkeypatch.setattr(capabilities.shutil, "which", lambda name: which.get(name))
+    status = tmp_path / "status"
+    status.write_text(f"Name:\tpython\nCapInh:\t0000000000000000\nCapEff:\t{cap_eff}\n")
+    real_open = open
+    monkeypatch.setattr(
+        "builtins.open", lambda path, *a, **k: real_open(status if path == "/proc/self/status" else path, *a, **k)
+    )
+    calls = []
+
+    def run_tc(*args):
+        calls.append(args)
+        return SimpleNamespace(returncode=0 if tc_ok else 2, stdout="", stderr="Cannot open netlink socket")
+
+    monkeypatch.setattr(capabilities, "run_tc", run_tc)
+    supported, why = capabilities.netem_supported()
+    assert supported is (reason == "") and reason in why
+    assert all(call[0] != "sudo" for call in calls) and (
+        calls == [("qdisc", "show", "dev", "lo")] if cap_eff.endswith("1000") else calls == []
+    )
 
 
 def test_a_partition_timer_that_fires_once_recovery_began_does_nothing(monkeypatch):

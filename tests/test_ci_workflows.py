@@ -30,10 +30,11 @@ from .valkey_experiments_support import valkey_service
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOWS = ROOT / ".github" / "workflows"
 REGISTER = ROOT / "tests" / "fixtures" / "spec" / "register"
-# The live tests that need root: a tmpfs mount and iptables partitions.
+# The live tests that need root: a tmpfs mount, iptables partitions, and tc netem degradations.
 ROOT_ONLY_LIVE_TESTS = (
     "test_disk_full_degrades_gracefully_and_recovers",
     "test_cluster_partition_fails_over_heals_and_bounds_loss",
+    "test_a_degraded_link_experiment_passes_and_leaves_no_netem_rule",
 )
 
 

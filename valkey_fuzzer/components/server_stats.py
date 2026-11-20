@@ -48,7 +48,7 @@ MEMORY = "memory"
 
 # The changes (undo obligations) that break replication and cluster links for a while, and those that make
 # writes to disk fail.
-_LINK_CHANGES = ("process.stopped", "process.paused", "network.partition")
+_LINK_CHANGES = ("process.stopped", "process.paused", "network.partition", "network.degrade")
 _STORAGE_CHANGES = ("disk.filled", "directory.read-only")
 # A kill or a role change lasts until the deployment is removed, so no obligation owns it: its evidence says so.
 _LINK_EVIDENCE = (EXPECTED_DOWN, "valkey.chaos.schedule", FAILOVER_RESULT, "valkey.replication.replicaof")
@@ -164,8 +164,9 @@ def _got_errors(evidence: Sequence[Evidence]) -> list[str]:
 def scenario_causes(context: Any, evidence: Sequence[Evidence]) -> dict[str, list[str]]:
     """What the scenario did that can raise an error counter, each cause with what did it.
 
-    - ``links``: it broke replication or cluster links: a component stopped, paused, or partitioned an instance
-      (an undo obligation of those kinds), killed one for good or moved a role (:data:`_LINK_EVIDENCE`), or was
+    - ``links``: it broke replication or cluster links: a component stopped, paused, partitioned, or degraded the
+      links of an instance (an undo obligation of those kinds), killed one for good or moved a role
+      (:data:`_LINK_EVIDENCE`), or was
       configured with a command that does (``REPLICAOF``, ``FAILOVER``, ``CLIENT KILL``, ``DEBUG``, ...).
     - ``storage``: it made writes to disk fail: a filled disk or a read-only directory (an undo obligation).
     - ``commands``: Valkey answered one of its own commands with an error reply: the command-table workload's,

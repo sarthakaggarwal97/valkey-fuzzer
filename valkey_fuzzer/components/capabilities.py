@@ -27,7 +27,8 @@ there, so a deployment that does not load it is ``SKIP``.
 
 ``valkey.capability.host-probe`` makes a run ``SKIP_UNSUPPORTED`` on a host
 that cannot run it: not Linux, not root (or root, for permission faults), no
-tmpfs mounts, no usable iptables, or no per-instance loopback addresses.
+tmpfs mounts, no usable iptables, no usable ``tc`` netem (``tc`` and ``ip``
+with ``CAP_NET_ADMIN``), or no per-instance loopback addresses.
 """
 
 import contextlib
@@ -48,7 +49,7 @@ from valkey_fuzzer.deployment.local import clock_faults
 from valkey_fuzzer.deployment.local.models import LocalDeploymentError
 from valkey_fuzzer.deployment.local.processes import SOURCE_BUILD_DIR
 from valkey_fuzzer.deployment.local.server_config import config_for_build
-from valkey_fuzzer.hoststate import run_iptables
+from valkey_fuzzer.hoststate import run_iptables, run_tc
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
 from valkey_fuzzer.schema import ConfigError, ConfigField, plain_config
@@ -514,6 +515,40 @@ def cgroup_v2_supported(controllers: tuple[str, ...] = ("cpu", "memory")) -> tup
     return directory is not None, reason
 
 
+# The capability tc needs to change qdiscs and filters (and ip to add a device): bit 12 of the effective set.
+_CAP_NET_ADMIN = 12
+
+
+def has_cap_net_admin() -> bool:
+    """Whether this process may configure the network: ``CAP_NET_ADMIN`` in its effective capabilities
+    (``/proc/self/status``), which root has; root elsewhere."""
+
+    try:
+        with open("/proc/self/status", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("CapEff:"):
+                    return bool(int(line.split()[1], 16) >> _CAP_NET_ADMIN & 1)
+    except (OSError, ValueError, IndexError):
+        pass
+    return providers.as_root()
+
+
+def netem_supported() -> tuple[bool, str]:
+    """Whether this host can degrade links with ``tc`` netem; the reason when it cannot. Never asks for sudo."""
+
+    if not providers.on_linux():
+        return False, "network degradation requires Linux tc (netem)"
+    missing = [tool for tool in ("tc", "ip") if shutil.which(tool) is None]
+    if missing:
+        return False, f"{' and '.join(missing)} not installed (iproute2); network degradation needs tc netem"
+    if not has_cap_net_admin():
+        return False, "network degradation requires CAP_NET_ADMIN (run as root; the fuzzer never asks for sudo)"
+    probe = run_tc("qdisc", "show", "dev", "lo")
+    if probe.returncode != 0:
+        return False, f"tc is not usable: {probe.stderr.strip()[:200]}"
+    return True, ""
+
+
 def per_instance_loopback_supported() -> tuple[bool, str]:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -529,7 +564,7 @@ def per_instance_loopback_supported() -> tuple[bool, str]:
 # valkey.capability.host-probe
 # ---------------------------------------------------------------------------
 
-_HOST_REQUIREMENTS = ("linux", "root", "not_root", "tmpfs", "iptables", "per_instance_loopback")
+_HOST_REQUIREMENTS = ("linux", "root", "not_root", "tmpfs", "iptables", "netem", "per_instance_loopback")
 
 _HOST_FIELDS = {"requires": ConfigField(list, items=ConfigField(str, choices=_HOST_REQUIREMENTS))}
 
@@ -552,10 +587,11 @@ class HostCapabilityProbe:
                 unmet.append("requires root")
             elif requirement == "not_root" and providers.as_root():
                 unmet.append("permission faults are ineffective as root")
-            elif requirement in ("tmpfs", "iptables", "per_instance_loopback"):
+            elif requirement in ("tmpfs", "iptables", "netem", "per_instance_loopback"):
                 check = {
                     "tmpfs": providers.tmpfs_supported,
                     "iptables": iptables_supported,
+                    "netem": netem_supported,
                     "per_instance_loopback": per_instance_loopback_supported,
                 }[requirement]
                 supported, reason = check()

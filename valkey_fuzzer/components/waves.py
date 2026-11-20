@@ -44,6 +44,7 @@ from .wave_targets import Member, TargetSelector
 UNDO_ORDER = {
     "process.paused": 0,
     "network.partition": 1,
+    "network.degrade": 1,
     "server.config": 2,
     "server.client-pause": 3,
     "process.stopped": 4,

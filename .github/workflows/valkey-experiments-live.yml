@@ -1,10 +1,10 @@
 name: Valkey Experiments Live
 
 # Every Valkey experiment against real servers, once a day. Only the Linux
-# fault experiments that need root (tmpfs disk-full, iptables partitions) run
-# as root, so they run instead of reporting SKIP_UNSUPPORTED; a second, older
-# build enables the mixed-version, rolling-upgrade, and baseline-vs-candidate
-# tests.
+# fault experiments that need root (tmpfs disk-full, iptables partitions, tc
+# netem degradations) run as root, so they run instead of reporting
+# SKIP_UNSUPPORTED; a second, older build enables the mixed-version,
+# rolling-upgrade, and baseline-vs-candidate tests.
 
 on:
   schedule:
@@ -88,10 +88,10 @@ jobs:
           VALKEY_FUZZER_BINARY=/tmp/valkey-unstable/src/valkey-server \
             VALKEY_FUZZER_OLD_BINARY=/tmp/valkey-8.1/src/valkey-server \
             python -m pytest -q -rs -m live tests/test_live_spec_register.py tests/test_live_valkey_experiments.py \
-            -k "not (test_disk_full_degrades_gracefully_and_recovers or test_cluster_partition_fails_over_heals_and_bounds_loss)" \
+            -k "not (test_disk_full_degrades_gracefully_and_recovers or test_cluster_partition_fails_over_heals_and_bounds_loss or test_a_degraded_link_experiment_passes_and_leaves_no_netem_rule)" \
             2>&1 | tee valkey-experiments-live.log
 
-      # Only the tests that need root (a tmpfs mount, iptables partitions) run
+      # Only the tests that need root (a tmpfs mount, iptables partitions, tc netem) run
       # as root, after everything else, so nothing root creates is in the way.
       - name: Run the root-only Valkey experiments live
         if: success() || failure()
@@ -101,7 +101,7 @@ jobs:
             VALKEY_FUZZER_BINARY=/tmp/valkey-unstable/src/valkey-server \
             VALKEY_FUZZER_OLD_BINARY=/tmp/valkey-8.1/src/valkey-server \
             "$(command -v python)" -m pytest -q -rs -p no:cacheprovider -m live tests/test_live_valkey_experiments.py \
-            -k "test_disk_full_degrades_gracefully_and_recovers or test_cluster_partition_fails_over_heals_and_bounds_loss" \
+            -k "test_disk_full_degrades_gracefully_and_recovers or test_cluster_partition_fails_over_heals_and_bounds_loss or test_a_degraded_link_experiment_passes_and_leaves_no_netem_rule" \
             2>&1 | tee valkey-experiments-live-root.log
           if grep -q '^SKIPPED' valkey-experiments-live-root.log; then
             echo "::error::a root-only experiment skipped although it ran as root"

@@ -1,0 +1,105 @@
+# Delay one primary's links to every other cluster node (its cluster bus and
+# its replica's replication link) under writes, with jitter, below
+# cluster-node-timeout, for `degrade_s`, then heal. A slow node is not a dead
+# one: no node may mark it failing or receive a FAIL message about it, no
+# election may be won while the links are slow or after, and once healed every
+# node must report cluster_state ok, the deployment's validators must find one
+# primary per shard, full slot coverage, and agreeing views, and no
+# acknowledged write may be lost (there is no loss window). Clients on
+# 127.0.0.1 are not delayed.
+#
+# Needs Linux, tc and ip with CAP_NET_ADMIN (the fuzzer never asks for sudo),
+# and deployment.addressing: per_instance_loopback.
+extends: [valkey.base]
+id: valkey.cluster-gossip-delay
+deployment:
+  modes: [cluster]
+  primaries: {minimum: 3}
+  replicas_per_primary: {minimum: 1}
+  # The degradation matches the instances' own addresses.
+  addressing: {type: string, enum: [per_instance_loopback]}
+metadata:
+  description: Delay one primary's cluster links below node timeout; no false failure detection or failover, the cluster view holds
+  generator:
+    deployment:
+      addressing: per_instance_loopback
+      cluster:
+        primaries: {minimum: 3, maximum: 5}
+        replicas_per_primary: {minimum: 1, maximum: 2}
+    inputs:
+      degrade: fixed
+      # The local deployment's cluster-node-timeout is 1000 ms: a round trip of twice the delay plus jitter stays
+      # well below it.
+      delay_ms: {values: [50, 100, 200]}
+      jitter_ms: {values: [0, 10, 50]}
+      degrade_s: {minimum: 2, maximum: 5}
+inputs:
+  properties:
+    degrade: {type: string, default: valkey-0, description: "planned primary whose links are delayed"}
+    mutable_keys: {default: 300}
+    mutation_rate: {minimum: 1, default: 300}
+    delay_ms: {type: number, minimum: 1, maximum: 300, default: 100, description: "added to each packet, each way; keep twice this plus jitter below cluster-node-timeout"}
+    jitter_ms: {type: number, minimum: 0, maximum: 300, default: 20, description: "random variation of delay_ms"}
+    degrade_s: {type: number, minimum: 0.1, maximum: 600, default: 3, description: "how long the links stay slow"}
+components:
+  - use: valkey.capability.host-probe
+    id: host
+    config: {requires: [linux, netem, per_instance_loopback]}
+
+  - use: valkey.observer.log
+    id: logs
+    config:
+      instances: all
+      forbidden:
+        - {pattern: "Marking node .* as failing"}
+        - {pattern: "FAIL message received"}
+        - {pattern: "Failover election won"}
+
+  - use: valkey.workload.key-value
+    id: writes
+    config:
+      op_timeout_s: 2.0
+
+  - use: valkey.fault.network-degrade
+    id: degrade
+    config:
+      when_event: run-then-degrade.completed
+      instances: {$ref: inputs.degrade}
+      delay_ms: {$ref: inputs.delay_ms}
+      jitter_ms: {$ref: inputs.jitter_ms}
+      duration_s: {$ref: inputs.degrade_s}
+
+  - use: valkey.action.sleep
+    id: run-then-degrade
+    depends_on: [writes, logs, degrade]
+    config: {seconds: 1}
+
+  - use: valkey.action.wait-event
+    id: healed
+    depends_on: [run-then-degrade]
+    config: {event: degrade.healed, timeout_s: 660}
+
+  - use: valkey.action.poll
+    id: cluster-ok
+    depends_on: [healed]
+    config:
+      instances: all
+      command: [CLUSTER, INFO]
+      predicate: {contains: "cluster_state:ok"}
+      timeout_s: 60
+
+  - use: valkey.oracle.ledger
+    id: data
+    config:
+      # A slow link loses nothing: no fault opens a loss window.
+      loss_window_faults: []
+      converge_timeout_s: 60
+
+  - use: valkey.oracle.deployment-state
+    id: deployment-state
+    config: {validation: {stabilization_wait: 2, validation_timeout: 120}}
+required_events: [run-then-degrade.completed, degrade.degraded, degrade.healed]
+required_evidence:
+  - {evidence_id: valkey.fault.injected, source: degrade}
+  - {evidence_id: valkey.poll.satisfied, source: cluster-ok}
+  - {evidence_id: valkey.deployment.validated, source: deployment-state}

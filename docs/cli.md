@@ -356,7 +356,7 @@ that exits without a run report is an `ERROR` (`WorkerExit`), and one whose
 job could not be generated or compiled leaves `error.json` and is an `ERROR`.
 
 After every run, the [sweep](#sweep), limited to that worker's owner tag and
-its directories (and `/tmp`, where private servers' directories are), removes what the run left: servers, iptables chains, tmpfs
+its directories (and `/tmp`, where private servers' directories are), removes what the run left: servers, iptables chains, netem devices, tmpfs
 mounts, data directories. Anything it finds is recorded under the job's
 `leaks` and the summary's `leaks`, and makes the job an `ERROR`. The job's
 summary (in its result, `summary.json`, `batch.log`, and on the console) then
@@ -366,9 +366,9 @@ A slot whose sweep could not remove a leftover (a mount that will not
 unmount, say) runs no more jobs, and keeps its `work/w<k>/`: its ports or
 addresses may still be taken. Once no slot is left the batch stops; sweep
 the host, then resume it. Before its first job, a batch (a resumed one too)
-removes the servers, iptables chains, and tmpfs mounts of every fuzzer
-process that is gone: a chain a killed batch left matches the addresses of
-this batch's slots, and would cut its instances apart. If one cannot be
+removes the servers, iptables chains, netem devices, and tmpfs mounts of every fuzzer
+process that is gone: a chain (or netem filter) a killed batch left matches the addresses of
+this batch's slots, and would cut (or slow) its instances apart. If one cannot be
 removed, the batch refuses to start. Dead runs' directories stay.
 
 ### The batch folder
@@ -692,7 +692,7 @@ in the shared `logs/`.
 ```bash
 valkey-fuzzer sweep --dry-run
 valkey-fuzzer sweep --older-than 3600 --format json
-sudo valkey-fuzzer sweep            # Linux: also iptables chains and tmpfs mounts
+sudo valkey-fuzzer sweep            # Linux: also iptables chains, netem devices, and tmpfs mounts
 ```
 
 Removes what fuzzer processes that are gone left on this host. A fuzzer
@@ -706,11 +706,14 @@ for the owner.
 | deployment directory, `valkey.resource.tmpdir` directory, private server directory | a `.valkey-fuzzer-owner` file (JSON: `owner`, `pid`, `kind`, `label`, `created_at`) |
 | `valkey-server` process, and the children it forks (`valkey-rdb-bgsave`, `valkey-aof-rewrite`, ...), which outlive it | `valkey-fuzzer-owner=<owner>` in its process title (`--proc-title-template`, which scenarios may not set) |
 | iptables chain (`valkey.fault.network-partition`) | the name `VF-<owner>-<hash>` |
+| netem device (`valkey.fault.network-degrade`) | the `ifb` device name `vf<pid in hex><start><suffix>`; the `lo` ingress filters that redirect to it are found by that name, and `lo`'s ingress qdisc by the `lo-ingress.added` marker in `/tmp/valkey-fuzzer` |
 | tmpfs mount (`valkey.resource.tmpfs`) | the mount point `<tmp>/valkey-fuzzer-mounts/<owner>/<name>`; an empty one (made before its mount) is removed too |
 
 The sweep lists every tagged item whose owner is no longer running and,
 without `--dry-run`, kills the servers (`SIGKILL`), deletes the chains (and
-their jumps from `INPUT`), unmounts the mounts, and removes the directories,
+their jumps from `INPUT`), removes the netem devices (their `lo` filters first,
+then `lo`'s ingress qdisc once the fuzzer added it and nothing is left on it,
+then the device), unmounts the mounts, and removes the directories,
 in that order. It never touches anything untagged, anything whose owner is
 running, or anything whose owner it cannot rule out; it re-checks a server's
 tag right before killing it and a directory's tag right before removing it
@@ -727,12 +730,13 @@ changed.
 | Option | Meaning |
 | --- | --- |
 | `--dry-run` | List, remove nothing. |
-| `--older-than SECONDS` | Only leftovers at least this old (servers by process age, directories by their tag, mounts by their owner directory); a chain has no age, so it is left alone. |
-| `--root DIR` | Look for tagged directories in the children of `DIR` instead of the defaults (`/tmp/valkey-fuzzer`, `/tmp`, the temporary directory); may be repeated. Use it for a custom `base_data_dir` or `valkey.resource.tmpdir` `parent`. Servers, chains, and mounts are found host-wide, servers only among the processes of the user running the sweep, in its PID namespace (a fuzzer in a container is left to its own sweep). |
-| `--format text\|json` | JSON: `{dry_run, ok, leftovers: [{kind, target, owner, age_s, detail, action, reason}], unchecked}`; `kind` is `server`, `chain`, `mount`, `mount point`, or `directory`. |
+| `--older-than SECONDS` | Only leftovers at least this old (servers by process age, directories by their tag, mounts by their owner directory); a chain or a netem device has no age, so it is left alone. |
+| `--root DIR` | Look for tagged directories in the children of `DIR` instead of the defaults (`/tmp/valkey-fuzzer`, `/tmp`, the temporary directory); may be repeated. Use it for a custom `base_data_dir` or `valkey.resource.tmpdir` `parent`. Servers, chains, netem devices, and mounts are found host-wide, servers only among the processes of the user running the sweep, in its PID namespace (a fuzzer in a container is left to its own sweep). |
+| `--format text\|json` | JSON: `{dry_run, ok, leftovers: [{kind, target, owner, age_s, detail, action, reason}], unchecked}`; `kind` is `server`, `chain`, `netem`, `mount`, `mount point`, or `directory`. |
 
-Listing chains and unmounting need root. Without it, a leftover mount is
-reported as `failed` and chains as not checked. The exit code is 0 when
+Listing chains, removing netem devices, and unmounting need root. Without it,
+a leftover mount or netem device is reported as `failed` and chains as not
+checked. The exit code is 0 when
 everything found was removed (or with `--dry-run`), and 2 when anything could
 not be. A deployment kept with `enable_cleanup: false`, and a
 `valkey.resource.tmpdir` with `keep: true`, lose their tag when the run ends,

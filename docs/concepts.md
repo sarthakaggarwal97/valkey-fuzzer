@@ -58,7 +58,7 @@ unique within the experiment.
 | capability | `probe`, before the deployment starts | no; `SKIP` means unsupported | build and host probes |
 | workload | `start`, then `stop` at teardown | no | key/value writes with a ledger |
 | observer | `start`, then `stop` at teardown | no | INFO sampling, log scanning |
-| fault | `inject`, then `recover` at teardown | no | process signals, network partitions, disk fill |
+| fault | `inject`, then `recover` at teardown | no | process signals, network partitions and degraded links, disk fill |
 | action | `run`, once | yes | BGSAVE, failover, polls, rolling upgrade |
 | oracle | `evaluate`, after teardown, with all evidence | yes | write ledger, liveness, election safety |
 

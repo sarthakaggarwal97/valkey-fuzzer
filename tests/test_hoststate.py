@@ -131,6 +131,62 @@ def test_servers_chains_and_mounts_name_their_owner_and_scenarios_cannot_replace
     monkeypatch.setitem(hoststate._CURRENT, os.getpid(), Owner(4_194_304, "abcdef"))
     name = hoststate.chain_name("component/" + "x" * 200)
     assert name.startswith("VF-4194304-abcdef-") and len(name) <= 28 and name != hoststate.chain_name("b")
+    # A netem device name holds the largest PID Linux gives, in hex, within an interface name's 15 characters.
+    device = hoststate.netem_device_name(35)
+    assert device == "vf400000abcdefz" and len(device) == 15
+    assert hoststate.netem_device_owner(device) == Owner(4_194_304, "abcdef")
+    assert hoststate.netem_device_owner(hoststate.netem_device_name(0)) == Owner(4_194_304, "abcdef")
+    for other in ("vf400000abcdef", "vf400000abcdefZ", "vf40000abcdef0", "lo", "ifb0", "vf-4194304-abcdef"):
+        assert hoststate.netem_device_owner(other) is None, other
+
+
+_LO_FILTERS = """\
+filter protocol ip pref 10000 flower chain 0
+filter protocol ip pref 10000 flower chain 0 handle 0x1
+  eth_type ipv4
+  ip_proto tcp
+  src_ip 127.0.0.2
+  dst_ip 127.0.0.3
+  not_in_hw
+\taction order 1: mirred (Egress Redirect to device vf2a0a1b2c3) stolen
+ \tindex 1 ref 1 bind 1
+filter protocol ip pref 10000 flower chain 0 handle 0x2
+  src_ip 127.0.0.3
+  dst_ip 127.0.0.2
+\taction order 1: mirred (Egress Redirect to device vf2a0a1b2c3) stolen
+filter protocol ip pref 10007 flower chain 0 handle 0x1
+  src_ip 127.0.1.2
+  dst_ip 127.0.1.3
+\taction order 1: mirred (Egress Redirect to device vf2a0a1b2c4) stolen
+filter protocol ip pref 49152 u32 chain 0 fh 800: ht divisor 1
+filter protocol ip pref 49152 u32 chain 0 fh 800::800 order 2048 key ht 800 bkt 0 flowid 1:1
+  match 7f000002/ffffffff at 12
+"""
+
+
+def test_the_filters_that_redirect_to_a_device_are_found_by_their_pref():
+    listing = SimpleNamespace(returncode=0, stdout=_LO_FILTERS, stderr="")
+    assert hoststate.redirect_prefs("vf2a0a1b2c3", lambda *args: listing) == [10000]
+    assert hoststate.redirect_prefs("vf2a0a1b2c4", lambda *args: listing) == [10007]
+    assert hoststate.redirect_prefs("vf2a0a1b2c5", lambda *args: listing) == []
+    assert hoststate.lo_has_filters(lambda *args: listing) is True
+    empty = SimpleNamespace(returncode=0, stdout="", stderr="")
+    assert hoststate.lo_has_filters(lambda *args: empty) is False
+    failed = SimpleNamespace(returncode=2, stdout="", stderr="Cannot open netlink socket")
+    assert hoststate.redirect_prefs("vf2a0a1b2c3", lambda *args: failed) is None
+    assert hoststate.lo_has_filters(lambda *args: failed) is None
+    devices = SimpleNamespace(
+        returncode=0,
+        stdout=f"4: vf{DEAD.pid:06x}{DEAD.start}0: <BROADCAST,NOARP,UP,LOWER_UP> mtu 1500 qdisc netem state UNKNOWN\n"
+        "5: ifb0: <BROADCAST,NOARP> mtu 1500 qdisc noop state DOWN\n"
+        f"6: vf{DEAD.pid:06x}{DEAD.start}1@NONE: <BROADCAST,NOARP> mtu 1500 qdisc noop state DOWN\n",
+        stderr="",
+    )
+    assert hoststate.tagged_netem_devices(lambda *args: devices) == [
+        (f"vf{DEAD.pid:06x}{DEAD.start}0", DEAD),
+        (f"vf{DEAD.pid:06x}{DEAD.start}1", DEAD),
+    ]
+    assert hoststate.tagged_netem_devices(lambda *args: failed) is None
 
 
 def test_the_sweep_kills_only_old_enough_tagged_servers_of_gone_owners(host, tmp_path, monkeypatch):
@@ -348,26 +404,61 @@ def test_chains_and_mounts_of_gone_owners_are_removed_only_as_root(host, tmp_pat
     monkeypatch.setattr(hoststate.platform, "system", lambda: "Linux")
     monkeypatch.setattr(hoststate.shutil, "which", lambda name: f"/usr/sbin/{name}")
     monkeypatch.setattr(hoststate, "run_iptables", iptables)
+    # A dead run's netem device, with its two lo filters at pref 10000, and a live run's at pref 10007; another
+    # tool's u32 filter at 49152; lo's ingress qdisc, which the fuzzer added (the marker says so).
+    from tests.test_valkey_components_faults import Tc
 
-    # Without root: chains cannot even be listed (reported, not guessed), mounts not unmounted; the command fails
-    # with a harness error (never exit 1, a FAIL).
+    tc = Tc(ingress=True, taken=(49152,))
+    dead_device, live_device = f"vf{DEAD.pid:06x}{DEAD.start}0", hoststate.netem_device_name(0)
+    for device, pref, block in ((dead_device, 10000, 0), (live_device, 10007, 1)):
+        tc.ip("link", "add", "dev", device, "type", "ifb")
+        for handle, (source, destination) in enumerate(((f"127.0.{block}.2", f"127.0.{block}.3"), (f"127.0.{block}.3", f"127.0.{block}.2")), start=1):  # fmt: skip
+            tc.tc("filter", "add", "dev", "lo", "ingress", "protocol", "ip", "pref", str(pref), "handle", str(handle),
+                  "flower", "ip_proto", "tcp", "src_ip", source, "dst_ip", destination,
+                  "action", "mirred", "egress", "redirect", "dev", device)  # fmt: skip
+    monkeypatch.setattr(hoststate, "run_tc", tc.tc)
+    monkeypatch.setattr(hoststate, "run_ip", tc.ip)
+    monkeypatch.setattr(hoststate, "default_root", lambda: str(tmp_path / "shared"))
+    os.makedirs(hoststate.default_root())
+    open(hoststate._lo_ingress_marker(), "w").close()
+
+    # Without root: chains cannot even be listed (reported, not guessed), mounts not unmounted, and a netem
+    # device is listed but cannot be removed; the command fails with a harness error (never exit 1, a FAIL).
+    tc.fail[("tc filter del", 1)] = "RTNETLINK answers: Operation not permitted"
     args = create_parser().parse_args(["sweep", "--root", str(tmp_path / "none"), "--format", "json"])
     assert args.handler(args) == 2
     report = json.loads(capsys.readouterr().out)
     assert [(item["target"], item["action"], item["reason"]) for item in report["leftovers"]] == [
-        (str(dead), "failed", "unmounting needs root")
+        (dead_device, "failed", "RTNETLINK answers: Operation not permitted (needs root)"),
+        (str(dead), "failed", "unmounting needs root"),
     ]
     assert (
         report["unchecked"] == ["iptables chains: listing them needs root"] and host.unmounted == [] and dead.exists()
     )
+    assert sorted(tc.devices) == sorted((dead_device, live_device)) and sorted(tc.filters) == [10000, 10007, 49152]
 
     monkeypatch.setattr(hoststate, "_is_root", lambda: True)
+    tc.fail.clear()
     report = sweep([str(tmp_path / "none")])
-    assert _found(report) == [("chain", dead_chain, "removed"), ("mount", str(dead), "removed")] and report.ok
+    assert _found(report) == [
+        ("chain", dead_chain, "removed"), ("netem", dead_device, "removed"), ("mount", str(dead), "removed")
+    ] and report.ok  # fmt: skip
     assert ("-X", dead_chain) in calls and all(
         chain not in call for call in calls for chain in (live_chain, "DOCKER", "VF-custom")
     )
     assert host.unmounted == [str(dead)] and not dead.parent.exists() and live.exists()
+    # The dead device and the filters that redirected to it are gone; the live run's, the other tool's, and the
+    # ingress qdisc they hang off stay.
+    assert list(tc.devices) == [live_device] and sorted(tc.filters) == [10007, 49152] and tc.ingress
+    assert all(call[1:3] != ("qdisc", "del") for call in tc.calls)
+    # Once the live run's filters are gone too, a sweep that removes the last fuzzer filters removes the qdisc.
+    tc.tc("filter", "del", "dev", "lo", "ingress", "protocol", "ip", "pref", "10007")
+    tc.tc("filter", "del", "dev", "lo", "ingress", "protocol", "ip", "pref", "49152")
+    tc.ip("link", "del", "dev", live_device)
+    tc.ip("link", "add", "dev", dead_device, "type", "ifb")
+    found = [item for item in _found(sweep([str(tmp_path / "none")])) if item[0] == "netem"]
+    assert found == [("netem", dead_device, "removed")]
+    assert not tc.devices and not tc.ingress and not os.path.exists(hoststate._lo_ingress_marker())
 
 
 @pytest.mark.parametrize("enable_cleanup", [True, False])

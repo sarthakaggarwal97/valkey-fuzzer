@@ -155,6 +155,7 @@ _SETS_MAXMEMORY = {"commands": [["CONFIG", "SET", "maxmemory", "1mb"]]}
         ("sync_partial_err", 3, _KILL, "links"),
         ("sync_partial_err", 3, {"obligation": "process.paused"}, "links"),
         ("sync_partial_err", 3, {"obligation": "network.partition"}, "links"),
+        ("sync_partial_err", 3, {"obligation": "network.degrade"}, "links"),
         ("sync_partial_err", 3, _DISK, None),
         ("sync_partial_err", 3, _KILLED_FOR_GOOD, "links"),
         ("sync_partial_err", 3, _NONE_KILLED, None),

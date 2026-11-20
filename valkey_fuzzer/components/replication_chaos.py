@@ -16,6 +16,10 @@
   at the primary;
 - ``partition {target, duration_s}``: drop the traffic between one instance
   and every other (Linux, root, iptables, per-instance loopback addresses);
+- ``degrade {target, duration_s, loss_pct, delay_ms, jitter_ms, reorder_pct,
+  duplicate_pct, rate_kbit}``: degrade the traffic between one instance and
+  every other with tc netem instead of dropping it (Linux, ``tc`` with
+  ``CAP_NET_ADMIN``, per-instance loopback addresses);
 - ``stall {target, duration_s}``: ``SIGSTOP``, then ``SIGCONT``;
 - ``backlog_pressure {repl_backlog_size, output_limit, duration_s}``: shrink
   the primary's replication backlog and replica output buffer limit;
@@ -31,7 +35,7 @@ when another operation of the same wave disrupted an instance it involves
 (:func:`excusing_operations`); otherwise it fails the action.
 
 After every wave the action heals in order: undo what is still in place
-(configs, partitions, stalls), promote the most advanced live replica if the
+(configs, partitions, degradations, stalls), promote the most advanced live replica if the
 primary is down, restart the killed instances as replicas of the primary
 (``replicate`` then ``restart``), and point every other instance at it. Then,
 with writes briefly paused (``CLIENT PAUSE WRITE``), it waits for every
@@ -78,7 +82,7 @@ from valkey_fuzzer.hoststate import chain_name
 from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.schema import ConfigField, ConfigSchema
 
-from .capabilities import iptables_supported
+from .capabilities import iptables_supported, netem_supported
 from .instances import (
     close_quietly,
     follows,
@@ -86,7 +90,7 @@ from .instances import (
     is_primary,
     replication_info,
 )
-from .network import create_chain, drop_between, remove_partition
+from .network import Degradation, create_chain, drop_between, netem_arguments, remove_partition
 from .polling import poll_until
 from .processes import pause_owned, restart_once
 from .schemas import LIST, TEXT
@@ -133,7 +137,7 @@ def excusing_operations(record: Mapping[str, Any], records: Sequence[Mapping[str
 
     An operation excuses another when it landed in the same wave before the
     other finished and acted on an instance the other involves: a kill,
-    stall, or partition of that instance; a promotion, which changes the
+    stall, partition, or degradation of that instance; a promotion, which changes the
     primary and repoints every replica; a repoint or restart of it; or a
     backlog change on it, which drops replica links (on the
     primary, every replica's link).
@@ -192,11 +196,15 @@ class StandaloneWaves(WaveRun):
 
     @staticmethod
     def host_ready(waves: Sequence[list[dict[str, Any]]]) -> Optional[str]:
-        if not any(operation["op"] == "partition" for wave in waves for operation in wave):
-            return None
-        supported, reason = iptables_supported()
-        if not supported:
-            return f"partition operations need Linux, root, and iptables ({reason}); remove them or run elsewhere"
+        kinds = {operation["op"] for wave in waves for operation in wave}
+        if "partition" in kinds:
+            supported, reason = iptables_supported()
+            if not supported:
+                return f"partition operations need Linux, root, and iptables ({reason}); remove them or run elsewhere"
+        if "degrade" in kinds:
+            supported, reason = netem_supported()
+            if not supported:
+                return f"degrade operations need Linux, tc, and CAP_NET_ADMIN ({reason}); remove them or run elsewhere"
         return None
 
     def outcome(self, records: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
@@ -523,6 +531,17 @@ class StandaloneWaves(WaveRun):
         drop_between(chain, hosts, [target], [peer for peer in hosts if peer != target])
         self.hold(record, [target], config["duration_s"])
 
+    def _degrade(self, record: dict[str, Any], config: dict[str, Any]) -> None:
+        target = record["target"]
+        hosts = {instance.instance_id: instance.host for instance in self.handle.instances}
+        peers = [peer for peer in hosts if peer != target]
+        degradation = Degradation(hosts, [target], peers, netem_arguments(config))
+        # The device carries this process as its owner; the obligation owns it from the moment it exists.
+        device = degradation.create_device()
+        self.own(record, "network.degrade", device, degradation.remove)
+        degradation.install()
+        self.hold(record, [target], config["duration_s"])
+
     def _backlog_pressure(self, record: dict[str, Any], config: dict[str, Any]) -> None:
         with self.lock:
             primary = self.primary
@@ -679,7 +698,14 @@ _ACTION_DECLARES = wave_declares(
         )
     },
     loss_windows=True,
-    changes=("process.stopped", "process.paused", "network.partition", "server.config", "server.client-pause"),
+    changes=(
+        "process.stopped",
+        "process.paused",
+        "network.partition",
+        "network.degrade",
+        "server.config",
+        "server.client-pause",
+    ),
 )
 
 REGISTRATIONS = (
