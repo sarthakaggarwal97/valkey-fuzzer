@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+### Fixed: the minimizer's verdicts, oracle edge cases, write retries, provenance pins, and small engine checks (PR-H2)
+
+- `minimize` runs the recorded scenario before any reduction and exits `2` when it does not fail the same way
+  (nothing is minimized), runs its result once more and exits `2` when that run does not fail the same way, and
+  no longer re-runs a reduction it already rejected. A crash signature matches only with the same outcome
+  status: an `ERROR` run that reports the `FAIL`'s crash is another failure. Numeric inputs shrink only when the
+  experiment marks them `shrinkable: true` (a new input rule, for a count, a rate, or a size); a shard index, a
+  delay, or a loss window is left alone. The shipped sizes (`stable_keys`, `mutable_keys`, `mutation_rate`,
+  `value_size`, `operations`, `keys_per_slot`, `clients`, `config_changes`, `command_rate`) are marked.
+- `valkey.oracle.dataset-digest` no longer fails a key held by two primaries while `CLUSTER NODES` shows its
+  slot migrating or importing; such keys are listed as `migrating_keys` in its evidence.
+- `valkey.oracle.cluster-election-safety` reports `ERROR`, not `FAIL`, when the cluster views were still changing
+  at the `converge_timeout_s` deadline; `FAIL` stays for views that hold still and disagree. Its minimum Valkey
+  version, 9.2 (the first to log `Failover auth ACK`), is documented and named in the `ERROR` for a run without
+  ACK lines.
+- `valkey.oracle.rdb-snapshot` with `workload` (the cut check, which allows no lost write) does not compile next
+  to a component that can lose acknowledged writes: a process kill, a syscall fault that kills, a forced
+  failover, or a chaos or rolling-upgrade action. It was a false `FAIL` at the end of such a run.
+- `valkey.action.commands` and `valkey.action.tools` mark an `expect` both builds violate alike with
+  `pre_existing: true` in the `expect-disputed` diagnostics.
+- `valkey.action.command` retries a send only while its connection cannot be opened, decided by which step
+  failed (the connection is opened first, sending nothing), not by the client's error text.
+- `valkey.artifact.local-binary` requires `expected_sha` to be 7 to 64 hex characters and a prefix of the git SHA
+  or SHA-256; a digest that was a prefix of the expectation no longer matches. The source build checks that the
+  `9.1.3` tag resolves to the pinned commit before building, and records the commit in `build.log`. A report's
+  `fuzzer_digest` covers the package of every component the plan uses, so a plug-in pack's code drifts like the
+  fuzzer's own.
+- A batch worker's deadline adds the plug-ins' after-run budgets (spec conform's `conform_tlc_timeout_s`), so a
+  run that used most of its `timeout_s` is not killed while it conforms and recorded `ERROR`.
+- Reports and the coverage key refuse a value JSON cannot write (a set, a path) instead of writing its `str()`;
+  a failed undo is logged when it happens; a command handler that returns no exit code is a harness error (exit
+  `2`), not a success; a scenario's `seed` is `0` to `2**64-1`; a duplicate experiment ID across
+  `--experiment-dir` directories names both files.
+
 ### Added: every spec bundle translates into scenarios and has shipped experiments that publish its steps
 
 - `formal/replication`, `formal/persistence` and `formal/slot-migration` have a `scenario` section, so
