@@ -175,7 +175,10 @@ class FakeContext:
     Without ``artifact_dir``, components write to a temporary folder that is
     removed with the context. :meth:`cancel` does what the runner does when a
     call outlives its timeout. Given ``registrations`` (the components'), :meth:`call`
-    holds a component to its registration's declarations.
+    holds a component to its registration's declarations. :meth:`sleep` waits
+    the seconds asked divided by ``time_scale``, so a test of a component
+    whose config holds real delays (a wave's ``delay_s``, a poll interval)
+    runs them faster without changing the config.
     """
 
     def __init__(
@@ -189,7 +192,10 @@ class FakeContext:
         artifact_dir: Optional[str] = None,
         deadline: Optional[float] = None,
         registrations: Sequence[ComponentRegistration] = (),
+        time_scale: float = 1.0,
     ):
+        if time_scale <= 0:
+            raise ValueError(f"time_scale must be positive, not {time_scale!r}")
         if plan is None:
             experiment = ExperimentSpec(
                 experiment_id="testing.component",
@@ -222,6 +228,7 @@ class FakeContext:
         self.obligations = ObligationLedger(check=self._check_change)
         self._rngs: dict[tuple[str, str], random.Random] = {}
         self._cancelled = threading.Event()
+        self.time_scale = time_scale
 
     @property
     def violations(self) -> list[Mapping[str, Any]]:
@@ -282,7 +289,7 @@ class FakeContext:
         self._cancelled.set()
 
     def sleep(self, seconds: float) -> bool:
-        return not self._cancelled.wait(max(0.0, seconds))
+        return not self._cancelled.wait(max(0.0, seconds) / self.time_scale)
 
 
 __all__ = [
