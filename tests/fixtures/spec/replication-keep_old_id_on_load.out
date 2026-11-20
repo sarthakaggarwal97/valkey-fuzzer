@@ -1,0 +1,222 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Error: Invariant OneHistoryPerId is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ off = (n1 :> 0 @@ n2 :> 0 @@ n3 :> 0)
+/\ backlog = (n1 :> 0 @@ n2 :> 0 @@ n3 :> 0)
+/\ snap = ( n1 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n2 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n3 :> [data |-> <<>>, off |-> 0, id |-> 0] )
+/\ link = (n1 :> "none" @@ n2 :> "down" @@ n3 :> "down")
+/\ writes = 0
+/\ data = (n1 :> <<>> @@ n2 :> <<>> @@ n3 :> <<>>)
+/\ nextId = 3
+/\ rdb = ( n1 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n2 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n3 :> [data |-> <<>>, off |-> 0, id |-> 0] )
+/\ replid2 = (n1 :> 0 @@ n2 :> 0 @@ n3 :> 0)
+/\ primaryOf = (n1 :> n1 @@ n2 :> n1 @@ n3 :> n1)
+/\ replid = (n1 :> 1 @@ n2 :> 2 @@ n3 :> 3)
+/\ switches = 0
+/\ crashes = 0
+/\ cached = (n1 :> FALSE @@ n2 :> FALSE @@ n3 :> FALSE)
+/\ role = (n1 :> "primary" @@ n2 :> "replica" @@ n3 :> "replica")
+/\ secondOff = (n1 :> 0 @@ n2 :> 0 @@ n3 :> 0)
+
+State 2: <DualFork line 251, col 5 to line 262, col 87 of module model>
+/\ off = (n1 :> 0 @@ n2 :> 0 @@ n3 :> 0)
+/\ backlog = (n1 :> 1 @@ n2 :> 0 @@ n3 :> 0)
+/\ snap = ( n1 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n2 :> [data |-> <<>>, off |-> 0, id |-> 4] @@
+  n3 :> [data |-> <<>>, off |-> 0, id |-> 0] )
+/\ link = (n1 :> "none" @@ n2 :> "rdb" @@ n3 :> "down")
+/\ writes = 0
+/\ data = (n1 :> <<>> @@ n2 :> <<>> @@ n3 :> <<>>)
+/\ nextId = 4
+/\ rdb = ( n1 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n2 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n3 :> [data |-> <<>>, off |-> 0, id |-> 0] )
+/\ replid2 = (n1 :> 0 @@ n2 :> 0 @@ n3 :> 0)
+/\ primaryOf = (n1 :> n1 @@ n2 :> n1 @@ n3 :> n1)
+/\ replid = (n1 :> 4 @@ n2 :> 2 @@ n3 :> 3)
+/\ switches = 0
+/\ crashes = 0
+/\ cached = (n1 :> FALSE @@ n2 :> FALSE @@ n3 :> FALSE)
+/\ role = (n1 :> "primary" @@ n2 :> "replica" @@ n3 :> "replica")
+/\ secondOff = (n1 :> 0 @@ n2 :> 0 @@ n3 :> 0)
+
+State 3: <Write line 159, col 5 to line 165, col 57 of module model>
+/\ off = (n1 :> 1 @@ n2 :> 0 @@ n3 :> 0)
+/\ backlog = (n1 :> 1 @@ n2 :> 0 @@ n3 :> 0)
+/\ snap = ( n1 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n2 :> [data |-> <<>>, off |-> 0, id |-> 4] @@
+  n3 :> [data |-> <<>>, off |-> 0, id |-> 0] )
+/\ link = (n1 :> "none" @@ n2 :> "rdb" @@ n3 :> "down")
+/\ writes = 1
+/\ data = (n1 :> <<1>> @@ n2 :> <<>> @@ n3 :> <<>>)
+/\ nextId = 4
+/\ rdb = ( n1 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n2 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n3 :> [data |-> <<>>, off |-> 0, id |-> 0] )
+/\ replid2 = (n1 :> 0 @@ n2 :> 0 @@ n3 :> 0)
+/\ primaryOf = (n1 :> n1 @@ n2 :> n1 @@ n3 :> n1)
+/\ replid = (n1 :> 4 @@ n2 :> 2 @@ n3 :> 3)
+/\ switches = 0
+/\ crashes = 0
+/\ cached = (n1 :> FALSE @@ n2 :> FALSE @@ n3 :> FALSE)
+/\ role = (n1 :> "primary" @@ n2 :> "replica" @@ n3 :> "replica")
+/\ secondOff = (n1 :> 0 @@ n2 :> 0 @@ n3 :> 0)
+
+State 4: <DualContinueEarly line 268, col 5 to line 275, col 59 of module model>
+/\ off = (n1 :> 1 @@ n2 :> 0 @@ n3 :> 0)
+/\ backlog = (n1 :> 1 @@ n2 :> 0 @@ n3 :> 0)
+/\ snap = ( n1 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n2 :> [data |-> <<>>, off |-> 0, id |-> 4] @@
+  n3 :> [data |-> <<>>, off |-> 0, id |-> 0] )
+/\ link = (n1 :> "none" @@ n2 :> "rdbContinued" @@ n3 :> "down")
+/\ writes = 1
+/\ data = (n1 :> <<1>> @@ n2 :> <<>> @@ n3 :> <<>>)
+/\ nextId = 4
+/\ rdb = ( n1 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n2 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n3 :> [data |-> <<>>, off |-> 0, id |-> 0] )
+/\ replid2 = (n1 :> 0 @@ n2 :> 0 @@ n3 :> 0)
+/\ primaryOf = (n1 :> n1 @@ n2 :> n1 @@ n3 :> n1)
+/\ replid = (n1 :> 4 @@ n2 :> 2 @@ n3 :> 3)
+/\ switches = 0
+/\ crashes = 0
+/\ cached = (n1 :> FALSE @@ n2 :> FALSE @@ n3 :> FALSE)
+/\ role = (n1 :> "primary" @@ n2 :> "replica" @@ n3 :> "replica")
+/\ secondOff = (n1 :> 0 @@ n2 :> 0 @@ n3 :> 0)
+
+State 5: <Trim line 181, col 5 to line 186, col 65 of module model>
+/\ off = (n1 :> 1 @@ n2 :> 0 @@ n3 :> 0)
+/\ backlog = (n1 :> 2 @@ n2 :> 0 @@ n3 :> 0)
+/\ snap = ( n1 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n2 :> [data |-> <<>>, off |-> 0, id |-> 4] @@
+  n3 :> [data |-> <<>>, off |-> 0, id |-> 0] )
+/\ link = (n1 :> "none" @@ n2 :> "rdbContinued" @@ n3 :> "down")
+/\ writes = 1
+/\ data = (n1 :> <<1>> @@ n2 :> <<>> @@ n3 :> <<>>)
+/\ nextId = 4
+/\ rdb = ( n1 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n2 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n3 :> [data |-> <<>>, off |-> 0, id |-> 0] )
+/\ replid2 = (n1 :> 0 @@ n2 :> 0 @@ n3 :> 0)
+/\ primaryOf = (n1 :> n1 @@ n2 :> n1 @@ n3 :> n1)
+/\ replid = (n1 :> 4 @@ n2 :> 2 @@ n3 :> 3)
+/\ switches = 0
+/\ crashes = 0
+/\ cached = (n1 :> FALSE @@ n2 :> FALSE @@ n3 :> FALSE)
+/\ role = (n1 :> "primary" @@ n2 :> "replica" @@ n3 :> "replica")
+/\ secondOff = (n1 :> 0 @@ n2 :> 0 @@ n3 :> 0)
+
+State 6: <DualLoadContinued line 280, col 5 to line 290, col 76 of module model>
+/\ off = (n1 :> 1 @@ n2 :> 0 @@ n3 :> 0)
+/\ backlog = (n1 :> 2 @@ n2 :> 1 @@ n3 :> 0)
+/\ snap = ( n1 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n2 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n3 :> [data |-> <<>>, off |-> 0, id |-> 0] )
+/\ link = (n1 :> "none" @@ n2 :> "up" @@ n3 :> "down")
+/\ writes = 1
+/\ data = (n1 :> <<1>> @@ n2 :> <<>> @@ n3 :> <<>>)
+/\ nextId = 4
+/\ rdb = ( n1 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n2 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n3 :> [data |-> <<>>, off |-> 0, id |-> 0] )
+/\ replid2 = (n1 :> 0 @@ n2 :> 0 @@ n3 :> 0)
+/\ primaryOf = (n1 :> n1 @@ n2 :> n1 @@ n3 :> n1)
+/\ replid = (n1 :> 4 @@ n2 :> 4 @@ n3 :> 3)
+/\ switches = 0
+/\ crashes = 0
+/\ cached = (n1 :> FALSE @@ n2 :> FALSE @@ n3 :> FALSE)
+/\ role = (n1 :> "primary" @@ n2 :> "replica" @@ n3 :> "replica")
+/\ secondOff = (n1 :> 0 @@ n2 :> 0 @@ n3 :> 0)
+
+State 7: <Disconnect line 343, col 5 to line 349, col 59 of module model>
+/\ off = (n1 :> 1 @@ n2 :> 0 @@ n3 :> 0)
+/\ backlog = (n1 :> 2 @@ n2 :> 1 @@ n3 :> 0)
+/\ snap = ( n1 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n2 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n3 :> [data |-> <<>>, off |-> 0, id |-> 0] )
+/\ link = (n1 :> "none" @@ n2 :> "down" @@ n3 :> "down")
+/\ writes = 1
+/\ data = (n1 :> <<1>> @@ n2 :> <<>> @@ n3 :> <<>>)
+/\ nextId = 4
+/\ rdb = ( n1 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n2 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n3 :> [data |-> <<>>, off |-> 0, id |-> 0] )
+/\ replid2 = (n1 :> 0 @@ n2 :> 0 @@ n3 :> 0)
+/\ primaryOf = (n1 :> n1 @@ n2 :> n1 @@ n3 :> n1)
+/\ replid = (n1 :> 4 @@ n2 :> 4 @@ n3 :> 3)
+/\ switches = 0
+/\ crashes = 0
+/\ cached = (n1 :> FALSE @@ n2 :> TRUE @@ n3 :> FALSE)
+/\ role = (n1 :> "primary" @@ n2 :> "replica" @@ n3 :> "replica")
+/\ secondOff = (n1 :> 0 @@ n2 :> 0 @@ n3 :> 0)
+
+State 8: <DualFork line 251, col 5 to line 262, col 87 of module model>
+/\ off = (n1 :> 1 @@ n2 :> 0 @@ n3 :> 0)
+/\ backlog = (n1 :> 2 @@ n2 :> 1 @@ n3 :> 0)
+/\ snap = ( n1 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n2 :> [data |-> <<1>>, off |-> 1, id |-> 4] @@
+  n3 :> [data |-> <<>>, off |-> 0, id |-> 0] )
+/\ link = (n1 :> "none" @@ n2 :> "rdb" @@ n3 :> "down")
+/\ writes = 1
+/\ data = (n1 :> <<1>> @@ n2 :> <<>> @@ n3 :> <<>>)
+/\ nextId = 4
+/\ rdb = ( n1 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n2 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n3 :> [data |-> <<>>, off |-> 0, id |-> 0] )
+/\ replid2 = (n1 :> 0 @@ n2 :> 0 @@ n3 :> 0)
+/\ primaryOf = (n1 :> n1 @@ n2 :> n1 @@ n3 :> n1)
+/\ replid = (n1 :> 4 @@ n2 :> 4 @@ n3 :> 3)
+/\ switches = 0
+/\ crashes = 0
+/\ cached = (n1 :> FALSE @@ n2 :> TRUE @@ n3 :> FALSE)
+/\ role = (n1 :> "primary" @@ n2 :> "replica" @@ n3 :> "replica")
+/\ secondOff = (n1 :> 0 @@ n2 :> 0 @@ n3 :> 0)
+
+State 9: <DualLoadFirst line 297, col 5 to line 309, col 82 of module model>
+/\ off = (n1 :> 1 @@ n2 :> 0 @@ n3 :> 0)
+/\ backlog = (n1 :> 2 @@ n2 :> 1 @@ n3 :> 0)
+/\ snap = ( n1 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n2 :> [data |-> <<1>>, off |-> 1, id |-> 4] @@
+  n3 :> [data |-> <<>>, off |-> 0, id |-> 0] )
+/\ link = (n1 :> "none" @@ n2 :> "loaded" @@ n3 :> "down")
+/\ writes = 1
+/\ data = (n1 :> <<1>> @@ n2 :> <<1>> @@ n3 :> <<>>)
+/\ nextId = 4
+/\ rdb = ( n1 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n2 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n3 :> [data |-> <<>>, off |-> 0, id |-> 0] )
+/\ replid2 = (n1 :> 0 @@ n2 :> 0 @@ n3 :> 0)
+/\ primaryOf = (n1 :> n1 @@ n2 :> n1 @@ n3 :> n1)
+/\ replid = (n1 :> 4 @@ n2 :> 4 @@ n3 :> 3)
+/\ switches = 0
+/\ crashes = 0
+/\ cached = (n1 :> FALSE @@ n2 :> FALSE @@ n3 :> FALSE)
+/\ role = (n1 :> "primary" @@ n2 :> "replica" @@ n3 :> "replica")
+/\ secondOff = (n1 :> 0 @@ n2 :> 0 @@ n3 :> 0)
+
+State 10: <Promote line 358, col 5 to line 370, col 72 of module model>
+/\ off = (n1 :> 1 @@ n2 :> 0 @@ n3 :> 0)
+/\ backlog = (n1 :> 2 @@ n2 :> 1 @@ n3 :> 0)
+/\ snap = ( n1 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n2 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n3 :> [data |-> <<>>, off |-> 0, id |-> 0] )
+/\ link = (n1 :> "none" @@ n2 :> "none" @@ n3 :> "down")
+/\ writes = 1
+/\ data = (n1 :> <<1>> @@ n2 :> <<1>> @@ n3 :> <<>>)
+/\ nextId = 5
+/\ rdb = ( n1 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n2 :> [data |-> <<>>, off |-> 0, id |-> 0] @@
+  n3 :> [data |-> <<>>, off |-> 0, id |-> 0] )
+/\ replid2 = (n1 :> 0 @@ n2 :> 4 @@ n3 :> 0)
+/\ primaryOf = (n1 :> n1 @@ n2 :> n1 @@ n3 :> n1)
+/\ replid = (n1 :> 4 @@ n2 :> 5 @@ n3 :> 3)
+/\ switches = 1
+/\ crashes = 0
+/\ cached = (n1 :> FALSE @@ n2 :> FALSE @@ n3 :> FALSE)
+/\ role = (n1 :> "primary" @@ n2 :> "primary" @@ n3 :> "replica")
+/\ secondOff = (n1 :> 0 @@ n2 :> 1 @@ n3 :> 0)

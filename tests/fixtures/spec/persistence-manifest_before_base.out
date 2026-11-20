@@ -1,0 +1,82 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Error: Invariant ManifestFilesExist is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ done = "none"
+/\ content = <<<<>>, <<>>, <<>>, <<>>, <<>>, <<>>, <<>>>>
+/\ cur = 0
+/\ rewrites = 0
+/\ snap = <<>>
+/\ writes = 0
+/\ present = {}
+/\ state = "off"
+/\ data = <<>>
+/\ rdb = <<>>
+/\ ackedOn = {}
+/\ next = 0
+/\ newBase = 0
+/\ buf = <<>>
+/\ man = [base |-> 0, incrs |-> <<>>]
+/\ switches = 0
+/\ crashes = 0
+/\ child = "none"
+
+State 2: <StartAof line 237, col 5 to line 243, col 55 of module model>
+/\ done = "none"
+/\ content = <<<<>>, <<>>, <<>>, <<>>, <<>>, <<>>, <<>>>>
+/\ cur = 0
+/\ rewrites = 0
+/\ snap = <<>>
+/\ writes = 0
+/\ present = {}
+/\ state = "wait"
+/\ data = <<>>
+/\ rdb = <<>>
+/\ ackedOn = {}
+/\ next = 0
+/\ newBase = 0
+/\ buf = <<>>
+/\ man = [base |-> 0, incrs |-> <<>>]
+/\ switches = 1
+/\ crashes = 0
+/\ child = "none"
+
+State 3: <StartRewrite line 155, col 5 to line 167, col 79 of module model>
+/\ done = "none"
+/\ content = <<<<>>, <<>>, <<>>, <<>>, <<>>, <<>>, <<>>>>
+/\ cur = 1
+/\ rewrites = 1
+/\ snap = <<>>
+/\ writes = 0
+/\ present = {1}
+/\ state = "wait"
+/\ data = <<>>
+/\ rdb = <<>>
+/\ ackedOn = {}
+/\ next = 1
+/\ newBase = 0
+/\ buf = <<>>
+/\ man = [base |-> 0, incrs |-> <<>>]
+/\ switches = 1
+/\ crashes = 0
+/\ child = "aof"
+
+State 4: <MutantPersistManifest line 8, col 5 to line 16, col 39 of module manifest_before_base>
+/\ done = "persisted"
+/\ content = <<<<>>, <<>>, <<>>, <<>>, <<>>, <<>>, <<>>>>
+/\ cur = 1
+/\ rewrites = 1
+/\ snap = <<>>
+/\ writes = 0
+/\ present = {1}
+/\ state = "on"
+/\ data = <<>>
+/\ rdb = <<>>
+/\ ackedOn = {}
+/\ next = 2
+/\ newBase = 2
+/\ buf = <<>>
+/\ man = [base |-> 2, incrs |-> <<1>>]
+/\ switches = 1
+/\ crashes = 0
+/\ child = "aof"

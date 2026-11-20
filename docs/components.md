@@ -113,6 +113,7 @@ a retry succeeded makes the fault, and the run, `ERROR`.
 | [`valkey.action.rolling-upgrade`](#valkeyactionrolling-upgrade) | action | standalone, cluster | moves every instance to a new build |
 | [`valkey.action.cluster-chaos`](#valkeyactioncluster-chaos) | action | cluster | failover waves with process kills |
 | [`valkey.action.cluster-election`](#valkeyactioncluster-election) | action | cluster | forces one failover election |
+| [`valkey.action.migrate-slots`](#valkeyactionmigrate-slots) | action | cluster | moves one hash slot to another shard with `CLUSTER MIGRATESLOTS` |
 | [`valkey.action.replication-chaos`](#valkeyactionreplication-chaos) | action | standalone | waves of kills, promotions, repoints, stalls, and partitions, healed and validated |
 | [`valkey.fault.process-signal`](#valkeyfaultprocess-signal) | fault | any | kills, stops, or pauses an instance |
 | [`valkey.fault.syscall`](#valkeyfaultsyscall) | fault | any (needs `syscall_faults`) | kills, delays, or fails an instance at its nth matching system call |
@@ -158,6 +159,7 @@ schemas.
 | `valkey.action.command` | none | `valkey.command.replies` | none |
 | `valkey.action.commands` | none | `valkey.command.sequence` (many) | `process.private-server` |
 | `valkey.action.failover` | none | `valkey.failover.result` | none |
+| `valkey.action.migrate-slots` | `<id>.migration-completed`<br>`<id>.migration-started` | `valkey.cluster.slot-migration.result` | none |
 | `valkey.action.poll` | none | `valkey.poll.satisfied` | none |
 | `valkey.action.replication-chaos` | `<id>.instance-killed`<br>`<id>.promoted`<br>`<id>.wave-validated` | `valkey.chaos.schedule`<br>`valkey.chaos.test-keys`<br>`valkey.data.loss-window` (many)<br>`valkey.instances.expected-down` | `network.partition`<br>`process.paused`<br>`process.stopped`<br>`server.client-pause`<br>`server.config` |
 | `valkey.action.rolling-upgrade` | `<id>.failed-over`<br>`<id>.instance-upgraded` | `valkey.upgrade.completed` | `process.stopped` |
@@ -191,7 +193,8 @@ schemas.
 | `valkey.workload.benchmark` | none | `valkey.workload.benchmark` | none |
 | `valkey.workload.command-table` | none | `valkey.workload.command-table` | none |
 | `valkey.workload.config-churn` | none | `valkey.workload.config-churn` | none |
-| `valkey.workload.key-value` | `<id>.drained`<br>`<id>.seeded` | `valkey.workload.ledger` | none |<!-- END declarations -->
+| `valkey.workload.key-value` | `<id>.drained`<br>`<id>.seeded` | `valkey.workload.ledger` | none |
+<!-- END declarations -->
 
 ## Capabilities
 
@@ -1026,6 +1029,35 @@ action in `crash_faults`. Events: `<id>.election-started`,
 `<id>.election-completed` (with the winner and its `configEpoch`), and for
 `kill_primary` `<id>.injected`, which `valkey-fuzzer spec conform` reads as a
 crash.
+
+### `valkey.action.migrate-slots`
+
+Cluster mode. Moves one hash slot, the slot of `key`, from the primary that
+owns it to the primary of shard `shard` with `CLUSTER MIGRATESLOTS SLOTSRANGE
+<slot> <slot> NODE <target>`, and waits until the source's export job
+(`CLUSTER GETSLOTMIGRATIONS`) ends: `success`, `failed`, or `cancelled`. A
+hash tag as the key (`{s}`, slot 3828) names the slot every key carrying the
+tag is in, so a `valkey.workload.key-value` with that `prefix` writes to the
+slot that moves. `valkey.slot-migration-spec` kills the target as it claims
+the slot; the oracles judge the data and the cluster state, this action only
+that the migration ran to an end.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `key` | string | | The key whose slot moves. |
+| `shard` | integer | 1 | The shard whose primary imports the slot, below `primaries`. |
+| `timeout_s` | number, 1 to 3600 | 60 | How long the export may take to end. |
+| `poll_interval_s` | number, 0.01 to 10 | 0.05 | |
+
+`PASS` once the export ended, whatever its state; `ERROR` when the shard has
+no primary that answers, the target already owns the slot, the source refused
+`CLUSTER MIGRATESLOTS`, or the export did not end within `timeout_s`: the run
+never reached what it tests. Evidence: `valkey.cluster.slot-migration.result`
+(the slot, `source` and `target`, their node IDs, the reply, the export job
+as the source listed it last, its `state` and `message`). Events:
+`<id>.migration-started` once the source accepted the command, and
+`<id>.migration-completed` (with the `state`, and `ended`) once the export
+ended or `timeout_s` passed.
 
 ### `valkey.action.replication-chaos`
 

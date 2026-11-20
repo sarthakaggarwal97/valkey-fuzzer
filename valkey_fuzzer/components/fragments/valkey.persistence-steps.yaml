@@ -1,0 +1,24 @@
+# The persistence model's steps (formal/persistence), as the server logs them:
+# the `persistence-steps` observer publishes every line that
+# formal/persistence/mapping.yaml maps to a step (an AOF rewrite's start, its
+# base rename and its end, a failed rewrite, a save's start and end), with the
+# mapping's patterns (spec: persistence), so a batch checks each run against
+# the bundle (`spec conform`: which steps the run took; the claims compare the
+# files' writes with the data set's, which a run does not observe). A SIGKILL
+# fault is the model's Crash. An experiment lists `- id: persistence-steps`
+# before its actions, so the observer tails the logs before they act.
+components:
+  - use: valkey.observer.log-trigger
+    id: persistence-steps
+    config:
+      instances: all
+      # Only coverage is read from these events, so their order matters little.
+      poll_interval_s: 0.05
+      spec: persistence
+      rules:
+        - {publish: persistence.rewrite.started}
+        - {publish: persistence.rewrite.base.renamed}
+        - {publish: persistence.rewrite.finished}
+        - {publish: persistence.rewrite.failed}
+        - {publish: persistence.save.started}
+        - {publish: persistence.save.done}

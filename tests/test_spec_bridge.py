@@ -152,6 +152,19 @@ def test_tlc_output_and_printed_values_are_read():
             "    occurrence_shift: [1]\n    inputs:\n      crash_delay_s",
             "occurrence_shift needs an occurrence_input",
         ),
+        # A fault the scenario does not inject names a model action and says why; one it injects is not unmapped.
+        (
+            "mapping.yaml",
+            "  variants:\n    inputs:\n      crash_delay_s",
+            "  unmapped: {Reboot: no fault component}\n  variants:\n    inputs:\n      crash_delay_s",
+            "unmapped.Reboot must be a model action",
+        ),
+        (
+            "mapping.yaml",
+            "  variants:\n    inputs:\n      crash_delay_s",
+            "  unmapped: {Crash: no fault component}\n  variants:\n    inputs:\n      crash_delay_s",
+            "unmapped.Crash is also a fault",
+        ),
         (
             "mapping.yaml",
             "    event: register.loaded\n",
@@ -301,6 +314,72 @@ def test_translate_aligns_the_election_counterexample_on_the_vote_that_left_befo
     )
     inputs = translation["scenarios"][0]["experiment"]["inputs"]
     assert inputs == {"save_behavior": "best-effort", "election": "force_failover", "vote_occurrence": 1}
+
+
+def _shipped(protocol, control, variants=4):
+    """The checked-in TLC counterexample of a shipped bundle's control, translated against the Valkey experiments."""
+
+    result = read_tlc_output((FIXTURES / f"{protocol}-{control}.out").read_text(), 12)
+    bundle = load_bundle(protocol)
+    return translate_trace(
+        bundle,
+        result.trace,
+        bundle.files[bundle.control(control).config],
+        name=control,
+        violated=result.violated,
+        variants=variants,
+        compile_scenario=valkey_service().compile,
+    )
+
+
+def test_translate_kills_the_slot_migration_target_at_its_claim():
+    translation = _shipped("slot-migration", "replica_misses_claim")
+    # T crashes after it claimed the slot; the write to T and R applying T's stream must fit in kill_delay_s.
+    (alignment,) = translation["alignment"]
+    assert (alignment["fault"], alignment["component"], alignment["trigger"]) == ("CrashT", "kill-target", "claimed")
+    assert alignment["between"] == ["Write", "RApply", "RApply", "RApply", "RApply"]
+    direct, *nearby = translation["scenarios"]
+    assert direct["experiment"] == {"id": "valkey.slot-migration-spec", "inputs": {}}
+    assert direct["deployment"] == {"mode": "cluster", "primaries": 3, "replicas_per_primary": 1, "base_port": 7760}
+    assert [item["experiment"]["inputs"] for item in nearby] == [{"kill_delay_s": 0.2}, {"kill_delay_s": 1}]
+    # The faults the scenario leaves to the experiment, each with its reason.
+    assert set(translation["unmapped"]) == {"Cancel", "DropLink", "PauseExpires", "LoseBus"}
+
+
+@pytest.mark.parametrize(
+    ("protocol", "control", "experiment", "deployment", "inputs", "unmapped"),
+    [
+        # No persistence counterexample takes Crash: a kill would lose data after the trace's last step, so the
+        # scenario names the crash-point experiment and sweeps the rewrite's calls.
+        (
+            "persistence",
+            "manifest_before_base",
+            "valkey.save-crash-points",
+            {"mode": "standalone", "syscall_faults": True, "base_port": 7720},
+            {"trigger_command": ["BGREWRITEAOF"], "nth": 9},
+            {"Crash", "RewriteFails"},
+        ),
+        # No replication counterexample takes Crash either; its one fault, the link drop, is the experiment's own.
+        (
+            "replication",
+            "keep_old_id_on_load",
+            "valkey.replication-full-resync",
+            {"mode": "standalone", "replicas_per_primary": 2, "base_port": 7730},
+            {},
+            {"Crash", "Disconnect", "LoadFails"},
+        ),
+    ],
+)
+def test_translate_writes_a_scenario_without_a_fault_for_a_counterexample_that_takes_none(
+    protocol, control, experiment, deployment, inputs, unmapped
+):
+    translation = _shipped(protocol, control)
+    assert translation["alignment"] == [] and set(translation["unmapped"]) == unmapped
+    direct = translation["scenarios"][0]
+    assert direct["experiment"] == {"id": experiment, "inputs": inputs} and direct["deployment"] == deployment
+    # The variants sweep what the trace does not say (the crash point, the stall), and each compiles.
+    assert len(translation["scenarios"]) > 1
+    assert all(item["experiment"]["inputs"] != inputs for item in translation["scenarios"][1:])
 
 
 def test_translate_refuses_what_the_experiment_cannot_run(tmp_path, monkeypatch):

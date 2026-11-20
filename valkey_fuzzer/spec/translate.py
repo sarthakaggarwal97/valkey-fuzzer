@@ -276,6 +276,8 @@ def translate_trace(
             "constants": constants,
         },
         "alignment": alignment,
+        # The model's fault actions the scenario leaves to the experiment's own schedule, with the reason.
+        "unmapped": dict(scenario_spec.get("unmapped") or {}),
         "scenarios": scenarios,
     }
 

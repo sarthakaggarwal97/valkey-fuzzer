@@ -1,0 +1,356 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Error: Invariant NoAckedWriteLost is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ epoch = 1
+/\ repl = <<>>
+/\ paused = FALSE
+/\ writes = 0
+/\ toS = <<>>
+/\ toT = <<>>
+/\ data = [S |-> <<>>, T |-> <<>>, R |-> <<>>]
+/\ view = [ S |-> [epoch |-> 1, owner |-> "S"],
+  T |-> [epoch |-> 1, owner |-> "S"],
+  R |-> [epoch |-> 1, owner |-> "S"] ]
+/\ faults = 0
+/\ exp = "none"
+/\ hidden = [S |-> FALSE, T |-> FALSE, R |-> FALSE]
+/\ imp = "none"
+/\ bus = {}
+/\ track = "none"
+/\ acked = {}
+/\ role = [S |-> "primary", T |-> "primary", R |-> "replica"]
+
+State 2: <Start line 133, col 5 to line 138, col 42 of module model>
+/\ epoch = 1
+/\ repl = <<>>
+/\ paused = FALSE
+/\ writes = 0
+/\ toS = <<>>
+/\ toT = <<[k |-> "establish"]>>
+/\ data = [S |-> <<>>, T |-> <<>>, R |-> <<>>]
+/\ view = [ S |-> [epoch |-> 1, owner |-> "S"],
+  T |-> [epoch |-> 1, owner |-> "S"],
+  R |-> [epoch |-> 1, owner |-> "S"] ]
+/\ faults = 0
+/\ exp = "establish"
+/\ hidden = [S |-> FALSE, T |-> FALSE, R |-> FALSE]
+/\ imp = "none"
+/\ bus = {}
+/\ track = "none"
+/\ acked = {}
+/\ role = [S |-> "primary", T |-> "primary", R |-> "replica"]
+
+State 3: <TEstablish line 143, col 5 to line 152, col 92 of module model>
+/\ epoch = 1
+/\ repl = <<[k |-> "establish"]>>
+/\ paused = FALSE
+/\ writes = 0
+/\ toS = <<"ok">>
+/\ toT = <<>>
+/\ data = [S |-> <<>>, T |-> <<>>, R |-> <<>>]
+/\ view = [ S |-> [epoch |-> 1, owner |-> "S"],
+  T |-> [epoch |-> 1, owner |-> "S"],
+  R |-> [epoch |-> 1, owner |-> "S"] ]
+/\ faults = 0
+/\ exp = "establish"
+/\ hidden = [S |-> FALSE, T |-> TRUE, R |-> FALSE]
+/\ imp = "receive"
+/\ bus = {}
+/\ track = "none"
+/\ acked = {}
+/\ role = [S |-> "primary", T |-> "primary", R |-> "replica"]
+
+State 4: <SFork line 157, col 5 to line 163, col 35 of module model>
+/\ epoch = 1
+/\ repl = <<[k |-> "establish"]>>
+/\ paused = FALSE
+/\ writes = 0
+/\ toS = <<>>
+/\ toT = <<[k |-> "snapshot", d |-> <<>>]>>
+/\ data = [S |-> <<>>, T |-> <<>>, R |-> <<>>]
+/\ view = [ S |-> [epoch |-> 1, owner |-> "S"],
+  T |-> [epoch |-> 1, owner |-> "S"],
+  R |-> [epoch |-> 1, owner |-> "S"] ]
+/\ faults = 0
+/\ exp = "stream"
+/\ hidden = [S |-> FALSE, T |-> TRUE, R |-> FALSE]
+/\ imp = "receive"
+/\ bus = {}
+/\ track = "none"
+/\ acked = {}
+/\ role = [S |-> "primary", T |-> "primary", R |-> "replica"]
+
+State 5: <TApply line 169, col 5 to line 178, col 94 of module model>
+/\ epoch = 1
+/\ repl = <<[k |-> "establish"], [k |-> "snapshot", d |-> <<>>]>>
+/\ paused = FALSE
+/\ writes = 0
+/\ toS = <<"reqPause">>
+/\ toT = <<>>
+/\ data = [S |-> <<>>, T |-> <<>>, R |-> <<>>]
+/\ view = [ S |-> [epoch |-> 1, owner |-> "S"],
+  T |-> [epoch |-> 1, owner |-> "S"],
+  R |-> [epoch |-> 1, owner |-> "S"] ]
+/\ faults = 0
+/\ exp = "stream"
+/\ hidden = [S |-> FALSE, T |-> TRUE, R |-> FALSE]
+/\ imp = "waitPaused"
+/\ bus = {}
+/\ track = "none"
+/\ acked = {}
+/\ role = [S |-> "primary", T |-> "primary", R |-> "replica"]
+
+State 6: <SPause line 183, col 5 to line 189, col 98 of module model>
+/\ epoch = 1
+/\ repl = <<[k |-> "establish"], [k |-> "snapshot", d |-> <<>>]>>
+/\ paused = TRUE
+/\ writes = 0
+/\ toS = <<>>
+/\ toT = <<[k |-> "paused"]>>
+/\ data = [S |-> <<>>, T |-> <<>>, R |-> <<>>]
+/\ view = [ S |-> [epoch |-> 1, owner |-> "S"],
+  T |-> [epoch |-> 1, owner |-> "S"],
+  R |-> [epoch |-> 1, owner |-> "S"] ]
+/\ faults = 0
+/\ exp = "paused"
+/\ hidden = [S |-> FALSE, T |-> TRUE, R |-> FALSE]
+/\ imp = "waitPaused"
+/\ bus = {}
+/\ track = "none"
+/\ acked = {}
+/\ role = [S |-> "primary", T |-> "primary", R |-> "replica"]
+
+State 7: <TPaused line 193, col 5 to line 200, col 35 of module model>
+/\ epoch = 1
+/\ repl = <<[k |-> "establish"], [k |-> "snapshot", d |-> <<>>]>>
+/\ paused = TRUE
+/\ writes = 0
+/\ toS = <<"reqFailover">>
+/\ toT = <<>>
+/\ data = [S |-> <<>>, T |-> <<>>, R |-> <<>>]
+/\ view = [ S |-> [epoch |-> 1, owner |-> "S"],
+  T |-> [epoch |-> 1, owner |-> "S"],
+  R |-> [epoch |-> 1, owner |-> "S"] ]
+/\ faults = 0
+/\ exp = "paused"
+/\ hidden = [S |-> FALSE, T |-> TRUE, R |-> FALSE]
+/\ imp = "requested"
+/\ bus = {}
+/\ track = "none"
+/\ acked = {}
+/\ role = [S |-> "primary", T |-> "primary", R |-> "replica"]
+
+State 8: <SGrant line 205, col 5 to line 211, col 35 of module model>
+/\ epoch = 1
+/\ repl = <<[k |-> "establish"], [k |-> "snapshot", d |-> <<>>]>>
+/\ paused = TRUE
+/\ writes = 0
+/\ toS = <<>>
+/\ toT = <<[k |-> "granted"]>>
+/\ data = [S |-> <<>>, T |-> <<>>, R |-> <<>>]
+/\ view = [ S |-> [epoch |-> 1, owner |-> "S"],
+  T |-> [epoch |-> 1, owner |-> "S"],
+  R |-> [epoch |-> 1, owner |-> "S"] ]
+/\ faults = 0
+/\ exp = "granted"
+/\ hidden = [S |-> FALSE, T |-> TRUE, R |-> FALSE]
+/\ imp = "requested"
+/\ bus = {}
+/\ track = "none"
+/\ acked = {}
+/\ role = [S |-> "primary", T |-> "primary", R |-> "replica"]
+
+State 9: <TClaim line 220, col 5 to line 232, col 79 of module model>
+/\ epoch = 2
+/\ repl = << [k |-> "establish"],
+   [k |-> "snapshot", d |-> <<>>],
+   [k |-> "finish", ok |-> TRUE] >>
+/\ paused = TRUE
+/\ writes = 0
+/\ toS = <<>>
+/\ toT = <<>>
+/\ data = [S |-> <<>>, T |-> <<>>, R |-> <<>>]
+/\ view = [ S |-> [epoch |-> 1, owner |-> "S"],
+  T |-> [epoch |-> 2, owner |-> "T"],
+  R |-> [epoch |-> 1, owner |-> "S"] ]
+/\ faults = 0
+/\ exp = "granted"
+/\ hidden = [S |-> FALSE, T |-> FALSE, R |-> FALSE]
+/\ imp = "success"
+/\ bus = { [epoch |-> 2, owner |-> "T", to |-> "S"],
+  [epoch |-> 2, owner |-> "T", to |-> "R"] }
+/\ track = "none"
+/\ acked = {}
+/\ role = [S |-> "primary", T |-> "primary", R |-> "replica"]
+
+State 10: <Write line 119, col 5 to line 126, col 89 of module model>
+/\ epoch = 2
+/\ repl = << [k |-> "establish"],
+   [k |-> "snapshot", d |-> <<>>],
+   [k |-> "finish", ok |-> TRUE],
+   [k |-> "write", w |-> 1] >>
+/\ paused = TRUE
+/\ writes = 1
+/\ toS = <<>>
+/\ toT = <<>>
+/\ data = [S |-> <<>>, T |-> <<1>>, R |-> <<>>]
+/\ view = [ S |-> [epoch |-> 1, owner |-> "S"],
+  T |-> [epoch |-> 2, owner |-> "T"],
+  R |-> [epoch |-> 1, owner |-> "S"] ]
+/\ faults = 0
+/\ exp = "granted"
+/\ hidden = [S |-> FALSE, T |-> FALSE, R |-> FALSE]
+/\ imp = "success"
+/\ bus = { [epoch |-> 2, owner |-> "T", to |-> "S"],
+  [epoch |-> 2, owner |-> "T", to |-> "R"] }
+/\ track = "none"
+/\ acked = {1}
+/\ role = [S |-> "primary", T |-> "primary", R |-> "replica"]
+
+State 11: <RApply line 258, col 5 to line 271, col 94 of module model>
+/\ epoch = 2
+/\ repl = << [k |-> "snapshot", d |-> <<>>],
+   [k |-> "finish", ok |-> TRUE],
+   [k |-> "write", w |-> 1] >>
+/\ paused = TRUE
+/\ writes = 1
+/\ toS = <<>>
+/\ toT = <<>>
+/\ data = [S |-> <<>>, T |-> <<1>>, R |-> <<>>]
+/\ view = [ S |-> [epoch |-> 1, owner |-> "S"],
+  T |-> [epoch |-> 2, owner |-> "T"],
+  R |-> [epoch |-> 1, owner |-> "S"] ]
+/\ faults = 0
+/\ exp = "granted"
+/\ hidden = [S |-> FALSE, T |-> FALSE, R |-> TRUE]
+/\ imp = "success"
+/\ bus = { [epoch |-> 2, owner |-> "T", to |-> "S"],
+  [epoch |-> 2, owner |-> "T", to |-> "R"] }
+/\ track = "tracking"
+/\ acked = {1}
+/\ role = [S |-> "primary", T |-> "primary", R |-> "replica"]
+
+State 12: <RApply line 258, col 5 to line 271, col 94 of module model>
+/\ epoch = 2
+/\ repl = <<[k |-> "finish", ok |-> TRUE], [k |-> "write", w |-> 1]>>
+/\ paused = TRUE
+/\ writes = 1
+/\ toS = <<>>
+/\ toT = <<>>
+/\ data = [S |-> <<>>, T |-> <<1>>, R |-> <<>>]
+/\ view = [ S |-> [epoch |-> 1, owner |-> "S"],
+  T |-> [epoch |-> 2, owner |-> "T"],
+  R |-> [epoch |-> 1, owner |-> "S"] ]
+/\ faults = 0
+/\ exp = "granted"
+/\ hidden = [S |-> FALSE, T |-> FALSE, R |-> TRUE]
+/\ imp = "success"
+/\ bus = { [epoch |-> 2, owner |-> "T", to |-> "S"],
+  [epoch |-> 2, owner |-> "T", to |-> "R"] }
+/\ track = "tracking"
+/\ acked = {1}
+/\ role = [S |-> "primary", T |-> "primary", R |-> "replica"]
+
+State 13: <RApply line 258, col 5 to line 271, col 94 of module model>
+/\ epoch = 2
+/\ repl = <<[k |-> "write", w |-> 1]>>
+/\ paused = TRUE
+/\ writes = 1
+/\ toS = <<>>
+/\ toT = <<>>
+/\ data = [S |-> <<>>, T |-> <<1>>, R |-> <<>>]
+/\ view = [ S |-> [epoch |-> 1, owner |-> "S"],
+  T |-> [epoch |-> 2, owner |-> "T"],
+  R |-> [epoch |-> 1, owner |-> "S"] ]
+/\ faults = 0
+/\ exp = "granted"
+/\ hidden = [S |-> FALSE, T |-> FALSE, R |-> FALSE]
+/\ imp = "success"
+/\ bus = { [epoch |-> 2, owner |-> "T", to |-> "S"],
+  [epoch |-> 2, owner |-> "T", to |-> "R"] }
+/\ track = "success"
+/\ acked = {1}
+/\ role = [S |-> "primary", T |-> "primary", R |-> "replica"]
+
+State 14: <RApply line 258, col 5 to line 271, col 94 of module model>
+/\ epoch = 2
+/\ repl = <<>>
+/\ paused = TRUE
+/\ writes = 1
+/\ toS = <<>>
+/\ toT = <<>>
+/\ data = [S |-> <<>>, T |-> <<1>>, R |-> <<1>>]
+/\ view = [ S |-> [epoch |-> 1, owner |-> "S"],
+  T |-> [epoch |-> 2, owner |-> "T"],
+  R |-> [epoch |-> 1, owner |-> "S"] ]
+/\ faults = 0
+/\ exp = "granted"
+/\ hidden = [S |-> FALSE, T |-> FALSE, R |-> FALSE]
+/\ imp = "success"
+/\ bus = { [epoch |-> 2, owner |-> "T", to |-> "S"],
+  [epoch |-> 2, owner |-> "T", to |-> "R"] }
+/\ track = "success"
+/\ acked = {1}
+/\ role = [S |-> "primary", T |-> "primary", R |-> "replica"]
+
+State 15: <CrashT line 339, col 5 to line 347, col 84 of module model>
+/\ epoch = 2
+/\ repl = <<>>
+/\ paused = TRUE
+/\ writes = 1
+/\ toS = <<>>
+/\ toT = <<>>
+/\ data = [S |-> <<>>, T |-> <<1>>, R |-> <<1>>]
+/\ view = [ S |-> [epoch |-> 1, owner |-> "S"],
+  T |-> [epoch |-> 2, owner |-> "T"],
+  R |-> [epoch |-> 1, owner |-> "S"] ]
+/\ faults = 1
+/\ exp = "granted"
+/\ hidden = [S |-> FALSE, T |-> FALSE, R |-> FALSE]
+/\ imp = "success"
+/\ bus = { [epoch |-> 2, owner |-> "T", to |-> "S"],
+  [epoch |-> 2, owner |-> "T", to |-> "R"] }
+/\ track = "success"
+/\ acked = {1}
+/\ role = [S |-> "primary", T |-> "dead", R |-> "replica"]
+
+State 16: <LoseBus line 352, col 5 to line 358, col 34 of module model>
+/\ epoch = 2
+/\ repl = <<>>
+/\ paused = TRUE
+/\ writes = 1
+/\ toS = <<>>
+/\ toT = <<>>
+/\ data = [S |-> <<>>, T |-> <<1>>, R |-> <<1>>]
+/\ view = [ S |-> [epoch |-> 1, owner |-> "S"],
+  T |-> [epoch |-> 2, owner |-> "T"],
+  R |-> [epoch |-> 1, owner |-> "S"] ]
+/\ faults = 2
+/\ exp = "granted"
+/\ hidden = [S |-> FALSE, T |-> FALSE, R |-> FALSE]
+/\ imp = "success"
+/\ bus = {[epoch |-> 2, owner |-> "T", to |-> "S"]}
+/\ track = "success"
+/\ acked = {1}
+/\ role = [S |-> "primary", T |-> "dead", R |-> "replica"]
+
+State 17: <Promote line 372, col 5 to line 383, col 76 of module model>
+/\ epoch = 3
+/\ repl = <<>>
+/\ paused = TRUE
+/\ writes = 1
+/\ toS = <<>>
+/\ toT = <<>>
+/\ data = [S |-> <<>>, T |-> <<1>>, R |-> <<>>]
+/\ view = [ S |-> [epoch |-> 1, owner |-> "S"],
+  T |-> [epoch |-> 2, owner |-> "T"],
+  R |-> [epoch |-> 1, owner |-> "S"] ]
+/\ faults = 2
+/\ exp = "granted"
+/\ hidden = [S |-> FALSE, T |-> FALSE, R |-> FALSE]
+/\ imp = "success"
+/\ bus = {[epoch |-> 2, owner |-> "T", to |-> "S"]}
+/\ track = "success"
+/\ acked = {1}
+/\ role = [S |-> "primary", T |-> "dead", R |-> "primary"]

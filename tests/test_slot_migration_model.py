@@ -5,9 +5,17 @@ import json
 import os
 import re
 import shutil
+from unittest.mock import patch
 
 import pytest
 
+from tests.fakes import FakeClient, FakeHandle, fake_instances
+from tests.valkey_experiments_support import evidence_values, fake_context, resolved, valkey_experiment
+from valkey_fuzzer.components import slot_migration
+from valkey_fuzzer.components.slot_migration import MigrateSlotsAction
+from valkey_fuzzer.plan import ComponentSpec
+from valkey_fuzzer.protocols import ComponentRole
+from valkey_fuzzer.results import ComponentStatus
 from valkey_fuzzer.spec.bundle import load_bundle
 from valkey_fuzzer.spec.conform import ObservedRun, collect_runs
 
@@ -125,6 +133,95 @@ def test_conform_maps_a_migration_run_onto_the_steps(tmp_path):
         "Deliver": 1,
     }
     assert observed.states[-1]["faults"] == 1
+
+
+class _ClusterHandle(FakeHandle):
+    """Two shards of a primary and a replica each; each client answers ``replies`` and records its commands."""
+
+    def __init__(self, replies):
+        self.instances = fake_instances(
+            4, role=lambda n: "primary" if n % 2 == 0 else "replica", shard_id=lambda n: n // 2,
+            cluster_node_id=lambda n: chr(ord("a") + n) * 40,
+        )  # fmt: skip
+        self.replies, self.commands = replies, {}
+
+    def new_client(self, node_id, timeout=5.0):
+        return FakeClient(self.commands.setdefault(node_id, []), self.replies.get(node_id, {}))
+
+
+def _job(state):
+    return ["name", "x" * 40, "operation", "EXPORT", "slot_ranges", "3828-3828", "state", state, "message", ""]
+
+
+def test_migrate_slots_moves_the_tags_slot_from_its_owner_to_the_shards_primary_and_waits_for_the_export():
+    # {s} is slot 3828, in shard 0's range; valkey-2 is shard 1's primary and imports it.
+    view = {
+        "node_id": "c" * 40,
+        "role": "primary",
+        "primaries": [{"node_id": "a" * 40, "slots": [[0, 8191]]}, {"node_id": "c" * 40, "slots": [[8192, 16383]]}],
+    }
+    # The source's export is read until it ends.
+    reads = iter([[_job("snapshotting")], [_job("failover-granted")], [_job("success")]])
+
+    class Client(FakeClient):
+        def execute_command(self, *args):
+            if args == ("CLUSTER", "GETSLOTMIGRATIONS"):
+                self.commands.append(args)
+                return next(reads)
+            return super().execute_command(*args)
+
+    handle = _ClusterHandle({})
+    handle.new_client = lambda node_id, timeout=5.0: Client(handle.commands.setdefault(node_id, []))
+    spec = resolved(
+        ComponentSpec(role=ComponentRole.ACTION, use="valkey.action.migrate-slots", id="migrate", config={"key": "{s}"})
+    )
+    context = fake_context(handle, spec, deployment_mode="cluster")
+    with patch.object(slot_migration, "read_view", lambda handle, instance_id, timeout=2.0: view):
+        result = MigrateSlotsAction().run(context, spec)
+
+    assert result.status is ComponentStatus.PASS and "valkey-0 to valkey-2: success" in result.summary
+    assert handle.commands["valkey-0"][0] == ("CLUSTER", "MIGRATESLOTS", "SLOTSRANGE", "3828", "3828", "NODE", "c" * 40)
+    assert handle.commands["valkey-0"].count(("CLUSTER", "GETSLOTMIGRATIONS")) == 3
+    (record,) = evidence_values(result.evidence, "valkey.cluster.slot-migration.result")
+    assert (record["slot"], record["source"], record["target"], record["state"]) == (
+        3828,
+        "valkey-0",
+        "valkey-2",
+        "success",
+    )
+    names = [event.name for event in context.event_bus.committed_history()]
+    assert names == ["migrate.migration-started", "migrate.migration-completed"]
+
+
+def test_migrate_slots_does_not_migrate_a_slot_the_target_owns():
+    # Shard 1's primary owns the slot already: nothing to migrate, so the run never reached what it tests.
+    view = {"node_id": "c" * 40, "role": "primary", "primaries": [{"node_id": "c" * 40, "slots": [[0, 16383]]}]}
+    handle = _ClusterHandle({})
+    spec = resolved(
+        ComponentSpec(role=ComponentRole.ACTION, use="valkey.action.migrate-slots", id="migrate", config={"key": "{s}"})
+    )
+    with patch.object(slot_migration, "read_view", lambda handle, instance_id, timeout=2.0: view):
+        result = MigrateSlotsAction().run(fake_context(handle, spec, deployment_mode="cluster"), spec)
+    assert result.status is ComponentStatus.ERROR and "valkey-2 already owns slot 3828" in result.summary
+    assert handle.commands == {}
+
+
+def test_the_slot_migration_experiment_publishes_the_models_steps_and_kills_the_target_at_its_claim():
+    experiment = valkey_experiment("valkey.slot-migration-spec")
+    components = {component.id: component for component in experiment.components}
+    log = components["migration-log"]
+    assert (log.use, log.config["spec"]) == ("valkey.observer.log-trigger", "slot-migration")
+    patterns = load_bundle("slot-migration").mapping.log_patterns()
+    assert sorted(rule["publish"] for rule in log.config["rules"]) == sorted(patterns)
+    assert components["trace"].config["spec"] == "slot-migration"
+    kill = components["kill-target"].config
+    assert (kill["when_event"], kill["instance"], kill["signal"]) == ("slot-migration.claimed", "event", "SIGKILL")
+    # The scenario section names this experiment and this fault, so translate's scenarios compile against it.
+    scenario = load_bundle("slot-migration").mapping.scenario
+    assert scenario["experiment"] == experiment.experiment_id
+    assert [(fault["action"], fault["after"], fault["component"]) for fault in scenario["faults"]] == [
+        ("CrashT", "claimed", "kill-target")
+    ]
 
 
 def _tla_jar():

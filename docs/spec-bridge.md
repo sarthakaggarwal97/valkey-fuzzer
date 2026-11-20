@@ -47,7 +47,8 @@ names the paths involved. The code is in
 property is also evaluated against live runs. Of the four bundles that ship,
 only `cluster-election` is. The others (`replication`, `persistence`,
 `slot-migration`) are model only: `spec conform` reports which steps their
-runs took, and the data oracles compare data, but no oracle evaluates their
+runs took (each has shipped experiments that publish them, [Bundles](#bundles)),
+and the data oracles compare data, but no oracle evaluates their
 properties. `approved` claims do not change that; they say a maintainer
 reviewed the model, not that a live check exists. No shipped bundle is
 approved today: `replication` was, under an assumption (`AdoptOnLoad`)
@@ -111,11 +112,23 @@ publish those steps with the `valkey.replication-steps` fragment.
 [`formal/slot-migration/`](../formal/slot-migration/README.md) is atomic
 slot migration (`CLUSTER MIGRATESLOTS`: the snapshot, the pause, the grant,
 the target's claim, and its replica); like replication, `conform` reports
-only which steps a run took.
+only which steps a run took. `valkey.slot-migration-spec` migrates a slot
+under writes and kills the target at its claim.
 [`formal/persistence/`](../formal/persistence/README.md) is the order in
 which one server writes its AOF files, manifest and RDB file through a
 rewrite, `CONFIG SET appendonly` and a kill; `conform` reports only which
-steps a run took.
+steps a run took. `valkey.aof-durability` and `valkey.save-crash-points`
+publish those steps with the `valkey.persistence-steps` fragment.
+Every bundle has a `scenario` section, so `spec translate` writes scenarios
+from each one's counterexamples; which fault each injects, and which it
+leaves to the experiment, is in the table below.
+
+| Bundle | Experiment | Fault the scenario injects | Left to the experiment (`unmapped`) |
+| --- | --- | --- | --- |
+| `cluster-election` | `valkey.cluster-election-durability` | `Crash`: `kill-voter` after `granted`, at `vote_occurrence` | |
+| `replication` | `valkey.replication-full-resync` | none: no counterexample takes `Crash` | `Crash`, `Disconnect` (the experiment's own stall), `LoadFails` |
+| `slot-migration` | `valkey.slot-migration-spec` | `CrashT`: `kill-target` after `claimed`, `kill_delay_s` later | `Cancel`, `DropLink`, `PauseExpires`, `LoseBus` |
+| `persistence` | `valkey.save-crash-points` | none: every property is violated before any kill | `Crash` (the experiment's crash point, swept by `nth`), `RewriteFails` |
 `tests/fixtures/spec/register/` is a toy register that brings its own
 experiment and runs on Valkey (see
 [Onboarding a protocol with data only](#onboarding-a-protocol-with-data-only)).
@@ -196,8 +209,13 @@ on a pattern that matches none.
   follows (`after`), the experiment's fault `component` that injects it, the
   experiment input that sets the trigger occurrence (`occurrence_input`;
   without one the fault fires on the first occurrence), and `target:
-  same-process`. It also lists the timing `variants`; `occurrence_shift`
-  needs an `occurrence_input` on every fault.
+  same-process`. `unmapped` lists the model's fault actions the scenario
+  does not inject, each with the reason: no fault component does it (a
+  cancel is a command), or no counterexample takes it (the persistence
+  properties are violated before any kill). A scenario with no `faults`
+  sets only the deployment and the inputs, and the experiment runs its own
+  schedule; every counterexample then translates. It also lists the timing
+  `variants`; `occurrence_shift` needs an `occurrence_input` on every fault.
 
 **`experiments/`** holds data-only experiment documents, in the format of
 [Scenarios and experiments](scenarios-and-experiments.md), composed only of

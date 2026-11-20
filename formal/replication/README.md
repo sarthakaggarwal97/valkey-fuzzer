@@ -54,7 +54,7 @@ None of these properties is evaluated against a live run. `spec conform` reports
 | `negative-controls/save_info_without_primary.tla` | an RDB file always records the ID: must violate `OneHistoryPerId` |
 | `negative-controls/no_second_offset_check.tla` | PSYNC on replid2 ignores `second_replid_offset`: must violate `ReplicaIsPrefix` |
 | `claims.yaml` | the properties, scope, assumptions, bounds and exclusions (status `draft`) |
-| `mapping.yaml` | the log lines that show each step |
+| `mapping.yaml` | the log lines that show each step, and the `scenario` `spec translate` writes |
 
 Each `.tla` control `EXTENDS model` and replaces one action, so it checks the model's own property.
 
@@ -81,6 +81,17 @@ that adopts the snapshot's ID and offset when the load ends.
 The model does not show the replica exit of fuzzer issue #12: there `LoadFails` is what Valkey should do on a disk
 load whose main channel closes, and Valkey exits instead.
 
+## Scenarios
+
+`spec translate replication --control <name>` writes scenarios of `valkey.replication-full-resync` on the model's
+three nodes (one primary, two replicas). No counterexample takes `Crash`; the one fault a counterexample takes, the
+link drop of `keep_old_id_on_load`, is what the experiment injects itself (`stall-replica`, a `SIGSTOP` the primary
+answers by closing the link) on its own timer rather than on a mapped line, so the scenario injects no fault
+(`unmapped` in `mapping.yaml`: `Crash`, `Disconnect`, `LoadFails`): it sets the deployment, and the variants sweep
+the stall (`pause_s`). `DualChannel` sets no input, since the experiments take `dual-channel-replication-enabled`
+from the deployment's `server_config`. Every control translates. Run on Valkey 9.1.3, the direct scenario showed
+`Disconnect` and `FullSync` to `spec conform`.
+
 ## Checking runs
 
 `spec conform replication RUN` replays a run's mapped log lines and crashes, and reports which steps it took. The
@@ -99,4 +110,7 @@ run. A run with no mapped step is an error. The four dual-channel steps are unob
 curl -fsSL -o tla2tools.jar https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
 echo "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88  tla2tools.jar" | sha256sum -c -
 valkey-fuzzer spec check replication --tla2tools tla2tools.jar --output assurance.json
+valkey-fuzzer spec translate replication --control keep_old_id_on_load --tla2tools tla2tools.jar --out scenarios/
+valkey-fuzzer run scenarios/spec-replication-keep_old_id_on_load.yaml --artifact-dir runs/
+valkey-fuzzer spec conform replication runs/
 ```

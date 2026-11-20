@@ -24,7 +24,12 @@
 # point per run; scripts/crash_points.py sweeps a save's points, nth 1, 2, ...
 # both before and after each call, until the rule no longer acts. A nth past
 # the save's last call leaves the fault unfired, and the run is ERROR.
-extends: [valkey.base]
+#
+# `persistence-steps` publishes the persistence model's steps from the log
+# (valkey.persistence-steps), and the kill is the model's Crash: the live
+# counterpart of formal/persistence, whose counterexamples are kills between
+# two file operations of a rewrite (`spec translate persistence`).
+extends: [valkey.base, valkey.persistence-steps]
 id: valkey.save-crash-points
 deployment:
   modes: [standalone, cluster]
@@ -65,6 +70,8 @@ startup_overlays:
       # BGREWRITEAOF ("already in progress") and its calls would count as the save's.
       auto-aof-rewrite-percentage: "0"
 components:
+  - id: persistence-steps
+
   - use: valkey.observer.log
     id: logs
     config:

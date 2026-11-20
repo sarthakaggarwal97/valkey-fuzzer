@@ -8,6 +8,7 @@ import shutil
 
 import pytest
 
+from valkey_fuzzer.components import experiments
 from valkey_fuzzer.spec.bundle import load_bundle
 from valkey_fuzzer.spec.conform import ObservedRun, collect_runs
 
@@ -77,6 +78,18 @@ def test_conform_maps_a_rewrite_and_a_kill_onto_the_steps(tmp_path):
         "Crash": 1,
     }
     assert observed.states[-1]["crashes"] == 1
+
+
+@pytest.mark.parametrize("experiment_id", ["valkey.aof-durability", "valkey.save-crash-points"])
+def test_the_persistence_experiments_publish_the_models_steps_before_they_act(experiment_id):
+    (experiment,) = [item for item in experiments() if item.experiment_id == experiment_id]
+    order = [component.id for component in experiment.components]
+    (steps,) = [component for component in experiment.components if component.id == "persistence-steps"]
+    assert (steps.use, steps.config["spec"]) == ("valkey.observer.log-trigger", "persistence")
+    patterns = load_bundle("persistence").mapping.log_patterns()
+    assert sorted(rule["publish"] for rule in steps.config["rules"]) == sorted(patterns)
+    actions = [component.id for component in experiment.components if component.use.split(".")[1] == "action"]
+    assert actions and all(order.index("persistence-steps") < order.index(action) for action in actions)
 
 
 def _tla_jar():

@@ -71,6 +71,7 @@ _FORCED = {"extra": (_component("valkey.action.failover", "failover", force=True
         # A shard the cluster does not have is a config error, not a finding about Valkey.
         ("valkey.action.failover", {"shard": 3}, _SHARDS, "shard 3 is not below primaries 3"),
         ("valkey.action.cluster-election", {"shard": 3}, _SHARDS, "shard 3 is not below primaries 3"),
+        ("valkey.action.migrate-slots", {"key": "{s}", "shard": 3}, _SHARDS, "shard 3 is not below primaries 3"),
         ("valkey.action.poll", {"section": "s", "field": "f", "command": ["PING"], "predicate": {"equals": 1}}, {}, "section and field, or command"),
         ("valkey.observer.info", {"expectations": [{"field": "x", "equals": 1}]}, {}, "missing required field 'evidence_id'"),
         ("valkey.observer.info", {"expectations": [{"evidence_id": "a.b", "field": "x", "equals": 1, "required": "yes"}]}, {}, "required must be a boolean"),
