@@ -106,6 +106,33 @@ def verify_instance_process_identity(instance: InstanceInfo, client: valkey.Valk
         )
 
 
+def _proc_children(pid: int) -> list[int]:
+    """The children of ``pid`` from ``/proc`` (Linux with ``CONFIG_PROC_CHILDREN``); OSError where that is missing.
+
+    Each thread's file lists the children that thread forked, so every thread's file is read: ``ps`` reports them
+    all as the process's.
+    """
+    children: list[int] = []
+    for task in os.listdir(f"/proc/{pid}/task"):
+        with open(f"/proc/{pid}/task/{task}/children", encoding="utf-8") as handle:
+            children += [int(child) for child in handle.read().split()]
+    return children
+
+
+def _children(pid: int) -> list[int]:
+    """The PIDs of the children of ``pid``: read from ``/proc``, else from a ``ps`` listing of every process."""
+    try:
+        return _proc_children(pid)
+    except OSError:
+        pass
+    listing = run_bounded(["ps", "-A", "-o", "pid=", "-o", "ppid="])
+    return [
+        int(fields[0])
+        for fields in map(str.split, listing.stdout.splitlines())
+        if len(fields) == 2 and fields[1] == str(pid)
+    ]
+
+
 def kill_server(process: subprocess.Popen) -> None:
     """SIGKILL a server and the children it forked (an AOF rewrite, an RDB save), which would outlive it.
 
@@ -113,14 +140,11 @@ def kill_server(process: subprocess.Popen) -> None:
     """
     process.send_signal(signal.SIGSTOP)
     if process.poll() is None:
-        listing = run_bounded(["ps", "-A", "-o", "pid=", "-o", "ppid="])
-        for line in listing.stdout.splitlines():
-            fields = line.split()
-            if len(fields) == 2 and fields[1] == str(process.pid):
-                try:
-                    os.kill(int(fields[0]), signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+        for child in _children(process.pid):
+            try:
+                os.kill(child, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
     process.kill()
 
 
