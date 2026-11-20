@@ -92,7 +92,7 @@ def _may_lose_writes(component: ComponentSpec) -> bool:
         return config.get("signal", "SIGKILL") != "SIGSTOP"
     if component.use == "valkey.fault.syscall":
         return config.get("action", "kill") == "kill"
-    # The pack's own registrations (a component of another pack is not among them); the package imports this
+    # The Valkey registrations (a component registered elsewhere is not among them); the package imports this
     # module, so it is imported where it is used.
     from valkey_fuzzer.components import component_registrations
 

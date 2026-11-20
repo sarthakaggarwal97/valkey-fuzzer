@@ -10,15 +10,12 @@ result is recorded (:meth:`~BatchPlugin.record`), in the summary (:meth:`~BatchP
 lines the command prints of it (:meth:`~BatchPlugin.describe`). A plug-in with a source also records what that
 source expanded to, in ``batch.json`` under its name. A job such a source adds carries the plug-in's name as a key
 (the plug-in's own record of the job) and is the plug-in's to judge: the batch neither counts it, groups it by
-failure signature, nor runs it again. The batch loop knows no plug-in by name: the plug-ins are the
-``valkey_fuzzer.batch_plugins`` entry points (:func:`register_installed`), one per pack, each a function returning
-the pack's plug-ins; the fuzzer's own, ``valkey``, are the bug zoo and spec conformance
-(:func:`valkey_fuzzer.batch.shipped_plugins`).
+failure signature, nor runs it again. The batch loop knows no plug-in by name; :mod:`valkey_fuzzer.batch`
+registers the bug zoo and spec conformance.
 """
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from importlib.metadata import entry_points
 from typing import TYPE_CHECKING, Any, Optional
 
 from ..schema import ConfigSchema
@@ -108,10 +105,6 @@ class BatchPlugin:
         return []
 
 
-# The entry-point group of the installed plug-ins: one entry point per pack, named after it, whose value is a
-# function returning the pack's BatchPlugin instances (docs/extending.md, "Ship a pack").
-PLUGIN_GROUP = "valkey_fuzzer.batch_plugins"
-
 SOURCES: dict[str, BatchSource] = {}
 PLUGINS: list[BatchPlugin] = []
 
@@ -132,16 +125,6 @@ def register(plugin: BatchPlugin) -> None:
     if plugin.source is not None:
         register_source(plugin.source)
     PLUGINS.append(plugin)
-
-
-def register_installed() -> None:
-    """Register every installed plug-in: the :data:`PLUGIN_GROUP` entry points in name order, each pack's plug-ins
-    in the order its function returns them."""
-
-    points = sorted(entry_points(group=PLUGIN_GROUP), key=lambda point: point.name)
-    for point in points:
-        for plugin in point.load()():
-            register(plugin)
 
 
 def plugin_job(job: Mapping[str, Any]) -> bool:

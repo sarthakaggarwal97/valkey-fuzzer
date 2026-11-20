@@ -12,7 +12,6 @@ import signal
 import subprocess
 import sys
 import time
-from importlib.metadata import EntryPoint, entry_points
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -1107,8 +1106,12 @@ def test_a_resume_refuses_random_jobs_that_the_installed_code_would_draw_differe
 
 
 def test_a_plug_in_takes_part_at_every_point_of_the_batch_and_its_jobs_are_its_own_to_judge(
-    tmp_path, workers, stub, monkeypatch
+    tmp_path, workers, stub, monkeypatch, capsys
 ):
+    # The fuzzer's own plug-ins, in the order they take part (and the order of their summary entries).
+    assert [plugin.name for plugin in hooks.PLUGINS] == ["zoo", "conformance"]
+    assert list(hooks.SOURCES) == ["random", "matrix", "scenarios", "failures", "zoo"]
+
     def toy_jobs(value, index, service, options, expansion):
         expansion.recorded["toy"] = {"seeds": value["seeds"]}
         for seed in value["seeds"]:
@@ -1150,6 +1153,9 @@ def test_a_plug_in_takes_part_at_every_point_of_the_batch_and_its_jobs_are_its_o
             own = sorted(result["id"] for result in results.values() if result["source"] == "toy")
             return {"jobs": own, "counted": len(main)}, ["SKIP_UNSUPPORTED"]
 
+        def describe(self, entry):
+            return [f"  toy {job_id}: judged" for job_id in entry["jobs"]]
+
     monkeypatch.setattr(hooks, "PLUGINS", list(hooks.PLUGINS))
     monkeypatch.setattr(hooks, "SOURCES", dict(hooks.SOURCES))
     hooks.register(Toy())
@@ -1177,6 +1183,10 @@ def test_a_plug_in_takes_part_at_every_point_of_the_batch_and_its_jobs_are_its_o
     assert summary["toy"] == {"jobs": ["toy-7", "toy-8"], "counted": 2}
     # The statuses it adds count toward the batch's.
     assert summary["status"] == "SKIP_UNSUPPORTED" and summary["exit_code"] == 3
+    # The command prints what it describes, in the plug-ins' order, between the batch's lines and its status.
+    batch_command._print_summary(summary)
+    out = capsys.readouterr().out
+    assert out.index("Cores per run") < out.index("  toy toy-7: judged\n  toy toy-8: judged\n") < out.index("Status: ")
     with pytest.raises(ValueError, match="already registered"):
         hooks.register(Toy())
 
@@ -1212,84 +1222,6 @@ def test_a_plug_in_checks_the_options_it_carries_into_the_task_and_no_two_name_t
     hooks.register(Twin())
     with pytest.raises(ValueError, match=r"'twin' names task options another plug-in gives: \['toy_limit'\]"):
         hooks.task_options(BatchOptions())
-
-
-# A pack's batch plug-in: a module an entry point of the ``valkey_fuzzer.batch_plugins`` group names.
-_TOY_BATCH_PACK = """\
-from pathlib import Path
-
-from valkey_fuzzer.batch.hooks import BatchPlugin, BatchSource
-from valkey_fuzzer.schema import ConfigField, ConfigSchema
-
-
-def _jobs(value, index, service, options, expansion):
-    expansion.recorded["toy"] = {"seeds": value["seeds"]}
-    for seed in value["seeds"]:
-        scenario = {"scenario_id": f"toy-{seed}", "seed": seed, "experiment": {"id": "valkey.snapshot-equivalence"},
-                    "deployment": {"mode": "standalone"}}
-        expansion.add({"id": f"toy-{seed}", "source": "toy", "label": "toy", "scenario": scenario, "toy": {"seed": seed}})
-
-
-class Toy(BatchPlugin):
-    name = "toy"
-    source = BatchSource(
-        "toy", ConfigSchema({"seeds": ConfigField(list, items=ConfigField(int))}), lambda settings, base_dir, where: settings, _jobs
-    )
-
-    def after_run(self, report_dir, task):
-        Path(report_dir, "toy.txt").write_text("checked")
-
-    def record(self, job, run_dir, report, result):
-        return result["status"] if "toy" in job else Path(run_dir, "toy.txt").read_text()
-
-    def summarize(self, runner, results, main):
-        return {"statuses": {result["id"]: result["toy"] for result in results.values() if result["source"] == "toy"}}, []
-
-    def describe(self, entry):
-        return [f"  toy {job_id}: {status}" for job_id, status in sorted(entry["statuses"].items())]
-
-
-def batch_plugins():
-    return [Toy()]
-"""
-
-
-def test_the_plug_ins_are_the_entry_points_of_their_group_and_a_packs_takes_part_like_the_fuzzers(
-    tmp_path, workers, stub, monkeypatch, capsys
-):
-    # The fuzzer's own are the ``valkey`` entry point (pyproject.toml): the zoo, then spec conformance.
-    installed = tuple(entry_points(group=hooks.PLUGIN_GROUP))
-    assert "valkey" in [point.name for point in installed]
-    assert [type(plugin).__name__ for plugin in batch.shipped_plugins()] == ["ZooPlugin", "ConformancePlugin"]
-    assert [plugin.name for plugin in hooks.PLUGINS] == ["zoo", "conformance"]
-
-    (tmp_path / "tests_toy_batch.py").write_text(_TOY_BATCH_PACK, encoding="utf-8")
-    monkeypatch.syspath_prepend(str(tmp_path))
-    points = (*installed, EntryPoint("toy", "tests_toy_batch:batch_plugins", hooks.PLUGIN_GROUP))
-    monkeypatch.setattr(hooks, "entry_points", lambda group: points)
-    builtin = {kind: s for kind, s in hooks.SOURCES.items() if not any(s is p.source for p in hooks.PLUGINS)}
-    monkeypatch.setattr(hooks, "PLUGINS", [])
-    monkeypatch.setattr(hooks, "SOURCES", builtin)
-    hooks.register_installed()
-    # Packs in name order (toy before valkey), a pack's plug-ins in the order its function returns them.
-    assert [plugin.name for plugin in hooks.PLUGINS] == ["toy", "zoo", "conformance"]
-    assert list(hooks.SOURCES) == ["random", "matrix", "scenarios", "failures", "toy", "zoo"]
-
-    stub.behave(**{"8": "fail:data"})
-    spec = tmp_path / "batch.yaml"
-    random = {"experiments": [SNAPSHOT], "seeds": 1, "first_seed": 0, "excludes": EXCLUDES}
-    spec.write_text(yaml.safe_dump({"port_base": 12000, "sources": [{"random": random}, {"toy": {"seeds": [7, 8]}}]}))
-    with patch("sys.argv", ["valkey-fuzzer", "batch", str(spec), "--out", str(tmp_path / "b")]):
-        assert main() == 0
-    out = capsys.readouterr().out
-    results = {path.stem: json.loads(path.read_text()) for path in Path(tmp_path, "b", "results").glob("*.json")}
-    # Its source expanded, the worker ran its after_run, it recorded each job, and its jobs were its own to judge.
-    assert json.loads(Path(tmp_path, "b", "batch.json").read_text())["toy"] == {"seeds": [7, 8]}
-    assert results[_id(0)]["toy"] == "checked" and results["toy-8"]["toy"] == "FAIL"
-    summary = json.loads(Path(tmp_path, "b", "summary.json").read_text())
-    assert summary["toy"] == {"statuses": {"toy-7": "PASS", "toy-8": "FAIL"}} and summary["counts"] == {"PASS": 1}
-    # The command printed what it describes, in the plug-ins' order, between the batch's lines and its status.
-    assert out.index("Cores per run") < out.index("  toy toy-7: PASS\n  toy toy-8: FAIL\n") < out.index("Status: PASS")
 
 
 @pytest.mark.parametrize(

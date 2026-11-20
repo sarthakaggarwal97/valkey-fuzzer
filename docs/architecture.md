@@ -62,9 +62,8 @@ probes, inputs, workloads, transitions and faults, path evidence, oracles,
 and any external service or loss model.
 
 The engine is kept apart from the Valkey components, so each can be tested
-on its own: the engine never imports `valkey_fuzzer.components`, which
-registers through the `valkey_fuzzer.packs` entry point like any other
-[pack](extending.md#ship-a-pack), and the components import the engine modules
+on its own: the engine imports `valkey_fuzzer.components` only in
+`build_catalog`, and the components import the engine modules
 they use directly (see [The Valkey components](#the-valkey-components)).
 
 ## Code layout
@@ -86,7 +85,7 @@ they use directly (see [The Valkey components](#the-valkey-components)).
 | `valkey_fuzzer/events.py` | `RunEvent` and `EventBus`, the run's event journal, and the names of the events the runner publishes. |
 | `valkey_fuzzer/evidence.py` | The evidence contract: `check_requirements` at compile time, `EvidenceContract` at run time. |
 | `valkey_fuzzer/obligations.py` | `ObligationLedger` and `Obligation`: owned state changes and their undo. |
-| `valkey_fuzzer/catalog.py` | `Catalog`, `installed_packs`, and `build_catalog`: experiment documents and fragments, the registries (one for components, one for generator hooks), and the packs the `valkey_fuzzer.packs` entry points name. |
+| `valkey_fuzzer/catalog.py` | `Catalog` and `build_catalog`: experiment documents and fragments, and the registries (one for components, one for generator hooks). |
 | `valkey_fuzzer/describe.py` | The catalog as data: what `list --format json` prints. |
 | `valkey_fuzzer/compiler.py` | `ScenarioCompiler`: scenario plus catalog to execution plan. |
 | `valkey_fuzzer/runner.py` | `Runner`: the run lifecycle and containment; it watches component calls through `deadlines.py`. |
@@ -145,16 +144,14 @@ so a report never holds a run-time path it did not declare.
 first use and keeps, with its compiler and runner (a `RunService` given a
 catalog, as the testing helpers build one, uses that one instead):
 
-1. it registers the deployment providers its caller passes, if any (the
-   core ships none of its own);
-2. each installed pack (an entry point of the `valkey_fuzzer.packs` group,
-   in name order; the Valkey components are the `valkey` pack) registers its
-   components, generator hooks, artifact and resource providers, deployment
-   providers (the `valkey` pack's are the local deployment's for `standalone`
-   and `cluster`, `valkey-fuzzer.deployment.local`), fragments, and
+1. it registers the local deployment provider for `standalone` and `cluster`
+   (`valkey-fuzzer.deployment.local`), or the deployment providers its caller
+   passes instead;
+2. `valkey_fuzzer.components.register` registers the Valkey components,
+   generator hooks, artifact and resource providers, fragments, and
    experiments as one transaction: every entry is validated before anything
    changes, so a conflict leaves the catalog untouched;
-3. it parses the experiment directories, which can extend the packs'
+3. it parses the experiment directories, which can extend the Valkey
    fragments;
 4. it freezes every registry.
 
@@ -447,8 +444,8 @@ component library ([full list](components/README.md)), the providers
 `valkey.artifact.local-binary`, `valkey.resource.tmpdir`, and
 `valkey.resource.tmpfs`, the generator hooks, the
 [fragments](scenarios-and-experiments.md#fragments) (the search profiles
-among them), and the experiments. Its `register`, the `valkey` entry point of
-the `valkey_fuzzer.packs` group, registers
+among them), and the experiments. Its `register`, which `build_catalog`
+calls, registers
 them (see [Register components and experiments](extending.md#register-components-and-experiments)).
 
 What it needed from the engine was feature-neutral: per-instance binaries,

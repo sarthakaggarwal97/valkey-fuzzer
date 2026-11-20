@@ -2,15 +2,13 @@
 
 :class:`Catalog` owns everything one run service registers. Data-only
 experiment documents are parsed here (fragments merged in through
-``extends``); :func:`build_catalog` registers every installed pack (the
-``valkey_fuzzer.packs`` entry points; the Valkey components are one) and the
-experiments of any experiment directories.
+``extends``); :func:`build_catalog` registers the local deployment providers,
+the Valkey components, and the experiments of any experiment directories.
 """
 
 import re
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
-from importlib.metadata import entry_points
 from os import PathLike
 from pathlib import Path
 from types import MappingProxyType
@@ -39,10 +37,6 @@ from .schema import (
 )
 
 ExperimentDirectory = Union[str, "PathLike[str]"]
-
-# The entry-point group packs register through: each entry point is a ``register(catalog)`` function, and is named
-# after the namespace of the IDs it registers (``valkey`` registers ``valkey.*``).
-PACK_GROUP = "valkey_fuzzer.packs"
 
 
 class DuplicateExperimentError(ExperimentError):
@@ -493,7 +487,7 @@ class Catalog:
             for file, spec in load_experiment_directory(directory, fragments=self._fragments).items():
                 other = files_of.get(spec.experiment_id)
                 if other is None and self._experiments.get(spec.experiment_id) is not None:
-                    other = "a registered pack"
+                    other = "a shipped experiment"
                 if other is not None:
                     raise DuplicateExperimentError(spec.experiment_id, f"{other} and {file}")
                 files_of[spec.experiment_id] = file
@@ -517,34 +511,31 @@ class Catalog:
         self._frozen = True
 
 
-def installed_packs() -> dict[str, Callable[[Catalog], None]]:
-    """``{name: register}`` for every installed pack: the ``valkey_fuzzer.packs`` entry points, loaded, in name order."""
-
-    # shortcut: a pack sees only the fragments of packs before it in name order; give packs a declared order (or
-    # register fragments in a first pass) when one pack's experiments must extend a later pack's fragments.
-    points = sorted(entry_points(group=PACK_GROUP), key=lambda point: point.name)
-    return {point.name: point.load() for point in points}
-
-
 def build_catalog(
     experiment_directories: Sequence[ExperimentDirectory] = (),
     *,
     deployment_providers: Optional[Iterable[DeploymentProviderRegistration]] = None,
 ) -> Catalog:
-    """A frozen catalog: ``deployment_providers``, every installed pack, then ``experiment_directories``.
+    """A frozen catalog: the deployment providers, the Valkey components, then ``experiment_directories``.
 
-    The core registers no provider of its own: each pack registers the
-    providers it ships (the Valkey pack, the local deployment's), and
-    ``deployment_providers`` are the caller's, registered first. Each pack's
-    ``register(catalog)`` runs in name order (:func:`installed_packs`). The
-    experiment directories load last, since data-only experiments may extend
-    a pack's experiment fragments.
+    ``deployment_providers`` default to the local deployment's
+    (:func:`~valkey_fuzzer.deployment.local.provider.local_deployment_provider_registrations`).
+    :func:`valkey_fuzzer.components.register` then registers the Valkey
+    components, generator hooks, environment providers, fragments, and
+    experiments. The experiment directories load last, since data-only
+    experiments may extend the Valkey experiment fragments.
     """
 
+    # The components import this module, so they are imported only once it is loaded; the local deployment (and
+    # the valkey client it brings) is imported here too, so a command that builds no catalog never loads it.
+    from .components import register as register_valkey_components
+    from .deployment.local.provider import local_deployment_provider_registrations
+
     catalog = Catalog()
-    catalog.deployment_providers.register_many(deployment_providers or ())
-    for register in installed_packs().values():
-        register(catalog)
+    if deployment_providers is None:
+        deployment_providers = local_deployment_provider_registrations().values()
+    catalog.deployment_providers.register_many(deployment_providers)
+    register_valkey_components(catalog)
     catalog.load_experiment_directories(experiment_directories)
     catalog.freeze()
     return catalog
