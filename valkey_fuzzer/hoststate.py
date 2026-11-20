@@ -483,6 +483,14 @@ def run_iptables(*args: str) -> Any:
     return run_bounded(["iptables", "-w", *args])
 
 
+def run_iptables_restore(text: str) -> Any:
+    """``iptables-restore -w -n`` with ``text`` (a table's rules between ``*table`` and ``COMMIT``) on stdin: one
+    process and one commit for them all; ``-n`` (``--noflush``) keeps every rule already there. Its stderr names
+    the line that failed (``line N failed``, or ``Error occurred at line: N``), counted from the first."""
+
+    return run_bounded(["iptables-restore", "-w", "-n"], input=text)
+
+
 Iptables = Callable[..., Any]
 
 
@@ -520,6 +528,14 @@ def run_tc(*args: str) -> Any:
     """``tc <args>``, bounded."""
 
     return run_bounded(["tc", *args])
+
+
+def run_tc_batch(text: str) -> Any:
+    """``tc -force -batch -`` with ``text`` (one ``tc`` command per line, without ``tc``) on stdin: one process for
+    them all, every line tried (``-force``). Its stderr names each line that failed (``Command failed -:N``,
+    after that command's own error), counted from the first; it exits 1 once one failed."""
+
+    return run_bounded(["tc", "-force", "-batch", "-"], input=text)
 
 
 def run_ip(*args: str) -> Any:
@@ -666,6 +682,26 @@ def release_lo_ingress(tc: Command = run_tc) -> list[str]:
     return []
 
 
+def remove_degradation(device: str, prefs: Iterable[int], tc: Command = run_tc, ip: Command = run_ip) -> list[str]:
+    """Remove a degradation: the ``lo`` ingress filters at ``prefs``, then ``lo``'s ingress qdisc once the fuzzer
+    added it and no filter is left on it, then ``device`` with its netem; the errors, empty once all are gone
+    (idempotent). The undo of a fault's own degradation and of one a dead fuzzer left (the sweep).
+
+    The order is a safety rule: the filters first, so no packet is redirected to a device that is gone (a filter
+    whose device is gone drops what it matches), and the device only once no filter redirects to it; the first
+    two steps under :func:`lo_ingress_lock`, so the qdisc is never removed under another run's first filter.
+    """
+
+    errors = []
+    with lo_ingress_lock():
+        errors += remove_lo_filters(prefs, tc)
+        if not errors:
+            errors += release_lo_ingress(tc)
+    if not errors:
+        errors += remove_netem_device(device, ip)
+    return errors
+
+
 # ---------------------------------------------------------------------------
 # Finding leftovers
 # ---------------------------------------------------------------------------
@@ -780,6 +816,33 @@ def _find_servers(gone: Gone) -> list[Leftover]:
         if owner is not None and pid != os.getpid() and gone(owner):
             found.append(Leftover("server", str(pid), owner.token, age, command))
     return found
+
+
+def _find_chains(gone: Gone, report: SweepReport) -> list[Leftover]:
+    """The fuzzer-named iptables chains of gone owners (a partition's, left when its fuzzer died); none off Linux
+    or without ``iptables``, and none, noted in ``report.unchecked``, without root (listing them needs it)."""
+
+    if platform.system() != "Linux" or not shutil.which("iptables"):
+        return []
+    chains = tagged_chains(run_iptables) if _is_root() else None
+    if chains is None:
+        report.unchecked.append("iptables chains: listing them needs root")
+        return []
+    return [Leftover("chain", chain, owner.token, None) for chain, owner in chains if gone(owner)]
+
+
+def _find_netem_devices(gone: Gone, report: SweepReport) -> list[Leftover]:
+    """The fuzzer-named netem devices of gone owners (a degradation's, left when its fuzzer died); none off Linux or
+    without ``ip`` and ``tc``, and none, noted in ``report.unchecked``, when they cannot be listed. Listing
+    devices needs no privilege; removing one does."""
+
+    if platform.system() != "Linux" or not (shutil.which("ip") and shutil.which("tc")):
+        return []
+    devices = tagged_netem_devices(run_ip)
+    if devices is None:
+        report.unchecked.append("netem devices: listing them failed")
+        return []
+    return [Leftover("netem", device, owner.token, None) for device, owner in devices if gone(owner)]
 
 
 def _find_cgroups(gone: Gone) -> list[Leftover]:
@@ -966,18 +1029,10 @@ def _remove_cgroup(item: Leftover) -> Optional[str]:
 
 
 def _remove_netem(item: Leftover) -> Optional[str]:
-    # The filters first, so no packet is redirected to a device that is gone; then lo's ingress qdisc, if the
-    # fuzzer added it and nothing is left on it; then the device.
-    with lo_ingress_lock():
-        prefs = redirect_prefs(item.target, run_tc)
-        if prefs is None:
-            raise RuntimeError("cannot list lo's ingress filters" + ("" if _is_root() else " (needs root)"))
-        errors = remove_lo_filters(prefs, run_tc)
-        if not errors:
-            errors += release_lo_ingress(run_tc)
-    if not errors:
-        # Only once no filter redirects to it: a filter whose device is gone drops what it matches.
-        errors += remove_netem_device(item.target, run_ip)
+    prefs = redirect_prefs(item.target, run_tc)
+    if prefs is None:
+        raise RuntimeError("cannot list lo's ingress filters" + ("" if _is_root() else " (needs root)"))
+    errors = remove_degradation(item.target, prefs, run_tc, run_ip)
     if errors:
         raise RuntimeError("; ".join(errors) + ("" if _is_root() else " (needs root)"))
     return None
@@ -1083,19 +1138,8 @@ def sweep(
     now = time.time()
     report = SweepReport(dry_run=dry_run)
     found = _find_servers(gone)
-    if platform.system() == "Linux" and shutil.which("iptables"):
-        chains = tagged_chains(run_iptables) if _is_root() else None
-        if chains is None:
-            report.unchecked.append("iptables chains: listing them needs root")
-        else:
-            found += [Leftover("chain", chain, owner.token, None) for chain, owner in chains if gone(owner)]
-    if platform.system() == "Linux" and shutil.which("ip") and shutil.which("tc"):
-        # Listing devices needs no privilege; removing one does.
-        devices = tagged_netem_devices(run_ip)
-        if devices is None:
-            report.unchecked.append("netem devices: listing them failed")
-        else:
-            found += [Leftover("netem", device, owner.token, None) for device, owner in devices if gone(owner)]
+    found += _find_chains(gone, report)
+    found += _find_netem_devices(gone, report)
     found += _find_cgroups(gone)
     roots = default_roots() if roots is None else roots
     found += _find_mounts(now, gone)

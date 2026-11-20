@@ -507,8 +507,7 @@ def test_a_degrade_wave_scopes_netem_to_the_targets_links_and_heals_them(monkeyp
 
 
 def test_a_partition_whose_heal_fails_is_an_error_though_the_final_cleanup_removed_it(monkeypatch):
-    iptables = Iptables(fail={("-D", 1): "resource busy", ("-D", 2): "resource busy"})
-    monkeypatch.setattr(network, "run_iptables", iptables)
+    iptables = Iptables(fail={("-D", 1): "resource busy", ("-D", 2): "resource busy"}).install(monkeypatch)
     monkeypatch.setattr(replication_chaos, "iptables_supported", lambda: (True, ""))
     waves = [[{"op": "partition", "target": "valkey-1", "duration_s": 0.05}]]
     handle = FakeStandalone()
@@ -861,15 +860,21 @@ def test_a_window_ends_at_the_exit_that_ended_its_primarys_tenure_not_an_earlier
 def test_a_partition_refuses_unsafe_addresses_before_any_iptables_call(
     monkeypatch, addresses, isolated, peers, message
 ):
-    iptables = Iptables()
-    monkeypatch.setattr(network, "run_iptables", iptables)
+    iptables = Iptables().install(monkeypatch)
     with pytest.raises(network.PartitionError, match=message):
         network.drop_between("VF-chain", addresses, isolated, peers)
-    assert iptables.calls == []
+    assert iptables.calls == [] and iptables.restores == []
 
 
 def test_a_partition_between_distinct_loopback_addresses_is_installed(monkeypatch):
-    iptables = Iptables()
-    monkeypatch.setattr(network, "run_iptables", iptables)
+    iptables = Iptables().install(monkeypatch)
     rules = network.drop_between("VF-chain", {"a": "127.0.0.2", "b": "127.0.0.3", "c": "::1"}, ["a"], ["b"])
     assert rules == ["127.0.0.2->127.0.0.3", "127.0.0.3->127.0.0.2"] and iptables.calls[-1][0] == "-I"
+    # The rules and the jump in one iptables-restore, so they land together or not at all.
+    assert iptables.restores == [
+        "*filter\n"
+        "-A VF-chain -s 127.0.0.2 -d 127.0.0.3 -j DROP\n"
+        "-A VF-chain -s 127.0.0.3 -d 127.0.0.2 -j DROP\n"
+        "-I INPUT 1 -j VF-chain\n"
+        "COMMIT\n"
+    ]

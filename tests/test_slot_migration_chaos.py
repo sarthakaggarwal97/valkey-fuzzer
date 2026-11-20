@@ -682,12 +682,19 @@ class _Iptables:
         self.calls.append(args)
         return SimpleNamespace(returncode=0, stderr="")
 
+    def restore(self, text):
+        # iptables-restore's stdin: the rules between *filter and COMMIT, each recorded as a call.
+        for line in text.splitlines()[1:-1]:
+            self(*line.split())
+        return SimpleNamespace(returncode=0, stderr="")
+
 
 def test_a_partition_cuts_the_source_from_the_target_for_its_duration(monkeypatch):
     from valkey_fuzzer.components import network
 
     iptables = _Iptables()
     monkeypatch.setattr(network, "run_iptables", iptables)
+    monkeypatch.setattr(network, "run_iptables_restore", iptables.restore)
     monkeypatch.setattr(slot_migration_chaos, "iptables_supported", lambda: (True, ""))
     removed = []
     monkeypatch.setattr(slot_migration_chaos, "remove_partition", lambda chain: removed.append(chain))

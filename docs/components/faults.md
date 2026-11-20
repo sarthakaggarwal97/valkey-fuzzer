@@ -85,7 +85,9 @@ restart timing).
 ## `valkey.fault.network-partition`
 
 Drops every packet between each isolated instance and each peer with
-iptables rules in a chain of its own, jumped to from `INPUT`. Client traffic
+iptables rules in a chain of its own, jumped to from `INPUT`: `iptables -N`
+creates the chain, then one `iptables-restore --noflush` adds its rules and
+the jump in one commit. Client traffic
 from the harness (127.0.0.1) still reaches both sides. It needs Linux, root,
 iptables, and `deployment.addressing: per_instance_loopback`; pair it with
 `valkey.capability.host-probe` and `requires: [linux, root, iptables,
@@ -134,7 +136,9 @@ What runs on the host, and why it can touch no other flow:
    added it. The qdisc itself changes nothing: it only gives filters a place.
 4. One `tc filter add dev lo ingress protocol ip pref <P> handle <k> flower
    ip_proto tcp src_ip <A> dst_ip <B> action mirred egress redirect dev vf...`
-   per direction of each instance pair. A filter matches a packet only when
+   per direction of each instance pair: the first in a `tc` call of its own
+   (it claims the `pref`), the rest as the lines of one `tc -force -batch -`
+   on its stdin. A filter matches a packet only when
    its source and destination are both the exact addresses of the pair, so a
    flow between two addresses of this run's instances is redirected and
    nothing else is: not the harness's clients (127.0.0.1), not another run's
