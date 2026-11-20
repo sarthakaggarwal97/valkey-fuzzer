@@ -20,7 +20,7 @@ import yaml
 from tests.live_support import BINARY, check, evidence, run_scenario, scenario
 from tests.valkey_experiments_support import registration_for, valkey_service
 from valkey_fuzzer._data import to_plain_data
-from valkey_fuzzer.components import actions
+from valkey_fuzzer.components import command_sequence
 from valkey_fuzzer.components.server import PrivateServer
 from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import ComponentRole
@@ -142,7 +142,7 @@ def run(commands, **config):
     )
     spec = resolved_spec(registration_for("valkey.action.commands"), spec)
     context = FakeContext(spec, deployment={"valkey_binary": BINARY})
-    result = actions.CommandsAction().run(context, spec)
+    result = command_sequence.CommandsAction().run(context, spec)
     return result, (to_plain_data(result.evidence[0].value) if result.evidence else None)
 
 

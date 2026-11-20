@@ -35,7 +35,7 @@ from valkey_fuzzer.schema import ConfigError, ConfigField, ConfigSchema, plain_c
 from .instances import EXPECTED_DOWN, deployment, select_instance
 from .polling import remaining
 from .predicates import payload_matches
-from .processes import KILL_EXIT_TIMEOUT_S, pause_owned, wait_killed
+from .processes import KILL_EXIT_TIMEOUT_S, RESTART_FIELDS, pause_owned, record_restart, wait_killed
 from .registration import component_registration
 from .schemas import FLAG, INTEGER, MAPPING, NUMBER, TEXT, declared, mapping_of, nullable, optional
 
@@ -463,14 +463,12 @@ class ProcessSignalFault(EventFault):
             context.event_bus.publish(f"{spec.id}.recovered", source=spec.id, payload={"instance_id": self._target})
 
     def _restart(self, handle: Any, record: dict[str, Any]) -> None:
-        started = now()
-        handle.restart(self._target, wait_ready=True, ready_timeout=self._config["ready_timeout_s"])
-        record["restarted"] = True
-        # The new process can vote and acknowledge from its spawn on, before it is ready.
-        record["restart_spawned_at"] = handle.started_at(self._target)
-        record["restart_ready_at"] = now()
-        record["restart_seconds"] = round(now() - started, 3)
-        record["restart_pid"] = handle.pid(self._target)
+        record_restart(
+            handle,
+            self._target,
+            record,
+            lambda: handle.restart(self._target, wait_ready=True, ready_timeout=self._config["ready_timeout_s"]),
+        )
 
     def _quiesce(self) -> None:
         if self._restarter is not None:
@@ -493,12 +491,7 @@ _SIGNAL_DECLARES = fault_declares(
         "exited": optional(bool),
         "exited_at": optional(float),
         "disk_vars_at_kill": optional(dict, allow_none=True),
-        "restarted": optional(bool),
-        "restart_spawned_at": optional(float),
-        "restart_ready_at": optional(float),
-        "restart_seconds": optional(float),
-        "restart_pid": optional(int, allow_none=True),
-        "restart_error": optional(str),
+        **RESTART_FIELDS,
         "resumed": optional(bool),
     },
     events={"{id}.recovered": ConfigSchema({"instance_id": TEXT})},

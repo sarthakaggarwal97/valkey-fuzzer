@@ -6,9 +6,36 @@ from typing import Any, Callable
 
 from ..clock import now
 from .files import nodes_conf_path, read_cluster_vars
+from .schemas import optional
 
 # Opens the undo obligation of a change just applied: ``own(kind, target, undo)``.
 Own = Callable[[str, str, Callable[[], None]], Any]
+
+# What :func:`record_restart` records of a restart, for a fault's declarations; ``restart_error`` is what a fault
+# records when its restart raised instead.
+RESTART_FIELDS = {
+    "restarted": optional(bool),
+    "restart_spawned_at": optional(float),
+    "restart_ready_at": optional(float),
+    "restart_seconds": optional(float),
+    "restart_pid": optional(int, allow_none=True),
+    "restart_error": optional(str),
+}
+
+
+def record_restart(handle: Any, instance_id: str, record: dict[str, Any], restart: Callable[[], None]) -> None:
+    """Run ``restart`` (which starts ``instance_id`` again and waits for it) and record it in ``record`` (see
+    ``RESTART_FIELDS``): that it restarted, when the new process was spawned and when it was ready, how long the
+    restart took, and the new pid."""
+
+    started = now()
+    restart()
+    record["restarted"] = True
+    # The new process can vote and acknowledge from its spawn on, before it is ready.
+    record["restart_spawned_at"] = handle.started_at(instance_id)
+    record["restart_ready_at"] = now()
+    record["restart_seconds"] = round(now() - started, 3)
+    record["restart_pid"] = handle.pid(instance_id)
 
 
 def restart_once(handle: Any, instance_id: str, **restart: Any) -> Callable[[], None]:

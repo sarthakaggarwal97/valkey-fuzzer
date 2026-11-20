@@ -16,7 +16,7 @@ import pytest
 from tests.live_support import BINARY, OLD_BINARY, check, evidence, needs_old_binary, run_scenario, scenario
 from tests.valkey_experiments_support import registration_for, valkey_service
 from valkey_fuzzer._data import to_plain_data
-from valkey_fuzzer.components import actions
+from valkey_fuzzer.components import command_sequence
 from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.testing import FakeContext, resolved_spec
@@ -48,7 +48,7 @@ def run(candidate, commands, **config):
     )
     spec = resolved_spec(registration_for("valkey.action.commands"), spec)
     context = FakeContext(spec, deployment={"valkey_binary": candidate})
-    result = actions.CommandsAction().run(context, spec)
+    result = command_sequence.CommandsAction().run(context, spec)
     return result, (to_plain_data(result.evidence[0].value) if result.evidence else None)
 
 

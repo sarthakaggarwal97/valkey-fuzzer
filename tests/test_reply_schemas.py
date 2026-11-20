@@ -6,7 +6,7 @@ import json
 import pytest
 
 from valkey_fuzzer.components import reply_schemas
-from valkey_fuzzer.components.actions import raw_reply
+from valkey_fuzzer.components.command_sequence import raw_reply
 from valkey_fuzzer.components.reply_schemas import dumped, mismatch, read_specs
 
 _STRING, _INTEGER, _NULL = {"type": "string"}, {"type": "integer"}, {"type": "null"}

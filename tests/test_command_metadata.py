@@ -23,7 +23,7 @@ from tests.test_command_sequence import (
 from tests.test_command_table import _flat
 from tests.valkey_experiments_support import fake_context, registration_for, resolved, unit_plan, valkey_service
 from valkey_fuzzer._data import to_plain_data
-from valkey_fuzzer.components import actions, command_metadata, command_table
+from valkey_fuzzer.components import command_metadata, command_sequence, command_table
 from valkey_fuzzer.components.command_metadata import CommandMetadataOracle, range_positions, spec_positions
 from valkey_fuzzer.generator import generate
 from valkey_fuzzer.plan import ComponentSpec
@@ -165,8 +165,8 @@ def builds(monkeypatch, tmp_path):
 
     BUILDS.clear()
     SERVERS.clear()
-    monkeypatch.setattr(actions, "PrivateServer", FakeServer)
-    monkeypatch.setattr(actions, "open_raw_connection", fake_open_raw_connection)
+    monkeypatch.setattr(command_sequence, "PrivateServer", FakeServer)
+    monkeypatch.setattr(command_sequence, "open_raw_connection", fake_open_raw_connection)
     path = tmp_path / "valkey-server"
     path.write_text("#!/bin/sh\n")
     path.chmod(0o755)

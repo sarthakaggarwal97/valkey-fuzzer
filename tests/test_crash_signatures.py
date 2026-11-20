@@ -10,7 +10,7 @@ import valkey
 import yaml
 
 from valkey_fuzzer.batch import signature_key, signature_label
-from valkey_fuzzer.components import actions, capabilities
+from valkey_fuzzer.components import capabilities, command_sequence
 from valkey_fuzzer.components.oracles import CRASH_PATTERNS, LivenessOracle, scan_for_crashes
 from valkey_fuzzer.minimize import failure_signature, same_failure
 from valkey_fuzzer.plan import ComponentSpec, DeploymentProviderIdentity, EvidenceRequirement, ExecutionPlan
@@ -501,7 +501,7 @@ def test_a_compared_build_that_crashes_when_the_commands_action_starts_it_is_a_c
     )
     context = FakeContext(spec, deployment={"valkey_binary": _fake_server(tmp_path / "candidate", "exit 1")})
 
-    result = actions.CommandsAction().run(context, spec)
+    result = command_sequence.CommandsAction().run(context, spec)
 
     started = f"the parent build ({parent})"
     if not crashed:

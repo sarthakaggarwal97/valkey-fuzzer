@@ -22,9 +22,9 @@ from valkey_fuzzer.protocols import component_artifact_dir
 from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
 from valkey_fuzzer.schema import BASE64_KEY, ConfigError, ConfigField, plain_config
 
-from .actions import _PRIVATE_SERVER_DEFAULTS, _free_ports, _is_binary, _port_block, _text
-from .actions import _Side as _ServerSide
 from .capabilities import resolve_binary
+from .command_sequence import _PRIVATE_SERVER_DEFAULTS, _free_ports, _is_binary, _port_block, _text
+from .command_sequence import _Side as _ServerSide
 from .oracles import CRASH_PATTERNS, crash_cause
 from .predicates import PREDICATE_FIELDS, compare, validate_predicate
 from .registration import component_registration
