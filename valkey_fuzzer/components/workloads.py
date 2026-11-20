@@ -155,7 +155,7 @@ def make_value(rng: random.Random, size: int, compressible: bool, tag: str) -> s
         body = (tag + ":") * (size // (len(tag) + 1) + 1)
         return body[:size]
     alphabet = string.ascii_letters + string.digits
-    return (tag + ":" + "".join(rng.choice(alphabet) for _ in range(size)))[: max(size, len(tag) + 1)]
+    return (tag + ":" + "".join(rng.choices(alphabet, k=size)))[: max(size, len(tag) + 1)]
 
 
 def list_key(prefix: str, index: int) -> str:

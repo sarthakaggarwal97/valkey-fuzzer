@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Changed: keyspace snapshots read each SCAN batch in two round trips, and the workload draws a value in one call (PR-R3-3)
+
+- `keyspace_snapshot` (`valkey_fuzzer.components.keyspace`), which `valkey.oracle.dataset-digest` reads from every
+  primary and replica and `valkey.oracle.rdb-snapshot` from every reloaded RDB, pipelines each SCAN batch of up to
+  1000 keys: one pipeline of `TYPE`s, then one pipeline of the per-type reads (`GET`, `HGETALL`, `LRANGE`, `SMEMBERS`,
+  `ZRANGE WITHSCORES`, `XRANGE`, `DUMP`), instead of two round trips per key. The snapshot is byte-identical (same
+  canonical values, same SCAN order), so ledgers and digests do not change; a client that does not pipeline (a
+  test's) is still read key by key with `canonical_value`. 100,000 keys over TCP: 10.0 s -> 1.7 s; 10,000 keys:
+  0.98 s -> 0.15 s.
+- `make_value` (`valkey.workload.key-value`) draws a value with one `rng.choices` call instead of one `rng.choice`
+  per byte: 64 B 16.5 µs -> 6.6 µs, 4 KB 1.02 ms -> 0.33 ms, 16 KB 4.08 ms -> 1.29 ms. The random bodies a seed
+  draws change (every id, operation, key, outcome, tag and length is as before); nothing compares them to fixed
+  values, only to the run's own ledger.
+
 ### Changed: readiness and formation polls at 50-100 ms, role sweeps that ask every instance at once (PR-R3-2)
 
 - A spawned or restarted server is polled every 0.05 s instead of 0.5 s, and cluster formation (meet, slot
