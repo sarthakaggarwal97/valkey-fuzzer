@@ -137,9 +137,7 @@ class DeploymentProviderRegistration:
       first, within the experiment's ``deployment_requirements``; the
       minimizer tries them.
     - ``host_fields``: the deployment fields that only place the deployment
-      on a host (ports, folders), which a run's coverage leaves out, and
-      through which a batch worker places its job (``base_port``,
-      ``base_data_dir``, ``loopback_block``: the ones named here are set).
+      on a host (ports, folders), which a run's coverage leaves out.
     - ``core_demand(plan)``: the cores the plan's deployment needs for its
       validators to read every instance in time. A random draw that needs
       more than the run may use is drawn again (:mod:`~valkey_fuzzer.capacity`).

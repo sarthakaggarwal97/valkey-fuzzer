@@ -499,7 +499,7 @@ without one goes without:
 | `recorded_instances(outcome)` | `replay`: the per-instance provenance the provider left in a recorded outcome. |
 | `binary_drift(plan, recorded, *, override, replayed=None)` | `replay` and `minimize`: how the binaries a replay runs differ from the recorded ones; without it they are reported as not verified. |
 | `reductions(deployment, requirements)` | `minimize`: smaller deployment sections to try; without it only the inputs shrink. |
-| `host_fields` | the coverage tuple: the deployment fields that only place the deployment on a host; a batch worker sets the ones named here (`base_port`, `base_data_dir`, `loopback_block`) to place its job. |
+| `host_fields` | the coverage tuple: the deployment fields that only place the deployment on a host. |
 | `core_demand(plan)` | random draws: the cores the plan's deployment needs for its validators to read every instance in time; a draw that needs more than the run may use is drawn again (`valkey_fuzzer/capacity.py`). Without it every draw fits. |
 
 Several providers may implement one mode. A scenario then selects one with
@@ -569,9 +569,6 @@ appear in a plan. `valkey-fuzzer list generators` prints them.
 
 A pack is a Python package of your own that adds components, providers,
 fragments, generator hooks, and experiments, with no edit to the fuzzer.
-The toy pack below is the smallest one; the `redis` pack under `packs/redis`
-is a complete second target, and [Second target](second-target.md) walks
-through it and through adding a third.
 Every command, and every batch worker, builds its catalog the same way: each
 installed pack (the `valkey` pack brings the local deployment providers),
 then the `--experiment-dir` directories. A pack is an entry point of the
@@ -713,10 +710,7 @@ Rules:
   `--experiment-dir`, which loads after every pack.
 - **A mode the local deployment runs.** A provider for `standalone` or
   `cluster` sits next to the local one, so a scenario selects it with
-  `deployment.provider`; until it does, every scenario of that mode without
-  `provider` is refused as ambiguous, the Valkey pack's included. A mode of
-  your own, as `echo` here (or `redis`, the [second target](second-target.md)'s),
-  needs none.
+  `deployment.provider`. A mode of your own, as `echo` here, needs none.
 - **Test without installing.** `valkey_fuzzer.testing.run_experiment` runs
   your components and experiments in a catalog of their own (see
   [Testing](#testing)).
