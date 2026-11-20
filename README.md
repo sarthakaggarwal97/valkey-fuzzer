@@ -181,6 +181,7 @@ container, not a server that runs anything you care about.
 | [Reading a FAIL](docs/reading-a-fail.md) | anyone with a failed run | where the verdict, logs, and replay command are, and what to attach to a Valkey issue |
 | [Concepts and glossary](docs/concepts.md) | everyone | scenarios, execution plans, component roles, events, evidence, and the terms these docs use |
 | [Base contracts](docs/contracts.md) | everyone | the rules every run is held to: verdicts, the evidence contract, fault ownership, effective config, search profiles, deadlines, host state, replay |
+| [What is stable](docs/stability.md) | tool and component authors | the surfaces a release keeps (commands, exit codes, YAML, report keys, component ids, entry points, `format_version`) and the ones it does not |
 | [Scenarios and experiments](docs/scenarios-and-experiments.md) | scenario and experiment authors | file formats, the local deployment, the Valkey experiments, random scenarios and search profiles |
 | [Valkey components](docs/components.md) | experiment authors | every Valkey component and provider, with its config, declarations, and defaults |
 | [Adding tests](docs/extending.md) | experiment and component authors | writing experiments, components, and providers, registering them, and testing them |
@@ -206,6 +207,12 @@ ruff format --check .
 
 Describe the code path you exercised, the oracles that judge it, and how to
 reproduce a failure. Sign off every commit (`git commit -s`).
+
+Do not edit `CHANGELOG.md`: add `changelog.d/<branch-slug>.md` with your
+bullets (see [changelog.d/README.md](changelog.d/README.md)). A release runs
+`python scripts/fold_changelog.py <version>`, which moves every fragment under
+a `## <version> - <date>` heading. [What is stable](docs/stability.md) says
+which surfaces a change must keep working.
 
 ## License
 
