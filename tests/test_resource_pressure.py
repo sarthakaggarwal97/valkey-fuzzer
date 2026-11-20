@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from tests.fakes import FakeHandle, fake_instances
-from tests.valkey_experiments_support import fake_context, registration_for, resolved, unit_plan
+from tests.valkey_experiments_support import evidence_values, injected_fault, registration_for, resolved, unit_plan
 from valkey_fuzzer import cgroups, hoststate
 from valkey_fuzzer.components import capabilities
 from valkey_fuzzer.components.faults import FAULT_INJECTED
@@ -125,22 +125,9 @@ class _Handle(FakeHandle):
 
 
 def _fault(handle, **config):
-    context = fake_context(handle)
-    spec = resolved(
-        ComponentSpec(
-            role=ComponentRole.FAULT,
-            use="valkey.fault.resource-pressure",
-            id="starve",
-            config={"when_event": "go", **config},
-        )
+    return injected_fault(
+        ResourcePressureFault, "valkey.fault.resource-pressure", handle, component_id="starve", **config
     )
-    fault = ResourcePressureFault()
-    fault.inject(context, spec)
-    return context, spec, fault
-
-
-def _record(result):
-    return next(item.value for item in result.evidence if item.evidence_id == FAULT_INJECTED)
 
 
 def _write_stats(leaf, throttled=3, memory_max=0):
@@ -182,7 +169,7 @@ def test_the_fault_limits_the_instance_in_a_leaf_of_the_runs_cgroup_and_releases
     assert released.payload == {"instance_id": "valkey-0", "reason": "event"}
     result = fault.recover(context, spec)
     assert result.status is ComponentStatus.PASS, result.summary
-    record = _record(result)
+    record = evidence_values(result.evidence, FAULT_INJECTED)[0]
     assert record["cgroup"] == str(leaf) and record["limits"] == {"cpu.max": "1000 100000", "memory.max": "67108864"}
     assert record["stats"]["cpu.stat.nr_throttled"] == 12 and record["stats"]["memory.events.max"] == 2
     assert record["stats"]["memory.current"] == 20971520 and record["release_reason"] == "event"

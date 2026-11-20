@@ -14,6 +14,8 @@ from unittest.mock import Mock
 import pytest
 
 from tests.conform_support import approved_register, register_service, scenario_file
+from tests.conftest import TLA_JAR as JAR
+from tests.conftest import cli, needs_tlc
 from tests.valkey_experiments_support import valkey_service
 from valkey_fuzzer import __version__
 from valkey_fuzzer.cli import create_parser
@@ -44,10 +46,6 @@ CONTROL = BUNDLE / "negative-controls" / "ack-before-save.cfg"
 COUNTEREXAMPLE = FIXTURES / "register-ack-before-save.out"
 ELECTION = Path(__file__).resolve().parents[1] / "formal" / "cluster-election"
 ID = {name: name[-1] * 40 for name in ("valkey-0", "valkey-1", "valkey-2", "valkey-3")}
-JAR = os.environ.get("TLA2TOOLS_JAR")
-needs_tlc = pytest.mark.skipif(
-    not (JAR and os.path.exists(JAR) and shutil.which("java")), reason="needs java and TLA2TOOLS_JAR"
-)
 
 
 @pytest.fixture(autouse=True)
@@ -78,8 +76,9 @@ def _edit(path, old, new):
 
 
 def _cli(*argv):
-    args = create_parser().parse_args(["spec", *map(str, argv)])
-    return args.handler(args)
+    """``valkey-fuzzer spec argv`` through the command's handler, so a failure shows its traceback."""
+
+    return cli("spec", *argv, via_main=False)
 
 
 @pytest.mark.parametrize(

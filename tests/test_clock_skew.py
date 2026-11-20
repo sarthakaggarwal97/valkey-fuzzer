@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from tests.fakes import FakeHandle, fake_instances
-from tests.valkey_experiments_support import fake_context, registration_for, resolved, unit_plan
+from tests.valkey_experiments_support import evidence_values, injected_fault, registration_for, resolved, unit_plan
 from valkey_fuzzer.components import capabilities
 from valkey_fuzzer.components.clock_skew import ClockSkewFault, measure_skew, time_spec
 from valkey_fuzzer.components.faults import FAULT_INJECTED
@@ -75,23 +75,11 @@ class _Handle(FakeHandle):
 
 
 def _fault(handle, **config):
-    context = fake_context(handle)
-    spec = resolved(
-        ComponentSpec(
-            role=ComponentRole.FAULT, use="valkey.fault.clock-skew", id="skew", config={"when_event": "go", **config}
-        )
-    )
-    fault = ClockSkewFault()
-    fault.inject(context, spec)
-    return context, spec, fault
+    return injected_fault(ClockSkewFault, "valkey.fault.clock-skew", handle, component_id="skew", **config)
 
 
 def _text(path):
     return Path(path).read_text(encoding="utf-8")
-
-
-def _record(result):
-    return next(item.value for item in result.evidence if item.evidence_id == FAULT_INJECTED)
 
 
 def _fault_record(fault):
@@ -123,7 +111,7 @@ def test_the_fault_skews_the_instances_clock_and_restores_it_on_the_release_even
     assert released.payload == {"instance_id": "valkey-0", "reason": "event"}
     result = fault.recover(context, spec)
     assert result.status is ComponentStatus.PASS, result.summary
-    record = _record(result)
+    record = evidence_values(result.evidence, FAULT_INJECTED)[0]
     assert record["spec"] == written.strip() and record["offset_s"] == offset and record["rate"] == rate
     assert abs(record["skew_measured_s"] - offset) < 0.5 and abs(record["skew_at_release_s"] - offset) < 0.5
     assert record["release_reason"] == "event" and record["skew_seconds"] >= 0
@@ -139,7 +127,8 @@ def test_recovery_restores_a_clock_no_event_released(tmp_path):
     result = fault.recover(context, spec)
     assert result.status is ComponentStatus.PASS, result.summary
     assert _text(path) == clock_faults.REAL_TIME
-    assert _record(result)["release_reason"] == "recover" and not context.event_bus.committed_history("skew.released")
+    record = evidence_values(result.evidence, FAULT_INJECTED)[0]
+    assert record["release_reason"] == "recover" and not context.event_bus.committed_history("skew.released")
 
 
 def test_a_skew_the_server_does_not_show_is_not_applied(tmp_path):

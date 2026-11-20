@@ -3,7 +3,6 @@
 
 import json
 import os
-import shutil
 import sys
 import time
 from pathlib import Path
@@ -12,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.conftest import needs_tlc
 from tests.fakes import FakeClient, fake_instances
 from tests.fakes import FakeHandle as BaseHandle
 from tests.support import VirtualClock
@@ -836,23 +836,15 @@ def _trace(tmp_path, save_behavior="sync", disk_vote=0, second_winner=False):
     return bundle, run
 
 
-def _tla_jar():
-    path = os.environ.get("TLA2TOOLS_JAR")
-    return path if path and os.path.exists(path) else None
-
-
 @pytest.mark.slow
-@pytest.mark.skipif(not _tla_jar() or not shutil.which("java"), reason="needs java and TLA2TOOLS_JAR")
-def test_conform_checks_the_election_claims_with_tlc(tmp_path):
+@needs_tlc
+def test_conform_checks_the_election_claims_with_tlc(tmp_path, tla_tools):
     from valkey_fuzzer.spec.conform import check_run
-    from valkey_fuzzer.spec.tla import TlaTools
-
-    tools = TlaTools.locate(_tla_jar(), workers="1")
 
     def conform(**kwargs):
         folder = tmp_path / str(len(list(tmp_path.iterdir())))
         folder.mkdir()
-        return check_run(*_trace(folder, **kwargs), tools)
+        return check_run(*_trace(folder, **kwargs), tla_tools)
 
     clean = conform(save_behavior="best-effort")
     assert clean["status"] == "pass", clean

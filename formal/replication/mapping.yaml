@@ -118,7 +118,7 @@ evidence:
   sample-primary:
     sample: true
     where: {info.role: master}
-    fields:
+    fields: &sample-fields
       node: node
       offset: {type: int, path: info.master_repl_offset}
       replid: {type: str, path: info.master_replid}
@@ -141,14 +141,8 @@ evidence:
     # replaced; its last streaming sample stands until the next.
     sample: true
     where: {info.role: slave, info.master_link_status: up}
-    fields:
-      node: node
-      offset: {type: int, path: info.master_repl_offset}
-      replid: {type: str, path: info.master_replid}
-      replid2: {type: str, path: info.master_replid2, map: {"0000000000000000000000000000000000000000": 0}}
-      second_offset: {type: int, path: info.second_repl_offset, map: {-1: 0}}
-      backlog: {type: int, path: info.repl_backlog_first_byte_offset}
-      digest: str
+    # The primary's fields: the two samples read the same INFO fields and differ in where and the role.
+    fields: *sample-fields
     updates:
       - {set: role, key: $node@Nodes, value: replica}
       - {set: off, key: $node@Nodes, value: $offset}

@@ -7,20 +7,17 @@ on Valkey, and the runs are conformed back to the model. Needs java and
 """
 
 import json
-import os
-import shutil
 from pathlib import Path
 
 import pytest
 import yaml
 
+from tests.conftest import cli, needs_tlc
 from tests.live_support import BINARY
-from valkey_fuzzer.cli import create_parser
 from valkey_fuzzer.deployment.local.ports import port_unavailable_reason
 
-pytestmark = [pytest.mark.live, pytest.mark.slow]
+pytestmark = [pytest.mark.live, pytest.mark.slow, needs_tlc]
 
-JAR = os.environ.get("TLA2TOOLS_JAR")
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "spec"
 EXPERIMENTS = FIXTURES / "register" / "experiments"
 # The base port the register mapping's scenario section sets.
@@ -28,13 +25,12 @@ PORT = 7940
 
 if not BINARY:
     pytest.skip("valkey-server is not available", allow_module_level=True)
-if not (JAR and os.path.exists(JAR) and shutil.which("java")):
-    pytest.skip("needs java and TLA2TOOLS_JAR", allow_module_level=True)
 
 
 def _cli(*argv):
-    args = create_parser().parse_args([str(item) for item in argv])
-    return args.handler(args)
+    """The command's handler on the parsed arguments: a failure on the live server shows its traceback."""
+
+    return cli(*argv, via_main=False)
 
 
 def _run(scenario, artifacts):

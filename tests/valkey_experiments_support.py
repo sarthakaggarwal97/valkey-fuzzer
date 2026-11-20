@@ -85,6 +85,19 @@ def fake_context(handle, *components, **kwargs):
     return FakeContext(*components, services={"valkey.deployment": handle}, **kwargs)
 
 
+def injected_fault(fault_cls, use, handle, *, component_id, **config):
+    """A ``fault_cls`` fault (``use``, ``component_id``) armed on the event ``go`` with ``config``, injected on a
+    fake context over ``handle``: ``(context, spec, fault)``, for the test to publish ``go`` and recover."""
+
+    context = fake_context(handle)
+    spec = resolved(
+        ComponentSpec(role=ComponentRole.FAULT, use=use, id=component_id, config={"when_event": "go", **config})
+    )
+    fault = fault_cls()
+    fault.inject(context, spec)
+    return context, spec, fault
+
+
 def evidence_values(evidence, evidence_id):
     """The plain values of the ``evidence_id`` items of ``evidence``, in order."""
 

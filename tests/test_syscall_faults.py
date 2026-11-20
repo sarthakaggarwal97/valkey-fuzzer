@@ -17,7 +17,14 @@ import time
 import pytest
 
 from tests.fakes import FakeHandle, fake_instances
-from tests.valkey_experiments_support import fake_context, registration_for, resolved, unit_plan
+from tests.valkey_experiments_support import (
+    evidence_values,
+    fake_context,
+    injected_fault,
+    registration_for,
+    resolved,
+    unit_plan,
+)
 from valkey_fuzzer.components.faults import FAULT_INJECTED
 from valkey_fuzzer.components.syscall_faults import SyscallFault, read_calls, rule_text
 from valkey_fuzzer.deployment.local import syscall_faults as library
@@ -307,18 +314,8 @@ def _library_acts(handle, instance_id, fault_id, at, action="kill"):
 
 
 def _fault(handle, **config):
-    context = fake_context(handle)
-    spec = resolved(
-        ComponentSpec(
-            role=ComponentRole.FAULT,
-            use="valkey.fault.syscall",
-            id="crash",
-            config={"when_event": "go", "calls": ["write"], **config},
-        )
-    )
-    fault = SyscallFault()
-    fault.inject(context, spec)
-    return context, spec, fault
+    config = {"calls": ["write"], **config}
+    return injected_fault(SyscallFault, "valkey.fault.syscall", handle, component_id="crash", **config)
 
 
 def _wait(predicate, timeout=5.0):
@@ -343,7 +340,7 @@ def test_a_kill_lands_when_the_library_acts_and_the_fault_restarts_the_instance(
     assert injected.payload["applied_at"] == 1000.5 and injected.payload["signal"] == "SIGKILL"
     result = fault.recover(context, spec)
     assert result.status is ComponentStatus.PASS, result.summary
-    record = next(item.value for item in result.evidence if item.evidence_id == FAULT_INJECTED)
+    record = evidence_values(result.evidence, FAULT_INJECTED)[0]
     assert record["call"] == "write" and record["calls_matched"] == 2 and record["applied_at"] == 1000.5
     assert record["restarted"] and record["restart_spawned_at"] == 123.0 and handle.restarts == 1
 

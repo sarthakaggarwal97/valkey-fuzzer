@@ -2,11 +2,10 @@
 with java and ``$TLA2TOOLS_JAR``, the counterexample of fuzzer issue #133."""
 
 import json
-import os
-import shutil
 
 import pytest
 
+from tests.conftest import needs_tlc
 from valkey_fuzzer.components import experiments
 from valkey_fuzzer.spec.bundle import load_bundle
 from valkey_fuzzer.spec.conform import ObservedRun, collect_runs
@@ -231,18 +230,11 @@ def test_a_sample_that_disagrees_with_the_events_is_reported_not_overwritten_in_
     assert len(observed.sample_mismatches) == 1
 
 
-def _tla_jar():
-    path = os.environ.get("TLA2TOOLS_JAR")
-    return path if path and os.path.exists(path) else None
-
-
 @pytest.mark.slow
-@pytest.mark.skipif(not _tla_jar() or not shutil.which("java"), reason="needs java and TLA2TOOLS_JAR")
-def test_conform_checks_same_offset_same_data_on_sampled_runs(tmp_path):
+@needs_tlc
+def test_conform_checks_same_offset_same_data_on_sampled_runs(tmp_path, tla_tools):
     from valkey_fuzzer.spec.conform import conform_runs
-    from valkey_fuzzer.spec.tla import TlaTools
 
-    tools = TlaTools.locate(_tla_jar(), workers="1")
     bundle = load_bundle("replication")
     partial = (1.3, "replication.partial.continued", {"instance_id": "valkey-1"})
     agree = [
@@ -256,7 +248,7 @@ def test_conform_checks_same_offset_same_data_on_sampled_runs(tmp_path):
     runs = collect_runs(
         [_trace(tmp_path / "agree", agree), _trace(tmp_path / "disagree", disagree), _trace(tmp_path / "dual", disagree, "yes")]
     )  # fmt: skip
-    report = conform_runs(bundle, runs, tools)
+    report = conform_runs(bundle, runs, tla_tools)
 
     holds, violated, outside = report["runs"]
     assert holds["status"] == "pass" and holds["properties"]["SameOffsetSameData"] == {
@@ -271,13 +263,12 @@ def test_conform_checks_same_offset_same_data_on_sampled_runs(tmp_path):
 
 
 @pytest.mark.slow
-@pytest.mark.skipif(not _tla_jar() or not shutil.which("java"), reason="needs java and TLA2TOOLS_JAR")
-def test_a_promotion_before_continue_names_two_histories_with_one_id():
+@needs_tlc
+def test_a_promotion_before_continue_names_two_histories_with_one_id(tla_tools):
     from valkey_fuzzer.spec.check import run_control
-    from valkey_fuzzer.spec.tla import TlaTools
 
     bundle = load_bundle("replication")
-    result, _ = run_control(bundle, bundle.control("keep_old_id_on_load"), TlaTools.locate(_tla_jar(), workers="1"))
+    result, _ = run_control(bundle, bundle.control("keep_old_id_on_load"), tla_tools)
 
     assert (result.violation, result.violated) == ("invariant", "OneHistoryPerId")
     steps = [state.action for state in result.trace]

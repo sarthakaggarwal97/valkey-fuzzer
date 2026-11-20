@@ -2,18 +2,12 @@
 printed with its source, and replaced by an explicit --timeout."""
 
 import time
-from unittest.mock import patch
 
 import pytest
 
+from tests.conftest import cli as _cli
 from tests.test_runner import WORKLOAD, _plan, _spec
-from valkey_fuzzer.cli import main
 from valkey_fuzzer.service import DEFAULT_TIMEOUT_S, derive_timeout
-
-
-def _cli(*argv):
-    with patch("sys.argv", ["valkey-fuzzer", *map(str, argv)]):
-        return main()
 
 
 def test_without_a_profile_or_component_budgets_the_default_applies():

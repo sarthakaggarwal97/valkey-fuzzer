@@ -11,8 +11,10 @@
 # is saved: election-safety fails a run in which it did
 # (vote_left_before_save). The voter restarts, a second election runs, and
 # election-safety checks the model's invariants as in the durability
-# experiment. Fork issue #120 has the end-to-end consequence: two winners of
-# one epoch.
+# experiment (both share its election-log and trace observers through
+# valkey.election-steps). Fork issue #120 has the end-to-end consequence: two
+# winners of one epoch.
+extends: [valkey.election-steps]
 id: valkey.cluster-vote-save-crash
 deployment:
   modes: [cluster]
@@ -64,23 +66,8 @@ components:
       # Valkey 9.2 is the first to log each counted vote with the count and quorum.
       min_version: "9.2.0"
 
-  - use: valkey.observer.log-trigger
-    id: election-log
-    config:
-      instances: all
-      poll_interval_s: 0.001
-      switch_interval_s: 0.0002
-      spec: cluster-election
-      rules:
-        - {publish: cluster.vote.granted, evidence_id: valkey.cluster.vote-granted-logged, required: true}
-        - {publish: cluster.vote.acked}
-        - {publish: cluster.vote.denied}
-        - {publish: cluster.election.started}
-        - {publish: cluster.election.won, evidence_id: valkey.cluster.election-won-logged, required: true}
-
-  - use: valkey.observer.trace
-    id: trace
-    config: {interval_s: 0.25, spec: cluster-election}
+  - id: election-log
+  - id: trace
 
   # The voter: the first primary (shard 0's), which votes in every shard's
   # election (in its own because CLUSTER FAILOVER FORCE asks it too).
