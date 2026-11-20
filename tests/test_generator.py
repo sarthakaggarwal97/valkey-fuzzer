@@ -191,6 +191,15 @@ def test_excluded_and_rejected_values_never_appear(tmp_path):
             Exclusion.parse(text)
 
 
+def test_an_exclusion_reads_its_value_as_yaml_once_when_parsed(monkeypatch):
+    """``matches`` runs per listed value per draw, so the value is parsed when the exclusion is."""
+
+    exclusion = Exclusion.parse("inputs.count=0x10")
+    assert exclusion.parsed == 16 and exclusion == Exclusion.parse("inputs.count=0x10")
+    monkeypatch.setattr(yaml, "safe_load", lambda text: {}["matches must not parse"])
+    assert exclusion.matches(16) and exclusion.matches("0x10") and not exclusion.matches(10)
+
+
 def test_a_default_pool_is_drawn_without_being_listed_and_yields_to_listed_pools_and_overlays(tmp_path):
     pools = {"tests.pool.default": {"default": True, "repl-diskless-sync": ["never"], "hz": ["11", "12"], "lfu-log-factor": ["20"]}}  # fmt: skip
     overlay = {"overlay_id": "lfu", "server_config": {"lfu-log-factor": "30"}}

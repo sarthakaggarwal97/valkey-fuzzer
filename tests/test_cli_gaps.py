@@ -11,9 +11,8 @@ import pytest
 import yaml
 
 from tests.test_batch import _batch, _random, stub, workers  # noqa: F401  (the batch tests' fixtures)
-from tests.valkey_experiments_support import valkey_service
+from tests.valkey_experiments_support import shared_catalog, valkey_service
 from valkey_fuzzer.batch import normalize_source
-from valkey_fuzzer.catalog import build_catalog
 from valkey_fuzzer.cli import create_parser, main
 from valkey_fuzzer.deployment.local.config import deployment_config_from_document
 from valkey_fuzzer.deployment.local.planner import plan_deployment
@@ -253,7 +252,7 @@ def test_a_seed_draws_another_scenario_at_other_cores_and_the_run_header_says_so
 def smoke_runs(canned_runs, monkeypatch):
     """Canned runs on a catalog that also holds the shipped smoke experiment."""
 
-    catalog = build_catalog(experiment_directories=[str(EXPERIMENTS)])
+    catalog = shared_catalog([str(EXPERIMENTS)])
     canned_runs.catalog = catalog
     monkeypatch.setattr("valkey_fuzzer.service.build_catalog", lambda **options: catalog)
     return canned_runs

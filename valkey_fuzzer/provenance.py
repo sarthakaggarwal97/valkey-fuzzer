@@ -4,7 +4,9 @@ differs from the recorded run.
 Everything here is a function of the catalog: what is installed, and the code that ran.
 """
 
+import functools
 import hashlib
+import os
 import platform
 import sys
 from collections.abc import Iterable, Mapping
@@ -33,6 +35,10 @@ def source_digest(packages: Iterable[str]) -> Optional[str]:
     The whole package, not only the module defining a class, because a
     component's behavior also comes from the helpers it calls and the core
     that judges it. None when a package is not imported or a file cannot be read.
+
+    A run hashes the same package several times (the plan's reproducer, the
+    report's, the catalog digest), so each package's part is reused while no
+    file of it changes size or modification time.
     """
 
     digest = hashlib.sha256()
@@ -41,22 +47,51 @@ def source_digest(packages: Iterable[str]) -> Optional[str]:
         if not path:
             return None
         root = Path(path)
-        if root.name == "__init__.py":
-            root = root.parent
-            files = sorted(
-                file
-                for file in root.rglob("*")
-                if file.is_file() and "__pycache__" not in file.parts and file.suffix != ".pyc"
-            )
-        else:
-            files = [root]
-        for file in files:
-            content = file_sha256(str(file))
-            if content is None:
-                return None
-            name = file.name if file == root else file.relative_to(root).as_posix()
-            digest.update(f"{package}/{name}\0{content}\n".encode())
+        try:
+            if root.name == "__init__.py":
+                root = root.parent
+                stamps = _package_stamps(root)
+            else:
+                stamps = (_stamp(root),)
+            digest.update(_package_material(package, root, stamps))
+        except OSError:
+            return None
     return digest.hexdigest()
+
+
+def _stamp(file: Path) -> tuple[Path, int, int]:
+    """``file`` with its modification time and size: a cache key that changes when the file does."""
+
+    stat = file.stat()
+    return file, stat.st_mtime_ns, stat.st_size
+
+
+def _package_stamps(root: Path) -> tuple[tuple[Path, int, int], ...]:
+    """The :func:`_stamp` of every file under ``root`` but the bytecode, in path order."""
+
+    stamps = []
+    for directory, subdirectories, names in os.walk(root):
+        subdirectories[:] = [name for name in subdirectories if name != "__pycache__"]
+        stamps.extend(_stamp(Path(directory, name)) for name in names if not name.endswith(".pyc"))
+    return tuple(sorted(stamps))
+
+
+@functools.lru_cache(maxsize=16)
+def _package_material(package: str, root: Path, stamps: tuple[tuple[Path, int, int], ...]) -> bytes:
+    """What :func:`source_digest` hashes for ``package``: one line per file of ``stamps``, with its SHA-256.
+
+    Reused while every file keeps its size and modification time; a file that cannot be read raises, so a
+    failure is never cached.
+    """
+
+    lines = []
+    for file, _mtime_ns, _size in stamps:
+        content = file_sha256(str(file))
+        if content is None:
+            raise OSError(f"cannot read {file}")
+        name = file.name if file == root else file.relative_to(root).as_posix()
+        lines.append(f"{package}/{name}\0{content}\n".encode())
+    return b"".join(lines)
 
 
 def _fuzzer_digest(packages: Iterable[str] = ()) -> Optional[str]:

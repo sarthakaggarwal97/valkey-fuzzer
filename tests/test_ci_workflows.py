@@ -150,6 +150,27 @@ def test_every_workflow_sets_its_token_permissions(name):
     assert "contents" in _workflow(name).get("permissions", {}), name
 
 
+@pytest.mark.parametrize("name", WORKFLOW_NAMES)
+def test_every_workflow_caches_the_pip_downloads_and_the_go_modules_on_the_files_that_name_them(name):
+    for job in _workflow(name)["jobs"].values():
+        for step in job.get("steps", ()):
+            if step.get("uses", "").startswith("actions/setup-python@"):
+                assert step["with"]["cache"] == "pip", (name, step["name"])
+                assert step["with"]["cache-dependency-path"] == "pyproject.toml", (name, step["name"])
+            if step.get("uses", "").startswith("actions/setup-go@"):
+                assert step["with"]["cache"] is True, (name, step["name"])
+                assert step["with"]["cache-dependency-path"] == "porcupine/go.sum", (name, step["name"])
+
+
+def test_the_server_tests_build_valkey_only_when_the_pinned_commits_build_is_not_cached():
+    steps = {step["name"]: step for step in _workflow("test.yml")["jobs"]["server-tests"]["steps"] if "name" in step}
+    restore = steps["Restore the Valkey build"]
+    assert restore["with"]["path"] == "/tmp/valkey" and "hashFiles('zoo/valkey-commit')" in restore["with"]["key"]
+    assert steps["Build Valkey at the pinned commit"]["if"] == f"steps.{restore['id']}.outputs.cache-hit != 'true'"
+    # On PATH whether the build was restored or made.
+    assert "if" not in steps["Put Valkey on PATH"] and "/tmp/valkey/src" in steps["Put Valkey on PATH"]["run"]
+
+
 def test_lint_installs_the_ruff_version_the_dev_extra_pins():
     (install,) = [script.strip() for script in _run_scripts(_workflow("lint.yml")) if "pip install" in script]
     (pinned,) = re.findall(r'"ruff==([\d.]+)"', (ROOT / "pyproject.toml").read_text(encoding="utf-8"))
