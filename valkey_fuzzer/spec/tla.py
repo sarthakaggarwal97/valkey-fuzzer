@@ -8,6 +8,7 @@ plain Python: integers, booleans, strings (:class:`str`), model values
 """
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -15,7 +16,7 @@ import signal
 import subprocess
 import tempfile
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Optional
 
@@ -383,6 +384,25 @@ TOOLS_HINT = (
     "the spec bridge needs Java 11 or later on PATH and tla2tools.jar (pass --tla2tools or set TLA2TOOLS_JAR). "
     f"Get the jar CI pins with: curl -fsSL -o tla2tools.jar {TLA_TOOLS_URL}"
 )
+# The release jars the bridge knows, by the SHA-256 of the release asset (https://github.com/tlaplus/tlaplus/releases):
+# the one CI pins (TLA_TOOLS_SHA256 in the workflows; tests/test_ci_workflows.py keeps it equal to this) and v1.8.0,
+# the first release whose TLC dumps a counterexample as JSON (-dumpTrace json). A jar with another digest runs,
+# with a warning (an error with --strict): its TLC may print what the bridge reads differently.
+TLA_TOOLS_RELEASES = {
+    "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88": "v1.7.4",
+    "fdffef247f563ef6edbfd44958d2a82db79e7564e07cb673262d896353fa6713": "v1.8.0",
+}
+# The oldest TLC the bridge runs: 2.19 (release v1.7.4) is the one it is tested with. A release prints
+# "Version 2.19 of 08 August 2024"; a 2026 build prints "Version 2026.11.19.180144", later as numbers.
+MIN_TLC_VERSION = "2.19"
+# Where TLC that can (-dumpTrace json) writes the counterexample, in the directory the run uses.
+TRACE_DUMP = "trace.json"
+
+
+def version_key(version: str) -> tuple[int, ...]:
+    """A TLC version (``2.19``, ``2026.11.19.180144``) as numbers, for ordering."""
+
+    return tuple(int(part) for part in version.split("."))
 
 
 @dataclass(frozen=True)
@@ -393,6 +413,10 @@ class TlaTools:
     ``timeout_s`` seconds from now: a run still going at the deadline is
     killed with its process group and reported as timed out, and no run
     starts after it. Without a deadline a run takes as long as it needs.
+
+    :meth:`probed` fills ``tlc_version`` and ``json_trace`` (whether TLC
+    takes ``-dumpTrace json``) from ``tlc2.TLC -h``, and ``warnings`` when
+    the jar is no release the bridge knows; :meth:`locate` does so.
     """
 
     jar: str
@@ -400,11 +424,14 @@ class TlaTools:
     workers: str = "auto"
     timeout_s: Optional[float] = None
     deadline: Optional[float] = None
+    tlc_version: Optional[str] = None
+    json_trace: bool = False
+    warnings: tuple[str, ...] = ()
 
     @classmethod
-    def locate(cls, jar: Optional[str], *, workers: str = "auto") -> "TlaTools":
-        """The tools at ``jar`` (or ``$TLA2TOOLS_JAR``); raise :class:`TlaError`, naming what is missing and
-        :data:`TOOLS_HINT`, if java or the jar is missing."""
+    def locate(cls, jar: Optional[str], *, workers: str = "auto", strict: bool = False) -> "TlaTools":
+        """The tools at ``jar`` (or ``$TLA2TOOLS_JAR``), :meth:`probed`; raise :class:`TlaError`, naming what is
+        missing and :data:`TOOLS_HINT`, if java or the jar is missing."""
 
         path = jar or os.environ.get("TLA2TOOLS_JAR")
         java = shutil.which("java")
@@ -415,28 +442,72 @@ class TlaTools:
             missing.append("java not found on PATH")
         if missing:
             raise TlaError(f"{' and '.join(missing)}: {TOOLS_HINT}")
-        return cls(jar=os.path.abspath(path), java=java, workers=workers)
+        return cls(jar=os.path.abspath(path), java=java, workers=workers).probed(strict=strict)
 
     def within(self, seconds: float) -> "TlaTools":
         """These tools with every run ending at most ``seconds`` from now."""
 
         return replace(self, timeout_s=seconds, deadline=time.monotonic() + seconds)
 
-    def identity(self) -> dict[str, Any]:
+    def probed(self, *, strict: bool = False) -> "TlaTools":
+        """These tools with TLC's version and whether it dumps JSON traces, read from ``tlc2.TLC -h``.
+
+        A jar that does not run TLC, or runs one older than :data:`MIN_TLC_VERSION`, is a :class:`TlaError`; so is
+        a jar that is no release in :data:`TLA_TOOLS_RELEASES` with ``strict``, and a warning without.
+        """
+
+        run = _run(replace(self, deadline=time.monotonic() + 120), ["tlc2.TLC", "-h"], {})
+        match = re.search(r"\bVersion (\d+(?:\.\d+)+)", run.output)
+        if match is None:
+            last = (run.tail(1) or ["no output"])[0]
+            raise TlaError(f"{self.jar} does not run TLC (tlc2.TLC -h printed no version: {last}); {TOOLS_HINT}")
+        version = match.group(1)
+        if version_key(version) < version_key(MIN_TLC_VERSION):
+            raise TlaError(
+                f"TLC {version} in {self.jar} is older than {MIN_TLC_VERSION}, the oldest the spec bridge runs; "
+                f"{TOOLS_HINT}"
+            )
+        warnings: tuple[str, ...] = ()
+        digest = self.sha256()
+        if digest not in TLA_TOOLS_RELEASES:
+            known = ", ".join(sorted(set(TLA_TOOLS_RELEASES.values())))
+            message = (
+                f"{os.path.basename(self.jar)} (sha256 {digest}) is not a tla2tools.jar release the spec bridge "
+                f"knows ({known}); its TLC {version} may print what the bridge reads differently"
+            )
+            if strict:
+                raise TlaError(f"{message} (--strict)")
+            warnings = (message,)
+        return replace(self, tlc_version=version, json_trace="-dumpTrace" in run.output, warnings=warnings)
+
+    def sha256(self) -> str:
         with open(self.jar, "rb") as handle:
-            digest = hashlib.sha256(handle.read()).hexdigest()
-        return {"jar": os.path.basename(self.jar), "sha256": digest}
+            return hashlib.sha256(handle.read()).hexdigest()
+
+    def identity(self) -> dict[str, Any]:
+        """The jar by name, digest, and the release the digest belongs to (None for an unknown jar), and what the
+        probe found: TLC's version (None when the tools were not probed) and whether it dumps JSON traces."""
+
+        digest = self.sha256()
+        return {
+            "jar": os.path.basename(self.jar),
+            "sha256": digest,
+            "release": TLA_TOOLS_RELEASES.get(digest),
+            "tlc_version": self.tlc_version,
+            "json_trace": self.json_trace,
+        }
 
 
 @dataclass
 class ToolRun:
-    """One SANY or TLC process: its command, exit code, output, and duration."""
+    """One SANY or TLC process: its command, exit code, output, duration, and the files it was asked to leave."""
 
     command: list[str]
     exit_code: int
     output: str
     seconds: float
     timed_out: bool = False
+    files: dict[str, str] = field(default_factory=dict)
 
     def tail(self, lines: int = 30) -> list[str]:
         return self.output.strip().splitlines()[-lines:]
@@ -465,8 +536,9 @@ class ToolRun:
         return f"{self.tool} did not start (exit {self.exit_code}: {last}); check --tla2tools and java"
 
 
-def _run(tools: TlaTools, arguments: list[str], files: Mapping[str, str]) -> ToolRun:
-    """Run ``java -cp jar <arguments>`` in a fresh directory holding ``files`` ({name: text}).
+def _run(tools: TlaTools, arguments: list[str], files: Mapping[str, str], collect: Sequence[str] = ()) -> ToolRun:
+    """Run ``java -cp jar <arguments>`` in a fresh directory holding ``files`` ({name: text}); the files named in
+    ``collect`` that the tool left there come back in ``ToolRun.files``.
 
     The JVM runs in its own process group; past the tools' deadline the whole
     group is killed and the run comes back with ``timed_out`` set.
@@ -507,12 +579,20 @@ def _run(tools: TlaTools, arguments: list[str], files: Mapping[str, str]) -> Too
                 pass
             process.wait()
             raise
+        left = {}
+        for name in collect:
+            try:
+                with open(os.path.join(directory, name), encoding="utf-8") as handle:
+                    left[name] = handle.read()
+            except OSError:
+                pass
         return ToolRun(
             command=command,
             exit_code=process.returncode,
             output=(stdout or "") + (stderr or ""),
             seconds=round(time.monotonic() - started, 2),
             timed_out=timed_out,
+            files=left,
         )
 
 
@@ -533,13 +613,25 @@ def sany(tools: TlaTools, module: str, files: Mapping[str, str]) -> tuple[bool, 
 def tlc(
     tools: TlaTools, module: str, config: str, files: Mapping[str, str], *, coverage: bool = False
 ) -> tuple["TlcResult", ToolRun]:
-    """Model-check ``module`` with ``config`` (file names in ``files``)."""
+    """Model-check ``module`` with ``config`` (file names in ``files``).
+
+    A TLC that can (``tools.json_trace``) also dumps the counterexample as JSON (:data:`TRACE_DUMP`), which is
+    then the trace read (:func:`read_json_trace`); otherwise, and when the dump is unreadable, the trace is read
+    from the text output (:func:`read_trace`). Both come back through :func:`read_tlc_output`.
+    """
 
     arguments = ["tlc2.TLC", "-workers", tools.workers, "-metadir", "tlc-states", "-config", config]
     if coverage:
         arguments += ["-coverage", "1"]
-    run = _run(tools, [*arguments, module], files)
-    result = read_tlc_output(run.output, run.exit_code)
+    if tools.json_trace:
+        arguments += ["-dumpTrace", "json", TRACE_DUMP]
+    run = _run(tools, [*arguments, module], files, collect=(TRACE_DUMP,) if tools.json_trace else ())
+    result = read_tlc_output(
+        run.output,
+        run.exit_code,
+        json_trace=run.files.get(TRACE_DUMP),
+        model_values=config_model_values(files.get(config, "")),
+    )
     if run.timed_out:
         result.errors.append(run.timeout_error)
     return result, run
@@ -561,13 +653,14 @@ class TraceState:
 
 @dataclass
 class TlcResult:
-    """What a TLC run found."""
+    """What a TLC run found. ``trace_format`` says where the trace was read from: TLC's JSON dump or its text."""
 
     exit_code: int
     finished: bool
     violation: Optional[str] = None
     violated: Optional[str] = None
     trace: list[TraceState] = field(default_factory=list)
+    trace_format: str = "text"
     coverage: dict[str, dict[str, int]] = field(default_factory=dict)
     distinct_states: Optional[int] = None
     generated_states: Optional[int] = None
@@ -592,8 +685,15 @@ _COVERAGE = re.compile(
 )
 
 
-def read_tlc_output(output: str, exit_code: int = 0) -> TlcResult:
-    """Read a TLC run's text output: the verdict, the error trace, coverage, and state counts."""
+def read_tlc_output(
+    output: str, exit_code: int = 0, *, json_trace: Optional[str] = None, model_values: Iterable[str] = ()
+) -> TlcResult:
+    """Read a TLC run's text output: the verdict, the error trace, coverage, and state counts.
+
+    With ``json_trace``, the text of TLC's ``-dumpTrace json`` file, the trace is read from it
+    (:func:`read_json_trace`, with ``model_values`` the names TLC wrote as strings); a dump that cannot be read
+    is an error of the result, and the trace is read from the text instead.
+    """
 
     lines = output.splitlines()
     result = TlcResult(exit_code=exit_code, finished="Finished in" in output or "Model checking completed" in output)
@@ -619,7 +719,13 @@ def read_tlc_output(output: str, exit_code: int = 0) -> TlcResult:
         result.generated_states, result.distinct_states = int(counts[-1][0]), int(counts[-1][1])
     depth = re.search(r"The depth of the complete state graph search is (\d+)", output)
     result.depth = int(depth.group(1)) if depth else None
-    result.trace = read_trace(output)
+    if json_trace is not None:
+        try:
+            result.trace, result.trace_format = read_json_trace(json_trace, model_values), "json"
+        except TlaError as exc:
+            result.errors.append(f"{exc}; the trace was read from TLC's text output instead")
+    if result.trace_format == "text":
+        result.trace = read_trace(output)
     for line in lines:
         if re.match(r"^Error: ", line) and not any(pattern.match(line) for pattern, _ in _VIOLATIONS):
             if not line.startswith("Error: The behavior up to this point is"):
@@ -648,7 +754,9 @@ def read_trace(output: str) -> list[TraceState]:
                 break  # a second trace (TLC -continue): read only the first
             close()
             label = match.group(2)
-            action = "Init" if label.startswith("Initial predicate") else label.split(" ")[0]
+            # The action's name: TLC 2.19 writes "<Win line 1, col 2 ...>", a 2026 TLC "<Win(r1) line 1, ...>".
+            name = re.match(r"[A-Za-z_]\w*", label)
+            action = "Init" if label.startswith("Initial predicate") else (name.group(0) if name else label)
             current, body = (index, action), []
             continue
         if current is None:
@@ -681,6 +789,79 @@ def _assignments(lines: Iterable[str]) -> dict[str, Any]:
         name, _, value = text.partition(" = ")
         values[name.strip()] = parse_value(value)
     return values
+
+
+def read_json_trace(text: str, model_values: Iterable[str] = ()) -> list[TraceState]:
+    """The error trace in TLC's ``-dumpTrace json`` file: ``{"counterexample": {"state": [[n, {var: value}], ...],
+    "action": [[[n, s], {"name": A, ...}, [n', s']], ...]}}``.
+
+    JSON keeps less than TLC's text: a model value and a string are both
+    strings, a set and a sequence are both arrays, a function and a record are
+    both objects. The names in ``model_values`` (the config's, see
+    :func:`config_model_values`) are read back as :class:`ModelValue`, an
+    object keyed only by them or by integers as a :class:`TlaFunction`, and an
+    array as a tuple, in the order TLC wrote it (TLC writes a set's elements in
+    a fixed order, so equal sets read equal). A file that is not such a trace
+    is a :class:`TlaError`.
+    """
+
+    names = frozenset(model_values)
+    try:
+        document = json.loads(text)
+        counterexample = document["counterexample"]
+        states: dict[int, dict[str, Any]] = {}
+        for index, values in counterexample.get("state") or []:
+            states[int(index)] = {str(var): _json_value(value, names) for var, value in values.items()}
+        actions: dict[int, str] = {}
+        for (before, values), action, (after, next_values) in counterexample.get("action") or []:
+            for index, found in ((int(before), values), (int(after), next_values)):
+                states.setdefault(index, {str(var): _json_value(value, names) for var, value in found.items()})
+            actions.setdefault(int(after), str(action["name"]))
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise TlaError(f"cannot read TLC's JSON trace: {exc!r}") from exc
+    return [
+        TraceState(index=index, action=actions.get(index, "Init" if index == 1 else "?"), values=states[index])
+        for index in sorted(states)
+    ]
+
+
+def _json_value(value: Any, names: frozenset[str]) -> Any:
+    if isinstance(value, str):
+        return ModelValue(value) if value in names else value
+    if isinstance(value, list):
+        return tuple(_json_value(item, names) for item in value)
+    if isinstance(value, dict):
+        if value and all(key in names or re.fullmatch(r"-?\d+", key) for key in value):
+            return TlaFunction(
+                (ModelValue(key) if key in names else int(key), _json_value(item, names)) for key, item in value.items()
+            )
+        return {key: _json_value(item, names) for key, item in value.items()}
+    return value
+
+
+def config_model_values(config_text: str) -> frozenset[str]:
+    """The model values a TLC config declares: the bare names in its constant assignments (``Primaries = {p1, p2}``,
+    ``p1 = p1``), which TLC's JSON trace writes as strings."""
+
+    names: set[str] = set()
+
+    def collect(value: Any) -> None:
+        if isinstance(value, ModelValue):
+            names.add(str(value))
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                collect(item)
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                collect(key)
+                collect(item)
+
+    for text in parse_config(config_text).constants.values():
+        try:
+            collect(parse_value(text))
+        except TlaError:
+            continue  # an operator replacement, which names no value
+    return frozenset(names)
 
 
 def print_values(output: str, tag: str) -> list[Any]:

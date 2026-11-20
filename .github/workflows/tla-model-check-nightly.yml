@@ -1,0 +1,89 @@
+name: TLA+ Model Check (nightly)
+
+# `valkey-fuzzer spec check --configs nightly` on every spec bundle under
+# formal/ that has a nightly/ directory: the safe configs whose bounds are
+# raised past what the PR check (tla-model-check.yml) can run in time, such
+# as a third election epoch with two crashes (cluster-election) and a second
+# crash under dual-channel replication (replication). The negative controls,
+# the experiment gate, and the mapping gates run as in the PR check. The
+# schedule runs only on valkey-io/valkey-fuzzer; any repository can dispatch
+# it.
+
+on:
+  schedule:
+    - cron: '40 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tla-nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # The same release as tla-model-check.yml pins; tests/test_ci_workflows.py keeps them equal.
+  TLA_TOOLS_VERSION: v1.7.4
+  TLA_TOOLS_SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
+
+jobs:
+  tlc:
+    if: github.event_name != 'schedule' || github.repository == 'valkey-io/valkey-fuzzer'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Java
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+
+      - name: Download tla2tools.jar
+        shell: bash
+        run: |
+          curl -fsSL --retry 3 -o "${RUNNER_TEMP}/tla2tools.jar" \
+            "https://github.com/tlaplus/tlaplus/releases/download/${TLA_TOOLS_VERSION}/tla2tools.jar"
+          echo "${TLA_TOOLS_SHA256}  ${RUNNER_TEMP}/tla2tools.jar" | sha256sum -c -
+
+      - name: spec check every bundle's nightly configs
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "${RUNNER_TEMP}/assurance"
+          status=0
+          for nightly in formal/*/nightly; do
+            bundle="$(dirname "${nightly}")"
+            name="$(basename "${bundle}")"
+            echo "::group::spec check ${bundle} --configs nightly"
+            valkey-fuzzer spec check "${bundle}" --configs nightly --strict \
+              --tla2tools "${RUNNER_TEMP}/tla2tools.jar" --timeout 6000 \
+              --output "${RUNNER_TEMP}/assurance/${name}-nightly.json" || status=1
+            echo "::endgroup::"
+          done
+          exit "${status}"
+
+      - name: Upload assurance reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: spec-assurance-nightly
+          path: ${{ runner.temp }}/assurance
+          if-no-files-found: warn

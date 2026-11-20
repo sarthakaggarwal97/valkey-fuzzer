@@ -150,6 +150,14 @@ state:
 constants:
   MaxEpoch: {max_of: [currentEpoch, lastVote, diskEpoch, electionEpoch], at_least: 1}
   MaxCrashes: {max_of: [crashes], at_least: 1}
+  # Valkey's needed_quorum, (slot-owning primaries / 2) + 1, as the candidate's
+  # ACK line logs it: the largest any ACK of the run logs. Not a majority of
+  # Primaries: that set holds every node that ever voted, so after a
+  # promotion it has more nodes than vote in one election, and a win with
+  # Valkey's quorum would have no model step. A run without an ACK line
+  # (Valkey before 9.2) gets 1; its Win is never enabled anyway, since no
+  # vote is observed.
+  Quorum: {field: {evidence: acked, name: quorum}, at_least: 1}
   PersistBeforeAck: {config: cluster-config-save-behavior, equals: sync}
   # Every conform property claims FlushBeforeSave = FALSE, so a sync run is
   # checked as claimed: a double vote there fails the run, as it should,

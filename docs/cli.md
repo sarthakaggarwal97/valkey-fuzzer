@@ -742,8 +742,8 @@ evidence, not leftovers (`cleanup-logs` removes them).
 ## spec
 
 ```text
-valkey-fuzzer spec check BUNDLE [--tla2tools JAR] [--workers N] [--require-approved] [--output FILE]
-valkey-fuzzer spec translate BUNDLE (--control NAME | --trace TLC_OUTPUT --config CFG) --out DIR [--variants N] [--seed N]
+valkey-fuzzer spec check BUNDLE [--tla2tools JAR] [--workers N] [--strict] [--configs DIR] [--require-approved] [--output FILE]
+valkey-fuzzer spec translate BUNDLE (--control NAME | --trace TLC_OUTPUT_OR_JSON --config CFG) --out DIR [--variants N] [--seed N]
 valkey-fuzzer spec translate BUNDLE (--reach TARGET... | --mutate | both) --out DIR [--tlc-timeout SECONDS] [--max-scenarios N]
 valkey-fuzzer spec conform BUNDLE RUN... [--tla2tools JAR] [--group-by INPUT,...] [--no-transitions] [--output FILE]
 ```
@@ -752,13 +752,16 @@ Checks a TLA+ spec bundle (`formal/<protocol>/`, or a bundle directory),
 translates its counterexamples into scenarios, and checks real runs against it:
 its claims on the states a run shows, and (unless `--no-transitions`) that
 the steps a run shows are steps of the model. `--tla2tools` defaults to
-`$TLA2TOOLS_JAR`. `translate` takes the
-catalog option (`--experiment-dir`) to compile what it
+`$TLA2TOOLS_JAR`; the jar is probed (`tlc2.TLC -h`) for TLC's version, 2.19
+or later, and a jar that is no release the bridge knows by SHA-256 is a
+warning, or an error with `--strict`. `check --configs nightly` checks the
+bounds raised in the bundle's `nightly/` configs instead of its own. `translate`
+takes the catalog option (`--experiment-dir`) to compile what it
 writes; with `--reach` or `--mutate` it searches the model for
 counterexamples itself ([spec translate](spec-bridge.md#spec-translate)).
 Exit codes: 0 pass, 1 a gate failed, a claimed property was
 violated, or a step the model cannot take, 2 a harness error (no java or jar, which the command names with
-the jar's download command; a bundle that does not exist, a
+the jar's download command, a jar that does not run TLC or runs one older than 2.19; a bundle that does not exist, a
 SANY or TLC run that never started or was cut short by `--timeout`, a run
 without mapped evidence or with a mapped record it cannot apply, or a
 `translate` whose experiments do not load, whose TLC run timed out, or that

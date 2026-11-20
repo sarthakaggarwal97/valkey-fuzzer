@@ -18,7 +18,7 @@ import yaml
 from ..outcomes import EXIT_FAILURE, EXIT_HARNESS_ERROR, EXIT_SUCCESS
 from ..reports import write_document
 from ..spec.bundle import SPEC_PATH_VARIABLE, Bundle, SpecBundleError, load_bundle
-from ..spec.tla import TOOLS_HINT, TlaError, TlaTools, read_tlc_output
+from ..spec.tla import TOOLS_HINT, TlaError, TlaTools, config_model_values, read_tlc_output
 from ._common import add_common_options, positive_count, positive_seconds
 
 # How long one spec command may run SANY and TLC, unless --timeout says otherwise.
@@ -43,6 +43,12 @@ def register(subparsers: Any) -> None:
     add_common_options(check)
     _bundle_options(check)
     check.add_argument("--require-approved", action="store_true", help="Fail unless the claims are approved")
+    check.add_argument(
+        "--configs",
+        metavar="DIR",
+        help="Check the safe configs in this subdirectory of the bundle instead of its own; `nightly` holds the "
+        "bounds raised past what PR CI checks in time",
+    )
     check.set_defaults(handler=check_command)
 
     translate = tools.add_parser(
@@ -55,7 +61,9 @@ def register(subparsers: Any) -> None:
     _bundle_options(translate)
     source = translate.add_mutually_exclusive_group()
     source.add_argument("--control", help="Run TLC on this negative control and translate its counterexample")
-    source.add_argument("--trace", help="TLC text output holding a counterexample (needs --config)")
+    source.add_argument(
+        "--trace", help="TLC output, or its -dumpTrace json file, holding a counterexample (needs --config)"
+    )
     translate.add_argument("--config", help="The .cfg TLC ran with --trace")
     translate.add_argument(
         "--reach",
@@ -117,12 +125,23 @@ def _bundle_options(parser: argparse.ArgumentParser) -> None:
         help="Stop SANY and TLC (their process group) once the command has run this long; a run cut short "
         f"is an error, exit 2 (default {DEFAULT_TIMEOUT_S:g})",
     )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="A tla2tools.jar that is no release the spec bridge knows (by SHA-256) is an error, not a warning",
+    )
     parser.add_argument("--output", help="Write the JSON report to this file")
     parser.add_argument("--verbose", action="store_true")
 
 
 def _tools(args: argparse.Namespace) -> TlaTools:
-    return TlaTools.locate(args.tla2tools, workers=args.workers).within(args.timeout)
+    """The tools the command runs: located, probed (a missing, non-TLC, or too-old jar is a :class:`TlaError`), and
+    under ``--timeout``; a jar that is no known release is printed as a warning, or raised with ``--strict``."""
+
+    tools = TlaTools.locate(args.tla2tools, workers=args.workers, strict=args.strict).within(args.timeout)
+    for warning in tools.warnings:
+        print(f"Warning: {warning}", file=sys.stderr)
+    return tools
 
 
 def _relative(bundle: Bundle, path: str) -> str:
@@ -146,11 +165,15 @@ def check_command(args: argparse.Namespace) -> int:
     except TlaError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return EXIT_HARNESS_ERROR
+    identity = tools.identity()
+    release = identity["release"] or "no release the spec bridge knows"
+    print(f"Tools: TLC {identity['tlc_version']} from {identity['jar']} ({release}, sha256 {identity['sha256']})")
     report = check_bundle(
         args.bundle,
         tools,
         require_approved=args.require_approved,
         experiment_dirs=args.experiment_dirs,
+        configs=args.configs,
         progress=print,
     )
     for name, gate in report["gates"].items():
@@ -210,9 +233,14 @@ def translate_command(args: argparse.Namespace) -> int:
             print("Error: --trace needs --config, the .cfg TLC ran with", file=sys.stderr)
             return EXIT_HARNESS_ERROR
         with open(args.trace, encoding="utf-8") as handle:
-            result = read_tlc_output(handle.read())
+            text = handle.read()
         with open(args.config, encoding="utf-8") as handle:
             config_text = handle.read()
+        if text.lstrip().startswith("{"):
+            # TLC's -dumpTrace json file: the trace alone, so the violated property is not known.
+            result = read_tlc_output("", json_trace=text, model_values=config_model_values(config_text))
+        else:
+            result = read_tlc_output(text)
         config = _relative(bundle, args.config)
         name = os.path.splitext(os.path.basename(args.trace))[0]
         name = name[len(bundle.protocol) + 1 :] if name.startswith(f"{bundle.protocol}-") else name

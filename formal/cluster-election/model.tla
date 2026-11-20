@@ -5,7 +5,10 @@
 (* Replicas of a failed primary ask the voting primaries for a vote in a   *)
 (* new epoch. A primary grants at most one vote per epoch, tracked by      *)
 (* lastVoteEpoch, which is saved to nodes.conf. A replica that collects    *)
-(* votes from a majority of primaries wins the epoch and takes the slots.  *)
+(* Quorum votes wins the epoch and takes the slots. Valkey's quorum is a   *)
+(* majority of the primaries that serve slots (needed_quorum in            *)
+(* clusterHandleReplicaFailover), which are also the primaries that vote;  *)
+(* the safe config sets Quorum to a majority of Primaries.                 *)
 (*                                                                         *)
 (* Faults:                                                                 *)
 (*   - Messages stay in `msgs` once sent and may be received any number of *)
@@ -36,6 +39,7 @@ CONSTANTS
     Candidates,       \* replicas of the failed primary
     MaxEpoch,         \* bound on epochs, keeps the state space finite
     MaxCrashes,       \* bound on primary crashes
+    Quorum,           \* votes a candidate needs to win: (slot-owning primaries \div 2) + 1
     PersistBeforeAck, \* TRUE:  the save in clusterBeforeSleep is on disk when it
                       \*        returns (cluster-config-save-behavior sync, the default)
                       \* FALSE: it queues a BIO job that writes later
@@ -62,7 +66,7 @@ vars == <<currentEpoch, lastVote, diskEpoch, diskVote, held, bio, msgs,
 Nodes  == Primaries \cup Candidates
 Epochs == 0..MaxEpoch
 Max(a, b) == IF a > b THEN a ELSE b
-IsMajority(S) == 2 * Cardinality(S) > Cardinality(Primaries)
+HasQuorum(S) == Cardinality(S) >= Quorum
 
 Request(c, e) == [type |-> "request", from |-> c, epoch |-> e]
 Vote(p, c, e) == [type |-> "vote", from |-> p, to |-> c, epoch |-> e]
@@ -133,7 +137,7 @@ ReceiveVote(c) ==
 \* clusterHandleReplicaFailover: failover_auth_count >= needed_quorum.
 Win(c) ==
     /\ electionEpoch[c] > 0
-    /\ IsMajority(granted[c])
+    /\ HasQuorum(granted[c])
     /\ <<c, electionEpoch[c]>> \notin winners
     /\ winners' = winners \cup {<<c, electionEpoch[c]>>}
     /\ UNCHANGED <<currentEpoch, lastVote, diskEpoch, diskVote, held, bio, msgs,

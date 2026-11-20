@@ -637,6 +637,14 @@ class ObservedRun:
                 if spec["input"] not in inputs:
                     raise TlaError(f"constant {name} needs input {spec['input']!r}, which the run does not record")
                 values[name] = render(inputs[spec["input"]] == spec["equals"])
+            elif "field" in spec:
+                # The largest value of the field in the run's records of that evidence (the quorum an ACK line
+                # logs), at_least when no record carries it.
+                numbers = [
+                    spec.get("at_least", 0),
+                    *self._field_values(spec["field"]["evidence"], spec["field"]["name"]),
+                ]
+                values[name] = str(max(numbers))
             else:
                 numbers = [spec.get("at_least", 0)]
                 for state in self.states:
@@ -645,6 +653,22 @@ class ObservedRun:
                         numbers.extend(value.values() if isinstance(value, dict) else [value])
                 values[name] = str(max(item for item in numbers if isinstance(item, int)))
         return values
+
+    def _field_values(self, evidence_name: str, field_name: str) -> list[int]:
+        """The integer values of field ``field_name`` in the run's records of evidence ``evidence_name``."""
+
+        evidence = self.mapping.evidence[evidence_name]
+        found = []
+        for record in self.run.records:
+            if not evidence.matches(record):
+                continue
+            try:
+                value = self._fields(evidence, record).get(field_name)
+            except _SkipError:
+                continue
+            if isinstance(value, int) and not isinstance(value, bool):
+                found.append(value)
+        return found
 
 
 # ---------------------------------------------------------------------------

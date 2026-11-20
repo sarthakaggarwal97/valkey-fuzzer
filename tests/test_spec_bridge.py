@@ -4,6 +4,7 @@ acknowledges a write before saving it, so a crash loses it. The slow tests run T
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -125,6 +126,179 @@ def test_tlc_output_and_printed_values_are_read():
         ("spec-conform", "violated", "A", TlaSet()),
         ("spec-conform", "reached", "B", TlaSet([2, 3])),
     ]
+
+
+ELECTION_2026 = FIXTURES / "cluster-election-vote-before-save-2026"  # one TLC 2026 run: .out and .trace.json
+
+
+def test_a_json_trace_reads_as_the_text_trace_of_the_same_run_does():
+    # The register's JSON dump (TLC 2026) is the trace the 2.19 text fixture holds.
+    json_trace = (FIXTURES / "register-ack-before-save.trace.json").read_text()
+    assert tla.read_json_trace(json_trace) == read_tlc_output(COUNTEREXAMPLE.read_text()).trace
+    result = read_tlc_output(COUNTEREXAMPLE.read_text(), 12, json_trace=json_trace)
+    assert result.trace_format == "json" and [state.action for state in result.trace] == [
+        "Init",
+        "Write",
+        "Ack",
+        "Crash",
+    ]
+    # A 2026 TLC labels a state with the action's arguments; the text reader keeps the name alone.
+    text = read_tlc_output((ELECTION_2026.with_suffix(".out")).read_text(), 12)
+    assert text.violated == "OneWinnerPerEpoch" and text.trace_format == "text"
+    assert [state.action for state in text.trace[:4]] == ["Init", "StartElection", "StartElection", "HandleRequest"]
+    # JSON writes model values as strings, functions and records as objects, sets and sequences as arrays: the
+    # config's model values come back as such, an object keyed by them as a function, and arrays as tuples, in
+    # TLC's fixed order, so both readers agree on every state.
+    config = (ELECTION / "negative-controls" / "vote-before-save.cfg").read_text()
+    names = tla.config_model_values(config)
+    assert names == {"p1", "p2", "p3", "r1", "r2"}
+    parsed = tla.read_json_trace(ELECTION_2026.with_suffix(".trace.json").read_text(), names)
+    assert [(state.index, state.action) for state in parsed] == [(state.index, state.action) for state in text.trace]
+    for ours, theirs in zip(parsed, text.trace):
+        for name in ("lastVote", "currentEpoch", "diskVote", "electionEpoch", "crashes"):
+            assert ours.values[name] == theirs.values[name], (ours.index, name)
+        assert sorted(map(render, ours.values["msgs"])) == sorted(map(render, theirs.values["msgs"]))
+    last = parsed[-1].values
+    assert isinstance(last["lastVote"], tla.TlaFunction) and list(last["lastVote"]) == [
+        ModelValue(f"p{i}") for i in (1, 2, 3)
+    ]
+    assert last["msgs"][0] == {"type": "request", "from": ModelValue("r1"), "epoch": 1}
+    assert last["bio"][ModelValue("p1")] == ((1, 1),) and last["winners"] == (
+        (ModelValue("r1"), 1),
+        (ModelValue("r2"), 1),
+    )
+    assert render(last["lastVote"]) == "(p1 :> 1 @@ p2 :> 1 @@ p3 :> 1)"
+    # A dump that is not a trace is an error of the result, and the trace comes from the text.
+    for broken in ("not json", '{"counterexample": {"state": [[1, 2]]}}', "[]"):
+        result = read_tlc_output(COUNTEREXAMPLE.read_text(), 12, json_trace=broken)
+        assert result.trace_format == "text" and len(result.trace) == 4 and not result.no_error
+        assert result.errors[0].startswith("cannot read TLC's JSON trace") and "text output instead" in result.errors[0]
+    with pytest.raises(TlaError, match="cannot read TLC's JSON trace"):
+        tla.read_json_trace("{}")
+
+
+def test_translate_reads_a_json_counterexample_as_it_reads_the_text(tmp_path):
+    # The same counterexample, from the JSON dump and from the text of the run that wrote it.
+    config = (ELECTION / "negative-controls" / "vote-before-save.cfg").read_text()
+    bundle = load_bundle("cluster-election")
+    compile_scenario = valkey_service().compile
+    traces = {
+        "text": read_tlc_output(ELECTION_2026.with_suffix(".out").read_text(), 12).trace,
+        "json": tla.read_json_trace(
+            ELECTION_2026.with_suffix(".trace.json").read_text(), tla.config_model_values(config)
+        ),
+    }
+    translations = {
+        name: translate_trace(bundle, trace, config, name="vote-before-save", violated="OneWinnerPerEpoch",
+                              compile_scenario=compile_scenario)
+        for name, trace in traces.items()
+    }  # fmt: skip
+    assert translations["json"]["alignment"] == translations["text"]["alignment"]
+    assert translations["json"]["scenarios"] == translations["text"]["scenarios"]
+    assert translations["json"]["alignment"][0]["process"] == "p1"
+    # The command takes the dump too (the violated property is then not known).
+    out = tmp_path / "scenarios"
+    trace, cfg = ELECTION_2026.with_suffix(".trace.json"), ELECTION / "negative-controls" / "vote-before-save.cfg"
+    assert _cli("translate", "cluster-election", "--trace", trace, "--config", cfg, "--out", out, "--variants", 1) == 0
+    translation = json.loads((out / "translation.json").read_text())
+    assert translation["counterexample"]["length"] == 18 and translation["counterexample"]["violated"] is None
+
+
+def _fake_java(tmp_path, script):
+    """A stand-in for java: a shell script, and an empty jar next to it."""
+
+    java = tmp_path / "java"
+    java.write_text(f"#!/bin/sh\n{script}\n")
+    java.chmod(0o755)
+    jar = tmp_path / "tla2tools.jar"
+    jar.write_bytes(b"not a jar")
+    return java, jar
+
+
+HELP_2_19 = "TLC - provides model checking and simulation of TLA+ specifications - Version 2.19 of 08 August 2024"
+HELP_2026 = "TLC [-h] [-dumpTrace format file] SPEC\n\tTLC - provides ... - Version 2026.11.19.180144"
+
+
+def test_the_tools_are_probed_for_tlcs_version_and_whether_it_dumps_json_traces(tmp_path, monkeypatch):
+    java, jar = _fake_java(tmp_path, f'case "$*" in *-h*) echo "{HELP_2_19}";; esac')
+    monkeypatch.setattr(tla.shutil, "which", lambda name: str(java))
+    tools = TlaTools.locate(str(jar))
+    assert (tools.tlc_version, tools.json_trace) == ("2.19", False)
+    # A jar that is no release the bridge knows runs with a warning, or not at all with --strict.
+    digest = tools.sha256()
+    (warning,) = tools.warnings
+    assert warning.startswith(f"tla2tools.jar (sha256 {digest}) is not a tla2tools.jar release the spec bridge knows")
+    assert "v1.7.4" in warning and "v1.8.0" in warning
+    assert tools.identity() == {
+        "jar": "tla2tools.jar",
+        "sha256": digest,
+        "release": None,
+        "tlc_version": "2.19",
+        "json_trace": False,
+    }
+    with pytest.raises(TlaError, match=r"is not a tla2tools.jar release the spec bridge knows .*\(--strict\)$"):
+        TlaTools.locate(str(jar), strict=True)
+    monkeypatch.setitem(tla.TLA_TOOLS_RELEASES, digest, "v9.9.9")
+    tools = TlaTools.locate(str(jar), strict=True)
+    assert tools.warnings == () and tools.identity()["release"] == "v9.9.9"
+    # A 2026 TLC takes -dumpTrace; its version is a date, later than 2.19 as numbers.
+    java.write_text(f'#!/bin/sh\nprintf "%s\\n" "{HELP_2026}"\n')
+    tools = TlaTools.locate(str(jar))
+    assert (tools.tlc_version, tools.json_trace) == ("2026.11.19.180144", True)
+    assert tla.version_key("2026.11.19.180144") > tla.version_key("2.19") > tla.version_key("2.18")
+    # Too old, or no TLC at all (a corrupt jar): an error that names the jar and how to get one.
+    java.write_text('#!/bin/sh\necho "TLC - Version 2.18 of 01 January 2023"\n')
+    with pytest.raises(
+        TlaError,
+        match=rf"^TLC 2.18 in {re.escape(str(jar))} is older than 2.19, the oldest the spec bridge runs; the spec bridge needs Java 11",
+    ):
+        TlaTools.locate(str(jar))
+    java.write_text('#!/bin/sh\necho "Error: Could not find or load main class tlc2.TLC" >&2\nexit 1\n')
+    with pytest.raises(
+        TlaError,
+        match=r"does not run TLC \(tlc2.TLC -h printed no version: Error: Could not find or load main class tlc2.TLC\)",
+    ):
+        TlaTools.locate(str(jar))
+    # Tools made without the probe (as tests do) report no version; check records TLC's banner instead.
+    assert TlaTools(jar=str(jar)).identity()["tlc_version"] is None
+
+
+def test_tlc_dumps_the_trace_as_json_when_it_can(tmp_path, monkeypatch):
+    # A TLC that writes trace.json next to the spec (as -dumpTrace json does) and prints the text trace too.
+    json_trace = (FIXTURES / "register-ack-before-save.trace.json").read_text().replace("\n", " ")
+    text = COUNTEREXAMPLE.read_text().replace("Ack line", "Ack(1) line")  # a 2026 label, as its text would show
+    (tmp_path / "out.txt").write_text(text)
+    script = (
+        f"case \"$*\" in *-dumpTrace*) printf %s '{json_trace}' > trace.json;; esac\n"
+        f'cat "{tmp_path / "out.txt"}"\nexit 12'
+    )
+    java, jar = _fake_java(tmp_path, script)
+    files = {"model.tla": "", "ack-before-save.cfg": CONTROL.read_text()}
+    tools = TlaTools(jar=str(jar), java=str(java), json_trace=True)
+    result, run = tla.tlc(tools, "model.tla", "ack-before-save.cfg", files)
+    assert run.command[-4:] == ["-dumpTrace", "json", "trace.json", "model.tla"] and "trace.json" in run.files
+    assert result.trace_format == "json" and result.violated == "AckedDurable" and not result.errors
+    assert [state.action for state in result.trace] == ["Init", "Write", "Ack", "Crash"]
+    # A TLC that cannot: no -dumpTrace, and the trace from the text.
+    result, run = tla.tlc(TlaTools(jar=str(jar), java=str(java)), "model.tla", "ack-before-save.cfg", files)
+    assert "-dumpTrace" not in run.command and run.files == {} and result.trace_format == "text"
+    assert [state.action for state in result.trace] == ["Init", "Write", "Ack", "Crash"]
+
+
+def test_check_reports_the_tools_and_strict_refuses_an_unknown_jar(tmp_path, monkeypatch, capsys):
+    java, jar = _fake_java(tmp_path, f'case "$*" in *-h*) echo "{HELP_2_19}";; *) echo "Killed" >&2; exit 137;; esac')
+    monkeypatch.setattr(tla.shutil, "which", lambda name: str(java))
+    assert _cli("check", BUNDLE, "--tla2tools", jar, "--strict") == 2
+    assert "Error: tla2tools.jar (sha256 " in capsys.readouterr().err
+    # Without --strict the check runs (here, to the SANY that never starts), and says what it ran with.
+    output = tmp_path / "assurance.json"
+    assert _cli("check", BUNDLE, "--tla2tools", jar, "--output", output) == 2
+    captured = capsys.readouterr()
+    assert captured.err.startswith("Warning: tla2tools.jar (sha256 ")
+    assert captured.out.startswith("Tools: TLC 2.19 from tla2tools.jar (no release the spec bridge knows, sha256 ")
+    report = json.loads(output.read_text())
+    assert report["tools"]["tlc_version"] == "2.19" and report["tools"]["release"] is None
+    assert report["tools"]["warnings"][0].startswith("tla2tools.jar (sha256 ")
 
 
 @pytest.mark.parametrize(
@@ -1461,6 +1635,110 @@ def test_conform_allows_the_mappings_count_of_unobservable_steps_between_records
     assert result["transitions"]["first_violation"]["index"] == 4 and result["status"] == "fail"
 
 
+def _with_quorum(events, quorum):
+    """``events`` with every ACK logging ``quorum``, as Valkey 9.2+ does (``(ACKs N, quorum Q)``)."""
+
+    return [
+        (name, {**payload, "quorum": quorum} if name == "cluster.vote.acked" else payload) for name, payload in events
+    ]
+
+
+def test_conform_takes_the_quorum_from_the_ack_lines(tmp_path):
+    # Valkey's quorum is of the slot-owning primaries, as the candidate's ACK line logs it: the constant is the
+    # largest any ACK of the run logs, and 1 (at_least) in a run whose candidate logged none.
+    assert _election_run(tmp_path, _with_quorum(ELECTION_EVENTS, 2)).constants()["Quorum"] == "2"
+    mixed = [*_with_quorum(ELECTION_EVENTS[:5], 3), *_with_quorum(ELECTION_EVENTS[5:], 2)]
+    assert _election_run(tmp_path, mixed).constants()["Quorum"] == "3"
+    assert _election_run(tmp_path, ELECTION_EVENTS).constants()["Quorum"] == "1"
+
+
+@pytest.mark.parametrize(
+    ("spec", "message"),
+    [
+        ("{field: {evidence: loaded, name: keys}, at_least: 1}", None),
+        ("{field: {evidence: nosuch, name: keys}}", "MaxCrashes.field must name an evidence entry and one of its fields"),
+        ("{field: {evidence: loaded, name: lines}}", "MaxCrashes.field must name an evidence entry and one of its fields"),
+        ("{field: {evidence: loaded}}", "field is missing required field 'name'"),
+        ("{field: {evidence: loaded, name: keys}, max_of: [crashes]}", "needs exactly one of value, config, input, max_of, field"),
+    ],
+)  # fmt: skip
+def test_a_mapping_constant_from_a_records_field_names_an_int_field_of_one_evidence(tmp_path, spec, message):
+    bundle = _copy(tmp_path)
+    _edit(bundle / "mapping.yaml", "MaxCrashes: {max_of: [crashes], at_least: 1}", f"MaxCrashes: {spec}")
+    if message is None:
+        assert load_spec_mapping(str(bundle)).constants["MaxCrashes"]["field"] == {"evidence": "loaded", "name": "keys"}
+        return
+    with pytest.raises(SpecBundleError, match=re.escape(message)):
+        load_spec_mapping(str(bundle))
+    _edit(
+        bundle / "mapping.yaml",
+        "fields: {keys: int}\n    updates:\n      - {set: mem",
+        "fields: {keys: str}\n    updates:\n      - {set: mem",
+    )
+    _edit(bundle / "mapping.yaml", f"MaxCrashes: {spec}", "MaxCrashes: {field: {evidence: loaded, name: keys}}")
+    with pytest.raises(SpecBundleError, match=r"MaxCrashes\.field must name an int field"):
+        load_spec_mapping(str(bundle))
+
+
+# Three shards: a second election after the first promotion, as the shipped experiments run it. The primary of
+# shard 0 (valkey-0) fails and valkey-1 wins epoch 7 with the votes of valkey-2 and valkey-4; then valkey-2 fails
+# and valkey-3 wins epoch 8 with the votes of valkey-4 and valkey-1, now a primary, so four nodes ever voted
+# while Valkey's quorum is 2 of the 3 slot-owning primaries.
+TWO_ELECTIONS_IDS = {f"valkey-{index}": str(index) * 40 for index in range(6)}
+TWO_ELECTIONS_OBSERVATIONS = [
+    {"kind": "observation", "t": 0.1, "round": 1, "node": f"valkey-{index}", "role": "primary" if index % 2 == 0 else "replica",
+     "slots": [[index // 2 * 5000, index // 2 * 5000 + 4999]] if index % 2 == 0 else [], "current_epoch": 6,
+     "disk": {"currentEpoch": 6, "lastVoteEpoch": 0}}
+    for index in range(6)
+]  # fmt: skip
+TWO_ELECTIONS = [
+    ("cluster.election.started", {"instance_id": "valkey-1", "epoch": 7}),
+    ("cluster.vote.granted", {"instance_id": "valkey-2", "candidate": TWO_ELECTIONS_IDS["valkey-1"], "epoch": 7}),
+    ("cluster.vote.granted", {"instance_id": "valkey-4", "candidate": TWO_ELECTIONS_IDS["valkey-1"], "epoch": 7}),
+    ("cluster.vote.acked", {"instance_id": "valkey-1", "voter": TWO_ELECTIONS_IDS["valkey-2"], "epoch": 7, "acks": 1}),
+    ("cluster.vote.acked", {"instance_id": "valkey-1", "voter": TWO_ELECTIONS_IDS["valkey-4"], "epoch": 7, "acks": 2}),
+    ("cluster.election.won", {"instance_id": "valkey-1"}),
+    ("cluster.election.started", {"instance_id": "valkey-3", "epoch": 8}),
+    ("cluster.vote.granted", {"instance_id": "valkey-4", "candidate": TWO_ELECTIONS_IDS["valkey-3"], "epoch": 8}),
+    ("cluster.vote.granted", {"instance_id": "valkey-1", "candidate": TWO_ELECTIONS_IDS["valkey-3"], "epoch": 8}),
+    ("cluster.vote.acked", {"instance_id": "valkey-3", "voter": TWO_ELECTIONS_IDS["valkey-4"], "epoch": 8, "acks": 1}),
+    ("cluster.vote.acked", {"instance_id": "valkey-3", "voter": TWO_ELECTIONS_IDS["valkey-1"], "epoch": 8, "acks": 2}),
+    ("cluster.election.won", {"instance_id": "valkey-3"}),
+]  # fmt: skip
+
+
+def _two_elections_trace(tmp_path, quorum, name):
+    nodes = {
+        n: {"node_id": TWO_ELECTIONS_IDS[n], "config": {"cluster-config-save-behavior": "sync"}}
+        for n in TWO_ELECTIONS_IDS
+    }
+    records = [{"kind": "header", "scenario_id": name, "seed": 1, "nodes": nodes}, *TWO_ELECTIONS_OBSERVATIONS]
+    for index, (event, payload) in enumerate(_with_quorum(TWO_ELECTIONS, quorum)):
+        records.append(
+            {"kind": "event", "t": 1 + index / 10, "sequence": 10 + index, "name": event, "payload": payload}
+        )
+    path = tmp_path / f"{name}.jsonl"
+    path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+    return str(path)
+
+
+@needs_tlc
+@pytest.mark.slow
+def test_conform_holds_a_second_election_won_with_valkeys_quorum(tmp_path):
+    # A replica promoted by the first election votes in the second, so the mapping's Primaries has more nodes
+    # than vote in one election; the model's Win needs Quorum votes, the ACK line's count, not a majority of them.
+    bundle = load_bundle("cluster-election")
+    result = check_run(bundle, collect_runs([_two_elections_trace(tmp_path, 2, "two")])[0], _tools())
+    assert sorted(result["processes"]["Primaries"]) == ["valkey-0", "valkey-1", "valkey-2", "valkey-4"]
+    assert result["constants"]["Quorum"] == "2" and result["actions"]["Win"] == 2
+    assert result["status"] == "pass" and result["transitions"]["holds"], json.dumps(result, indent=1)
+    # Known-bad: had Valkey needed three votes, the second win with two has no model step, at its won line.
+    result = check_run(bundle, collect_runs([_two_elections_trace(tmp_path, 3, "three")])[0], _tools())
+    violation = result["transitions"]["first_violation"]
+    assert result["status"] == "fail" and result["constants"]["Quorum"] == "3"
+    assert (violation["from"]["why"], violation["to"]["why"], violation["event"]) == ("ReceiveVote", "Win", "won")
+
+
 # ---------------------------------------------------------------------------
 # check
 # ---------------------------------------------------------------------------
@@ -1624,6 +1902,37 @@ def test_check_fails_a_broken_bundle(tmp_path, monkeypatch, path, old, new, gate
         assert "vacuous" in report["gates"][gate]["controls"]["ack-before-save"]["error"]
     if gate == "mapping_complete":
         assert report["gates"][gate]["unmapped_actions"] == ["Save"]
+
+
+@needs_tlc
+@pytest.mark.slow
+def test_check_runs_the_configs_of_a_subdirectory_that_raise_a_bound(tmp_path, monkeypatch):
+    # nightly/ holds the bounds PR CI cannot afford: --configs nightly checks them instead of the bundle's own.
+    bundle = _copy(tmp_path, monkeypatch)
+    nightly = bundle / "nightly"
+    nightly.mkdir()
+    (nightly / "model.cfg").write_text((bundle / "model.cfg").read_text().replace("MaxValue = 3", "MaxValue = 4"))
+    output = tmp_path / "assurance.json"
+    assert _cli("check", bundle, "--tla2tools", JAR, "--workers", 1, "--configs", "nightly", "--output", output) == 0
+    report = json.loads(output.read_text())
+    assert report["status"] == "pass" and report["configs"] == "nightly", json.dumps(report["gates"], indent=1)
+    assert list(report["gates"]["model_checked"]["configs"]) == ["nightly/model.cfg"]
+    assert report["gates"]["model_checked"]["configs"]["nightly/model.cfg"]["distinct_states"] > 40  # model.cfg: 40
+    # The claims' integer bounds may only be raised there; a lowered or changed one is what PR CI checks, not this.
+    (nightly / "model.cfg").write_text((bundle / "model.cfg").read_text().replace("MaxValue = 3", "MaxValue = 2"))
+    report = check_bundle(str(bundle), _tools(), configs="nightly")
+    assert report["status"] == "fail" and report["gates"]["claims_checked"]["problems"] == [
+        "bound MaxValue = 3, but nightly/model.cfg sets '2'; a config outside the bundle's own may only raise an "
+        "integer bound"
+    ]
+    # The bundle's own configs are still held to the exact bound, and a bundle without the directory has none.
+    _edit(bundle / "model.cfg", "MaxValue = 3", "MaxValue = 4")
+    problems = check_bundle(str(bundle), _tools())["gates"]["claims_checked"]["problems"]
+    assert problems == ["bound MaxValue = 3, but model.cfg sets '4'"]
+    report = check_bundle(str(bundle), _tools(), configs="weekly")
+    assert report["status"] == "fail" and report["gates"]["bundle"]["error"].endswith(
+        "has no .cfg: a bundle without a weekly/ directory has only its own configs"
+    )
 
 
 SHIPPED_BUNDLES = ["cluster-election", "replication", "slot-migration", "persistence", "register"]
