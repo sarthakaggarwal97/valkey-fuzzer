@@ -82,7 +82,6 @@ from valkey_fuzzer.hoststate import chain_name
 from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.schema import ConfigField, ConfigSchema
 
-from .capabilities import iptables_supported, netem_supported
 from .instances import (
     close_quietly,
     follows,
@@ -90,9 +89,9 @@ from .instances import (
     is_primary,
     replication_info,
 )
-from .network import Degradation, create_chain, drop_between, netem_arguments, remove_partition
+from .network import degrade, instance_addresses, netem_arguments, partition
 from .polling import poll_until
-from .processes import pause_owned, restart_once
+from .processes import pause_owned
 from .schemas import LIST, TEXT
 from .wave_evidence import wave_declares
 from .wave_operations import STANDALONE
@@ -172,13 +171,11 @@ class StandaloneWaves(WaveRun):
     quorum = False
     # The next wave's heal builds on this one's result.
     halt_on_failure = True
+    restarts_killed = True
 
     def __init__(self, context: Any, spec: ComponentSpec, handle: Any, state: Any):
         super().__init__(context, spec, handle, state)
-        self.heal_timeout_s = spec.config["heal_timeout_s"]
         self.instance = {instance.instance_id: instance for instance in handle.instances}
-        # Promotions, repoints, and restarts change the topology one at a time.
-        self.topology = threading.Lock()
         roles = handle.roles()
         primaries = [item for item in self.ids if roles.get(item) == "primary"]
         if len(primaries) != 1:
@@ -193,19 +190,6 @@ class StandaloneWaves(WaveRun):
             item: (None if item == self.primary else self.primary) for item in self.ids
         }
         self.heal_promotions: list[dict[str, Any]] = []
-
-    @staticmethod
-    def host_ready(waves: Sequence[list[dict[str, Any]]]) -> Optional[str]:
-        kinds = {operation["op"] for wave in waves for operation in wave}
-        if "partition" in kinds:
-            supported, reason = iptables_supported()
-            if not supported:
-                return f"partition operations need Linux, root, and iptables ({reason}); remove them or run elsewhere"
-        if "degrade" in kinds:
-            supported, reason = netem_supported()
-            if not supported:
-                return f"degrade operations need Linux, tc, and CAP_NET_ADMIN ({reason}); remove them or run elsewhere"
-        return None
 
     def outcome(self, records: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
         windows = self.close_windows()
@@ -330,45 +314,23 @@ class StandaloneWaves(WaveRun):
 
     # -- Operations ------------------------------------------------------------
 
-    def _restart(self, record: dict[str, Any], config: dict[str, Any]) -> None:
-        with self.topology:
-            with self.lock:
-                down = sorted(self.killed)
-                primary = self.primary
-            target = record["target"]
-            if target == "killed":
-                if not down:
-                    record["skipped"] = "no instance killed in this wave is down"
-                    return
-                target = self.rngs[record["index"]].choice(down)
-            elif target not in down:
-                record["missing"] = f"{target} is not down"
-                return
-            record["target"] = target
-            record["involved"] = [target, primary]
-            if primary in down:
-                record["skipped"] = f"the primary {primary} is down; {target} restarts when the wave heals"
-                return
-            self.landed(record, [target, primary])
-            self.restart_killed(target, "restart")
-        record["success"] = True
+    def before_restart(self, record: dict[str, Any], target: str) -> Optional[str]:
+        """A restart involves the primary too, and waits for the heal while the primary is down."""
 
-    def kill_undo(self, instance_id: str):
+        with self.lock:
+            down, primary = set(self.killed), self.primary
+        record["involved"] = [target, primary]
+        if primary in down:
+            return f"the primary {primary} is down; {target} restarts when the wave heals"
+        return None
+
+    def before_kill_undo(self, instance_id: str) -> None:
         """A killed instance restarts as a replica of the primary (as it was, if it still is the primary)."""
 
-        restart = restart_once(self.handle, instance_id, wait_ready=True, ready_timeout=60.0)
-
-        def undo() -> None:
-            with self.lock:
-                primary = self.primary
-            if primary != instance_id:
-                self.replicate(instance_id, primary)
-            restart()
-            self.selector.restore(instance_id)
-            with self.lock:
-                self.killed.pop(instance_id, None)
-
-        return undo
+        with self.lock:
+            primary = self.primary
+        if primary != instance_id:
+            self.replicate(instance_id, primary)
 
     def _promote(self, record: dict[str, Any], config: dict[str, Any]) -> None:
         target = record["target"]
@@ -512,21 +474,17 @@ class StandaloneWaves(WaveRun):
         target = record["target"]
         # Unique to this operation, so concurrent runs in one process never share a chain.
         chain = chain_name(f"{self.spec.id}/{record['index']}/{uuid.uuid4().hex}")
-        hosts = {instance.instance_id: instance.host for instance in self.handle.instances}
-        create_chain(chain)
-        self.own(record, "network.partition", chain, lambda: remove_partition(chain))
-        drop_between(chain, hosts, [target], [peer for peer in hosts if peer != target])
+        hosts = instance_addresses(self.handle)
+        partition(
+            functools.partial(self.own, record), chain, hosts, [target], [peer for peer in hosts if peer != target]
+        )
         self.hold(record, [target], config["duration_s"])
 
     def _degrade(self, record: dict[str, Any], config: dict[str, Any]) -> None:
         target = record["target"]
-        hosts = {instance.instance_id: instance.host for instance in self.handle.instances}
+        hosts = instance_addresses(self.handle)
         peers = [peer for peer in hosts if peer != target]
-        degradation = Degradation(hosts, [target], peers, netem_arguments(config))
-        # The device carries this process as its owner; the obligation owns it from the moment it exists.
-        device = degradation.create_device()
-        self.own(record, "network.degrade", device, degradation.remove)
-        degradation.install()
+        degrade(functools.partial(self.own, record), hosts, [target], peers, netem_arguments(config))
         self.hold(record, [target], config["duration_s"])
 
     def _backlog_pressure(self, record: dict[str, Any], config: dict[str, Any]) -> None:
@@ -568,8 +526,7 @@ class StandaloneWaves(WaveRun):
             down = set(self.killed)
         if self.primary in down:
             self._heal_promote(number, down)
-        for instance_id in sorted(down):
-            self.restart_killed(instance_id, "heal")
+        self.restart_down("heal")
         # Point the instances told to follow someone else (a repoint, or a
         # REPLICAOF that did not land) at the primary. One that was told to
         # follow the primary and does not is left for validation to fail.
@@ -699,7 +656,7 @@ REGISTRATIONS = (
     wave_registration(
         "valkey.action.replication-chaos",
         ReplicationChaosAction,
-        # How long the heal waits for every replica to link to the primary.
+        # How long the heal waits for every replica to link to the primary, and a restarted instance to be ready.
         {"heal_timeout_s": ConfigField(float, default=60.0, minimum=1, maximum=3600)},
         _ACTION_DECLARES,
     ),

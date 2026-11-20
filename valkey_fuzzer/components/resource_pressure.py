@@ -23,10 +23,10 @@ from typing import Any, Optional
 from valkey_fuzzer import cgroups
 from valkey_fuzzer.hoststate import cgroup_name
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
-from valkey_fuzzer.schema import ConfigError, ConfigField, ConfigSchema
+from valkey_fuzzer.schema import ConfigError, ConfigField
 
-from .faults import EVENT_TARGET, FaultRefusedError, HeldFault, fault_declares
-from .instances import deployment, select_instance
+from .faults import EVENT_TARGET, RELEASED_EVENT, RELEASED_FIELDS, FaultRefusedError, HeldFault, fault_declares
+from .instances import deployment
 from .registration import component_registration
 from .schemas import MAPPING, TEXT, nullable, optional
 
@@ -87,19 +87,17 @@ class ResourcePressureFault(HeldFault):
     recovery (see the module)."""
 
     seconds_field = "pressure_seconds"
+    release_failed_text = "releasing the limits failed, so they lasted until recovery"
 
     def _resolve(self, context: Any, spec: ComponentSpec) -> None:
-        self._target: Optional[str] = None
         self._leaf: Optional[str] = None
         self._harness: Optional[str] = None
         self._stats: Optional[dict[str, Any]] = None
-        if self._config["instance"] != EVENT_TARGET:
-            self._target = select_instance(deployment(context), self._config["instance"])
+        self._select_target(context)
 
     def _install(self, event: Any) -> dict[str, Any]:
         handle = deployment(self._context)
-        if self._target is None:
-            self._target = self._event_target(handle, event)
+        self._target_instance(handle, event)
         controllers = controllers_for(self._config)
         # Checked again at the trigger: the cgroup must still be the run's to use.
         directory, reason = cgroups.delegated(controllers)
@@ -111,7 +109,7 @@ class ResourcePressureFault(HeldFault):
         name = cgroup_name(f"{self._spec.id}/{uuid.uuid4().hex}")
         self._leaf = os.path.join(directory, name)
         # Owned from before the leaf exists: the undo of a leaf that is not there does nothing.
-        self._change = self._own("cgroup.limited", self._target, self._release_leaf)
+        self._own_change("cgroup.limited", self._target, self._release_leaf)
         cgroups.limit(directory, name, pid, limits)
         return {"target": self._target, "pid": pid, "cgroup": self._leaf, "limits": limits}
 
@@ -121,13 +119,6 @@ class ResourcePressureFault(HeldFault):
         if self._stats is None and os.path.isdir(self._leaf):
             self._stats = cgroups.stats(self._leaf)
         cgroups.remove_leaf(self._leaf, self._harness)
-
-    def _released_payload(self, reason: str) -> dict[str, Any]:
-        return {"instance_id": self._target, "reason": reason}
-
-    def _release_failed(self, record: dict[str, Any], error: str) -> str:
-        record["release_error"] = error
-        return f"releasing the limits failed, so they lasted until recovery: {error}"
 
     def _settled(self, context: Any, spec: ComponentSpec, record: dict[str, Any]) -> None:
         super()._settled(context, spec, record)
@@ -155,14 +146,12 @@ _DECLARES = fault_declares(
         "pid": nullable(int),
         "cgroup": TEXT,
         "limits": MAPPING,
-        "released_at": optional(float),
-        "release_reason": optional(str),
+        **RELEASED_FIELDS,
         "pressure_seconds": optional(float),
         # cpu.stat and memory.events as {file.key: count}, memory.current and memory.peak, read at release.
         "stats": optional(dict),
-        "release_error": optional(str),
     },
-    events={"{id}.released": ConfigSchema({"instance_id": TEXT, "reason": TEXT})},
+    events={"{id}.released": RELEASED_EVENT},
     changes=("cgroup.limited",),
 )
 

@@ -336,8 +336,10 @@ def _exits_by_itself():
     ids=["second-primary", "every-target-killed", "wave-ran-nothing", "exited-by-itself", "no-iptables", "no-netem"],
 )  # fmt: skip
 def test_replication_chaos_that_breaks_or_runs_nothing_does_not_pass(monkeypatch, handle, waves, status, summary):
-    monkeypatch.setattr(replication_chaos, "iptables_supported", lambda: (False, "network partitions require root"))
-    monkeypatch.setattr(replication_chaos, "netem_supported", lambda: (False, "tc not installed"))
+    monkeypatch.setattr(
+        "valkey_fuzzer.components.waves.iptables_supported", lambda: (False, "network partitions require root")
+    )
+    monkeypatch.setattr("valkey_fuzzer.components.waves.netem_supported", lambda: (False, "tc not installed"))
     result, _ = run_chaos(handle(), waves)
     assert result.status.value == status and summary in result.summary, result.summary
 
@@ -475,7 +477,7 @@ def test_a_stall_whose_undo_and_heal_fail_leaves_its_obligation_to_the_runner_an
 
 def test_a_degrade_wave_scopes_netem_to_the_targets_links_and_heals_them(monkeypatch, tmp_path):
     tc = Tc().install(monkeypatch, tmp_path)
-    monkeypatch.setattr(replication_chaos, "netem_supported", lambda: (True, ""))
+    monkeypatch.setattr("valkey_fuzzer.components.waves.netem_supported", lambda: (True, ""))
     waves = [[{"op": "degrade", "target": "valkey-1", "duration_s": 0.05, "delay_ms": 30, "jitter_ms": 5, "loss_pct": 2}],
              [{"op": "degrade", "target": "primary", "duration_s": 0.05, "rate_kbit": 256}]]  # fmt: skip
     handle = FakeStandalone()
@@ -508,7 +510,7 @@ def test_a_degrade_wave_scopes_netem_to_the_targets_links_and_heals_them(monkeyp
 
 def test_a_partition_whose_heal_fails_is_an_error_though_the_final_cleanup_removed_it(monkeypatch):
     iptables = Iptables(fail={("-D", 1): "resource busy", ("-D", 2): "resource busy"}).install(monkeypatch)
-    monkeypatch.setattr(replication_chaos, "iptables_supported", lambda: (True, ""))
+    monkeypatch.setattr("valkey_fuzzer.components.waves.iptables_supported", lambda: (True, ""))
     waves = [[{"op": "partition", "target": "valkey-1", "duration_s": 0.05}]]
     handle = FakeStandalone()
     for n, instance in enumerate(handle.instances):

@@ -34,8 +34,9 @@ from valkey_fuzzer.deployment.local.validation.config import STATE_VALIDATION_SC
 from valkey_fuzzer.results import ComponentStatus, make_result
 from valkey_fuzzer.schema import ConfigField, plain_config
 
+from .capabilities import iptables_supported, netem_supported
 from .instances import deployment
-from .processes import KILL_EXIT_TIMEOUT_S, wait_killed
+from .processes import KILL_EXIT_TIMEOUT_S, restart_once, wait_killed
 from .registration import component_registration
 from .wave_evidence import wave_evidence
 from .wave_operations import DEPLOYMENT_MODES, OPERATIONS, SIGNALS, check_waves, waves_field
@@ -58,22 +59,27 @@ class WaveRun:
 
     A mode's subclass sets ``mode``, ``quorum`` (kills also keep a majority of
     the planned shards' primaries live: cluster mode; a standalone deployment
-    is one shard, so one instance always stays up), and ``halt_on_failure``
+    is one shard, so one instance always stays up), ``halt_on_failure``
     (stop after any failed wave, when the next wave's heal builds on this one),
-    and implements ``prepare()`` (what the run needs before its test keys),
-    ``outcome(records)`` (its own summary text and schedule fields),
+    and ``restarts_killed`` (a kill owns its instance until the mode restarts
+    it, with the registration's ``heal_timeout_s``; else a killed node stays
+    down), and implements ``prepare()`` (what the run needs before its test
+    keys), ``outcome(records)`` (its own summary text and schedule fields),
     ``members()`` (the live view targets resolve against),
     ``kill_view()`` (a fresh view to confirm a kill against, or None),
     ``before_kill(instance_id)`` (what to record before an instance goes),
-    ``role_of(instance_id, members)`` (the role a kill records), ``heal``,
+    ``role_of(instance_id, members)`` (the role a kill records),
+    ``before_restart(record, target)`` and ``before_kill_undo(instance_id)``
+    (what a restart involves and does first), ``heal``,
     ``validate``, ``excusing(record, results)`` (the faults that excuse a
     failed topology change), ``wave_summary`` (its own wave fields), and an
-    ``_<name>`` method per operation of its mode.
+    ``_<name>`` method per operation of its mode (``_restart`` is shared).
     """
 
     mode: str
     quorum: bool
     halt_on_failure: bool
+    restarts_killed = False
 
     def __init__(self, context: Any, spec: Any, handle: Any, state: Any):
         self.context = context
@@ -82,6 +88,10 @@ class WaveRun:
         self.state = state
         self.ids = [instance.instance_id for instance in handle.instances]
         self.lock = threading.RLock()
+        # Restarts (and the standalone mode's promotions and repoints) change the topology one at a time.
+        self.topology = threading.Lock()
+        # How long a restart waits for the instance to be ready, in the modes that restart killed instances.
+        self.heal_timeout_s = spec.config.get("heal_timeout_s")
         planned = [Member(node.instance_id, node.role, node.shard_id) for node in handle.instances]
         self.selector = TargetSelector(planned, quorum=self.quorum)
         # Every operation's random stream, by record index.
@@ -133,7 +143,18 @@ class WaveRun:
 
     @staticmethod
     def host_ready(waves: Sequence[list[dict[str, Any]]]) -> Optional[str]:
-        """Why this host cannot run ``waves``, and what to do about it; None when it can."""
+        """Why this host cannot run ``waves``, and what to do about it; None when it can: partitions need
+        iptables and degradations tc netem, each with its privileges; waves without them run anywhere."""
+
+        kinds = {operation["op"] for wave in waves for operation in wave}
+        if "partition" in kinds:
+            supported, reason = iptables_supported()
+            if not supported:
+                return f"partition operations need Linux, root, and iptables ({reason}); remove them or run elsewhere"
+        if "degrade" in kinds:
+            supported, reason = netem_supported()
+            if not supported:
+                return f"degrade operations need Linux, tc, and CAP_NET_ADMIN ({reason}); remove them or run elsewhere"
         return None
 
     def prepare(self) -> None:
@@ -514,8 +535,65 @@ class WaveRun:
         """What the mode records about ``instance_id`` right before it is killed."""
 
     def kill_undo(self, instance_id: str) -> Optional[Callable[[], None]]:
-        """The undo of a kill whose instance the mode restarts (the kill then owns it), or None: it stays down."""
+        """The undo of a kill in a mode that ``restarts_killed`` (the kill then owns the instance): restart it
+        once, after whatever :meth:`before_kill_undo` does, and take it off the killed list; None in a mode
+        where a killed node stays down."""
+
+        if not self.restarts_killed:
+            return None
+        restart = restart_once(self.handle, instance_id, wait_ready=True, ready_timeout=self.heal_timeout_s)
+
+        def undo() -> None:
+            self.before_kill_undo(instance_id)
+            restart()
+            self.selector.restore(instance_id)
+            with self.lock:
+                self.killed.pop(instance_id, None)
+
+        return undo
+
+    def before_kill_undo(self, instance_id: str) -> None:
+        """What the mode does right before a killed ``instance_id`` restarts (point it at the primary)."""
+
+    def _restart(self, record: dict[str, Any], config: dict[str, Any]) -> None:
+        """Restart an instance killed earlier in the wave: its target (``killed``: one of them, drawn), or an
+        instance ID that is down (else ``missing``); the mode says what it involves and may skip it
+        (:meth:`before_restart`)."""
+
+        with self.topology:
+            with self.lock:
+                down = sorted(self.killed)
+            target = record["target"]
+            if target == "killed":
+                if not down:
+                    record["skipped"] = "no instance killed in this wave is down"
+                    return
+                target = self.rngs[record["index"]].choice(down)
+            elif target not in down:
+                record["missing"] = f"{target} is not down"
+                return
+            record["target"] = target
+            reason = self.before_restart(record, target)
+            if reason is not None:
+                record["skipped"] = reason
+                return
+            self.landed(record, record["involved"])
+            self.restart_killed(target, "restart")
+        record["success"] = True
+
+    def before_restart(self, record: dict[str, Any], target: str) -> Optional[str]:
+        """Record what a restart of ``target`` involves (``record["involved"]``); why it is skipped, or None."""
+
+        record["involved"] = [target]
         return None
+
+    def restart_down(self, stage: str) -> None:
+        """Restart every killed instance still down, in instance-ID order, as ``stage`` (the heal)."""
+
+        with self.lock:
+            down = sorted(self.killed)
+        for instance_id in down:
+            self.restart_killed(instance_id, stage)
 
     def down(self) -> set[str]:
         """Instances killed and not restarted."""

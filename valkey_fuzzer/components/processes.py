@@ -5,11 +5,32 @@ import time
 from typing import Any, Callable
 
 from ..clock import now
+from ..plan import ComponentSpec, ExecutionPlan
+from ..schema import ConfigError, ConfigField
 from .files import nodes_conf_path, read_cluster_vars
 from .schemas import optional
 
 # Opens the undo obligation of a change just applied: ``own(kind, target, undo)``.
 Own = Callable[[str, str, Callable[[], None]], Any]
+
+# The config of a fault that kills an instance and may restart it (``valkey.fault.process-signal``,
+# ``valkey.fault.syscall``): whether to restart, after how long, how long the restart waits for the instance to be
+# ready, and whether to record the on-disk cluster vars (nodes.conf currentEpoch and lastVoteEpoch) the restarted
+# process will load.
+KILL_FIELDS = {
+    "restart": ConfigField(bool, default=True),
+    "restart_delay_s": ConfigField(float, default=0.0, minimum=0, maximum=600),
+    "ready_timeout_s": ConfigField(float, default=30.0, minimum=1, maximum=600),
+    "capture_cluster_vars": ConfigField(bool, default=False),
+}
+
+
+def check_cluster_vars(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -> None:
+    """The compile check of :data:`KILL_FIELDS`: ``capture_cluster_vars`` needs a cluster deployment."""
+
+    if config["capture_cluster_vars"] and plan.deployment_mode != "cluster":
+        raise ConfigError("capture_cluster_vars needs a cluster deployment")
+
 
 # What :func:`record_restart` records of a restart, for a fault's declarations; ``restart_error`` is what a fault
 # records when its restart raised instead.
@@ -20,6 +41,14 @@ RESTART_FIELDS = {
     "restart_seconds": optional(float),
     "restart_pid": optional(int, allow_none=True),
     "restart_error": optional(str),
+}
+
+# What a kill records besides its own fields: the exit :func:`wait_killed` saw, and the restart.
+KILL_RECORD_FIELDS = {
+    "exited": optional(bool),
+    "exited_at": optional(float),
+    "disk_vars_at_kill": optional(dict, allow_none=True),
+    **RESTART_FIELDS,
 }
 
 

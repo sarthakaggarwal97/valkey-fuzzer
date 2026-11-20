@@ -32,10 +32,11 @@ operation's ``phase`` (the phase it waited for, the one it saw, whether it
 missed the phase).
 """
 
+import functools
 import threading
 import uuid
-from collections.abc import Mapping, Sequence
-from typing import Any, Callable, Optional
+from collections.abc import Mapping
+from typing import Any, Optional
 
 from valkey.cluster import key_slot
 
@@ -43,11 +44,9 @@ from valkey_fuzzer.clock import now
 from valkey_fuzzer.hoststate import chain_name
 from valkey_fuzzer.schema import ConfigField, ConfigSchema, plain_config
 
-from .capabilities import iptables_supported
 from .cluster_chaos import ClusterWaves
 from .instances import close_quietly, send_to
-from .network import create_chain, drop_between, remove_partition
-from .processes import restart_once
+from .network import instance_addresses, partition
 from .replication_chaos import excusing_operations
 from .schemas import INTEGER, LIST, MAPPING, TEXT, nullable
 from .slot_migration import ENDED, hash_tag, job_of, migration_endpoints, read_jobs
@@ -174,6 +173,7 @@ class MigrationWaves(ClusterWaves):
     """
 
     mode = MIGRATION
+    restarts_killed = True
 
     def __init__(self, context: Any, spec: Any, handle: Any, state: Any):
         super().__init__(context, spec, handle, state)
@@ -185,7 +185,6 @@ class MigrationWaves(ClusterWaves):
         # The slot-routing client the slot keys are written and read through, for the whole run (``prepare`` to
         # ``finish``): it follows MOVED after a migration.
         self.client: Any = None
-        self.heal_timeout_s = spec.config["heal_timeout_s"]
         self.subscriptions = [context.event_bus.subscribe(name, self._on_phase_event) for name in _PHASE_EVENTS]
 
     def _on_phase_event(self, event: Any) -> None:
@@ -205,15 +204,6 @@ class MigrationWaves(ClusterWaves):
         close_quietly(self.client)
         self.client = None
         return super().finish(*args, **kwargs)
-
-    @staticmethod
-    def host_ready(waves: Sequence[list[dict[str, Any]]]) -> Optional[str]:
-        if not any(operation["op"] == "partition" for wave in waves for operation in wave):
-            return None
-        supported, reason = iptables_supported()
-        if not supported:
-            return f"partition operations need Linux, root, and iptables ({reason}); remove them or run elsewhere"
-        return None
 
     def prepare(self) -> None:
         """Write the slot keys: ``keys_per_slot`` keys carrying each migrated key's hash tag, so they are in its
@@ -404,36 +394,6 @@ class MigrationWaves(ClusterWaves):
         if record is not None and "phase" in record:
             record["phase"]["landed_in"] = self.migration(record["wave"]).phase
 
-    def kill_undo(self, instance_id: str) -> Optional[Callable[[], None]]:
-        """A killed instance restarts (from its nodes.conf, so it rejoins its shard in whatever role it has)."""
-
-        restart = restart_once(self.handle, instance_id, wait_ready=True, ready_timeout=self.heal_timeout_s)
-
-        def undo() -> None:
-            restart()
-            self.selector.restore(instance_id)
-            with self.lock:
-                self.killed.pop(instance_id, None)
-
-        return undo
-
-    def _restart(self, record: dict[str, Any], config: dict[str, Any]) -> None:
-        with self.lock:
-            down = sorted(self.killed)
-        target = record["target"]
-        if target == "killed":
-            if not down:
-                record["skipped"] = "no instance killed in this wave is down"
-                return
-            target = self.rngs[record["index"]].choice(down)
-        elif target not in down:
-            record["missing"] = f"{target} is not down"
-            return
-        record.update(target=target, involved=[target])
-        self.landed(record, [target])
-        self.restart_killed(target, "restart")
-        record["success"] = True
-
     def _cancel(self, record: dict[str, Any], config: dict[str, Any]) -> None:
         endpoints = self._endpoints(record, config)
         if endpoints is None:
@@ -459,7 +419,7 @@ class MigrationWaves(ClusterWaves):
         if target is None:
             return
         peers_config = config["peers"] if isinstance(config["peers"], list) else [config["peers"]]
-        hosts = {instance.instance_id: instance.host for instance in self.handle.instances}
+        hosts = instance_addresses(self.handle)
         if peers_config == ["others"]:
             peers = [peer for peer in hosts if peer != target]
         else:
@@ -477,9 +437,7 @@ class MigrationWaves(ClusterWaves):
         self._await_phase(record, config)
         # Unique to this operation, so concurrent runs in one process never share a chain.
         chain = chain_name(f"{self.spec.id}/{record['index']}/{uuid.uuid4().hex}")
-        create_chain(chain)
-        self.own(record, "network.partition", chain, lambda: remove_partition(chain))
-        drop_between(chain, hosts, [target], peers)
+        partition(functools.partial(self.own, record), chain, hosts, [target], peers)
         self.context.event_bus.publish(
             f"{self.spec.id}.partitioned",
             source=self.spec.id,
@@ -492,10 +450,7 @@ class MigrationWaves(ClusterWaves):
     def heal(self, number: int) -> None:
         """Restart every killed instance, then wait for every instance to answer with the cluster state ok."""
 
-        with self.lock:
-            down = sorted(self.killed)
-        for instance_id in down:
-            self.restart_killed(instance_id, "heal")
+        self.restart_down("heal")
         self.handle.refresh_roles()
 
     def validate(self, number: int, results: list[dict[str, Any]]) -> dict[str, Any]:

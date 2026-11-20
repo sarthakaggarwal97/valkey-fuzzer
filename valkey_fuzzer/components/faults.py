@@ -33,14 +33,22 @@ from typing import Any, Optional
 from valkey_fuzzer._data import jsonable
 from valkey_fuzzer.clock import now
 from valkey_fuzzer.declarations import Declarations
-from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
+from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
-from valkey_fuzzer.schema import ConfigError, ConfigField, ConfigSchema, plain_config
+from valkey_fuzzer.schema import ConfigField, ConfigSchema, plain_config
 
 from .instances import EXPECTED_DOWN, deployment, select_instance
 from .polling import remaining
 from .predicates import payload_matches
-from .processes import KILL_EXIT_TIMEOUT_S, RESTART_FIELDS, pause_owned, record_restart, wait_killed
+from .processes import (
+    KILL_EXIT_TIMEOUT_S,
+    KILL_FIELDS,
+    KILL_RECORD_FIELDS,
+    check_cluster_vars,
+    pause_owned,
+    record_restart,
+    wait_killed,
+)
 from .registration import component_registration
 from .schemas import FLAG, INTEGER, MAPPING, NUMBER, TEXT, declared, mapping_of, nullable, optional
 
@@ -101,6 +109,23 @@ def fault_declares(
     )
 
 
+# What a fault that kills an instance declares besides its record: the event of a restart that started it again,
+# and the evidence of a kill without restart (:meth:`EventFault._expected_down`).
+KILL_DECLARES = {
+    "events": {"{id}.recovered": ConfigSchema({"instance_id": TEXT})},
+    "evidence": {EXPECTED_DOWN: declared(mapping_of({"instances": ConfigField(list, items=TEXT)}))},
+}
+
+# What a held fault on one instance records of its release (:meth:`HeldFault._settled`, under the default field
+# names) and publishes with ``<id>.released``; its own ``seconds_field`` goes beside them.
+RELEASED_FIELDS = {
+    "released_at": optional(float),
+    "release_reason": optional(str),
+    "release_error": optional(str),
+}
+RELEASED_EVENT = ConfigSchema({"instance_id": TEXT, "reason": TEXT})
+
+
 class FaultRefusedError(Exception):
     """Raised by ``_fire`` when firing would be unsafe; the fault reports ERROR, not FAIL."""
 
@@ -124,6 +149,8 @@ class EventFault:
         self._fire_done.set()
         # The changes this fault applied, oldest first.
         self._obligations: list[Any] = []
+        # The instance a fault on one instance acts on (:meth:`_select_target`, :meth:`_target_instance`).
+        self._target: Optional[str] = None
 
     def inject(self, context: Any, spec: ComponentSpec):
         self._config = spec.config
@@ -135,6 +162,20 @@ class EventFault:
 
     def _prepare(self, context: Any, spec: ComponentSpec) -> None:
         """Resolve targets before the trigger so firing does minimal work."""
+
+    def _select_target(self, context: Any) -> None:
+        """Resolve the ``instance`` the fault acts on before the trigger, unless it is the triggering event's
+        (``instance: event``), which :meth:`_target_instance` reads from the event when the fault fires."""
+
+        if self._config["instance"] != EVENT_TARGET:
+            self._target = select_instance(deployment(context), self._config["instance"])
+
+    def _target_instance(self, handle: Any, event: Any) -> str:
+        """The instance the fault acts on: the one selected before the trigger, else the one ``event`` names."""
+
+        if self._target is None:
+            self._target = self._event_target(handle, event)
+        return self._target
 
     def _own(self, kind: str, target: str, undo: Any) -> Any:
         """Open the obligation for a change of ``kind`` to ``target`` just applied, undone by ``undo``."""
@@ -259,6 +300,33 @@ class EventFault:
         """Evidence an applied fault records besides ``valkey.fault.injected``."""
         return ()
 
+    def _expected_down(self, spec: ComponentSpec, record: dict[str, Any]) -> tuple:
+        """The evidence of a kill without restart: its target is down on purpose until the deployment is removed,
+        so ``valkey.oracle.liveness`` and the data oracles skip it."""
+
+        return (make_evidence(spec, EXPECTED_DOWN, "fault.recovered", {"instances": [record["target"]]}),)
+
+    def _restart_after_kill(self, stopped: Any, record: dict[str, Any]) -> None:
+        """Restart the killed target after ``restart_delay_s``: discharge ``stopped``, the kill's obligation, whose
+        undo starts the instance again and records it (:func:`record_restart`), then publish ``<id>.recovered``.
+
+        It runs after ``<id>.injected``, on the trigger's dispatch or a worker thread. A cancelled delay leaves the
+        restart to recovery; a restart that raised is recorded as ``restart_error`` and stays owned, so recovery
+        retries it and reports it.
+        """
+
+        if not self._context.sleep(self._config["restart_delay_s"]):
+            return
+        try:
+            stopped.discharge()
+        except Exception as exc:
+            record["restart_error"] = f"{type(exc).__name__}: {exc}"
+            return
+        if record.get("restarted"):
+            self._context.event_bus.publish(
+                f"{self._spec.id}.recovered", source=self._spec.id, payload={"instance_id": self._target}
+            )
+
     def recover(self, context: Any, spec: ComponentSpec):
         if self._subscription is not None:
             context.event_bus.unsubscribe(self._subscription)
@@ -358,6 +426,9 @@ class HeldFault(EventFault):
     released_at_field = "released_at"
     reason_field = "release_reason"
     seconds_field = ""
+    # What the ERROR of a failed release says before the error itself ("restoring the clock failed, so the skew
+    # lasted until recovery"), for the faults that take the default :meth:`_release_failed`.
+    release_failed_text = ""
 
     def _prepare(self, context: Any, spec: ComponentSpec) -> None:
         # Reentrant: a subscriber of <id>.released, which is published under it, may release again.
@@ -384,16 +455,24 @@ class HeldFault(EventFault):
 
         raise NotImplementedError
 
-    def _released_payload(self, reason: str) -> dict[str, Any]:
-        """The ``<id>.<released_event>`` payload of a release for ``reason``."""
+    def _own_change(self, kind: str, target: str, undo: Any) -> Any:
+        """Open the obligation of the fault's one change (an ``Own``): :meth:`_own`, kept as ``self._change``."""
 
-        raise NotImplementedError
+        self._change = self._own(kind, target, undo)
+        return self._change
+
+    def _released_payload(self, reason: str) -> dict[str, Any]:
+        """The ``<id>.<released_event>`` payload of a release for ``reason``: a fault on one instance names it
+        (:data:`RELEASED_EVENT`); the others say what they released."""
+
+        return {"instance_id": self._target, "reason": reason}
 
     def _release_failed(self, record: dict[str, Any], error: str) -> str:
         """Record ``error``, the release that failed, on ``record``; what the ERROR says: the change lasted until
         recovery."""
 
-        raise NotImplementedError
+        record["release_error"] = error
+        return f"{self.release_failed_text}: {error}"
 
     def _fire(self, context: Any, spec: ComponentSpec, event: Any) -> dict[str, Any]:
         record = self._install(event)
@@ -452,24 +531,13 @@ class HeldFault(EventFault):
 _SIGNAL_FIELDS = {
     "instance": ConfigField(str, default="primary"),
     "signal": ConfigField(str, default="SIGKILL", choices=tuple(_SIGNALS)),
-    "restart": ConfigField(bool, default=True),
+    **KILL_FIELDS,
     # immediate: restart inside the trigger's dispatch; background: kill inside
     # it and restart on a worker so the publisher (the event bus) is not held up;
     # recover: restart when the fault recovers at teardown.
     "restart_mode": ConfigField(str, default="recover", choices=("recover", "immediate", "background")),
-    "restart_delay_s": ConfigField(float, default=0.0, minimum=0, maximum=600),
     "pause_s": ConfigField(float, default=1.0, minimum=0, maximum=600),
-    # How long a restart waits for the instance to become ready.
-    "ready_timeout_s": ConfigField(float, default=30.0, minimum=1, maximum=600),
-    # Record the killed instance's on-disk cluster vars (nodes.conf currentEpoch
-    # and lastVoteEpoch) as the restarted process will load them.
-    "capture_cluster_vars": ConfigField(bool, default=False),
 }
-
-
-def _validate_signal(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -> None:
-    if config["capture_cluster_vars"] and plan.deployment_mode != "cluster":
-        raise ConfigError("capture_cluster_vars needs a cluster deployment")
 
 
 class ProcessSignalFault(EventFault):
@@ -481,18 +549,15 @@ class ProcessSignalFault(EventFault):
     """
 
     def _prepare(self, context: Any, spec: ComponentSpec) -> None:
-        self._target: Optional[str] = None
         self._restarter: Optional[threading.Thread] = None
         self._restarter_stuck = False
         # The kill's obligation, discharged by the restart.
         self._stopped: Any = None
-        if self._config["instance"] != EVENT_TARGET:
-            self._target = select_instance(deployment(context), self._config["instance"])
+        self._select_target(context)
 
     def _fire(self, context: Any, spec: ComponentSpec, event: Any) -> dict[str, Any]:
         handle = deployment(context)
-        if self._target is None:
-            self._target = self._event_target(handle, event)
+        self._target_instance(handle, event)
         name = self._config["signal"]
         record: dict[str, Any] = {"target": self._target, "signal": name, "pid": handle.pid(self._target)}
         if name in ("SIGKILL", "SIGTERM"):
@@ -537,8 +602,7 @@ class ProcessSignalFault(EventFault):
     def _evidence(self, spec: ComponentSpec, record: dict[str, Any]) -> tuple:
         if record["signal"] == "SIGSTOP" or self._config["restart"]:
             return ()
-        # Down on purpose until the deployment is removed: valkey.oracle.liveness and the data oracles skip it.
-        return (make_evidence(spec, EXPECTED_DOWN, "fault.recovered", {"instances": [record["target"]]}),)
+        return self._expected_down(spec, record)
 
     def _restart_if_down(self, handle: Any, record: dict[str, Any]) -> None:
         if not handle.is_alive(self._target):
@@ -551,27 +615,16 @@ class ProcessSignalFault(EventFault):
             # Recovery is part of the fault here so later actions in the plan
             # observe the restarted instance. A failed restart keeps the kill
             # owned; recovery retries it.
-            self._restart_and_announce(context, spec, record)
+            self._restart_after_kill(self._stopped, record)
             return
         # Restart off the dispatch thread so the publisher (the event bus) is not held up.
         self._restarter = threading.Thread(
-            target=self._restart_and_announce,
-            args=(context, spec, record),
+            target=self._restart_after_kill,
+            args=(self._stopped, record),
             name=f"restart-{spec.id}",
             daemon=True,
         )
         self._restarter.start()
-
-    def _restart_and_announce(self, context: Any, spec: ComponentSpec, record: dict[str, Any]) -> None:
-        if not context.sleep(self._config["restart_delay_s"]):
-            return  # Cancelled: recovery restarts the instance.
-        try:
-            self._stopped.discharge()
-        except Exception as exc:
-            record["restart_error"] = f"{type(exc).__name__}: {exc}"
-            return
-        if record.get("restarted"):
-            context.event_bus.publish(f"{spec.id}.recovered", source=spec.id, payload={"instance_id": self._target})
 
     def _restart(self, handle: Any, record: dict[str, Any]) -> None:
         record_restart(
@@ -599,15 +652,11 @@ _SIGNAL_DECLARES = fault_declares(
         "signal": TEXT,
         "pid": nullable(int),
         "signal_sent_at": optional(float),
-        "exited": optional(bool),
-        "exited_at": optional(float),
-        "disk_vars_at_kill": optional(dict, allow_none=True),
-        **RESTART_FIELDS,
+        **KILL_RECORD_FIELDS,
         "resumed": optional(bool),
     },
-    events={"{id}.recovered": ConfigSchema({"instance_id": TEXT})},
     changes=("process.stopped", "process.paused"),
-    evidence={EXPECTED_DOWN: declared(mapping_of({"instances": ConfigField(list, items=TEXT)}))},
+    **KILL_DECLARES,
 )
 
 REGISTRATIONS = (
@@ -615,7 +664,7 @@ REGISTRATIONS = (
         "valkey.fault.process-signal",
         ProcessSignalFault,
         _SIGNAL_FIELDS,
-        check=_validate_signal,
+        check=check_cluster_vars,
         selectors={"instance": (EVENT_TARGET,)},
         triggered=True,
         declares=_SIGNAL_DECLARES,

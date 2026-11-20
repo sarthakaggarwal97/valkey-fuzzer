@@ -20,10 +20,10 @@ from typing import Any, Optional
 from valkey_fuzzer.clock import now
 from valkey_fuzzer.deployment.local import clock_faults
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
-from valkey_fuzzer.schema import ConfigError, ConfigField, ConfigSchema, plain_config
+from valkey_fuzzer.schema import ConfigError, ConfigField, plain_config
 
-from .faults import EVENT_TARGET, HeldFault, fault_declares
-from .instances import close_quietly, deployment, select_instance
+from .faults import EVENT_TARGET, RELEASED_EVENT, RELEASED_FIELDS, HeldFault, fault_declares
+from .instances import close_quietly, deployment
 from .registration import component_registration
 from .schemas import NUMBER, TEXT, nullable, optional
 
@@ -80,18 +80,16 @@ class ClockSkewFault(HeldFault):
     """Skew one instance's wall clock at a lifecycle event, until ``release_event`` or recovery (see the module)."""
 
     seconds_field = "skew_seconds"
+    release_failed_text = "restoring the clock failed, so the skew lasted until recovery"
 
     def _resolve(self, context: Any, spec: ComponentSpec) -> None:
-        self._target: Optional[str] = None
         self._path: Optional[str] = None
         self._skew_at_release: Optional[float] = None
-        if self._config["instance"] != EVENT_TARGET:
-            self._target = select_instance(deployment(context), self._config["instance"])
+        self._select_target(context)
 
     def _install(self, event: Any) -> dict[str, Any]:
         handle = deployment(self._context)
-        if self._target is None:
-            self._target = self._event_target(handle, event)
+        self._target_instance(handle, event)
         self._path = handle.clock_fault_file(self._target)
         if self._path is None:
             raise RuntimeError("the deployment does not start its servers under libfaketime (clock_faults)")
@@ -99,7 +97,7 @@ class ClockSkewFault(HeldFault):
         applied_at = now()
         spec_text = time_spec(offset, rate, applied_at - handle.started_at(self._target))
         # Owned from before the write: the undo restores the real time whatever the file holds.
-        self._change = self._own("clock.skewed", self._target, self._restore)
+        self._own_change("clock.skewed", self._target, self._restore)
         clock_faults.write_timestamp(self._path, spec_text)
         record: dict[str, Any] = {
             "target": self._target,
@@ -136,13 +134,6 @@ class ClockSkewFault(HeldFault):
                 self._skew_at_release = None  # Down, or the deployment is gone: the file still gets restored.
         clock_faults.write_timestamp(self._path, clock_faults.REAL_TIME)
 
-    def _released_payload(self, reason: str) -> dict[str, Any]:
-        return {"instance_id": self._target, "reason": reason}
-
-    def _release_failed(self, record: dict[str, Any], error: str) -> str:
-        record["release_error"] = error
-        return f"restoring the clock failed, so the skew lasted until recovery: {error}"
-
     def _settled(self, context: Any, spec: ComponentSpec, record: dict[str, Any]) -> None:
         super()._settled(context, spec, record)
         if self._released_at is not None:
@@ -159,13 +150,11 @@ _DECLARES = fault_declares(
         "rate": NUMBER,
         "skew_measured_s": nullable(float),
         "skew_expected_s": optional(float),
-        "released_at": optional(float),
-        "release_reason": optional(str),
+        **RELEASED_FIELDS,
         "skew_at_release_s": optional(float, allow_none=True),
         "skew_seconds": optional(float),
-        "release_error": optional(str),
     },
-    events={"{id}.released": ConfigSchema({"instance_id": TEXT, "reason": TEXT})},
+    events={"{id}.released": RELEASED_EVENT},
     changes=("clock.skewed",),
 )
 

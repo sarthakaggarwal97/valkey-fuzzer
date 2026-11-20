@@ -639,7 +639,7 @@ start of the wave; each operation draws from its own random stream,
 | --- | --- | --- | --- |
 | `waves` | list of lists | | The waves, each a non-empty list of operations. |
 | `validation` | mapping | `{}` | The [state validation](../cluster-chaos-and-ci.md#state-validation) settings, as for `valkey.action.cluster-chaos`. |
-| `heal_timeout_s` | number, 1 to 3600 | 60 | How long the heal waits for every replica to link to the primary. |
+| `heal_timeout_s` | number, 1 to 3600 | 60 | How long the heal waits for every replica to link to the primary, and a restarted instance may take to be ready. |
 
 Kill safety (the standalone policy of the
 [wave engine](../architecture.md#the-wave-engine)): a kill never takes the last

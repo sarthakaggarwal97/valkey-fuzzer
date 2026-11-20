@@ -1039,3 +1039,20 @@ def test_a_disk_fill_whose_ballast_stayed_does_not_record_it_removed(monkeypatch
     result = fault.recover(context, spec)
     record = next(item.value for item in result.evidence if item.evidence_id == FAULT_INJECTED)
     assert result.status is ComponentStatus.ERROR and record["ballast_removed"] is False
+
+
+def test_a_disk_fill_released_by_its_event_records_the_release_as_every_held_fault_does(monkeypatch, tmp_path):
+    monkeypatch.setattr(storage, "_tmpfs_limit", lambda path: 8192)
+    monkeypatch.setattr(storage.os, "statvfs", lambda path: SimpleNamespace(f_bavail=0, f_frsize=4096))
+    context, spec, fault = _fire(
+        storage.FillFilesystemFault(), _Handle(), "valkey.fault.disk-fill", path=str(tmp_path), chunk_bytes=4096,
+        release_event="saved",
+    )  # fmt: skip
+    context.event_bus.publish("saved", source="bgsave")
+    (released,) = context.event_bus.committed_history("fault.released")
+    assert released.payload == {"ballast": str(tmp_path / ".ballast-fault")} and not list(tmp_path.iterdir())
+    result = fault.recover(context, spec)
+    record = next(item.value for item in result.evidence if item.evidence_id == FAULT_INJECTED)
+    assert result.status is ComponentStatus.PASS and record["release_reason"] == "event"
+    assert record["filled_seconds"] == round(record["released_at"] - record["applied_at"], 3)
+    assert "ballast_removed" not in record and "released_on_event_sequence" not in record

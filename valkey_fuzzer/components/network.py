@@ -67,6 +67,7 @@ from valkey_fuzzer.schema import ConfigError, ConfigField, ConfigSchema, plain_c
 
 from .faults import HeldFault, fault_declares
 from .instances import deployment, select_instances
+from .processes import Own
 from .registration import component_registration
 from .schemas import LIST, MAPPING, TEXT, optional
 
@@ -158,6 +159,24 @@ def remove_partition(chain: str) -> None:
     errors = remove_chain(chain, run_iptables)
     if errors:
         raise RuntimeError(f"iptables chain {chain} remains: {errors}")
+
+
+def instance_addresses(handle: Any) -> dict[str, str]:
+    """Every instance's address, by instance ID."""
+
+    return {instance.instance_id: instance.host for instance in handle.instances}
+
+
+def partition(
+    own: Own, chain: str, addresses: Mapping[str, str], isolated: Sequence[str], peers: Sequence[str]
+) -> dict[str, Any]:
+    """Cut every isolated instance off from every peer: create ``chain``, open its obligation with ``own`` (it is
+    owned from the moment it exists, so a failed rule leaves nothing unowned), and add the DROP rules; the record
+    (``chain``, ``rules``). Raises :class:`PartitionError` at the first failed step."""
+
+    create_chain(chain)
+    own("network.partition", chain, lambda: remove_partition(chain))
+    return {"chain": chain, "rules": drop_between(chain, addresses, isolated, peers)}
 
 
 # ---------------------------------------------------------------------------
@@ -345,6 +364,20 @@ class Degradation:
             raise RuntimeError(f"netem device {self.device} remains: {errors}")
 
 
+def degrade(
+    own: Own, addresses: Mapping[str, str], instances: Sequence[str], peers: Sequence[str], netem: Sequence[str]
+) -> dict[str, Any]:
+    """Degrade the links between every instance and every peer with the ``netem`` arguments: create the device,
+    open its obligation with ``own`` (it is owned from the moment it exists), then netem and the filters; the
+    record (``device``, ``pref``, ``netem``, ``rules``). Raises :class:`DegradeError` at the first failed step."""
+
+    degradation = Degradation(addresses, instances, peers, netem)
+    device = degradation.create_device()
+    own("network.degrade", device, degradation.remove)
+    rules = degradation.install()
+    return {"device": device, "pref": degradation.pref, "netem": " ".join(netem), "rules": rules}
+
+
 # ---------------------------------------------------------------------------
 # The faults
 # ---------------------------------------------------------------------------
@@ -396,7 +429,7 @@ def _resolve_pairs(context: Any, config: Mapping[str, Any], field: str) -> tuple
         peers = [item for item in select_instances(handle, config["peers"]) if item not in selected]
     if not selected or not peers:
         raise ValueError("a network fault needs at least one selected instance and one peer")
-    addresses = {instance.instance_id: instance.host for instance in handle.instances}
+    addresses = instance_addresses(handle)
     if len(set(addresses.values())) != len(addresses):
         raise ValueError("instances share an address; use deployment.addressing: per_instance_loopback")
     return selected, peers, addresses
@@ -415,9 +448,26 @@ class _HealingFault(HeldFault):
     # The exception an installation step raises, and the event an installation publishes.
     step_error: type = Exception
     applied_event = ""
+    # The config field selecting the instances the fault acts on, and the key they appear under in the record and
+    # the event payloads (``isolate``/``isolated``, ``instances``/``instances``).
+    targets_field = ""
+    targets_key = ""
+
+    def _resolve(self, context: Any, spec: ComponentSpec) -> None:
+        self._targets, self._peers, self._addresses = _resolve_pairs(context, self._config, self.targets_field)
+
+    def _link_record(self, **change: Any) -> dict[str, Any]:
+        """The record: the targets (under ``targets`` and ``targets_key``), their peers, every address, and the
+        ``change`` installed."""
+
+        targets = {"targets": self._targets, self.targets_key: self._targets}
+        return {**targets, "peers": self._peers, "addresses": self._addresses, **change}
 
     def _applied_payload(self) -> dict[str, Any]:
-        raise NotImplementedError
+        return {self.targets_key: self._targets, "peers": self._peers}
+
+    def _released_payload(self, reason: str) -> dict[str, Any]:
+        return {"reason": reason, self.targets_key: self._targets}
 
     def _fire(self, context: Any, spec: ComponentSpec, event: Any) -> dict[str, Any]:
         try:
@@ -467,32 +517,19 @@ class PartitionFault(_HealingFault):
     step_error = PartitionError
     applied_event = "partitioned"
     seconds_field = "partition_seconds"
+    targets_field, targets_key = "isolate", "isolated"
 
     def _resolve(self, context: Any, spec: ComponentSpec) -> None:
-        self._isolated, self._peers, self._addresses = _resolve_pairs(context, self._config, "isolate")
+        super()._resolve(context, spec)
         # Unique to this fault instance, so concurrent runs in one process never share a chain.
         self._chain = chain_name(f"{spec.id}/{uuid.uuid4().hex}")
 
     def _install(self, event: Any) -> dict[str, Any]:
         """Create the chain, add every DROP rule, and jump to it from INPUT; raise on the first failure."""
 
-        create_chain(self._chain)
-        self._change = self._own("network.partition", self._chain, lambda: remove_partition(self._chain))
-        rules = drop_between(self._chain, self._addresses, self._isolated, self._peers)
-        return {
-            "targets": self._isolated,
-            "isolated": self._isolated,
-            "peers": self._peers,
-            "addresses": self._addresses,
-            "chain": self._chain,
-            "rules": rules,
-        }
-
-    def _applied_payload(self) -> dict[str, Any]:
-        return {"isolated": self._isolated, "peers": self._peers}
-
-    def _released_payload(self, reason: str) -> dict[str, Any]:
-        return {"reason": reason, "isolated": self._isolated}
+        return self._link_record(
+            **partition(self._own_change, self._chain, self._addresses, self._targets, self._peers)
+        )
 
 
 class DegradeFault(_HealingFault):
@@ -505,34 +542,19 @@ class DegradeFault(_HealingFault):
     step_error = DegradeError
     applied_event = "degraded"
     seconds_field = "degrade_seconds"
+    targets_field = targets_key = "instances"
 
     def _resolve(self, context: Any, spec: ComponentSpec) -> None:
-        self._instances, self._peers, self._addresses = _resolve_pairs(context, self._config, "instances")
+        super()._resolve(context, spec)
         self._netem = netem_arguments(self._config)
-        self._degradation = Degradation(self._addresses, self._instances, self._peers, self._netem)
 
     def _install(self, event: Any) -> dict[str, Any]:
         """Create the device, then netem on it and the redirect filters; raise on the first failure."""
 
-        device = self._degradation.create_device()
-        self._change = self._own("network.degrade", device, self._degradation.remove)
-        rules = self._degradation.install()
-        return {
-            "targets": self._instances,
-            "instances": self._instances,
-            "peers": self._peers,
-            "addresses": self._addresses,
-            "device": device,
-            "pref": self._degradation.pref,
-            "netem": " ".join(self._netem),
-            "rules": rules,
-        }
+        return self._link_record(**degrade(self._own_change, self._addresses, self._targets, self._peers, self._netem))
 
     def _applied_payload(self) -> dict[str, Any]:
-        return {"instances": self._instances, "peers": self._peers, "netem": " ".join(self._netem)}
-
-    def _released_payload(self, reason: str) -> dict[str, Any]:
-        return {"reason": reason, "instances": self._instances}
+        return {**super()._applied_payload(), "netem": " ".join(self._netem)}
 
 
 _HEAL_RECORD = {
