@@ -44,12 +44,10 @@ for ``sudo``.
 
 import ipaddress
 import secrets
-import threading
 import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any, Optional
 
-from valkey_fuzzer.clock import now
 from valkey_fuzzer.hoststate import (
     chain_name,
     ensure_lo_ingress,
@@ -66,7 +64,7 @@ from valkey_fuzzer.hoststate import (
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.schema import ConfigError, ConfigField, ConfigSchema, plain_config
 
-from .faults import EventFault, fault_declares
+from .faults import HeldFault, fault_declares
 from .instances import deployment, select_instances
 from .registration import component_registration
 from .schemas import LIST, MAPPING, TEXT, optional
@@ -385,49 +383,26 @@ def _resolve_pairs(context: Any, config: Mapping[str, Any], field: str) -> tuple
     return selected, peers, addresses
 
 
-class _HealingFault(EventFault):
+class _HealingFault(HeldFault):
     """A link fault installed at a lifecycle event and healed on ``heal_event``, after ``duration_s``, or at
-    recovery; subclasses install and remove the change, and name their events and record fields."""
+    recovery: a :class:`HeldFault` whose installation is all-or-nothing (a failed step removes what it made) and
+    which announces the changed links with an event of its own; subclasses install the change and name their
+    events and record fields."""
 
-    # The exception an installation step raises, the event an installation publishes, and the record field
-    # for how long the fault lasted.
+    release_field = "heal_event"
+    released_event = "healed"
+    released_at_field = "healed_at"
+    reason_field = "heal_reason"
+    # The exception an installation step raises, and the event an installation publishes.
     step_error: type = Exception
     applied_event = ""
-    seconds_field = ""
-
-    def _prepare(self, context: Any, spec: ComponentSpec) -> None:
-        self._resolve(context, spec)
-        # Reentrant: a subscriber of <id>.healed, which is published under it, may heal again.
-        self._lock_heal = threading.RLock()
-        # Set once recovery begins: a late timer or heal event no longer acts.
-        self._closed = False
-        self._heal_reason: Optional[str] = None
-        # The change's obligation, from the moment its chain or device exists.
-        self._change: Any = None
-        self._installed = False
-        self._healed_at = None
-        self._heal_errors: list[str] = []
-        self._timer = None
-        if self._config["heal_event"]:
-            self._subscribe(self._config["heal_event"], self._heal_on_event)
-
-    def _resolve(self, context: Any, spec: ComponentSpec) -> None:
-        raise NotImplementedError
-
-    def _install(self) -> dict[str, Any]:
-        """Apply the change, opening its obligation as soon as its chain or device exists; the record fields."""
-
-        raise NotImplementedError
 
     def _applied_payload(self) -> dict[str, Any]:
         raise NotImplementedError
 
-    def _healed_payload(self) -> dict[str, Any]:
-        raise NotImplementedError
-
     def _fire(self, context: Any, spec: ComponentSpec, event: Any) -> dict[str, Any]:
         try:
-            record = self._install()
+            record = self._install(event)
         except self.step_error as exc:
             record = {"applied": False, "error": str(exc)}
             error = self._remove()
@@ -439,10 +414,7 @@ class _HealingFault(EventFault):
             raise
         self._installed = True
         context.event_bus.publish(f"{spec.id}.{self.applied_event}", source=spec.id, payload=self._applied_payload())
-        if self._config["duration_s"] is not None:
-            self._timer = threading.Timer(self._config["duration_s"], self._heal, kwargs={"reason": "duration"})
-            self._timer.daemon = True
-            self._timer.start()
+        self._release_later()
         return {"applied": True, **record}
 
     def _remove(self) -> Optional[str]:
@@ -457,38 +429,13 @@ class _HealingFault(EventFault):
         return None
 
     def _heal(self, reason: str) -> None:
-        with self._lock_heal:
-            if self._closed or not self._installed or self._healed_at is not None:
-                return
-            error = self._undo_early(self._change, "healed", {"reason": reason, **self._healed_payload()})
-            if error:
-                self._heal_errors = [error]
-                return
-            self._healed_at = now()
-            self._heal_reason = reason
+        """Release the change: the link faults' word for it."""
 
-    def _heal_on_event(self, event: Any) -> None:
-        self._heal("event")
+        self._release(reason)
 
-    def _quiesce(self) -> None:
-        if self._timer is not None:
-            self._timer.cancel()
-        # Waits for a heal in progress; recovery removes the change from here on, and publishes nothing.
-        with self._lock_heal:
-            self._closed = True
-
-    def _settled(self, context: Any, spec: ComponentSpec, record: dict[str, Any]) -> None:
-        with self._lock_heal:
-            if self._installed and self._healed_at is None and not self._change.open:
-                self._healed_at = now()
-                self._heal_reason = "recover"
-        if self._heal_errors:
-            record["heal_errors"] = self._heal_errors
-            raise RuntimeError(f"{self.applied_event} heal failed, so it lasted until recovery: {self._heal_errors}")
-        if self._healed_at is not None:
-            record["healed_at"] = self._healed_at
-            record["heal_reason"] = self._heal_reason
-            record[self.seconds_field] = round(self._healed_at - record.get("applied_at", self._healed_at), 3)
+    def _release_failed(self, record: dict[str, Any], error: str) -> str:
+        record["heal_errors"] = [error]
+        return f"{self.applied_event} heal failed, so it lasted until recovery: {[error]}"
 
 
 class PartitionFault(_HealingFault):
@@ -507,7 +454,7 @@ class PartitionFault(_HealingFault):
         # Unique to this fault instance, so concurrent runs in one process never share a chain.
         self._chain = chain_name(f"{spec.id}/{uuid.uuid4().hex}")
 
-    def _install(self) -> dict[str, Any]:
+    def _install(self, event: Any) -> dict[str, Any]:
         """Create the chain, add every DROP rule, and jump to it from INPUT; raise on the first failure."""
 
         create_chain(self._chain)
@@ -525,8 +472,8 @@ class PartitionFault(_HealingFault):
     def _applied_payload(self) -> dict[str, Any]:
         return {"isolated": self._isolated, "peers": self._peers}
 
-    def _healed_payload(self) -> dict[str, Any]:
-        return {"isolated": self._isolated}
+    def _released_payload(self, reason: str) -> dict[str, Any]:
+        return {"reason": reason, "isolated": self._isolated}
 
 
 class DegradeFault(_HealingFault):
@@ -545,7 +492,7 @@ class DegradeFault(_HealingFault):
         self._netem = netem_arguments(self._config)
         self._degradation = Degradation(self._addresses, self._instances, self._peers, self._netem)
 
-    def _install(self) -> dict[str, Any]:
+    def _install(self, event: Any) -> dict[str, Any]:
         """Create the device, then netem on it and the redirect filters; raise on the first failure."""
 
         device = self._degradation.create_device()
@@ -565,8 +512,8 @@ class DegradeFault(_HealingFault):
     def _applied_payload(self) -> dict[str, Any]:
         return {"instances": self._instances, "peers": self._peers, "netem": " ".join(self._netem)}
 
-    def _healed_payload(self) -> dict[str, Any]:
-        return {"instances": self._instances}
+    def _released_payload(self, reason: str) -> dict[str, Any]:
+        return {"reason": reason, "instances": self._instances}
 
 
 _HEAL_RECORD = {
