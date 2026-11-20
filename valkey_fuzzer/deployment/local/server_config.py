@@ -182,19 +182,6 @@ def build_server_config_arguments(server_config: Mapping[str, Any]) -> list[str]
     ]
 
 
-# The configs Valkey renamed, {old name: (new name, {old value: new value})}: a build knows one name or the
-# other, and either may be written. Every server start, and the build probe's CONFIG GET and CONFIG SET, give
-# each build the name it knows (config_for_build).
-RENAMED_CONFIGS: dict[str, tuple[str, dict[str, str]]] = {}
-_RENAMED_NAMES = {name for old, (new, _) in RENAMED_CONFIGS.items() for name in (old, new)}
-
-
-def knows_config(binary: str, name: str, value: str) -> bool:
-    """Whether ``binary`` knows config ``name`` (``value`` being one of its values), without starting a server."""
-
-    return "Bad directive" not in _config_probe(binary, name, value)
-
-
 def accepts_config(binary: str, name: str, value: str) -> bool:
     """Whether ``binary`` starts with config ``name`` set to ``value``, without starting a server."""
 
@@ -238,30 +225,16 @@ UNOBSERVABLE_CONFIGS = {
 }
 
 
-def config_for_build(binary: str, name: str, value: Any) -> tuple[str, Any]:
-    """Config ``name`` and ``value`` as ``binary`` knows them, for a config Valkey renamed (:data:`RENAMED_CONFIGS`);
-    any other config, and a value the rename does not name, as it is."""
-
-    for old, (new, values) in RENAMED_CONFIGS.items():
-        if name in (old, new):
-            if knows_config(binary, new, next(iter(values.values()))):
-                return new, values.get(str(value), value)
-            return old, {to: was for was, to in values.items()}.get(str(value), value)
-    return name, value
-
-
 def arguments_for_build(binary: str, arguments: Sequence[str]) -> list[str]:
-    """valkey-server ``arguments`` (``--option value`` pairs) with each renamed config as ``binary`` knows it, and
-    each unobservable config it refuses (:data:`UNOBSERVABLE_CONFIGS`) replaced or left out."""
+    """valkey-server ``arguments`` (``--option value`` pairs) with each unobservable config ``binary`` refuses
+    (:data:`UNOBSERVABLE_CONFIGS`) replaced or left out."""
 
     if not os.path.exists(shutil.which(binary) or binary):
         return list(arguments)  # nothing to ask: the start itself reports the missing binary
     translated: list[str] = []
     for index in range(0, len(arguments) - 1, 2):
         option, value = arguments[index][2:], arguments[index + 1]
-        if option in _RENAMED_NAMES:
-            option, value = config_for_build(binary, option, value)
-        elif option in UNOBSERVABLE_CONFIGS and value != UNOBSERVABLE_CONFIGS[option]:
+        if option in UNOBSERVABLE_CONFIGS and value != UNOBSERVABLE_CONFIGS[option]:
             if not accepts_config(binary, option, value):
                 instead = UNOBSERVABLE_CONFIGS[option]
                 logger.info("%s refuses %s %s: it starts with %s", binary, option, value, instead or "its default")

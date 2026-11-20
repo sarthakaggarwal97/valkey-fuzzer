@@ -49,9 +49,9 @@ MEMORY = "memory"
 # The changes (undo obligations) that break replication and cluster links for a while, and those that make
 # writes to disk fail.
 _LINK_CHANGES = ("process.stopped", "process.paused", "network.partition", "network.degrade")
-_STORAGE_CHANGES = ("disk.filled", "directory.read-only")
+_STORAGE_CHANGES = ("disk.filled",)
 # A kill or a role change lasts until the deployment is removed, so no obligation owns it: its evidence says so.
-_LINK_EVIDENCE = (EXPECTED_DOWN, "valkey.chaos.schedule", FAILOVER_RESULT, "valkey.replication.replicaof")
+_LINK_EVIDENCE = (EXPECTED_DOWN, "valkey.chaos.schedule", FAILOVER_RESULT)
 # Configured commands that act on connections, the topology, or the server's internals, besides those that set
 # replication (checks.sets_replication): CLIENT KILL drops links, DEBUG CHANGE-REPL-ID forces a full resync.
 _LINK_COMMANDS = ("CLIENT", "CLUSTER", "DEBUG")

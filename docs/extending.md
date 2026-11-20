@@ -372,7 +372,7 @@ Instance IDs are `valkey-N`.
 | Group | Members |
 | --- | --- |
 | instances | `mode`, `deployment_id`, `valkey_sha`; `instances` (each with `instance_id`, `role`, `shard_id`, `host`, `port`, `bus_port`, `slot_start`, `slot_end`, `primary_id`, `cluster_node_id`), `instance(id)` |
-| clients | `execute_command(id, *args)`, `new_client(id, timeout=5.0)`, and in cluster mode `cluster_client(timeout=5.0)`; every client is closed at cleanup |
+| clients | `new_client(id, timeout=5.0)`, and in cluster mode `cluster_client(timeout=5.0)`; every client is closed at cleanup |
 | processes | `pid(id)`, `started_at(id)`, `is_alive(id)`, `send_signal(id, signum)`, `wait_exit(id, timeout=10.0)`, `restart(id, wait_ready=True)` |
 | topology | `replicate(id, primary_id)` (standalone): record the instance as a replica of `primary_id` (a primary with `None`) and send `REPLICAOF` if it runs, so a later `restart` keeps the role |
 | files | `log_file(id)` and `process_output_file(id)` (its stdout and stderr), both written by this deployment alone, and `data_dir(id)` |

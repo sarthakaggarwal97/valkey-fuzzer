@@ -221,15 +221,3 @@ def sigterm_during(target, call):
     finally:
         signal.signal(signal.SIGTERM, previous)
     return seen, code
-
-
-def valkey_build(directory: Path, rejects: str) -> Path:
-    """A valkey-server in ``directory`` that rejects config ``rejects`` as Valkey rejects a directive it does not
-    know (a build on the other side of a rename), and exits printing its arguments, never starting."""
-
-    binary = directory / "valkey-server"
-    binary.write_text(
-        f'#!/bin/sh\ncase " $* " in *" --{rejects} "*) echo "Bad directive or wrong number of arguments";; esac\necho "$*"\nexit 1\n'
-    )
-    binary.chmod(0o755)
-    return binary

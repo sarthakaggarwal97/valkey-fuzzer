@@ -137,7 +137,6 @@ class Property:
 @dataclass(frozen=True)
 class Target:
     name: str
-    meaning: str
 
 
 @dataclass(frozen=True)
@@ -297,7 +296,7 @@ def parse_claims(document: Mapping[str, Any], model: tla.ModelSymbols) -> Claims
     for index, item in enumerate(document.get("targets") or []):
         if item["name"] not in defined:
             raise SpecBundleError(f"{where}.targets[{index}]: {item['name']!r} is not defined in {MODEL_FILE}")
-        targets.append(Target(name=item["name"], meaning=item["meaning"]))
+        targets.append(Target(name=item["name"]))
     bounds = document["bounds"]
     if not set(bounds) <= constants:
         raise SpecBundleError(f"{where}.bounds must map model constants to the values the safe configs use")

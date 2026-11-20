@@ -81,8 +81,8 @@ scenario did:
 
 | Cause | The scenario |
 | --- | --- |
-| `links` | broke replication or cluster links: a component stopped, paused, partitioned, or degraded the links of an instance (an [undo obligation](../contracts.md#fault-ownership) of kind `process.stopped`, `process.paused`, `network.partition`, or `network.degrade`), killed one for good or moved a role (`valkey.instances.expected-down` naming an instance, `valkey.chaos.schedule`, `valkey.failover.result`, or `valkey.replication.replicaof` evidence), or is configured with a command that does (`REPLICAOF`, `SLAVEOF`, `FAILOVER`, or any `CLIENT`, `CLUSTER`, or `DEBUG` command of a [`valkey.action.command`](actions.md#valkeyactioncommand)) |
-| `storage` | made writes to disk fail: an undo obligation of kind `disk.filled` or `directory.read-only` |
+| `links` | broke replication or cluster links: a component stopped, paused, partitioned, or degraded the links of an instance (an [undo obligation](../contracts.md#fault-ownership) of kind `process.stopped`, `process.paused`, `network.partition`, or `network.degrade`), killed one for good or moved a role (`valkey.instances.expected-down` naming an instance, `valkey.chaos.schedule`, or `valkey.failover.result` evidence), or is configured with a command that does (`REPLICAOF`, `SLAVEOF`, `FAILOVER`, or any `CLIENT`, `CLUSTER`, or `DEBUG` command of a [`valkey.action.command`](actions.md#valkeyactioncommand)) |
+| `storage` | made writes to disk fail: an undo obligation of kind `disk.filled` |
 | `commands` | sent a command that Valkey answered with an error reply: the [`valkey.workload.command-table`](workloads.md#valkeyworkloadcommand-table) workload counted one, [`valkey.workload.config-churn`](workloads.md#valkeyworkloadconfig-churn) had a `CONFIG SET` refused, a configured command's recorded reply is one, or a [`valkey.action.bgsave`](actions.md#valkeyactionbgsave) was refused (`refusals`, or status `rejected`) |
 | `memory` | set a `maxmemory` itself, in the deployment's server config, a startup overlay, or a configured `CONFIG SET`; the deployment provider's default is one no experiment's dataset reaches |
 
