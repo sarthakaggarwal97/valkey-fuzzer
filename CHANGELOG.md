@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Changed: readiness and formation polls at 50-100 ms, role sweeps that ask every instance at once (PR-R3-2)
+
+- A spawned or restarted server is polled every 0.05 s instead of 0.5 s, and cluster formation (meet, slot
+  assignment, replica links, the health check) every 0.1 s instead of 1-2 s; the deadlines are unchanged. The first
+  check always ran before the server bound, so the interval set the cost: a standalone provision takes 0.10 s instead
+  of 0.50 s, a restart 0.17 s instead of 0.62 s, and a 3x2 cluster forms in 7.1 s instead of 10.2 s (the rest is
+  the replicas' sync), measured against valkey-server 9.1.3 on one host.
+- `roles()`, `primaries()` and `replicas()` query the instances concurrently (`ThreadPoolExecutor`, at most 32 at
+  once), with the same answers in the same order. Under a held `stall` fault a stopped instance accepts the connect
+  and its INFO times out after 2 s; the sweep now costs one such timeout, not one per stalled instance: 2.0 s instead
+  of 6.0 s with three of nine nodes stopped.
+- `select_instances` reads the roles once for a selector that names both roles (`{roles: [primary, replica]}`),
+  instead of one `primaries()` and one `replicas()` sweep: 9 INFO round trips instead of 18 on nine nodes, 2.0 s
+  instead of 12.0 s with three nodes stopped. A deployment where no instance answers still falls back to the planned
+  roles.
+
 ### Added: `spec translate` searches the model for counterexamples (PR-P2-a)
 
 - `spec translate` took one counterexample, from a negative control or a saved TLC output, so a bundle gave one
@@ -20,6 +36,7 @@
   output. On the shipped bundles `--reach all --mutate` writes 15 election scenarios in 12 s (the two deep
   controls that give the same scenarios take 31 and 34 s each), two replication scenarios in 19 s, and three
   slot-migration scenarios in 15 s (`docs/spec-bridge.md`, "Searching the model").
+
 ### Added: a run checks itself against its spec bundles, and the result is in its report (PR-P2-b)
 
 - A run whose plan names a spec bundle (a component's `spec`) ran `spec conform` only in a batch, whose worker
@@ -43,6 +60,7 @@
   the section. `spec conform` results gain `violated`, `first_violated`, and `tlc_seconds` per run everywhere.
 - The shipped bundles are drafts, so no shipped zoo case can FAIL by conform yet; `tests/test_zoo.py` pins a case
   on the test register bundle with a stub trace whose crash loses an acknowledged write.
+
 
 ### Changed: the catalog builds five times faster, a run hashes its code once, and CI caches what it downloads (PR-R3-1)
 

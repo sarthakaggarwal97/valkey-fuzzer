@@ -552,6 +552,42 @@ def test_a_command_is_retried_only_while_its_connection_cannot_be_opened_whateve
     assert client.commands == [] and clock.elapsed - before >= 2 - 1e-6
 
 
+class _CountingHandle(fakes.FakeHandle):
+    """A primary valkey-0 and replicas valkey-1 and valkey-2, counting the role sweeps; none answers unless ``live``."""
+
+    def __init__(self, live=True):
+        self.instances, self.live, self.sweeps = fakes.fake_instances(3), live, 0
+
+    def roles(self):
+        self.sweeps += 1
+        return super().roles() if self.live else {}
+
+
+@pytest.mark.parametrize(
+    ("selector", "selected", "sweeps"),
+    [
+        ("all", ["valkey-0", "valkey-1", "valkey-2"], 0),
+        (["valkey-2", "valkey-0"], ["valkey-2", "valkey-0"], 0),
+        ("primaries", ["valkey-0"], 1),
+        ("replica", ["valkey-1"], 1),
+        # Both roles: one sweep, not one per role (each sweep is an INFO round trip per instance).
+        ({"roles": ["primary", "replica"]}, ["valkey-0", "valkey-1", "valkey-2"], 1),
+        ({"roles": ["replica"], "instance_ids": ["valkey-2"]}, ["valkey-2"], 1),
+    ],
+    ids=["all", "ids", "primaries", "replica", "both-roles", "role-and-id"],
+)
+def test_select_instances_reads_the_live_roles_once_whichever_roles_the_selector_names(selector, selected, sweeps):
+    handle = _CountingHandle()
+    assert instances.select_instances(handle, selector) == selected
+    assert handle.sweeps == sweeps
+
+
+def test_select_instances_falls_back_to_the_planned_roles_when_no_instance_answers():
+    handle = _CountingHandle(live=False)
+    assert instances.select_instances(handle, "primaries") == ["valkey-0"]
+    assert instances.select_instances(handle, "replicas") == ["valkey-1", "valkey-2"]
+
+
 @pytest.mark.parametrize(
     ("raised", "status"),
     [
