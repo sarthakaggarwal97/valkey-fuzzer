@@ -3,6 +3,8 @@
 import hashlib
 import json
 import os
+import random
+import string
 from types import SimpleNamespace
 
 import pytest
@@ -19,14 +21,17 @@ from valkey_fuzzer.components.workloads import (
     list_digest,
     list_elements,
     list_key,
+    make_value,
 )
 from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.schema import ConfigError, ConfigSchema
 
 # The ledger (id, op, key, value, outcome, reply) and the preload the workload produced from seed 7 with
 # `_run`'s configuration before renames and list reads existed. The defaults must still draw exactly these.
-_DRAWS_BEFORE = "d67600e46ae1a148e0780fe9a6205fa4be7db52b6bfeadad1810cca64d6bbc01"
-_PRELOAD_BEFORE = "7eb9f11985e260bfe0b18cf9b5b0d39093b579191e172ce6d5a82d02bc7921cb"
+# The values are the ones make_value draws with rng.choices (every id, op, key, outcome and value length is
+# as before it; only the random bodies differ).
+_DRAWS_BEFORE = "6e94533472a3581681baaab677a076c0dd042d9c9ddafe709e2cc34f6f3ecbd0"
+_PRELOAD_BEFORE = "25ad54b74b6603f7c58e9a55cf0843a8784c9f7a0ea6b6b3b97c3e7cf0e8b484"
 
 
 class _Client(_StoreClient):
@@ -93,6 +98,17 @@ def test_the_defaults_draw_the_same_operations_and_values_as_before_renames_and_
     assert (
         summary["list_keys"] == 0 and summary["lists_path"] is None and summary["list_reads"] == {"ok": 0, "failed": 0}
     )
+
+
+def test_make_value_draws_a_tagged_value_of_the_asked_size_the_same_for_the_same_seed():
+    value = make_value(random.Random(1), 64, False, "s1")
+    assert len(value) == 64 and value.startswith("s1:")
+    assert set(value[3:]) <= set(string.ascii_letters + string.digits)
+    assert value == make_value(random.Random(1), 64, False, "s1")
+    assert value != make_value(random.Random(2), 64, False, "s1")
+    # A size the tag does not fit in is the tag alone; a compressible value repeats it.
+    assert make_value(random.Random(1), 2, False, "s1") == "s1:"
+    assert make_value(random.Random(1), 8, True, "s1") == "s1:s1:s1"
 
 
 def test_a_rename_is_a_del_of_its_source_and_a_set_of_its_destination_with_one_outcome(tmp_path):

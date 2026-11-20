@@ -3,7 +3,8 @@
 import base64
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from itertools import islice
 from typing import Any, Optional
 
 from valkey_fuzzer._data import jsonable
@@ -46,6 +47,50 @@ def _key(key: Any) -> str:
     return named if isinstance(named, str) else f"$base64:{named['$base64']}"
 
 
+def _read(target: Any, kind: str, key: Any) -> Any:
+    """The one read of a key of type ``kind``, sent to ``target``: a client answers it, a pipeline queues it."""
+
+    if kind == "string":
+        return target.get(key)
+    if kind == "hash":
+        return target.hgetall(key)
+    if kind == "list":
+        return target.lrange(key, 0, -1)
+    if kind == "set":
+        return target.smembers(key)
+    if kind == "zset":
+        return target.zrange(key, 0, -1, withscores=True)
+    if kind == "stream":
+        return target.xrange(key)
+    # DUMP is never decoded, so a decoding client returns the payload as bytes.
+    return target.dump(key)
+
+
+def _canonical(kind: str, reply: Any) -> Optional[list]:
+    """``[kind, content]`` from the reply to :func:`_read`, or None for a module value gone before its DUMP."""
+
+    if kind == "string":
+        content: Any = exact(reply)
+    elif kind == "hash":
+        content = _ordered([exact(field), exact(value)] for field, value in reply.items())
+    elif kind == "list":
+        content = exact(reply)
+    elif kind == "set":
+        content = _ordered(exact(member) for member in reply)
+    elif kind == "zset":
+        content = [[exact(member), repr(score)] for member, score in reply]
+    elif kind == "stream":
+        content = [
+            [exact(entry_id), _ordered([exact(field), exact(value)] for field, value in fields.items())]
+            for entry_id, fields in reply
+        ]
+    else:
+        if reply is None:
+            return None
+        content = hashlib.sha256(dump_body(reply)).hexdigest()
+    return [kind, jsonable(content)]
+
+
 def canonical_value(client: Any, key: Any) -> Optional[list]:
     """Return ``[type, content]`` with order-insensitive types sorted, or None. ``client`` may decode its replies
     or not: one that does not reads binary values (valkey-search's vectors) exactly.
@@ -58,38 +103,45 @@ def canonical_value(client: Any, key: Any) -> Optional[list]:
     kind = exact(client.type(key))
     if kind == "none":
         return None
-    if kind == "string":
-        content: Any = exact(client.get(key))
-    elif kind == "hash":
-        content = _ordered([exact(field), exact(value)] for field, value in client.hgetall(key).items())
-    elif kind == "list":
-        content = exact(client.lrange(key, 0, -1))
-    elif kind == "set":
-        content = _ordered(exact(member) for member in client.smembers(key))
-    elif kind == "zset":
-        content = [[exact(member), repr(score)] for member, score in client.zrange(key, 0, -1, withscores=True)]
-    elif kind == "stream":
-        content = [
-            [exact(entry_id), _ordered([exact(field), exact(value)] for field, value in fields.items())]
-            for entry_id, fields in client.xrange(key)
-        ]
-    else:
-        # DUMP is never decoded, so a decoding client returns the payload as bytes.
-        payload = client.dump(key)
-        if payload is None:
-            return None
-        content = hashlib.sha256(dump_body(payload)).hexdigest()
-    return [kind, jsonable(content)]
+    return _canonical(kind, _read(client, kind, key))
+
+
+def _batches(items: Iterable[Any], size: int) -> Iterator[list]:
+    iterator = iter(items)
+    while batch := list(islice(iterator, size)):
+        yield batch
 
 
 def keyspace_snapshot(client: Any, match: Optional[str] = None, count: int = 1000) -> dict[str, list]:
-    """Canonical content of every key on one instance (optionally a SCAN pattern)."""
+    """Canonical content of every key on one instance (optionally a SCAN pattern), in SCAN order.
+
+    A client that pipelines reads each batch of up to ``count`` keys in two round trips (every TYPE, then every
+    read) instead of two per key; one that cannot (a test's) is read key by key with :func:`canonical_value`.
+    Both give the same snapshot.
+    """
 
     snapshot: dict[str, list] = {}
-    for key in client.scan_iter(match=match, count=count):
-        value = canonical_value(client, key)
-        if value is not None:
-            snapshot[_key(key)] = value
+    keys = client.scan_iter(match=match, count=count)
+    if not hasattr(client, "pipeline"):
+        for key in keys:
+            value = canonical_value(client, key)
+            if value is not None:
+                snapshot[_key(key)] = value
+        return snapshot
+    for batch in _batches(keys, count):
+        with client.pipeline(transaction=False) as pipe:
+            for key in batch:
+                pipe.type(key)
+            kinds = [exact(kind) for kind in pipe.execute()]
+        held = [(key, kind) for key, kind in zip(batch, kinds) if kind != "none"]
+        with client.pipeline(transaction=False) as pipe:
+            for key, kind in held:
+                _read(pipe, kind, key)
+            replies = pipe.execute()
+        for (key, kind), reply in zip(held, replies):
+            value = _canonical(kind, reply)
+            if value is not None:
+                snapshot[_key(key)] = value
     return snapshot
 
 
