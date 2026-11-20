@@ -433,6 +433,40 @@ def test_a_server_killed_at_cleanup_takes_the_child_it_forked_along():
             pass
 
 
+@contextmanager
+def _shell_with_a_child():
+    # A shell whose one child is a sleep: echo and wait are builtins.
+    shell = subprocess.Popen(["sh", "-c", "sleep 60 & echo $!; wait"], stdout=subprocess.PIPE, text=True)
+    child = int(shell.stdout.readline())
+    try:
+        yield shell, child
+    finally:
+        for pid in (child, shell.pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        shell.wait()
+        shell.stdout.close()
+
+
+@pytest.mark.skipif(
+    not os.path.exists(f"/proc/{os.getpid()}/task/{os.getpid()}/children"), reason="needs /proc children"
+)
+def test_a_servers_children_are_read_from_proc_without_a_process_listing():
+    with _shell_with_a_child() as (shell, child), patch(f"{PROCESSES}.run_bounded") as ps:
+        assert processes._children(shell.pid) == [child]
+    ps.assert_not_called()
+
+
+def test_a_servers_children_come_from_a_process_listing_where_proc_has_none():
+    with (
+        _shell_with_a_child() as (shell, child),
+        patch(f"{PROCESSES}._proc_children", side_effect=FileNotFoundError),
+    ):
+        assert processes._children(shell.pid) == [child]
+
+
 def test_a_server_that_refuses_sigterm_is_killed_with_its_children():
     server = Mock(**{"wait.side_effect": [subprocess.TimeoutExpired("valkey-server", 5), -9]})
     with patch(f"{PROCESSES}.kill_server") as kill_server:
