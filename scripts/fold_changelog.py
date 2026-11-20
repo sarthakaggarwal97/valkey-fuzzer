@@ -3,9 +3,10 @@
     python scripts/fold_changelog.py 0.3.0
 
 Every ``changelog.d/*.md`` but ``README.md`` is a fragment: markdown bullets, under an optional ``### Added``,
-``### Changed``, ``### Removed``, or ``### Fixed`` heading (bullets under none are ``Changed``). The fragments go
-under a new ``## <version> - <date>`` heading right after the changelog's title, one subsection per kind in the
-order above, and are deleted. Only the standard library.
+``### Changed``, ``### Removed``, or ``### Fixed`` heading, which may carry a title (``### Changed: CI trust
+hardening``, as CHANGELOG.md's entries do); bullets under no heading are ``Changed``. The fragments go under a new
+``## <version> - <date>`` heading right after the changelog's title: one subsection per heading, the bare kinds in
+the order above, each kind's titled headings after it, and are deleted. Only the standard library.
 """
 
 import argparse
@@ -16,34 +17,43 @@ from pathlib import Path
 KINDS = ("Added", "Changed", "Removed", "Fixed")
 
 
-def read_fragment(path: Path) -> dict[str, list[str]]:
-    """The bullets of one fragment, by kind; a ``### <kind>`` heading starts a kind, and text before any is Changed."""
+def _order(heading: str) -> tuple[int, str]:
+    """A bare kind first, then its titled headings by title."""
 
-    bullets: dict[str, list[str]] = {kind: [] for kind in KINDS}
-    kind = "Changed"
+    kind, _, title = heading.partition(":")
+    return KINDS.index(kind.strip()), title.strip()
+
+
+def read_fragment(path: Path) -> dict[str, list[str]]:
+    """The bullets of one fragment, by heading (``<kind>`` or ``<kind>: <title>``); text before any is Changed."""
+
+    bullets: dict[str, list[str]] = {}
+    heading = "Changed"
     for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         if line.startswith("### "):
-            kind = line[len("### ") :].strip()
-            if kind not in KINDS:
-                raise SystemExit(f"{path}:{number}: a heading is one of {', '.join(KINDS)}, not {kind!r}")
+            heading = line[len("### ") :].strip()
+            if heading.partition(":")[0].strip() not in KINDS:
+                raise SystemExit(
+                    f"{path}:{number}: a heading is one of {', '.join(KINDS)}, with an optional ': <title>', "
+                    f"not {heading!r}"
+                )
         elif line.strip():
-            bullets[kind].append(line.rstrip())
-    if not any(bullets.values()):
+            bullets.setdefault(heading, []).append(line.rstrip())
+    if not bullets:
         raise SystemExit(f"{path} has no bullets")
     return bullets
 
 
 def release_section(version: str, date: str, fragments: list[Path]) -> str:
-    """The ``## <version> - <date>`` section holding every fragment's bullets, by kind."""
+    """The ``## <version> - <date>`` section holding every fragment's bullets, by heading."""
 
-    bullets: dict[str, list[str]] = {kind: [] for kind in KINDS}
+    bullets: dict[str, list[str]] = {}
     for path in fragments:
-        for kind, lines in read_fragment(path).items():
-            bullets[kind].extend(lines)
+        for heading, lines in read_fragment(path).items():
+            bullets.setdefault(heading, []).extend(lines)
     parts = [f"## {version} - {date}"]
-    for kind in KINDS:
-        if bullets[kind]:
-            parts.append(f"### {kind}\n\n" + "\n".join(bullets[kind]))
+    for heading in sorted(bullets, key=_order):
+        parts.append(f"### {heading}\n\n" + "\n".join(bullets[heading]))
     return "\n\n".join(parts) + "\n"
 
 

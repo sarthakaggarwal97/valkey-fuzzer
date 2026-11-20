@@ -10,7 +10,9 @@ two branches never conflict on the same lines.
   existing changelog. One bullet per behaviour.
 - Group bullets under `### Added`, `### Changed`, `### Removed`, or
   `### Fixed` when more than one kind applies; a file with bullets alone
-  counts as `### Changed`.
+  counts as `### Changed`. A heading may carry a title, as the entries of
+  `CHANGELOG.md` do (`### Changed: CI trust hardening`); the fold keeps it as
+  its own subsection after the bare kind's.
 
 At release time, `python scripts/fold_changelog.py <version>` moves every
 fragment under a new `## <version> - <date>` heading at the top of

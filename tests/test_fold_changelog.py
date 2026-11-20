@@ -32,11 +32,13 @@ def test_the_fragments_go_under_one_release_heading_by_kind_and_are_deleted(tmp_
         **{
             "b-fix": "### Fixed\n\n- a crash\n\n### Added\n- `--flag`\n",
             "a-change": "- bullets without a heading are Changed\n  and may wrap\n",
+            "c-titled": "### Changed: the titled entry\n\n- keeps its own heading, after the bare kind's\n",
+            "d-titled-too": "### Changed: the titled entry\n- and two fragments with one title share it\n",
         },
     )
     done = _fold(tmp_path, "0.3.0", "--date", "2026-11-20")
     assert done.returncode == 0, done.stderr
-    assert done.stdout == "folded 2 fragment(s) into CHANGELOG.md as 0.3.0 - 2026-11-20\n"
+    assert done.stdout == "folded 4 fragment(s) into CHANGELOG.md as 0.3.0 - 2026-11-20\n"
     assert (tmp_path / "CHANGELOG.md").read_text() == (
         "# Changelog\n"
         "\n"
@@ -50,6 +52,11 @@ def test_the_fragments_go_under_one_release_heading_by_kind_and_are_deleted(tmp_
         "\n"
         "- bullets without a heading are Changed\n"
         "  and may wrap\n"
+        "\n"
+        "### Changed: the titled entry\n"
+        "\n"
+        "- keeps its own heading, after the bare kind's\n"
+        "- and two fragments with one title share it\n"
         "\n"
         "### Fixed\n"
         "\n"
@@ -79,7 +86,10 @@ def test_an_empty_changelog_or_one_without_a_title_gets_the_section_at_the_top(t
 @pytest.mark.parametrize(
     ("text", "message"),
     [
-        ("### Deprecated\n- x\n", "a heading is one of Added, Changed, Removed, Fixed, not 'Deprecated'"),
+        (
+            "### Deprecated: x\n- x\n",
+            "a heading is one of Added, Changed, Removed, Fixed, with an optional ': <title>', not 'Deprecated: x'",
+        ),
         ("### Added\n\n", "has no bullets"),
     ],
 )
