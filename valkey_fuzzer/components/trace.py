@@ -15,7 +15,6 @@ import fnmatch
 import os
 import threading
 import time
-from collections.abc import Mapping
 from typing import Any, Optional
 
 import valkey
@@ -29,12 +28,13 @@ from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
 from valkey_fuzzer.schema import ConfigError, ConfigField, plain_config
 from valkey_fuzzer.spec.bundle import TRACE_FILE, SampleSpec
 
-from .cluster import cluster_view, read_view
+from .cluster import parse_cluster_view, read_view
 from .files import nodes_conf_path, read_cluster_vars, write_jsonl
 from .instances import close_quietly, deployment, select_instances
 from .polling import StoppableThread
 from .registration import SPEC_SHA256_FIELD, component_registration, pinned_spec_mapping
 from .schemas import INTEGER, TEXT, declared, mapping_of
+from .slot_migration import jobs_of
 
 TRACE_EVIDENCE = "valkey.trace.recorded"
 # What a cluster deployment is sampled for without a bundle: the node's view and its nodes.conf, as the election
@@ -88,13 +88,12 @@ def _validate_trace(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -> N
 
 
 def _jobs(reply: Any) -> dict[str, list[dict[str, Any]]]:
-    """CLUSTER GETSLOTMIGRATIONS (RESP3 maps, or RESP2 flat key-value arrays) as the jobs by kind, each in
-    creation order: ``export``, ``import`` (one with a source), and ``tracking`` (a replica's, which names no
-    source node: Valkey's ``is_tracking_only``)."""
+    """CLUSTER GETSLOTMIGRATIONS (:func:`~valkey_fuzzer.components.slot_migration.jobs_of`) as the jobs by kind,
+    each in the order Valkey lists them: ``export``, ``import`` (one with a source), and ``tracking`` (a
+    replica's, which names no source node: Valkey's ``is_tracking_only``)."""
 
     jobs: dict[str, list[dict[str, Any]]] = {"export": [], "import": [], "tracking": []}
-    for item in reply or []:
-        job = dict(item) if isinstance(item, Mapping) else dict(zip(item[::2], item[1::2]))
+    for job in jobs_of(reply):
         if job.get("operation") == "EXPORT":
             kind = "export"
         else:
@@ -117,8 +116,8 @@ class TraceObserver:
     (bus events; ``t`` is the log timestamp for log-derived events, else the
     receive time), and ``observation`` (one node's sample: ``round``,
     ``reason``, ``node``, ``t``, and the parts the ``sample:`` section asks
-    for; ``error`` when the node did not answer). A node's INFO, digests and
-    slot migrations are read in one MULTI/EXEC, so they are of one instant.
+    for; ``error`` when the node did not answer). A node's cluster view, INFO,
+    digests and slot migrations are read in one MULTI/EXEC, so they are of one instant.
     Sampling rounds run periodically and after events, on a background
     thread, so the observer never delays a fault that fires inside an event's
     dispatch.
@@ -210,8 +209,9 @@ class TraceObserver:
         values: dict[str, Any] = {}
         with self._handle.new_client(instance_id, timeout=2.0) as client:
             try:
-                for key in self._config["config_keys"]:
-                    values.update(client.config_get(key))
+                if self._config["config_keys"]:
+                    # One CONFIG GET names every key; with none, CONFIG GET would read every config.
+                    values.update(client.config_get(*self._config["config_keys"]))
             except (valkey.exceptions.ValkeyError, OSError) as exc:
                 return values, f"{type(exc).__name__}: {exc}"
         return values, None
@@ -251,12 +251,9 @@ class TraceObserver:
         record: dict[str, Any] = {}
         try:
             client = self._client(instance_id)
-            if sample.cluster:
-                view = cluster_view(client)
-                # The trace records the view; the raw CLUSTER NODES records serve only the split check.
-                view.pop("nodes")
-                record.update(view)
-            commands: list[tuple[str, ...]] = [("INFO", section) for section in sample.info]
+            # The view's two commands go first in the one transaction, so the view is of the digest's instant.
+            commands: list[tuple[str, ...]] = [("CLUSTER", "INFO"), ("CLUSTER", "NODES")] if sample.cluster else []
+            commands.extend(("INFO", section) for section in sample.info)
             if sample.digest:
                 commands.append(("DEBUG", "DIGEST"))
             commands.extend(("DEBUG", "DIGEST-VALUE", key) for key in sample.digest_keys)
@@ -267,6 +264,11 @@ class TraceObserver:
                 for command in commands:
                     pipe.execute_command(*command)
                 replies = pipe.execute()
+                if sample.cluster:
+                    view = parse_cluster_view(replies[0], replies[1])
+                    # The trace records the view; the raw CLUSTER NODES records serve only the split check.
+                    view.pop("nodes")
+                    record.update(view)
                 for command, reply in zip(commands, replies):
                     if command[0] == "INFO":
                         record.setdefault("info", {}).update(parse_cluster_info(reply))
@@ -276,7 +278,7 @@ class TraceObserver:
                         record.setdefault("digest_values", {})[command[2]] = (
                             reply[0] if isinstance(reply, list) else reply
                         )
-                    else:
+                    elif command[1] == "GETSLOTMIGRATIONS":
                         record["slot_migrations"] = _jobs(reply)
         except Exception as exc:
             record["error"] = f"{type(exc).__name__}: {exc}"

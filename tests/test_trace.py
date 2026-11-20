@@ -48,8 +48,9 @@ class _Client(FakeClient):
         assert transaction
         return _Pipeline(self)
 
-    def config_get(self, name):
-        return {name: self.replies.get(("CONFIG", name), "no")}
+    def config_get(self, *names):
+        self.commands.append(("CONFIG", "GET", *names))
+        return {name: self.replies.get(("CONFIG", name), "no") for name in names}
 
 
 class _Handle(FakeHandle):
@@ -171,6 +172,7 @@ def test_the_cluster_parts_group_the_slot_migration_jobs_by_kind(tmp_path):
     result = observer.stop(context, spec)
     header, *records = _records(result)
     assert header["nodes"]["valkey-0"]["node_id"] == me
+    assert header["nodes"]["valkey-0"]["config"] == {"cluster-config-save-behavior": "no", "cluster-node-timeout": "no"}
     sample = next(record for record in records if record["kind"] == "observation")
     assert (sample["current_epoch"], sample["role"]) == (3, "primary")
     assert [job["state"] for job in sample["slot_migrations"]["export"]] == ["replicating"]
@@ -178,6 +180,16 @@ def test_the_cluster_parts_group_the_slot_migration_jobs_by_kind(tmp_path):
     assert [job["state"] for job in sample["slot_migrations"]["tracking"]] == ["occurring-on-primary"]
     # The slot-migration bundle asks for no nodes.conf.
     assert "disk" not in sample
+    # The header reads every config key in one CONFIG GET; the view goes in the sample's one MULTI/EXEC.
+    header_commands = [c for client in handle.clients["valkey-0"] if not client.transactions for c in client.commands]
+    assert header_commands == [
+        ("CLUSTER", "INFO"),
+        ("CLUSTER", "NODES"),
+        ("CONFIG", "GET", "cluster-config-save-behavior", "cluster-node-timeout"),
+    ]
+    (sampler,) = [client for client in handle.clients["valkey-0"] if client.transactions]
+    assert sampler.transactions[0] == [("CLUSTER", "INFO"), ("CLUSTER", "NODES"), ("CLUSTER", "GETSLOTMIGRATIONS")]
+    assert sampler.commands == [command for transaction in sampler.transactions for command in transaction]
 
 
 def test_a_bundle_that_samples_debug_digest_needs_the_debug_command_enabled():

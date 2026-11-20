@@ -640,10 +640,10 @@ class _SaveClient(FakeClient):
         super().__init__(reply="Background saving started")
         self.directory, self.rdb, self.status, self.setup_error, self.polls = directory, rdb, status, setup_error, 0
 
-    def config_get(self, name):
+    def config_get(self, *names):
         if self.setup_error:
             raise RuntimeError("ERR unknown command 'CONFIG'")
-        return {name: {"dir": str(self.directory), "dbfilename": "dump.rdb"}[name]}
+        return {name: {"dir": str(self.directory), "dbfilename": "dump.rdb"}[name] for name in names}
 
     def execute_command(self, *args):
         if self.rdb is not None:
@@ -665,8 +665,8 @@ class _BusyClient(FakeClient):
         super().__init__(reply="Background saving started")
         self.directory, self.busy, self.error_text, self.saves = directory, busy, error, 0
 
-    def config_get(self, name):
-        return {name: {"dir": str(self.directory), "dbfilename": "dump.rdb"}[name]}
+    def config_get(self, *names):
+        return {name: {"dir": str(self.directory), "dbfilename": "dump.rdb"}[name] for name in names}
 
     def execute_command(self, *args):
         self.commands.append(args)
