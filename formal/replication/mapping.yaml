@@ -74,6 +74,10 @@ evidence:
     log: 'DB saved on disk|Background saving terminated with success'
     fields: {instance_id: node}
     action: Save
+    # A BGSAVE's child logs "DB saved on disk" and the server then logs "Background saving terminated with
+    # success": one save, two lines in one log. The child's line (role C) is skipped, so a BGSAVE is one Save, as
+    # a foreground save (the server's own "DB saved on disk") is.
+    logged_by: server
   crash:
     # valkey.fault.process-signal; the node restarts from its RDB file.
     event: '*.injected'

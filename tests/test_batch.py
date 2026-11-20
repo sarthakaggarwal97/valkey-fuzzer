@@ -41,7 +41,7 @@ from valkey_fuzzer.hoststate import OWNER_FILE, sweep
 from valkey_fuzzer.results import OutcomeStatus, RunOutcome
 from valkey_fuzzer.schema import ConfigField, ConfigSchema
 from valkey_fuzzer.spec import conform
-from valkey_fuzzer.spec.tla import TOOLS_HINT
+from valkey_fuzzer.spec.tla import TOOLS_HINT, TlaTools
 
 from .batch_worker_stub import InProcessWorkers
 from .valkey_experiments_support import valkey_service
@@ -120,7 +120,7 @@ def test_the_worker_isolates_its_run_keeps_a_zoo_build_and_refuses_a_scenario_to
         (tmp_path / f"{job['id']}.json").write_text(json.dumps({
             "job": job, "report_dir": str(tmp_path / job["id"]), "base_port": 40000, "loopback_block": 1,
             "data_dir": str(tmp_path / "data"), "artifact_dir": str(tmp_path), "timeout_s": 5, "cores": None,
-            "valkey_binary": "/default/valkey-server", "experiment_directories": [],
+            "valkey_binary": "/default/valkey-server", "experiment_directories": [], "conform_tlc_timeout_s": 300.0,
         }))  # fmt: skip
         return batch.run_worker(str(tmp_path / f"{job['id']}.json"))
 
@@ -779,6 +779,64 @@ def test_a_missing_conformance_is_held_against_the_run_only_for_approved_claims(
     assert approved["signature"]["failures"]["spec-conform:replication"]["status"] == "ERROR"
 
 
+def test_a_conform_entry_that_does_not_say_its_claims_are_approved_is_read_as_a_draft(
+    tmp_path, workers, stub, monkeypatch
+):
+    # Only an explicit approval decides a run: an entry without the flag (another writer's) is reported, even
+    # though the bundle's claims are approved.
+    monkeypatch.setattr(conform, "conform_folder", lambda folder, tools, unavailable="": {"replication": VIOLATED})
+    monkeypatch.setattr(conform_plugin, "_approved", lambda name: True)
+    runner = _batch(tmp_path, [_random(1, experiments=[REPLICATION])])
+    runner.run()
+    (result,) = _results(runner).values()
+    assert result["status"] == "PASS" and result["signature"] is None
+    assert result["conformance"]["replication"]["status"] == "fail"
+
+
+def test_the_conform_tlc_time_limit_is_a_batch_option_named_when_it_stops_a_check(tmp_path, workers, stub, monkeypatch):
+    with pytest.raises(BatchError, match="conform_tlc_timeout_s must be a number of seconds greater than zero"):
+        BatchOptions(conform_tlc_timeout_s=0).check()
+    seen = {}
+
+    def conform_folder(folder, tools, unavailable=""):
+        seen["timeout_s"] = tools.timeout_s
+        error = "TLC was stopped after 7.5s: the time limit ran out before it finished"
+        return {"replication": {"approved": False, "status": "error", "error": error, "timed_out": True}}
+
+    monkeypatch.setattr(conform, "conform_folder", conform_folder)
+    monkeypatch.setattr(conform_plugin.TlaTools, "locate", lambda jar, workers="auto": TlaTools(jar="unused"))
+    runner = _batch(tmp_path, [_random(1, experiments=[REPLICATION])], conform_tlc_timeout_s=7.5)
+    runner.run()
+    (result,) = _results(runner).values()
+    assert seen["timeout_s"] == 7.5, "the worker's TLC runs under the batch's limit"
+    assert result["conformance"]["replication"]["error"] == (
+        "TLC was stopped after 7.5s: the time limit ran out before it finished "
+        "(conform_tlc_timeout_s = 7.5, a batch option)"
+    )
+    assert json.loads(Path(runner.folder, "batch.json").read_text())["options"]["conform_tlc_timeout_s"] == 7.5
+    assert BatchOptions().conform_tlc_timeout_s == 300.0
+
+
+def test_a_check_that_does_not_finish_still_writes_why_for_each_bundle(tmp_path, monkeypatch):
+    # Otherwise the batch sees only that conform.json is missing, and holds that against an approved bundle's run
+    # with no reason it could act on.
+    plan = {"components": [{"use": "valkey.observer.log-trigger", "id": "steps", "config": {"spec": "replication"}}]}
+    (tmp_path / "report.json").write_text(json.dumps({"status": "PASS", "outcome": {"plan": plan}}))
+
+    def broken(folder, tools, unavailable=""):
+        raise ValueError("trace.jsonl does not start with a trace header")
+
+    monkeypatch.setattr(conform, "conform_folder", broken)
+    conform_plugin._conform(str(tmp_path), 300.0)
+    assert json.loads((tmp_path / "conform.json").read_text()) == {
+        "replication": {
+            "status": "error",
+            "approved": False,
+            "error": "spec conform did not finish: ValueError: trace.jsonl does not start with a trace header",
+        }
+    }
+
+
 @pytest.mark.slow
 def test_real_workers_run_in_parallel_in_isolation_and_a_leaked_or_hung_one_is_cleaned_up(tmp_path, stub, monkeypatch):
     monkeypatch.setattr(pool, "DEADLINE_GRACE_S", 0.0)
@@ -918,7 +976,7 @@ def test_a_plug_in_takes_part_at_every_point_of_the_batch_and_its_jobs_are_its_o
             shorthand=lambda value: {"seeds": value} if isinstance(value, list) else None,
         )
 
-        def after_run(self, report_dir):
+        def after_run(self, report_dir, task):
             Path(report_dir, "toy.txt").write_text("checked")
 
         def judge(self, job, run_dir, report, verdict):

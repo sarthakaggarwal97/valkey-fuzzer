@@ -322,7 +322,7 @@ scenarios translated from a bundle need, when the bundle brings its own
 data-only experiments: a JSON object mapping a bundle name (lowercase letters,
 digits, `-`) to `{path in the bundle: file text}`, at most 60,000 characters.
 The paths may be `claims.yaml`, `model.tla`, `mapping.yaml` (all three
-required), `<name>.cfg`, `negative-controls/<name>.cfg` or `.tla`, and
+required), `sample.log`, `<name>.cfg`, `negative-controls/<name>.cfg` or `.tla`, and
 `experiments/<name>.yaml`; anything else, a YAML file that is not a mapping,
 or a bundle that fails the bundle checks is refused before anything is built.
 The workflow writes each bundle to its own directory, runs the batch with

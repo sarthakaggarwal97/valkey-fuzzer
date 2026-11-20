@@ -3,6 +3,9 @@
 Gates, in order (each records ``status`` pass, fail, or error and what it saw):
 
 ``bundle``            claims.yaml and mapping.yaml read and agree with the model text
+``log_patterns``      every log pattern the mapping maps matches a line of the bundle's sample.log
+                      (lines Valkey logged), so one wrong pattern cannot silently blind every reader
+                      of the mapping: the observers that publish the lines, the oracles, and conform
 ``parsed``            every module uses only the standard modules and the bundle's own, and
                       SANY accepts model.tla and every mutated negative-control module
 ``claims_checked``    every property is checked by a safe config whose constants meet its
@@ -31,12 +34,23 @@ The report scopes itself: a pass means the model satisfies its claimed
 properties within the stated bounds, and says nothing about Valkey's code.
 """
 
+import os
 import posixpath
+import re
 import time
 from collections.abc import Mapping, Sequence
 from typing import Any, Callable, Optional
 
-from .bundle import MODEL_FILE, SPEC_PATH_VARIABLE, Bundle, NegativeControl, SpecBundleError, find_bundle, load_bundle
+from .bundle import (
+    MODEL_FILE,
+    SAMPLE_LOG_FILE,
+    SPEC_PATH_VARIABLE,
+    Bundle,
+    NegativeControl,
+    SpecBundleError,
+    find_bundle,
+    load_bundle,
+)
 from .tla import STANDARD_MODULES, TlaTools, TlcResult, ToolRun, module_references, normalize, parse_config, sany, tlc
 from .translate import NoFaultStepError, TranslateError, bundle_service, translate_trace
 
@@ -103,6 +117,34 @@ def _tlc_summary(result: TlcResult, run: ToolRun) -> dict[str, Any]:
     }
 
 
+def log_patterns_gate(bundle: Bundle) -> dict[str, Any]:
+    """The ``log_patterns`` gate: every mapped log pattern matches at least one line of the bundle's
+    :data:`SAMPLE_LOG_FILE`, lines Valkey logged. The oracle, the observers that publish the lines, and conform
+    all read their patterns from the mapping, so a wrong one would blind them all without this check."""
+
+    patterns = {item.name: item.log for item in bundle.mapping.evidence.values() if item.log}
+    if not patterns:
+        return {"status": "pass", "note": "mapping.yaml maps no log pattern"}
+    try:
+        with open(os.path.join(bundle.path, SAMPLE_LOG_FILE), encoding="utf-8") as handle:
+            lines = [line.rstrip("\n") for line in handle if line.strip()]
+    except OSError as exc:
+        return {
+            "status": "fail",
+            "error": f"cannot read {SAMPLE_LOG_FILE} ({exc.strerror or exc}): add one line Valkey logged for each "
+            f"of the mapping's log patterns ({', '.join(sorted(patterns))})",
+        }
+    matched = {name: sum(1 for line in lines if re.search(pattern, line)) for name, pattern in patterns.items()}
+    unmatched = sorted(name for name, count in matched.items() if not count)
+    gate: dict[str, Any] = {"status": "fail" if unmatched else "pass", "lines": len(lines), "matched": matched}
+    if unmatched:
+        gate["error"] = (
+            f"{len(unmatched)} log pattern(s) match no line of {SAMPLE_LOG_FILE}: {', '.join(unmatched)}; a pattern "
+            "Valkey never logs blinds every reader of the mapping"
+        )
+    return gate
+
+
 def check_bundle(
     reference: str,
     tools: TlaTools,
@@ -166,6 +208,7 @@ def check_bundle(
         }
     )
     report["gates"]["bundle"] = {"status": "pass"}
+    report["gates"]["log_patterns"] = log_patterns_gate(bundle)
     try:
         _model_gates(bundle, tools, report, say)
         traces = _negative_controls(bundle, tools, report, say)
@@ -402,4 +445,4 @@ def _finish(report: dict[str, Any], started: float) -> dict[str, Any]:
     return report
 
 
-__all__ = ["SCOPE", "check_bundle", "run_control"]
+__all__ = ["SCOPE", "check_bundle", "log_patterns_gate", "run_control"]

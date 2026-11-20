@@ -55,8 +55,9 @@ class BatchPlugin:
     source: Optional[BatchSource] = None
     kept_when_pruned: tuple[str, ...] = ()
 
-    def after_run(self, report_dir: str) -> None:
-        """In the worker, after its run, in the run's report folder."""
+    def after_run(self, report_dir: str, task: Mapping[str, Any]) -> None:
+        """In the worker, after its run, in the run's report folder; ``task`` is the worker's task (the job and
+        the batch options the run ran under)."""
 
     def judge(
         self, job: Mapping[str, Any], run_dir: str, report: Optional[Mapping[str, Any]], verdict: "Verdict"

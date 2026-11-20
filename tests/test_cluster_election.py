@@ -25,7 +25,7 @@ from valkey_fuzzer.components.election_safety import ElectionSafetyOracle, split
 from valkey_fuzzer.components.faults import FAULT_INJECTED, EventFault
 from valkey_fuzzer.components.files import log_line_time
 from valkey_fuzzer.components.instances import deployment
-from valkey_fuzzer.components.observers import LogTriggerObserver
+from valkey_fuzzer.components.observers import LogTriggerObserver, spec_rules
 from valkey_fuzzer.deployment.local.cluster_nodes import parse_cluster_nodes
 from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import ComponentRole
@@ -139,6 +139,46 @@ def test_the_log_trigger_publishes_whole_new_lines_with_their_named_groups(tmp_p
     result = observer.stop(context, spec)
     assert result.status is ComponentStatus.PASS and result.evidence[0].evidence_id == "t.vote-logged"
     assert result.evidence[0].value["counts"] == {"valkey-0": 3} and sys.getswitchinterval() == pytest.approx(before)
+
+
+def test_a_rule_logged_by_the_server_skips_the_fork_childs_lines(tmp_path):
+    # A BGSAVE logs "DB saved on disk" from the child (role C, its own pid) and "Background saving terminated with
+    # success" from the server: the replication mapping's Save is logged by the server, so one save is one event.
+    handle = FakeHandle(1, log_dir=str(tmp_path))
+    saved = load_spec_mapping("replication").event("saved")
+    assert saved.logged_by == "server"
+    rules = [
+        {"pattern": saved.log, "publish": "any.saved"},
+        {"pattern": saved.log, "publish": "server.saved", "logged_by": "server"},
+    ]
+    spec = resolved(
+        ComponentSpec(role=ComponentRole.OBSERVER, use="valkey.observer.log-trigger", id="logs",
+                      config={"rules": rules, "poll_interval_s": 10})
+    )  # fmt: skip
+    context = fake_context(handle, artifact_dir=str(tmp_path / "artifacts"))
+    observer = LogTriggerObserver()
+    Path(handle.log_file("valkey-0")).write_text("")
+    observer.start(context, spec)
+    Path(handle.log_file("valkey-0")).write_text(
+        "4300:C 25 Oct 2026 21:04:54.250 * DB saved on disk\n"
+        "4242:M 25 Oct 2026 21:04:54.260 * Background saving terminated with success\n"
+        "4242:M 25 Oct 2026 21:05:00.000 * DB saved on disk\n"
+    )
+    assert observer.poll() == 5
+    assert len(context.event_bus.committed_history("any.saved")) == 3
+    server = context.event_bus.committed_history("server.saved")
+    assert [event.payload["line"].split(" * ")[1] for event in server] == [
+        "Background saving terminated with success",
+        "DB saved on disk",
+    ]
+    assert observer.stop(context, spec).status is ComponentStatus.PASS
+    # A rule that takes its pattern from the mapping takes who logs it too.
+    from_mapping = resolved(
+        ComponentSpec(role=ComponentRole.OBSERVER, use="valkey.observer.log-trigger", id="steps",
+                      config={"spec": "replication", "rules": [{"publish": "replication.rdb.saved"}]})
+    )  # fmt: skip
+    rules, _ = spec_rules(from_mapping.config)
+    assert (rules[0]["pattern"], rules[0]["logged_by"]) == (saved.log, "server")
 
 
 def test_a_log_whose_size_cannot_be_read_is_unreadable_not_truncated(tmp_path, monkeypatch):
@@ -266,11 +306,13 @@ def _safety(save_behavior="sync", acks=_MAJORITY, disk_vote=None, evidence=(), e
     handle.is_alive = lambda node_id: node_id not in down
     context = fake_context(handle)
     publish = context.event_bus.publish
+    # The won line names no epoch: the win is of the election valkey-1 started.
+    publish("cluster.election.started", source="log", payload={"instance_id": "valkey-1", "epoch": 6, "logged_at": 8.9})
     publish("cluster.vote.granted", source="log", payload=_vote("valkey-2", "valkey-1", 6, at=9.0))
     publish("cluster.vote.granted", source="log", payload=_vote("valkey-0", "valkey-1", 6, at=9.5))
     for ack in acks:
         publish("cluster.vote.acked", source="log", payload=ack)
-    publish("cluster.election.won", source="log", payload={"instance_id": "valkey-1", "epoch": 6, "logged_at": 9.7})
+    publish("cluster.election.won", source="log", payload={"instance_id": "valkey-1", "logged_at": 9.7})
     for name, payload in extra:
         publish(name, source="log", payload=payload)
     if disk_vote is not None:
@@ -373,13 +415,17 @@ def _split_trace(tmp_path):
         ({"views": {"valkey-3": TimeoutError("Timeout reading from socket")}}, ComponentStatus.ERROR,
          "cannot read the cluster views of running node(s) valkey-3"),
         # Two winners and a double vote at epoch 6, and two primaries claiming slots 5-10 at config epoch 6.
-        ({"extra": [("cluster.vote.granted", _vote("valkey-2", "valkey-3", 6, at=11.0)),
-                    ("cluster.election.won", {"instance_id": "valkey-3", "epoch": 6})],
+        ({"extra": [("cluster.election.started", {"instance_id": "valkey-3", "epoch": 6, "logged_at": 10.9}),
+                    ("cluster.vote.granted", _vote("valkey-2", "valkey-3", 6, at=11.0)),
+                    ("cluster.election.won", {"instance_id": "valkey-3", "logged_at": 11.1})],
           "trace": "trace", "require_durable_votes": "never"}, ComponentStatus.FAIL,
          {"vote_once_per_epoch", "one_winner_per_epoch", "same_slots_same_config_epoch", "win_without_quorum"}),
+        # A win whose winner never logged an election start has no epoch: the two checks above did not see it.
+        ({"extra": [("cluster.election.won", {"instance_id": "valkey-3", "logged_at": 11.1})]}, ComponentStatus.ERROR,
+         "cannot tell the epoch of 1 election win(s)"),
     ],
     ids=["vote-left-before-save", "below-quorum", "voter-counted-twice", "quorum-below-majority", "no-vote-count",
-         "views-disagree", "view-unread", "two-winners-and-split-slots"],
+         "views-disagree", "view-unread", "two-winners-and-split-slots", "win-without-a-start"],
 )  # fmt: skip
 def test_election_safety_does_not_pass_a_win_without_one_durable_majority(tmp_path, case, status, violations):
     evidence = _split_trace(tmp_path) if "trace" in case else ()
@@ -391,6 +437,44 @@ def test_election_safety_does_not_pass_a_win_without_one_durable_majority(tmp_pa
         assert violations in result.summary
     else:
         assert set(result.diagnostics["violations"]) == violations
+
+
+# A double vote and two winners at epoch 6: valkey-3 starts an election of its own and valkey-2 votes again.
+_SECOND_WINNER = [
+    ("cluster.election.started", {"instance_id": "valkey-3", "epoch": 6, "logged_at": 10.9}),
+    ("cluster.vote.granted", _vote("valkey-2", "valkey-3", 6, at=11.0)),
+    ("cluster.vote.acked", {"instance_id": "valkey-3", "voter": ID["valkey-2"], "epoch": 6, "acks": 1, "quorum": 1, "logged_at": 11.05}),
+    ("cluster.vote.acked", {"instance_id": "valkey-3", "voter": ID["valkey-0"], "epoch": 6, "acks": 2, "quorum": 2, "logged_at": 11.06}),
+    ("cluster.election.won", {"instance_id": "valkey-3", "logged_at": 11.1}),
+]  # fmt: skip
+
+
+def test_election_safety_claims_vote_once_and_one_winner_only_where_the_model_does():
+    # The claims hold under PersistBeforeAck (every node sync) and FlushBeforeSave FALSE, the constants spec
+    # conform derives from a run: under sync the double vote and the two winners fail the run ...
+    failed = _safety("sync", extra=_SECOND_WINNER)
+    assert failed.status is ComponentStatus.FAIL, failed.summary
+    assert set(failed.diagnostics["violations"]) == {"vote_once_per_epoch", "one_winner_per_epoch"}
+    assert failed.diagnostics["claim_constants"] == {"PersistBeforeAck": "TRUE", "FlushBeforeSave": "FALSE"}
+    # ... and under best-effort the model allows both, so, as spec conform reports them, they are outside the
+    # claim: reported with the run, not held against it.
+    passed = _safety("best-effort", extra=_SECOND_WINNER)
+    assert passed.status is ComponentStatus.PASS, passed.summary
+    record = plain_config(passed.evidence[0].value)
+    assert record["claim_constants"] == {"PersistBeforeAck": "FALSE", "FlushBeforeSave": "FALSE"}
+    assert set(record["outside_claim"]) == {"vote_once_per_epoch", "one_winner_per_epoch"}
+    assert record["outside_claim"]["one_winner_per_epoch"] == [{"epoch": 6, "winners": ["valkey-1", "valkey-3"]}]
+    assert "outside the claim (not claimed under FlushBeforeSave = FALSE, PersistBeforeAck = FALSE)" in passed.summary
+    # One node that answered best-effort decides the claim does not hold, whoever did not answer.
+    assert _safety("best-effort", extra=_SECOND_WINNER, down={"valkey-0"}).status is ComponentStatus.PASS
+    # Every node that answered runs sync, but one setting is unknown: whether the claim holds is undecided.
+    unread = _safety("sync", extra=_SECOND_WINNER, down={"valkey-0"})
+    assert unread.status is ComponentStatus.ERROR, unread.summary
+    assert "cannot tell whether one_winner_per_epoch, vote_once_per_epoch break the claim" in unread.summary
+    assert "setting of valkey-0 is unknown" in unread.summary
+    # The checks the model does not claim fail the run under any setting.
+    short = _safety("best-effort", extra=_SECOND_WINNER[:2] + _SECOND_WINNER[-1:])
+    assert short.status is ComponentStatus.FAIL and set(short.diagnostics["violations"]) == {"win_without_quorum"}
 
 
 # ---------------------------------------------------------------------------

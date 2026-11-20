@@ -58,10 +58,16 @@ evidence:
         value: {type: vote, from: $voter@Primaries, to: $instance_id@Candidates, epoch: $epoch}
       - {add: granted, key: $instance_id@Candidates, value: $voter@Primaries}
   won:
+    # Logged for every win (clusterHandleReplicaFailover). The line names no
+    # epoch: the win is of the election the candidate last started, so the epoch
+    # is taken from its started record. "configEpoch set to N after successful
+    # failover" carries the epoch but is logged only when the candidate's
+    # configEpoch was below it, so a win can have no such line.
     event: cluster.election.won
-    log: 'configEpoch set to (?P<epoch>\d+) after successful failover'
+    log: "Failover election won: I'm the new primary\\."
     fields: {instance_id: node, epoch: int}
     action: Win
+    after: {evidence: started, match: {instance_id: $instance_id}, take: [epoch]}
     updates:
       - {add: winners, value: [$instance_id@Candidates, $epoch]}
   crash:

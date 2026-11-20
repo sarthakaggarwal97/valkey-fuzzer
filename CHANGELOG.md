@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+### Changed: the election oracle and `spec conform` agree, and the spec bridge's blind spots from the audit are closed
+
+- `valkey.oracle.cluster-election-safety` claims `VoteOncePerEpoch` and `OneWinnerPerEpoch` only where
+  `formal/cluster-election/claims.yaml` does (`holds_when`): it derives the same constants `spec conform` derives
+  from a run (`PersistBeforeAck` from every node's `cluster-config-save-behavior`, `FlushBeforeSave` pinned), so a
+  double vote or two winners under `best-effort` is recorded under `outside_claim` (and in the PASS summary), not
+  a FAIL, as conform reports it. Under `sync` both still FAIL. A finding whose claim depends on a setting no node
+  could answer is an `ERROR`. The quorum, saved-vote, and split-primary checks are not conditioned.
+- The election's `won` evidence is the line Valkey logs for every win, `Failover election won: I'm the new
+  primary.`; `configEpoch set to N after successful failover` is logged only when the winner's `configEpoch` was
+  below `N`, so a win could have no event, and the experiments' required `election-won-logged` evidence could be
+  missing on a real win. The line names no epoch: `mapping.yaml`'s `after` may now `take: [field, ...]` from the
+  latest record it follows, so the win is at the epoch of the winner's latest `started`; the oracle resolves the
+  epoch the same way, and a win with no earlier `started` of its winner is an `ERROR` (conform: a record it cannot
+  apply), never a win at a made-up epoch.
+- `valkey.observer.log-trigger` rules take `logged_by: server` (default `any`): the lines of a fork child (an RDB
+  or AOF child, role `C`) are skipped. A rule without a pattern takes it from the mapping's evidence, which may say
+  `logged_by: server`; replication's `saved` does, so one BGSAVE (the child's `DB saved on disk` and the server's
+  `Background saving terminated with success`) is one `Save`, not two.
+- The TLC limit of a batch worker's `spec conform` is the batch option `conform_tlc_timeout_s` (default 300, the
+  value that was hard-coded); a check it stops is a conform `error` whose reason names the option.
+  `BatchPlugin.after_run` takes the worker's task as its second argument.
+- A conform entry that does not say whether its claims are `approved` is read as a draft's: only an explicit
+  `approved: true` decides a run. A worker's `spec conform` that fails outright still writes `conform.json` with
+  the exception as each bundle's error, and conform reports a trace the run recorded that is missing or unreadable
+  as that run's error instead of raising, so a missing `conform.json` on an approved bundle no longer hides why.
+- `spec check` has a `log_patterns` gate: every `log` pattern of `mapping.yaml` must match a line of the bundle's
+  new `sample.log` (lines Valkey logged, from the format strings in its source). The oracle, the log-trigger
+  rules, and conform all read their patterns from the mapping, so one wrong pattern would blind them all. Every
+  shipped bundle and the register fixture have one.
+
 ### Fixed: process cleanup, readiness waits, the ledger's clock, and seeded ports (PR-H1)
 
 - A fault's `SIGKILL` (`valkey.fault.process-signal`, the chaos actions' kills) now takes the server's forked

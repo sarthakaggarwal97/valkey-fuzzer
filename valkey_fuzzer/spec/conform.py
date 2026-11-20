@@ -129,7 +129,21 @@ def _report_run(path: str, report: Mapping[str, Any]) -> RunEvidence:
     folder = os.path.dirname(path)
     traces = sorted(glob.glob(os.path.join(folder, "components", "*", TRACE_FILE)))
     if traces:
-        return _trace_run(traces[0], meta)
+        try:
+            return _trace_run(traces[0], meta)
+        except (OSError, ValueError) as exc:
+            return RunEvidence(source=path, header={}, records=[], meta=meta, problem=f"{traces[0]}: {exc}")
+    recorded = [
+        artifact
+        for item in outcome.get("evidence") or []
+        for artifact in item.get("artifacts") or []
+        if str(artifact).endswith(TRACE_FILE)
+    ]
+    if recorded:
+        # The run recorded a trace that is gone (a pruned run keeps only its report, scenario, and conform.json):
+        # its events alone would miss the samples the trace carries, so the run is not checked on them.
+        problem = f"the trace the run recorded is missing (a pruned run keeps its conform.json): {recorded[0]}"
+        return RunEvidence(source=path, header={}, records=[], meta=meta, problem=problem)
     events = sorted(
         (item for item in (outcome.get("diagnostics") or {}).get("events") or [] if item.get("committed")),
         key=lambda item: item.get("sequence", 0),
@@ -230,8 +244,12 @@ class ObservedRun:
 
     def _fields(self, evidence: Evidence, record: Mapping[str, Any]) -> dict[str, Any]:
         body = evidence.body(record)
+        taken = evidence.after.take if evidence.after else ()
         values = {}
         for spec in evidence.fields.values():
+            if spec.name in taken:
+                # Copied from the record this one follows, once that record is found (replay).
+                continue
             value = get_path(body, spec.path)
             if value is ABSENT or value is None:
                 if not spec.optional:
@@ -357,31 +375,55 @@ class ObservedRun:
                 if not self._follows(evidence, fields, applied):
                     waiting.append((evidence, record, fields))
                     continue
-                self._step(state, evidence, record, fields)
-                applied[evidence.name].append(fields)
+                self._apply_record(state, evidence, record, fields, applied)
                 ready = True
                 while ready:
                     ready = next((item for item in waiting if self._follows(item[0], item[2], applied)), None)
                     if ready:
                         waiting.remove(ready)
-                        self._step(state, *ready)
-                        applied[ready[0].name].append(ready[2])
+                        self._apply_record(state, *ready, applied)
         for evidence, _, fields in waiting:
             after = evidence.after
             wanted = ", ".join(f"{name} {fields[spec[1:]]}" for name, spec in after.match.items())
             self.unapplied.append(f"{evidence.name}: no {after.evidence} record ({wanted}) before or after it")
         return self.states
 
+    def _apply_record(
+        self,
+        state: dict[str, Any],
+        evidence: Evidence,
+        record: Mapping[str, Any],
+        fields: dict[str, Any],
+        applied: dict[str, list[Mapping[str, Any]]],
+    ) -> None:
+        """Apply a record whose ``after`` (if any) is satisfied, with the fields it takes from that record."""
+
+        if evidence.after is not None and evidence.after.take:
+            prior = self._prior(evidence, fields, applied)
+            fields = {**fields, **{name: prior[name] for name in evidence.after.take}}
+        self._step(state, evidence, record, fields)
+        applied[evidence.name].append(fields)
+
     def _follows(
         self, evidence: Evidence, fields: Mapping[str, Any], applied: Mapping[str, list[Mapping[str, Any]]]
     ) -> bool:
         """Whether the record ``evidence`` follows (its ``after``) has been applied, or it follows none."""
 
-        if evidence.after is None:
-            return True
+        return evidence.after is None or self._prior(evidence, fields, applied) is not None
+
+    def _prior(
+        self, evidence: Evidence, fields: Mapping[str, Any], applied: Mapping[str, list[Mapping[str, Any]]]
+    ) -> Optional[Mapping[str, Any]]:
+        """The latest applied record of ``evidence.after.evidence`` whose fields match this record's, else None."""
+
         wanted = {name: fields[spec[1:]] for name, spec in evidence.after.match.items()}
-        return any(
-            all(prior[name] == value for name, value in wanted.items()) for prior in applied[evidence.after.evidence]
+        return next(
+            (
+                prior
+                for prior in reversed(applied[evidence.after.evidence])
+                if all(prior[name] == value for name, value in wanted.items())
+            ),
+            None,
         )
 
     def _step(
@@ -590,6 +632,7 @@ def check_run(bundle: Bundle, run: RunEvidence, tools: Optional[TlaTools]) -> di
                 {MODEL_FILE: bundle.model_text, "ObservedTrace.tla": module, "ObservedTrace.cfg": cfg},
             )
             if run_tlc.timed_out:
+                result["timed_out"] = True
                 raise TlaError(run_tlc.timeout_error)
             printed = {(item[1], item[2]): sorted(item[3]) for item in print_values(run_tlc.output, _TAG)}
     except TlaError as exc:

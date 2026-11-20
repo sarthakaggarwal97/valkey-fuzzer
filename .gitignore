@@ -58,6 +58,8 @@ cover/
 # Django stuff:
 *.log
 !tests/fixtures/**/*.log
+# A spec bundle's lines Valkey logged (spec check's log_patterns gate).
+!formal/*/sample.log
 local_settings.py
 db.sqlite3
 db.sqlite3-journal

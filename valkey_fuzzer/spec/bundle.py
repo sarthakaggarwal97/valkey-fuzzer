@@ -43,8 +43,13 @@ MODEL_FILE = "model.tla"
 MAPPING_FILE = "mapping.yaml"
 CONTROLS_DIRECTORY = "negative-controls"
 EXPERIMENTS_DIRECTORY = "experiments"
+# Lines Valkey logged, at least one per mapped log pattern: spec check's log_patterns gate matches each
+# pattern against them, so a wrong pattern cannot silently blind every reader of the mapping.
+SAMPLE_LOG_FILE = "sample.log"
 # The JSONL a trace component writes in its artifact folder and spec conform reads (:mod:`.conform`).
 TRACE_FILE = "trace.jsonl"
+# Who logged a mapped line: any process, or the server only (a fork child's lines, role C, are skipped).
+LOGGED_BY = ("any", "server")
 
 # node reads as str; the name tells a reader the field is a node of the trace header.
 FIELD_TYPES = ("int", "str", "bool", "node", "node_id")
@@ -325,10 +330,14 @@ class Update:
 
 @dataclass(frozen=True)
 class After:
-    """The record an evidence record follows: one of ``evidence`` whose fields equal ``match`` (``$field`` refs)."""
+    """The record an evidence record follows: one of ``evidence`` whose fields equal ``match`` (``$field`` refs).
+
+    ``take`` names the fields this record copies from the latest such record, for a line that does not carry them.
+    """
 
     evidence: str
     match: dict[str, str]
+    take: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -346,6 +355,7 @@ class Evidence:
     updates: tuple[Update, ...]
     component: Optional[str] = None  # the experiment component that publishes the event
     after: Optional[After] = None
+    logged_by: str = "any"  # who logs the line: any process, or the server only (not a fork child)
 
     def body(self, record: Mapping[str, Any]) -> Mapping[str, Any]:
         """Where this evidence's fields are in a record: a sample itself, or an event's payload."""
@@ -466,7 +476,8 @@ _EVIDENCE = _record(
         "step": _record({}, {"changes": str, "unchanged": str, "process": _TEXTS}),
         "updates": _list(dict),
         "component": str,
-        "after": _record({"evidence": str, "match": _named(str)}),
+        "after": _record({"evidence": str, "match": _named(str)}, {"take": _TEXTS}),
+        "logged_by": ConfigField(str, choices=LOGGED_BY),
     },
 )
 _PROCESS = _record(
@@ -580,9 +591,18 @@ def parse_mapping(document: Mapping[str, Any], model: tla.ModelSymbols, *, path:
                 groups = set(re.compile(log).groupindex)
             except re.error as exc:
                 raise SpecBundleError(f"{at}.log is not a valid regex: {exc}") from exc
+        elif "logged_by" in spec:
+            raise SpecBundleError(f"{at}.logged_by says who logs the line, so it needs log")
         fields = _parse_fields(spec["fields"], f"{at}.fields")
+        after = spec.get("after")
+        taken = set(_texts(after.get("take") or [], f"{at}.after.take")) if after else set()
         if log is not None:
-            missing = [item.name for item in fields.values() if item.path.split(".")[0] not in groups | {"instance_id"}]
+            # A taken field comes from the record this one follows, not from the line.
+            missing = [
+                item.name
+                for item in fields.values()
+                if item.name not in taken and item.path.split(".")[0] not in groups | {"instance_id"}
+            ]
             if missing:
                 raise SpecBundleError(f"{at}.fields {missing} are not captured by the log pattern")
         action = spec.get("action")
@@ -615,7 +635,8 @@ def parse_mapping(document: Mapping[str, Any], model: tla.ModelSymbols, *, path:
             step=step,
             updates=updates,
             component=spec.get("component"),
-            after=After(spec["after"]["evidence"], spec["after"]["match"]) if "after" in spec else None,
+            after=After(after["evidence"], after["match"], tuple(sorted(taken))) if after else None,
+            logged_by=spec.get("logged_by", "any"),
         )
     for item in evidence.values():
         if item.after is None:
@@ -629,13 +650,19 @@ def parse_mapping(document: Mapping[str, Any], model: tla.ModelSymbols, *, path:
             if name not in evidence[item.after.evidence].fields:
                 raise SpecBundleError(f"{at}.match: {item.after.evidence} has no field {name!r}")
             ref = field_ref(spec)
-            if not ref or ref[1] is not None or ref[0] not in item.fields:
-                raise SpecBundleError(f"{at}.match.{name} must be $field, one of {item.name}'s fields")
+            if not ref or ref[1] is not None or ref[0] not in item.fields or ref[0] in item.after.take:
+                raise SpecBundleError(f"{at}.match.{name} must be $field, one of {item.name}'s own fields")
+        for name in item.after.take:
+            if name not in evidence[item.after.evidence].fields or name not in item.fields:
+                raise SpecBundleError(
+                    f"{at}.take: {name!r} must be a field of both {item.after.evidence} and {item.name}"
+                )
     for process in processes.values():
         for rule in process.members:
             if rule.evidence not in evidence:
                 raise SpecBundleError(f"{where}.processes.{process.name} uses unknown evidence {rule.evidence!r}")
-            if rule.field not in evidence[rule.evidence].fields:
+            item = evidence[rule.evidence]
+            if rule.field not in item.fields or (item.after is not None and rule.field in item.after.take):
                 raise SpecBundleError(f"{where}.processes.{process.name}: {rule.evidence} has no field {rule.field!r}")
 
     unobservable = document.get("unobservable") or {}
@@ -775,6 +802,19 @@ def _read(path: Path) -> str:
         raise SpecBundleError(f"cannot read {path}: {exc}") from exc
 
 
+def _stamps(path: Path, *names: str) -> tuple[tuple[int, int], ...]:
+    """The modification time and size of each of the bundle files ``names``: a cache key that changes when they do."""
+
+    stamps = []
+    for name in names:
+        try:
+            stat = (path / name).stat()
+        except OSError as exc:
+            raise SpecBundleError(f"cannot read {path / name}: {exc}") from exc
+        stamps.append((stat.st_mtime_ns, stat.st_size))
+    return tuple(stamps)
+
+
 def load_spec_mapping(reference: str) -> SpecMapping:
     """The mapping of the bundle ``reference`` names (see :func:`find_bundle`).
 
@@ -784,19 +824,25 @@ def load_spec_mapping(reference: str) -> SpecMapping:
     """
 
     path = find_bundle(reference)
-    stamps = []
-    for item in (path / MODEL_FILE, path / MAPPING_FILE):
-        try:
-            stat = item.stat()
-        except OSError as exc:
-            raise SpecBundleError(f"cannot read {item}: {exc}") from exc
-        stamps.append((stat.st_mtime_ns, stat.st_size))
-    return _cached_mapping(path, tuple(stamps))
+    return _cached_mapping(path, _stamps(path, MODEL_FILE, MAPPING_FILE))
 
 
 @functools.lru_cache(maxsize=64)
 def _cached_mapping(path: Path, stamps: tuple[tuple[int, int], ...]) -> SpecMapping:
     return _mapping(path, _read(path / MODEL_FILE))
+
+
+def load_spec_claims(reference: str) -> Claims:
+    """The claims of the bundle ``reference`` names, reused while claims.yaml and model.tla do not change, as
+    :func:`load_spec_mapping` reuses the mapping; treat them as read-only."""
+
+    path = find_bundle(reference)
+    return _cached_claims(path, _stamps(path, MODEL_FILE, CLAIMS_FILE))
+
+
+@functools.lru_cache(maxsize=64)
+def _cached_claims(path: Path, stamps: tuple[tuple[int, int], ...]) -> Claims:
+    return parse_claims(_yaml(path / CLAIMS_FILE)[1], tla.symbols(_read(path / MODEL_FILE)))
 
 
 def _yaml(path: Path) -> tuple[str, Mapping[str, Any]]:

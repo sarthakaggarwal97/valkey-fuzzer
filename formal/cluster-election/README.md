@@ -121,14 +121,16 @@ vote with the count and quorum; older builds report `SKIP_UNSUPPORTED`.
 `mapping.yaml` holds every log pattern the experiment uses: `election-log`
 (`valkey.observer.log-trigger` with `spec: cluster-election`) publishes each
 pattern's line as its event, and `election-safety` reads the event names
-from the same file.
+from the same file. `sample.log` holds one line Valkey logged per pattern;
+`spec check`'s `log_patterns` gate matches each pattern against it, so a
+pattern Valkey never logs cannot silently blind both readers.
 
 | Model action or variable | Implementation evidence (`mapping.yaml`) |
 | --- | --- |
 | `StartElection(c)` | `started`: `Starting a failover election for epoch E`; driven by `valkey.action.cluster-election` (`first-election`, `second-election`) |
 | `HandleRequest(p)` | `granted`: `Failover auth granted to …` (sets `lastVote`); `denied`: `Failover auth denied to …` |
 | `ReceiveVote(c)` | `acked`: `Failover auth ACK from … (ACKs N, quorum Q)`, logged by the candidate: the vote left the voter |
-| `Win(c)`, `winners` | `won`: `configEpoch set to N after successful failover` |
+| `Win(c)`, `winners` | `won`: `Failover election won: I'm the new primary.`, at the epoch of the winner's latest `started` (`after: ... take: [epoch]`); Valkey logs `configEpoch set to N after successful failover` only when the winner's `configEpoch` was below `N`, so that line would miss a win |
 | `Crash(p)` | `crash`: the `*.injected` event of `valkey.fault.process-signal` (`kill-voter`) or of the `kill_primary` trigger of `valkey.action.cluster-election`, with the `nodes.conf` vars read at the kill |
 | `currentEpoch`, `diskEpoch`, `diskVote` | `sample`: `valkey.observer.cluster-trace` (`trace`) samples of `CLUSTER INFO` and the `vars` line of `nodes.conf` |
 | `SaveConfig`, `BioWrite`, `FlushEarly`, `LearnEpoch` | unobservable (not logged) |
@@ -137,7 +139,11 @@ from the same file.
 `valkey.oracle.cluster-election-safety` checks `OneWinnerPerEpoch`,
 `VoteOncePerEpoch`, the `Win` quorum, votes saved before they leave, and no
 split primary inside the run. It reads the same `mapping.yaml` events as
-`spec conform`, below, but the two answer different questions: the oracle
+`spec conform`, below, and claims `OneWinnerPerEpoch` and `VoteOncePerEpoch`
+under the same `holds_when` constants, derived the same way (`PersistBeforeAck`
+from every node's `cluster-config-save-behavior`): a double vote under
+`best-effort` is outside the claim for both, reported and not failed. But the
+two answer different questions: the oracle
 gives the run's verdict from the events themselves, while `spec conform`
 rebuilds the model's states after the run and has TLC evaluate the model's
 own definitions of the properties on them.

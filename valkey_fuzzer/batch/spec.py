@@ -38,13 +38,18 @@ _OPTION_FIELDS = {
     "valkey_binary": ConfigField(str, required=False, allow_none=True),
     "prune_pass": ConfigField(bool, required=False),
     "serial_reruns": ConfigField(int, minimum=0, required=False),
+    "conform_tlc_timeout_s": ConfigField(float, required=False),
 }
 _SPEC = ConfigSchema({**_OPTION_FIELDS, "sources": ConfigField(list, required=False, allow_none=True)})
 
 
 @dataclass
 class BatchOptions:
-    """How a batch runs; ``timeout_s`` None means the profile's budget, or :data:`DEFAULT_TIMEOUT_S`."""
+    """How a batch runs; ``timeout_s`` None means the profile's budget, or :data:`DEFAULT_TIMEOUT_S`.
+
+    ``conform_tlc_timeout_s`` bounds the TLC run of each worker's ``spec conform`` on its run's observed states
+    (:mod:`.conform_plugin`); a run it stops is a conform ``error`` that names this option.
+    """
 
     batch_id: str = "batch"
     profile: Optional[str] = None
@@ -54,6 +59,7 @@ class BatchOptions:
     valkey_binary: Optional[str] = None
     prune_pass: bool = False
     serial_reruns: int = 0
+    conform_tlc_timeout_s: float = 300.0
     experiment_directories: tuple[str, ...] = ()
 
     def check(self) -> None:
@@ -65,6 +71,8 @@ class BatchOptions:
             raise BatchError("batch.batch_id must name the batch")
         if self.timeout_s is not None and self.timeout_s <= 0:
             raise BatchError("batch.timeout_s must be a number of seconds greater than zero")
+        if self.conform_tlc_timeout_s <= 0:
+            raise BatchError("batch.conform_tlc_timeout_s must be a number of seconds greater than zero")
         # Bus ports sit CLUSTER_BUS_PORT_OFFSET above the client ports: neither may reach another worker's block.
         span = self.workers * PORT_BLOCK
         if span > CLUSTER_BUS_PORT_OFFSET or self.port_base + span - 1 + CLUSTER_BUS_PORT_OFFSET > MAX_TCP_PORT:
