@@ -6,7 +6,7 @@
 # verdict says how many clients the history had, and `min_clients` requires
 # some. Replica reads are not part of it. Extend it after a fragment that brings
 # `writes` and `data` (valkey.writes or valkey.base). It needs the porcupine
-# checker on PATH (docs/components.md#valkeyoraclehistory).
+# checker on PATH (docs/components/oracles.md#valkeyoraclehistory).
 components:
   - use: valkey.oracle.history
     id: history

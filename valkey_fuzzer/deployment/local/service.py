@@ -615,7 +615,7 @@ class ValkeyDeploymentService:
             primaries = sum(role == "primary" for role in planned.values())
             replicas = sum(role == "replica" for role in planned.values())
             # Outside cluster mode this turns the cluster checks off and the role check on, whatever was asked:
-            # the role check is that mode's liveness check (docs/components.md, valkey.oracle.deployment-state).
+            # the role check is that mode's liveness check (docs/components/oracles.md, valkey.oracle.deployment-state).
             adapt_validation_config(config, self.mode, replicas // primaries if primaries else 0)
             return DeploymentStateCheck(
                 self._connection,

@@ -442,7 +442,7 @@ replication check (when there are replicas) and the role check run.
 ## The Valkey components
 
 `valkey_fuzzer.components` holds everything specific to Valkey features: the
-component library ([full list](components.md)), the providers
+component library ([full list](components/README.md)), the providers
 `valkey.artifact.local-binary`, `valkey.resource.tmpdir`, and
 `valkey.resource.tmpfs`, the generator hooks, the
 [fragments](scenarios-and-experiments.md#fragments) (the search profiles

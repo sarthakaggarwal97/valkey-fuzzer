@@ -619,7 +619,7 @@ component's random choices, not timing.
 There is no command for it. Declare both builds as artifacts and give
 `valkey.action.commands` a `compare_with` binary (usually
 `{$ref: artifacts.parent.binary}`): one run sends the same commands to both
-builds and compares every reply. See [components](components.md#valkeyactioncommands).
+builds and compares every reply. See [components](components/actions.md#valkeyactioncommands).
 
 ## minimize
 

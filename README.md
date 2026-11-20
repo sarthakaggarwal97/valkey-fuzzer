@@ -149,7 +149,9 @@ each example's first lines show the command that runs it.
 ## Safety
 
 The fuzzer acts on the machine it runs on. Use a disposable host, VM, or
-container, not a server that runs anything you care about.
+container, not a server that runs anything you care about. The
+[threat model](docs/threat-model.md) lists every change it makes, what keeps
+each inside its run, and what is left to you.
 
 - It starts real `valkey-server` processes on local ports (from 7000 by
   default, bound to loopback addresses, with protected mode off), sends them
@@ -175,22 +177,17 @@ container, not a server that runs anything you care about.
 
 ## Documentation
 
-| Document | For | Contents |
-| --- | --- | --- |
-| [Getting started](docs/getting-started.md) | first-time users | install, first runs, output and report files, troubleshooting |
-| [Reading a FAIL](docs/reading-a-fail.md) | anyone with a failed run | where the verdict, logs, and replay command are, and what to attach to a Valkey issue |
-| [Concepts and glossary](docs/concepts.md) | everyone | scenarios, execution plans, component roles, events, evidence, and the terms these docs use |
-| [Base contracts](docs/contracts.md) | everyone | the rules every run is held to: verdicts, the evidence contract, fault ownership, effective config, search profiles, deadlines, host state, replay |
-| [What is stable](docs/stability.md) | tool and component authors | the surfaces a release keeps (commands, exit codes, YAML, report keys, component ids, entry points, `format_version`) and the ones it does not |
-| [Scenarios and experiments](docs/scenarios-and-experiments.md) | scenario and experiment authors | file formats, the local deployment, the Valkey experiments, random scenarios and search profiles |
-| [Valkey components](docs/components.md) | experiment authors | every Valkey component and provider, with its config, declarations, and defaults |
-| [Adding tests](docs/extending.md) | experiment and component authors | writing experiments, components, and providers, registering them, and testing them |
-| [Command-line reference](docs/cli.md) | users and scripts | every command and option, exit codes, report folders and formats |
-| [Cluster chaos and CI](docs/cluster-chaos-and-ci.md) | cluster chaos users, CI maintainers | running cluster chaos, kill safety, the GitHub workflows, reproducing CI failures |
-| [Spec bridge](docs/spec-bridge.md) | model and experiment authors | TLA+ bundles: `spec check`, `spec translate`, `spec conform`, the assurance report |
-| [Bug zoo](docs/bug-zoo.md) | experiment authors, soak maintainers | deliberately broken Valkey builds the experiments must catch |
-| [Architecture](docs/architecture.md) | framework contributors | code layout, the compiler and runner, the local deployment provider, the wave engine |
-| [TLA+ election model](formal/cluster-election/README.md) | Valkey cluster maintainers | the failover election model and its live counterpart |
+[docs/README.md](docs/README.md) lists every page with one line each. The
+ones most people need first:
+
+| Document | For |
+| --- | --- |
+| [Getting started](docs/getting-started.md) | install, first runs, the output and report files, troubleshooting |
+| [Reading a FAIL](docs/reading-a-fail.md) | where a failed run's verdict and logs are, and what to attach to a Valkey issue |
+| [Operations](docs/operations.md) | what a host needs, running a soak, disk and ports, stopping, budgets and timeouts |
+| [Triage](docs/triage.md) | from a soak's failure signature to a filed bug or a fixed fuzzer bug |
+| [Threat model](docs/threat-model.md) | what the fuzzer does to the host, what scopes it, what runs as root, residual risks |
+| [Command-line reference](docs/cli.md) | every command and option, exit codes, report folders and formats |
 
 ## Contributing
 

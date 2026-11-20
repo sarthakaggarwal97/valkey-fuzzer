@@ -5,7 +5,7 @@ component, or a provider. The Valkey components and experiments are part of
 the fuzzer, in `valkey_fuzzer/components/`; components for another target
 ship in a [pack](#ship-a-pack) of their own. The formats are in
 [Scenarios and experiments](scenarios-and-experiments.md), the existing
-components in [Valkey components](components.md), and the framework's
+components in [Valkey components](components/README.md), and the framework's
 structure in [Architecture](architecture.md).
 
 - [Choose what to write](#choose-what-to-write)

@@ -25,7 +25,7 @@ KILL_FIELDS = {
     "exited_at": ConfigField(float, required=False, allow_none=True),
     "unexpected_exit": optional(bool),
 }
-# One operation's record: these fields always, and what happened to it (see docs/components.md).
+# One operation's record: these fields always, and what happened to it (see docs/components/README.md).
 _OPERATION = mapping_of(
     {
         "index": TEXT,
