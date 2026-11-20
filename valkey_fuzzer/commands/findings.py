@@ -49,7 +49,7 @@ def findings_command(args: argparse.Namespace) -> int:
         )
     store = findings.load(path)
     if args.findings_command == "show":
-        print(json.dumps(findings.find(store, args.key, path), indent=2))
+        print(json.dumps(findings.find(store, args.key, path), indent=2, sort_keys=True))
         return EXIT_SUCCESS
     listed = findings.entries(store, args.status)
     if not listed:

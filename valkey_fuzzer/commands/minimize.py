@@ -3,7 +3,6 @@
 import argparse
 import json
 import sys
-from pathlib import Path
 from typing import Any
 
 import yaml
@@ -11,6 +10,7 @@ import yaml
 from ..compiler import Overrides
 from ..minimize import signature_key
 from ..outcomes import EXIT_HARNESS_ERROR, EXIT_SUCCESS
+from ..reports import write_document
 from ._common import add_common_options, describe_drift, positive_count, service_for
 
 
@@ -44,12 +44,11 @@ def minimize_command(args: argparse.Namespace) -> int:
         print("Error: the failure did not reproduce, so nothing was minimized", file=sys.stderr)
         return EXIT_HARNESS_ERROR
     print(f"Accepted reductions: {', '.join(result.accepted) or 'none'}")
-    text = yaml.safe_dump(result.scenario, sort_keys=False)
     if args.output:
-        Path(args.output).write_text(text, encoding="utf-8")
+        write_document(args.output, result.scenario, "yaml")
         print(f"Minimized scenario written to {args.output}")
     else:
-        print(text)
+        print(yaml.safe_dump(result.scenario, sort_keys=False))
     if not result.accepted:
         print("Error: no reduction kept the failure, so the scenario is not smaller", file=sys.stderr)
         return EXIT_HARNESS_ERROR

@@ -82,6 +82,13 @@ def _cli(*argv):
     return cli("spec", *argv, via_main=False)
 
 
+def _main(*argv):
+    """``valkey-fuzzer spec argv`` through :func:`cli.main`, which prints the error the command raises and maps it
+    to its exit code: 64 for an option mix, 2 for the rest."""
+
+    return cli("spec", *argv)
+
+
 @pytest.mark.parametrize(
     ("text", "rendered"),
     [
@@ -307,7 +314,7 @@ def test_tlc_dumps_the_trace_as_json_when_it_can(tmp_path, monkeypatch):
 def test_check_reports_the_tools_and_strict_refuses_an_unknown_jar(tmp_path, monkeypatch, capsys):
     java, jar = _fake_java(tmp_path, f'case "$*" in *-h*) echo "{HELP_2_19}";; *) echo "Killed" >&2; exit 137;; esac')
     monkeypatch.setattr(tla.shutil, "which", lambda name: str(java))
-    assert _cli("check", BUNDLE, "--tla2tools", jar, "--strict") == 2
+    assert _main("check", BUNDLE, "--tla2tools", jar, "--strict") == 2
     assert "Error: tla2tools.jar (sha256 " in capsys.readouterr().err
     # Without --strict the check runs (here, to the SANY that never starts), and says what it ran with.
     output = tmp_path / "assurance.json"
@@ -468,7 +475,7 @@ def _translate(bundle=BUNDLE, **kwargs):
     return translate_trace(load_bundle(str(bundle)), trace, CONTROL.read_text(), **options)
 
 
-def test_translate_turns_the_counterexample_into_scenarios_of_the_bundles_experiment(tmp_path):
+def test_translate_turns_the_counterexample_into_scenarios_of_the_bundles_experiment(tmp_path, capsys):
     translation = _translate(variants=4, config="negative-controls/ack-before-save.cfg")
     (alignment,) = translation["alignment"]
     assert (alignment["fault"], alignment["fault_state"], alignment["trigger"]) == ("Crash", 4, "acked")
@@ -486,10 +493,13 @@ def test_translate_turns_the_counterexample_into_scenarios_of_the_bundles_experi
     names = ["spec-register-ack-before-save-v1.yaml", "spec-register-ack-before-save.yaml", "translation.json"]
     assert sorted(path.name for path in out.iterdir()) == names
     assert all(str(BUNDLE) not in (out / name).read_text() for name in names)
-    # Nothing to translate is a harness error (never exit 1, a FAIL).
+    # Nothing to translate is a harness error (never exit 1, a FAIL); --trace without --config is an option mix.
     empty = tmp_path / "empty.out"
     empty.write_text("")
-    assert _cli("translate", "register", "--trace", empty, "--config", CONTROL, "--out", tmp_path / "none") == 2
+    assert _main("translate", "register", "--trace", empty, "--config", CONTROL, "--out", tmp_path / "none") == 2
+    assert "Error: TLC produced no counterexample to translate" in capsys.readouterr().err
+    assert _main("translate", "register", "--trace", empty, "--out", tmp_path / "none") == 64
+    assert "Error: --trace needs --config" in capsys.readouterr().err
 
 
 def test_translate_aligns_the_election_counterexample_on_the_vote_that_left_before_its_save():
@@ -990,13 +1000,14 @@ def test_translate_searches_the_model_from_the_command_line(tmp_path, monkeypatc
     report = json.loads((out / "translation.json").read_text())
     assert (report["kind"], report["tlc_timeout_s"], report["max_scenarios"]) == ("spec-search", 9.0, 50)
     assert len(report["translations"]) == 2 and str(bundle) not in json.dumps(report)
-    # Known-bad: a search with a control, no source at all, a bundle without targets, and a TLC that fails.
-    assert _cli("translate", "register", "--control", "ack-before-save", "--mutate", "--out", out) == 2
-    assert "leave out --control" in capsys.readouterr().err
-    assert _cli("translate", "register", "--out", out) == 2
-    assert "one of --control, --trace, --reach, or --mutate" in capsys.readouterr().err
-    assert _cli("translate", str(BUNDLE), "--reach", "all", "--out", out) == 2
-    assert "names no targets to reach" in capsys.readouterr().err
+    # Known-bad: a search with a control and no source at all are option mixes (exit 64); a bundle without targets
+    # and a TLC that fails are harness errors (exit 2).
+    assert _main("translate", "register", "--control", "ack-before-save", "--mutate", "--out", out) == 64
+    assert "Error: --reach and --mutate search the model on their own; leave out --control" in capsys.readouterr().err
+    assert _main("translate", "register", "--out", out) == 64
+    assert "Error: one of --control, --trace, --reach, or --mutate" in capsys.readouterr().err
+    assert _main("translate", str(BUNDLE), "--reach", "all", "--out", out) == 2
+    assert "Error: register's claims.yaml names no targets to reach" in capsys.readouterr().err
     _FakeTlc(monkeypatch, SyncBeforeAck_FALSE=TLC_FAILED)
     assert _cli("translate", "register", "--mutate", "--out", out) == 2
     assert (
@@ -1237,7 +1248,7 @@ def test_conform_needs_no_tools_for_a_bundle_tlc_has_nothing_to_evaluate(tmp_pat
     monkeypatch.delenv("TLA2TOOLS_JAR", raising=False)
     run = _run_folder(tmp_path / "run", "PASS", ["persistence"], PERSISTENCE_EVENTS)
     assert _cli("conform", "persistence", run) == 0 and "Crash 1/1" in capsys.readouterr().out
-    assert _cli("conform", str(BUNDLE), run) == 2 and "tla2tools.jar not found" in capsys.readouterr().err
+    assert _main("conform", str(BUNDLE), run) == 2 and "Error: tla2tools.jar not found" in capsys.readouterr().err
 
 
 ELECTION_OBSERVATIONS = [

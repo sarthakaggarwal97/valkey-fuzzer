@@ -1,7 +1,8 @@
 """``spec``: check a TLA+ bundle, translate its counterexamples into scenarios, and conform real runs to it.
 
 Without java and ``tla2tools.jar`` a command that needs TLC prints :data:`~valkey_fuzzer.spec.tla.TOOLS_HINT` and
-exits 2.
+exits 2. Every error a command raises is printed, as ``Error: ...``, by :func:`valkey_fuzzer.cli.main`: an
+:class:`~valkey_fuzzer.reports.InputError` (an option mix) exits 64, the rest exit 2.
 """
 
 import argparse
@@ -14,7 +15,7 @@ from typing import Any, Optional
 import yaml
 
 from ..outcomes import EXIT_FAILURE, EXIT_HARNESS_ERROR, EXIT_SUCCESS
-from ..reports import write_document
+from ..reports import InputError, write_document
 from ..service import CONFORM_TLC_TIMEOUT_S
 from ..spec.bundle import SPEC_PATH_VARIABLE, Bundle, SpecBundleError, load_bundle
 from ..spec.check import check_bundle, run_control
@@ -157,11 +158,7 @@ def _write(args: argparse.Namespace, report: dict[str, Any]) -> None:
 
 
 def check_command(args: argparse.Namespace) -> int:
-    try:
-        tools = _tools(args)
-    except TlaError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return EXIT_HARNESS_ERROR
+    tools = _tools(args)
     identity = tools.identity()
     release = identity["release"] or "no release the spec bridge knows"
     print(f"Tools: TLC {identity['tlc_version']} from {identity['jar']} ({release}, sha256 {identity['sha256']})")
@@ -199,17 +196,13 @@ def check_command(args: argparse.Namespace) -> int:
 def translate_command(args: argparse.Namespace) -> int:
     searching = bool(args.reach or args.mutate)
     if (args.control or args.trace) and searching:
-        print("Error: --reach and --mutate search the model on their own; leave out --control and --trace", file=sys.stderr)  # fmt: skip
-        return EXIT_HARNESS_ERROR
+        raise InputError("--reach and --mutate search the model on their own; leave out --control and --trace")
     if not (args.control or args.trace or searching):
-        print("Error: one of --control, --trace, --reach, or --mutate is required", file=sys.stderr)
-        return EXIT_HARNESS_ERROR
+        raise InputError("one of --control, --trace, --reach, or --mutate is required")
+    if args.trace and not args.config:
+        raise InputError("--trace needs --config, the .cfg TLC ran with")
     bundle = load_bundle(args.bundle)
-    try:
-        service = bundle_service(bundle, args.experiment_dirs)
-    except Exception as exc:
-        print(f"Error: the experiments do not load: {exc}", file=sys.stderr)
-        return EXIT_HARNESS_ERROR
+    service = bundle_service(bundle, args.experiment_dirs)
     if searching:
         return _search(args, bundle, service.compile)
     if args.control:
@@ -217,15 +210,11 @@ def translate_command(args: argparse.Namespace) -> int:
         print(f"TLC: negative control {control.name} (must violate {control.violates})")
         result, run = run_control(bundle, control, _tools(args))
         if run.timed_out:
-            print(f"Error: {run.timeout_error}", file=sys.stderr)
-            return EXIT_HARNESS_ERROR
+            raise TlaError(run.timeout_error)
         config_text = bundle.files[control.config]
         config = control.config
         name = control.name
     else:
-        if not args.config:
-            print("Error: --trace needs --config, the .cfg TLC ran with", file=sys.stderr)
-            return EXIT_HARNESS_ERROR
         with open(args.trace, encoding="utf-8") as handle:
             text = handle.read()
         with open(args.config, encoding="utf-8") as handle:
@@ -239,23 +228,18 @@ def translate_command(args: argparse.Namespace) -> int:
         name = os.path.splitext(os.path.basename(args.trace))[0]
         name = name[len(bundle.protocol) + 1 :] if name.startswith(f"{bundle.protocol}-") else name
     if not result.trace:
-        print("Error: TLC produced no counterexample to translate", file=sys.stderr)
-        return EXIT_HARNESS_ERROR
-    try:
-        translation = translate_trace(
-            bundle,
-            result.trace,
-            config_text,
-            name=name,
-            violated=result.violated or result.violation,
-            config=config,
-            variants=args.variants,
-            seed=args.seed,
-            compile_scenario=service.compile,
-        )
-    except (TranslateError, SpecBundleError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return EXIT_HARNESS_ERROR
+        raise TranslateError("TLC produced no counterexample to translate")
+    translation = translate_trace(
+        bundle,
+        result.trace,
+        config_text,
+        name=name,
+        violated=result.violated or result.violation,
+        config=config,
+        variants=args.variants,
+        seed=args.seed,
+        compile_scenario=service.compile,
+    )
     os.makedirs(args.out, exist_ok=True)
     _write_translation(args.out, bundle, translation)
     write_document(os.path.join(args.out, "translation.json"), translation)
@@ -301,35 +285,26 @@ def _found_by(source: Mapping[str, Any]) -> str:
 def _search(args: argparse.Namespace, bundle: Bundle, compile_scenario: Any) -> int:
     """``translate --reach``/``--mutate``: search the model, write every scenario, and report the search."""
 
-    try:
-        tools = _tools(args)
-    except TlaError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return EXIT_HARNESS_ERROR
+    tools = _tools(args)
     reach = args.reach
     if "all" in reach:
         reach = [item.name for item in bundle.claims.targets]
         if not reach and not args.mutate:
-            print(f"Error: {bundle.protocol}'s claims.yaml names no targets to reach", file=sys.stderr)
-            return EXIT_HARNESS_ERROR
+            raise SpecBundleError(f"{bundle.protocol}'s claims.yaml names no targets to reach")
         if not reach:
             print(f"{bundle.protocol}'s claims.yaml names no targets to reach; mutating only")
-    try:
-        report = search_model(
-            bundle,
-            tools,
-            tlc_timeout_s=args.tlc_timeout,
-            max_scenarios=args.max_scenarios,
-            reach=reach,
-            mutate=args.mutate,
-            variants=args.variants,
-            seed=args.seed,
-            compile_scenario=compile_scenario,
-            progress=print,
-        )
-    except (TranslateError, SpecBundleError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return EXIT_HARNESS_ERROR
+    report = search_model(
+        bundle,
+        tools,
+        tlc_timeout_s=args.tlc_timeout,
+        max_scenarios=args.max_scenarios,
+        reach=reach,
+        mutate=args.mutate,
+        variants=args.variants,
+        seed=args.seed,
+        compile_scenario=compile_scenario,
+        progress=print,
+    )
     os.makedirs(args.out, exist_ok=True)
     for translation in report["translations"]:
         found_by = _found_by(translation["source"])
@@ -378,15 +353,13 @@ def conform_command(args: argparse.Namespace) -> int:
     tools = None
     try:
         tools = _tools(args)
-    except TlaError as exc:
+    except TlaError:
         # The transition check is reported as not checked without TLC; the properties cannot be.
         if needs_tlc(bundle):
-            print(f"Error: {exc}", file=sys.stderr)
-            return EXIT_HARNESS_ERROR
+            raise
     runs = collect_runs(args.runs)
     if not runs:
-        print("Error: no runs found", file=sys.stderr)
-        return EXIT_HARNESS_ERROR
+        raise ValueError("no runs found")
     group_by = [key for key in args.group_by.split(",") if key]
     report = conform_runs(bundle, runs, tools, group_by=group_by, transitions=not args.no_transitions)
     for run in report["runs"]:
