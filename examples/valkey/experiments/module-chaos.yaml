@@ -11,7 +11,7 @@
 # needs at start); the build probe skips a deployment without it, or whose
 # build lacks `module_command`. `load`, `during` and `verify` are
 # valkey.action.commands items (`{command: [...], expect: {...}}`,
-# docs/components.md#valkeyactioncommands); `verify` runs on every instance,
+# docs/components/actions.md#valkeyactioncommands); `verify` runs on every instance,
 # so a reply it expects must be the same on the primary and its replicas.
 # A line of an instance's log that matches a `forbidden_logs` pattern fails
 # the run, through the liveness oracle.
