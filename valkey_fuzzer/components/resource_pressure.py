@@ -17,17 +17,15 @@ written outside that cgroup, and no process but the run's own is moved. ``valkey
 """
 
 import os
-import threading
 import uuid
 from typing import Any, Optional
 
 from valkey_fuzzer import cgroups
-from valkey_fuzzer.clock import now
 from valkey_fuzzer.hoststate import cgroup_name
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.schema import ConfigError, ConfigField, ConfigSchema
 
-from .faults import EVENT_TARGET, EventFault, FaultRefusedError, fault_declares
+from .faults import EVENT_TARGET, FaultRefusedError, HeldFault, fault_declares
 from .instances import deployment, select_instance
 from .registration import component_registration
 from .schemas import MAPPING, TEXT, nullable, optional
@@ -84,28 +82,22 @@ def limits_for(config: dict) -> dict[str, str]:
     return limits
 
 
-class ResourcePressureFault(EventFault):
+class ResourcePressureFault(HeldFault):
     """Limit one instance's CPU or memory with cgroup v2 at a lifecycle event, until ``release_event`` or
     recovery (see the module)."""
 
-    def _prepare(self, context: Any, spec: ComponentSpec) -> None:
+    seconds_field = "pressure_seconds"
+
+    def _resolve(self, context: Any, spec: ComponentSpec) -> None:
         self._target: Optional[str] = None
         self._leaf: Optional[str] = None
         self._harness: Optional[str] = None
-        self._limited: Any = None
         self._stats: Optional[dict[str, Any]] = None
-        self._lock_release = threading.Lock()
-        self._closed = False
-        self._released_at: Optional[float] = None
-        self._release_reason: Optional[str] = None
-        self._release_error: Optional[str] = None
         if self._config["instance"] != EVENT_TARGET:
             self._target = select_instance(deployment(context), self._config["instance"])
-        if self._config["release_event"]:
-            self._subscribe(self._config["release_event"], self._release_on_event)
 
-    def _fire(self, context: Any, spec: ComponentSpec, event: Any) -> dict[str, Any]:
-        handle = deployment(context)
+    def _install(self, event: Any) -> dict[str, Any]:
+        handle = deployment(self._context)
         if self._target is None:
             self._target = self._event_target(handle, event)
         controllers = controllers_for(self._config)
@@ -116,10 +108,10 @@ class ResourcePressureFault(EventFault):
         pid = handle.pid(self._target)
         limits = limits_for(self._config)
         self._harness = cgroups.enter(directory, controllers)
-        name = cgroup_name(f"{spec.id}/{uuid.uuid4().hex}")
+        name = cgroup_name(f"{self._spec.id}/{uuid.uuid4().hex}")
         self._leaf = os.path.join(directory, name)
         # Owned from before the leaf exists: the undo of a leaf that is not there does nothing.
-        self._limited = self._own("cgroup.limited", self._target, self._release_leaf)
+        self._change = self._own("cgroup.limited", self._target, self._release_leaf)
         cgroups.limit(directory, name, pid, limits)
         return {"target": self._target, "pid": pid, "cgroup": self._leaf, "limits": limits}
 
@@ -130,36 +122,15 @@ class ResourcePressureFault(EventFault):
             self._stats = cgroups.stats(self._leaf)
         cgroups.remove_leaf(self._leaf, self._harness)
 
-    def _release(self, reason: str) -> None:
-        with self._lock_release:
-            if self._closed or self._limited is None or self._released_at is not None:
-                return
-            error = self._undo_early(self._limited, "released", {"instance_id": self._target, "reason": reason})
-            if error:
-                self._release_error = error
-                return
-            self._released_at = now()
-            self._release_reason = reason
+    def _released_payload(self, reason: str) -> dict[str, Any]:
+        return {"instance_id": self._target, "reason": reason}
 
-    def _release_on_event(self, event: Any) -> None:
-        self._release("event")
-
-    def _quiesce(self) -> None:
-        with self._lock_release:
-            self._closed = True
+    def _release_failed(self, record: dict[str, Any], error: str) -> str:
+        record["release_error"] = error
+        return f"releasing the limits failed, so they lasted until recovery: {error}"
 
     def _settled(self, context: Any, spec: ComponentSpec, record: dict[str, Any]) -> None:
-        with self._lock_release:
-            if self._limited is not None and self._released_at is None and not self._limited.open:
-                self._released_at = now()
-                self._release_reason = "recover"
-        if self._release_error:
-            record["release_error"] = self._release_error
-            raise RuntimeError(f"releasing the limits failed, so they lasted until recovery: {self._release_error}")
-        if self._released_at is not None:
-            record["released_at"] = self._released_at
-            record["release_reason"] = self._release_reason
-            record["pressure_seconds"] = round(self._released_at - record.get("applied_at", self._released_at), 3)
+        super()._settled(context, spec, record)
         if self._stats is None or not record.get("applied"):
             return
         record["stats"] = self._stats

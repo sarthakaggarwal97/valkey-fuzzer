@@ -14,7 +14,6 @@ uptime`` when the file changes; the offset written compensates for that, so the 
 is ``offset_s`` exactly, and grows (or shrinks) at ``rate`` from there.
 """
 
-import threading
 import time
 from typing import Any, Optional
 
@@ -23,7 +22,7 @@ from valkey_fuzzer.deployment.local import clock_faults
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.schema import ConfigError, ConfigField, ConfigSchema, plain_config
 
-from .faults import EVENT_TARGET, EventFault, fault_declares
+from .faults import EVENT_TARGET, HeldFault, fault_declares
 from .instances import close_quietly, deployment, select_instance
 from .registration import component_registration
 from .schemas import NUMBER, TEXT, nullable, optional
@@ -77,26 +76,20 @@ def measure_skew(handle: Any, instance_id: str) -> float:
     return int(seconds) + int(micros) / 1_000_000 - (before + after) / 2
 
 
-class ClockSkewFault(EventFault):
+class ClockSkewFault(HeldFault):
     """Skew one instance's wall clock at a lifecycle event, until ``release_event`` or recovery (see the module)."""
 
-    def _prepare(self, context: Any, spec: ComponentSpec) -> None:
+    seconds_field = "skew_seconds"
+
+    def _resolve(self, context: Any, spec: ComponentSpec) -> None:
         self._target: Optional[str] = None
         self._path: Optional[str] = None
-        self._skewed: Any = None
-        self._lock_release = threading.Lock()
-        self._closed = False
-        self._released_at: Optional[float] = None
-        self._release_reason: Optional[str] = None
         self._skew_at_release: Optional[float] = None
-        self._release_error: Optional[str] = None
         if self._config["instance"] != EVENT_TARGET:
             self._target = select_instance(deployment(context), self._config["instance"])
-        if self._config["release_event"]:
-            self._subscribe(self._config["release_event"], self._release_on_event)
 
-    def _fire(self, context: Any, spec: ComponentSpec, event: Any) -> dict[str, Any]:
-        handle = deployment(context)
+    def _install(self, event: Any) -> dict[str, Any]:
+        handle = deployment(self._context)
         if self._target is None:
             self._target = self._event_target(handle, event)
         self._path = handle.clock_fault_file(self._target)
@@ -106,7 +99,7 @@ class ClockSkewFault(EventFault):
         applied_at = now()
         spec_text = time_spec(offset, rate, applied_at - handle.started_at(self._target))
         # Owned from before the write: the undo restores the real time whatever the file holds.
-        self._skewed = self._own("clock.skewed", self._target, self._restore)
+        self._change = self._own("clock.skewed", self._target, self._restore)
         clock_faults.write_timestamp(self._path, spec_text)
         record: dict[str, Any] = {
             "target": self._target,
@@ -143,37 +136,17 @@ class ClockSkewFault(EventFault):
                 self._skew_at_release = None  # Down, or the deployment is gone: the file still gets restored.
         clock_faults.write_timestamp(self._path, clock_faults.REAL_TIME)
 
-    def _release(self, reason: str) -> None:
-        with self._lock_release:
-            if self._closed or self._skewed is None or self._released_at is not None:
-                return
-            error = self._undo_early(self._skewed, "released", {"instance_id": self._target, "reason": reason})
-            if error:
-                self._release_error = error
-                return
-            self._released_at = now()
-            self._release_reason = reason
+    def _released_payload(self, reason: str) -> dict[str, Any]:
+        return {"instance_id": self._target, "reason": reason}
 
-    def _release_on_event(self, event: Any) -> None:
-        self._release("event")
-
-    def _quiesce(self) -> None:
-        with self._lock_release:
-            self._closed = True
+    def _release_failed(self, record: dict[str, Any], error: str) -> str:
+        record["release_error"] = error
+        return f"restoring the clock failed, so the skew lasted until recovery: {error}"
 
     def _settled(self, context: Any, spec: ComponentSpec, record: dict[str, Any]) -> None:
-        with self._lock_release:
-            if self._skewed is not None and self._released_at is None and not self._skewed.open:
-                self._released_at = now()
-                self._release_reason = "recover"
-        if self._release_error:
-            record["release_error"] = self._release_error
-            raise RuntimeError(f"restoring the clock failed, so the skew lasted until recovery: {self._release_error}")
+        super()._settled(context, spec, record)
         if self._released_at is not None:
-            record["released_at"] = self._released_at
-            record["release_reason"] = self._release_reason
             record["skew_at_release_s"] = self._skew_at_release
-            record["skew_seconds"] = round(self._released_at - record.get("applied_at", self._released_at), 3)
 
 
 _DECLARES = fault_declares(

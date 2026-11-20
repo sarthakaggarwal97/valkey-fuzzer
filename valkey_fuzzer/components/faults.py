@@ -18,6 +18,11 @@ applies the change (:meth:`EventFault._own`); undoing early (a heal or
 release event, a pause that ends, an immediate restart) discharges it, and
 ``recover`` discharges whatever is left. What a fault cannot undo the runner
 undoes, and the run is ERROR.
+
+A fault that holds one change from its trigger until a release (a skewed
+clock, a cgroup limit, a cut or degraded link) is a :class:`HeldFault`: the
+release, on the event its config names, after ``duration_s``, or at recovery,
+and the record of when and why it happened are written once there.
 """
 
 import signal
@@ -332,6 +337,112 @@ class EventFault:
                 diagnostics={"record": record},
             )
         return make_result(spec, ComponentStatus.PASS, f"fault applied on {record.get('event')}", evidence=evidence)
+
+
+class HeldFault(EventFault):
+    """A fault that holds one change from its trigger until its release: the event its config names
+    (``release_event``, or ``heal_event`` for the link faults), ``duration_s`` where the fault has it, or recovery.
+
+    Subclasses resolve their targets in ``_resolve``, apply the change in ``_install`` (opening its obligation with
+    ``_own`` as ``self._change`` as soon as the change exists, so recovery undoes what no release did), and say what
+    the ``<id>.<released_event>`` payload is and what a failed release reports. A release before recovery discharges
+    the obligation and then publishes that event; recovery discharges it and publishes nothing. The record says
+    when the change was released, why (``event``, ``duration``, or ``recover``), and for how long it held, under
+    the field names the class attributes give.
+    """
+
+    # The config field naming the release event, the event published on an early release, and the record fields
+    # for when the change was released, why, and for how long it held.
+    release_field = "release_event"
+    released_event = "released"
+    released_at_field = "released_at"
+    reason_field = "release_reason"
+    seconds_field = ""
+
+    def _prepare(self, context: Any, spec: ComponentSpec) -> None:
+        # Reentrant: a subscriber of <id>.released, which is published under it, may release again.
+        self._lock_release = threading.RLock()
+        # Set once recovery begins: a late timer or release event no longer acts.
+        self._closed = False
+        # The change's obligation, from the moment the change exists; installed once it holds whole.
+        self._change: Any = None
+        self._installed = False
+        self._released_at: Optional[float] = None
+        self._release_reason: Optional[str] = None
+        self._release_error: Optional[str] = None
+        self._timer: Optional[threading.Timer] = None
+        self._resolve(context, spec)
+        if self._config[self.release_field]:
+            self._subscribe(self._config[self.release_field], self._release_on_event)
+
+    def _resolve(self, context: Any, spec: ComponentSpec) -> None:
+        """Resolve targets before the trigger so firing does minimal work."""
+
+    def _install(self, event: Any) -> dict[str, Any]:
+        """Apply the change at the trigger ``event``, opening its obligation as ``self._change`` as soon as the
+        change exists; the record fields."""
+
+        raise NotImplementedError
+
+    def _released_payload(self, reason: str) -> dict[str, Any]:
+        """The ``<id>.<released_event>`` payload of a release for ``reason``."""
+
+        raise NotImplementedError
+
+    def _release_failed(self, record: dict[str, Any], error: str) -> str:
+        """Record ``error``, the release that failed, on ``record``; what the ERROR says: the change lasted until
+        recovery."""
+
+        raise NotImplementedError
+
+    def _fire(self, context: Any, spec: ComponentSpec, event: Any) -> dict[str, Any]:
+        record = self._install(event)
+        self._installed = True
+        self._release_later()
+        return {"applied": True, **record}
+
+    def _release_later(self) -> None:
+        """Arm the ``duration_s`` release, where the fault's config has one."""
+
+        duration = self._config.get("duration_s")
+        if duration is None:
+            return
+        self._timer = threading.Timer(duration, self._release, kwargs={"reason": "duration"})
+        self._timer.daemon = True
+        self._timer.start()
+
+    def _release(self, reason: str) -> None:
+        with self._lock_release:
+            if self._closed or not self._installed or self._released_at is not None:
+                return
+            error = self._undo_early(self._change, self.released_event, self._released_payload(reason))
+            if error:
+                self._release_error = error
+                return
+            self._released_at = now()
+            self._release_reason = reason
+
+    def _release_on_event(self, event: Any) -> None:
+        self._release("event")
+
+    def _quiesce(self) -> None:
+        if self._timer is not None:
+            self._timer.cancel()
+        # Waits for a release in progress; recovery undoes the change from here on, and publishes nothing.
+        with self._lock_release:
+            self._closed = True
+
+    def _settled(self, context: Any, spec: ComponentSpec, record: dict[str, Any]) -> None:
+        with self._lock_release:
+            if self._installed and self._released_at is None and not self._change.open:
+                self._released_at = now()
+                self._release_reason = "recover"
+        if self._release_error:
+            raise RuntimeError(self._release_failed(record, self._release_error))
+        if self._released_at is not None:
+            record[self.released_at_field] = self._released_at
+            record[self.reason_field] = self._release_reason
+            record[self.seconds_field] = round(self._released_at - record.get("applied_at", self._released_at), 3)
 
 
 # ---------------------------------------------------------------------------

@@ -15,7 +15,7 @@ from tests.support import VirtualClock
 from tests.valkey_experiments_support import fake_context, registration_for, resolved, unit_plan
 from valkey_fuzzer import hoststate
 from valkey_fuzzer.components import capabilities, network, processes, providers, storage
-from valkey_fuzzer.components.faults import FAULT_INJECTED, ProcessSignalFault
+from valkey_fuzzer.components.faults import FAULT_INJECTED, HeldFault, ProcessSignalFault
 from valkey_fuzzer.components.ledger import fault_records
 from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import ComponentRole
@@ -839,6 +839,62 @@ def test_a_partition_timer_that_fires_once_recovery_began_does_nothing(monkeypat
     fault._heal("duration")
     assert context.event_bus.committed_history("fault.healed") == () and iptables.chains, "recovery removes it"
     assert fault.recover(context, spec).status is ComponentStatus.PASS and not iptables.chains
+
+
+def test_a_held_change_is_undone_once_before_its_release_event_or_else_by_recovery_which_publishes_nothing():
+    undone = []  # How many <id>.released events had been published each time the change was undone.
+
+    class Held(HeldFault):
+        seconds_field = "held_seconds"
+
+        def _install(self, event):
+            bus = self._context.event_bus
+            undo = lambda: undone.append(len(bus.committed_history("held.released")))  # noqa: E731
+            self._change = self._own("test.held", "valkey-0", undo)
+            return {"target": "valkey-0"}
+
+        def _released_payload(self, reason):
+            return {"instance_id": "valkey-0", "reason": reason}
+
+        def _release_failed(self, record, error):
+            raise AssertionError(error)
+
+    def held(**config):
+        context = fake_context(_Handle())
+        trigger = {"when_event": "go", "when_payload": {}, "occurrence": 1, "delay_s": 0.0, "release_event": None}
+        spec = ComponentSpec(role=ComponentRole.FAULT, use="test.held", id="held", config={**trigger, **config})
+        fault = Held()
+        fault.inject(context, spec)
+        context.event_bus.publish("go", source="test")
+        return context, spec, fault
+
+    def record_of(result):
+        return next(item.value for item in result.evidence if item.evidence_id == FAULT_INJECTED)
+
+    # Released by its event: the change is undone, then <id>.released says why, once; recovery undoes nothing more.
+    context, spec, fault = held(release_event="let-go")
+    context.event_bus.publish("let-go", source="test")
+    context.event_bus.publish("let-go", source="test")
+    (released,) = context.event_bus.committed_history("held.released")
+    assert undone == [0] and released.payload == {"instance_id": "valkey-0", "reason": "event"}
+    result = fault.recover(context, spec)
+    assert result.status is ComponentStatus.PASS and undone == [0]
+    assert _owned(context) == [("held", "test.held", "owner")]
+    record = record_of(result)
+    assert record["release_reason"] == "event" and record["applied_at"] <= record["released_at"]
+    assert record["held_seconds"] == round(record["released_at"] - record["applied_at"], 3)
+    # Without one: recovery closes the fault to late releases, undoes the change itself, and publishes nothing.
+    undone.clear()
+    context, spec, fault = held()
+    fault._quiesce()
+    fault._release("event")
+    assert undone == []
+    result = fault.recover(context, spec)
+    assert result.status is ComponentStatus.PASS and undone == [0]
+    assert _owned(context) == [("held", "test.held", "owner")]
+    record = record_of(result)
+    assert record["release_reason"] == "recover" and record["applied_at"] <= record["released_at"]
+    assert context.event_bus.committed_history("held.released") == ()
 
 
 def test_a_disk_fill_whose_ballast_stayed_does_not_record_it_removed(monkeypatch, tmp_path):
