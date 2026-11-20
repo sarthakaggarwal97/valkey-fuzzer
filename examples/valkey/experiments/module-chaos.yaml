@@ -29,7 +29,7 @@
 #       load: [{command: [JSON.SET, j:1, $, '{"a": 1}'], expect: {equals: OK}}]
 #       during: [{command: [JSON.SET, j:1, $.a, "2"]}]
 #       verify: [{command: [JSON.GET, j:1, $.a], expect: {equals: "[2]"}}]
-extends: [valkey.base]
+extends: [valkey.base, valkey.links-up]
 id: example.module-chaos
 deployment:
   modes: [standalone]
@@ -118,15 +118,8 @@ components:
     id: settle
     depends_on: [during]
     config: {seconds: 5}
-  - use: valkey.action.poll
-    id: links-up
+  - id: links-up
     depends_on: [settle]
-    config:
-      instances: replicas
-      section: replication
-      field: master_link_status
-      predicate: {equals: up}
-      timeout_s: 120
   - use: valkey.action.commands
     id: verify
     depends_on: [links-up]

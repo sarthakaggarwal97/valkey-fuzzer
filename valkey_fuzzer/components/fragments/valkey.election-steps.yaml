@@ -4,10 +4,20 @@
 # ReceiveVote, Win), with the mapping's patterns (spec: cluster-election), and
 # the `trace` observer records the events as trace.jsonl, which
 # `valkey-fuzzer spec conform cluster-election RUN` maps onto the model's
-# variables to check the claims on every observed state. An experiment lists
+# variables to check the claims on every observed state. The
+# `save-behavior-support` build probe skips a build below Valkey 9.2, the first
+# to log each counted vote; an experiment gives it the `startup_config` the
+# build must accept. An experiment lists `- id: save-behavior-support`,
 # `- id: election-log` and `- id: trace` before its actions, so the observers
 # see the whole run, and names `trace` in its election-safety oracle.
 components:
+  - use: valkey.capability.build-probe
+    id: save-behavior-support
+    config:
+      config_get: {cluster-config-save-behavior: null}
+      # Valkey 9.2 is the first to log each counted vote with the count and quorum.
+      min_version: "9.2.0"
+
   - use: valkey.observer.log-trigger
     id: election-log
     config:

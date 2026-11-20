@@ -11,10 +11,11 @@
 # is saved: election-safety fails a run in which it did
 # (vote_left_before_save). The voter restarts, a second election runs, and
 # election-safety checks the model's invariants as in the durability
-# experiment (both share its election-log and trace observers through
-# valkey.election-steps). Fork issue #120 has the end-to-end consequence: two
+# experiment (both share its build probe, election-log and trace observers
+# through valkey.election-steps, and the steps from voter-recovered on through
+# valkey.second-election). Fork issue #120 has the end-to-end consequence: two
 # winners of one epoch.
-extends: [valkey.election-steps]
+extends: [valkey.second-election]
 id: valkey.cluster-vote-save-crash
 deployment:
   modes: [cluster]
@@ -37,7 +38,6 @@ inputs:
   type: object
   additionalProperties: false
   properties:
-    shard: {type: integer, minimum: 0, maximum: 15, default: 0}
     clients:
       type: integer
       minimum: 1
@@ -45,26 +45,16 @@ inputs:
       default: 32
       shrinkable: true
       description: valkey-benchmark clients running DEBUG SLEEP 0.001 on the voter
-    restart_delay_s: {type: number, minimum: 0, maximum: 60, default: 0}
-    second_election_delay_s:
-      type: number
-      minimum: 0
-      maximum: 60
-      default: 2.5
-      description: wait after the voter restarts; below 2 s the restarted primary may still refuse votes (safe_to_join)
+    second_election_delay_s: {default: 2.5}
 startup_overlays:
   - overlay_id: vote-save
     server_config:
       cluster-config-save-behavior: sync
       enable-debug-command: "yes"
 components:
-  - use: valkey.capability.build-probe
-    id: save-behavior-support
+  - id: save-behavior-support
     config:
       startup_config: {cluster-config-save-behavior: sync}
-      config_get: {cluster-config-save-behavior: null}
-      # Valkey 9.2 is the first to log each counted vote with the count and quorum.
-      min_version: "9.2.0"
 
   - id: election-log
   - id: trace
@@ -107,34 +97,21 @@ components:
       trigger: force_failover
       timeout_s: 60
 
-  - use: valkey.action.wait-event
-    id: voter-recovered
+  - id: voter-recovered
     depends_on: [first-election]
-    config: {event: kill-voter.recovered, timeout_s: 90}
 
-  - use: valkey.action.sleep
-    id: before-second-election
-    depends_on: [voter-recovered]
-    config: {seconds: {$ref: inputs.second_election_delay_s}}
+  - id: before-second-election
 
-  - use: valkey.action.cluster-election
-    id: second-election
-    depends_on: [before-second-election]
+  - id: second-election
     config:
-      shard: {$ref: inputs.shard}
       trigger: force_failover
       timeout_s: 60
 
-  - use: valkey.oracle.cluster-election-safety
-    id: election-safety
+  - id: election-safety
     config:
-      trace: trace
       crash_faults: [kill-voter]
-      spec: cluster-election
 
-  - use: valkey.oracle.deployment-state
-    id: deployment-state
-    config: {validation: {stabilization_wait: 2, validation_timeout: 120}}
+  - id: deployment-state
 required_events: [cluster.vote.granted, kill-voter.recovered, first-election.election-completed, second-election.election-completed]
 required_evidence:
   - {evidence_id: valkey.fault.injected, source: kill-voter}

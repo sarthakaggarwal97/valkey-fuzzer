@@ -1,0 +1,49 @@
+# The second half of a cluster-election experiment, after a `first-election`
+# (valkey.action.cluster-election) in which a primary, `kill-voter`, was
+# killed and restarted: wait for its restart (`voter-recovered`,
+# kill-voter.recovered), wait `second_election_delay_s` more
+# (`before-second-election`), hold another election in the same shard
+# (`second-election`), and check the cluster-election model's invariants over
+# the whole run (`election-safety`, on valkey.election-steps's `trace`) and the
+# deployment's state (`deployment-state`). Extends valkey.election-steps.
+#
+# An experiment names its own `kill-voter` and `first-election`; it lists
+# `- id: voter-recovered` with `depends_on: [first-election]`,
+# `- id: second-election` with its `trigger` and `pause_s` or `timeout_s`,
+# `- id: election-safety` with its `crash_faults`, and sets the default of
+# `second_election_delay_s`.
+extends: [valkey.election-steps]
+inputs:
+  properties:
+    shard: {type: integer, minimum: 0, maximum: 15, default: 0}
+    restart_delay_s: {type: number, minimum: 0, maximum: 60, default: 0}
+    second_election_delay_s:
+      type: number
+      minimum: 0
+      maximum: 60
+      description: wait after the voter restarts; below 2 s the restarted primary may still refuse votes (safe_to_join)
+components:
+  - use: valkey.action.wait-event
+    id: voter-recovered
+    config: {event: kill-voter.recovered, timeout_s: 90}
+
+  - use: valkey.action.sleep
+    id: before-second-election
+    depends_on: [voter-recovered]
+    config: {seconds: {$ref: inputs.second_election_delay_s}}
+
+  - use: valkey.action.cluster-election
+    id: second-election
+    depends_on: [before-second-election]
+    config:
+      shard: {$ref: inputs.shard}
+
+  - use: valkey.oracle.cluster-election-safety
+    id: election-safety
+    config:
+      trace: trace
+      spec: cluster-election
+
+  - use: valkey.oracle.deployment-state
+    id: deployment-state
+    config: {validation: {stabilization_wait: 2, validation_timeout: 120}}

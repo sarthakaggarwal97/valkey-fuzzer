@@ -23,9 +23,11 @@
 # The log patterns and event names come from formal/cluster-election/mapping.yaml
 # (spec: cluster-election). The trace observer writes trace.jsonl, which
 # `valkey-fuzzer spec conform cluster-election RUN` maps onto the model's
-# variables to check the claims on every observed state (both observers come
-# from valkey.election-steps).  Liveness is added automatically.
-extends: [valkey.election-steps]
+# variables to check the claims on every observed state (the build probe and
+# both observers come from valkey.election-steps; the steps from
+# voter-recovered on, with the restart and second-election delays, from
+# valkey.second-election).  Liveness is added automatically.
+extends: [valkey.second-election]
 id: valkey.cluster-election-durability
 deployment:
   modes: [cluster]
@@ -52,7 +54,6 @@ inputs:
       enum: [sync, best-effort]
       default: sync
       description: cluster-config-save-behavior on every node
-    shard: {type: integer, minimum: 0, maximum: 15, default: 0}
     election:
       type: string
       enum: [force_failover, kill_primary, pause_primary]
@@ -68,25 +69,15 @@ inputs:
       maximum: 64
       default: 1
       description: kill the primary that grants the nth vote of the run (either election)
-    restart_delay_s: {type: number, minimum: 0, maximum: 60, default: 0}
-    second_election_delay_s:
-      type: number
-      minimum: 0
-      maximum: 60
-      default: 0.5
-      description: wait after the voter restarts; below 2 s the restarted primary may still refuse votes (safe_to_join)
+    second_election_delay_s: {default: 0.5}
 startup_overlays:
   - overlay_id: save-behavior
     server_config:
       cluster-config-save-behavior: {$ref: inputs.save_behavior}
 components:
-  - use: valkey.capability.build-probe
-    id: save-behavior-support
+  - id: save-behavior-support
     config:
       startup_config: {cluster-config-save-behavior: {$ref: inputs.save_behavior}}
-      config_get: {cluster-config-save-behavior: null}
-      # Valkey 9.2 is the first to log each counted vote with the count and quorum.
-      min_version: "9.2.0"
 
   - id: election-log
   - id: trace
@@ -118,35 +109,23 @@ components:
 
   # A vote_occurrence beyond the first election's votes kills a voter during
   # the second election instead; only wait here if the kill already happened.
-  - use: valkey.action.wait-event
-    id: voter-recovered
+  - id: voter-recovered
     depends_on: [first-election]
-    config: {event: kill-voter.recovered, only_after: kill-voter.injected, timeout_s: 90}
+    config: {only_after: kill-voter.injected}
 
-  - use: valkey.action.sleep
-    id: before-second-election
-    depends_on: [voter-recovered]
-    config: {seconds: {$ref: inputs.second_election_delay_s}}
+  - id: before-second-election
 
-  - use: valkey.action.cluster-election
-    id: second-election
-    depends_on: [before-second-election]
+  - id: second-election
     config:
-      shard: {$ref: inputs.shard}
       trigger: {$ref: inputs.second_election}
       pause_s: 30
 
-  - use: valkey.oracle.cluster-election-safety
-    id: election-safety
+  - id: election-safety
     config:
-      trace: trace
       # kill_primary elections kill a primary too.
       crash_faults: [kill-voter, first-election, second-election]
-      spec: cluster-election
 
-  - use: valkey.oracle.deployment-state
-    id: deployment-state
-    config: {validation: {stabilization_wait: 2, validation_timeout: 120}}
+  - id: deployment-state
 required_events: [cluster.vote.granted, kill-voter.recovered, first-election.election-completed, second-election.election-completed]
 required_evidence:
   - {evidence_id: valkey.fault.injected, source: kill-voter}

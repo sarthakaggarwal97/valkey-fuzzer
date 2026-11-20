@@ -15,7 +15,7 @@
 # Needs a delegated cgroup v2 of the run's own (systemd-run --user --scope
 # valkey-fuzzer ...); without one the host probe makes the run
 # SKIP_UNSUPPORTED saying what is missing.
-extends: [valkey.base]
+extends: [valkey.base, valkey.links-up]
 id: valkey.replication-cpu-starvation
 deployment:
   modes: [standalone]
@@ -85,15 +85,9 @@ components:
     depends_on: [run-then-starve]
     config: {seconds: {$ref: inputs.starve_s}}
 
-  - use: valkey.action.poll
-    id: links-up
+  - id: links-up
     depends_on: [starving]
-    config:
-      instances: replicas
-      section: replication
-      field: master_link_status
-      predicate: {equals: up}
-      timeout_s: 60
+    config: {timeout_s: 60}
 
   - use: valkey.oracle.ledger
     id: data
