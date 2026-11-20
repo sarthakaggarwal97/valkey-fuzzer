@@ -228,7 +228,7 @@ def wait_until_settled(
             unread.append(f"{type(exc).__name__}: {exc}")
             return False
 
-    if wait_until(done, timeout=timeout, interval=0.5, what=f"shard {shard_id} failover", context=context):
+    if wait_until(done, timeout=timeout, interval=0.1, what=f"shard {shard_id} failover", context=context):
         return True
     if unread:
         raise LocalDeploymentError(f"shard {shard_id}'s failover could not be read at the end of the wait: {unread[0]}")
