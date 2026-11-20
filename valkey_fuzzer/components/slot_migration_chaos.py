@@ -50,7 +50,7 @@ from .network import create_chain, drop_between, remove_partition
 from .processes import restart_once
 from .replication_chaos import excusing_operations
 from .schemas import INTEGER, LIST, MAPPING, TEXT, nullable
-from .slot_migration import ENDED, hash_tag, job_of, jobs_of, migration_endpoints
+from .slot_migration import ENDED, hash_tag, job_of, migration_endpoints, read_jobs
 from .wave_evidence import wave_declares
 from .wave_operations import MIGRATION, MIGRATION_TARGETS, PHASES
 from .waves import WaveAction, wave_registration
@@ -182,6 +182,9 @@ class MigrationWaves(ClusterWaves):
         self.killing: dict[str, dict[str, Any]] = {}
         # The slot keys written before the first wave, by slot: key -> value.
         self.slot_keys: dict[int, dict[str, str]] = {}
+        # The slot-routing client the slot keys are written and read through, for the whole run (``prepare`` to
+        # ``finish``): it follows MOVED after a migration.
+        self.client: Any = None
         self.heal_timeout_s = spec.config["heal_timeout_s"]
         self.subscriptions = [context.event_bus.subscribe(name, self._on_phase_event) for name in _PHASE_EVENTS]
 
@@ -199,6 +202,8 @@ class MigrationWaves(ClusterWaves):
     def finish(self, *args: Any, **kwargs: Any) -> Any:
         for subscription in self.subscriptions:
             self.context.event_bus.unsubscribe(subscription)
+        close_quietly(self.client)
+        self.client = None
         return super().finish(*args, **kwargs)
 
     @staticmethod
@@ -222,6 +227,7 @@ class MigrationWaves(ClusterWaves):
             if key_slot(f"{{{tag}}}".encode()) != slot:
                 raise ValueError(f"{operation['key']!r} has braces but no hash tag, so no key can be put in its slot")
             tags[tag] = slot
+        self.client = self.handle.cluster_client(timeout=5.0)
         for tag, slot in sorted(tags.items()):
             keys = {f"{{{tag}}}:{_KEY_PREFIX}:{index}": f"{tag}:{index}" for index in range(count)}
             self.slot_keys[slot] = keys
@@ -229,13 +235,9 @@ class MigrationWaves(ClusterWaves):
                 self.cluster_command("MSET", *(item for pair in keys.items() for item in pair))
 
     def cluster_command(self, *args: Any) -> Any:
-        """One command through a slot-routing client (it follows MOVED after a migration)."""
+        """One command through the run's slot-routing client."""
 
-        client = self.handle.cluster_client(timeout=5.0)
-        try:
-            return client.execute_command(*args)
-        finally:
-            close_quietly(client)
+        return self.client.execute_command(*args)
 
     def outcome(self, records: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
         migrations = [record for record in records if record["op"] == "migrate"]
@@ -307,31 +309,37 @@ class MigrationWaves(ClusterWaves):
         # The export job's name, which the target's import job of this migration shares (SYNCSLOTS ESTABLISH
         # NAME): a target that imported the slot before lists that job too, until the new one is created.
         name = None
-        while True:
-            down = self.down()
-            export_job = self._job(source, slot=slot) if source not in down else None
-            name = (export_job or {}).get("name") or name
-            import_job = self._job(target, name=name) if target not in down and name else None
-            export, import_ = _state(export_job), _state(import_job)
-            migration.advance(export, import_)
-            if export in ENDED:
-                migration.end()
-                return export
-            if source in down and (import_ in ENDED or import_ == "cleaning-up" or target in down):
-                migration.end()
-                return import_ if import_ in ENDED else None
-            if now() >= deadline or not self.context.sleep(_POLL_INTERVAL_S):
-                migration.end()
-                return None
+        # One client per endpoint for the whole follow (:func:`.slot_migration.read_jobs`).
+        clients: dict[str, Any] = {}
+        try:
+            while True:
+                down = self.selector.down
+                export_job = self._job(clients, source, slot=slot) if source not in down else None
+                name = (export_job or {}).get("name") or name
+                import_job = self._job(clients, target, name=name) if target not in down and name else None
+                export, import_ = _state(export_job), _state(import_job)
+                migration.advance(export, import_)
+                if export in ENDED:
+                    migration.end()
+                    return export
+                if source in down and (import_ in ENDED or import_ == "cleaning-up" or target in down):
+                    migration.end()
+                    return import_ if import_ in ENDED else None
+                if now() >= deadline or not self.context.sleep(_POLL_INTERVAL_S):
+                    migration.end()
+                    return None
+        finally:
+            close_quietly(*clients.values())
 
-    def _job(self, instance_id: str, *, slot: Optional[int] = None, name: Optional[str] = None) -> Optional[dict]:
-        """``instance_id``'s newest export job of ``slot``, or its job named ``name``; None when it lists none,
-        or does not answer."""
+    def _job(
+        self, clients: dict[str, Any], instance_id: str, *, slot: Optional[int] = None, name: Optional[str] = None
+    ) -> Optional[dict]:
+        """``instance_id``'s newest export job of ``slot``, or its job named ``name``, read through the client
+        ``clients`` holds for it; None when it lists none, or does not answer."""
 
-        read = send_to(self.handle, instance_id, ["CLUSTER", "GETSLOTMIGRATIONS"], timeout_s=2.0, context=self.context)
-        if "reply" not in read:
+        jobs, _ = read_jobs(self.handle, clients, instance_id, context=self.context)
+        if jobs is None:
             return None
-        jobs = jobs_of(read["reply"])
         if name is not None:
             return next((job for job in jobs if job.get("name") == name), None)
         return job_of(jobs, "export", slot)
@@ -423,15 +431,7 @@ class MigrationWaves(ClusterWaves):
             return
         record.update(target=target, involved=[target])
         self.landed(record, [target])
-        with self.lock:
-            obligation, owner = next(
-                (obligation, owner)
-                for obligation, owner in self.owned
-                if obligation.open and obligation.kind == "process.stopped" and obligation.target == target
-            )
-        problem = self.discharge(obligation, owner, "restart")
-        if problem:
-            raise RuntimeError(problem)
+        self.restart_killed(target, "restart")
         record["success"] = True
 
     def _cancel(self, record: dict[str, Any], config: dict[str, Any]) -> None:
@@ -495,16 +495,7 @@ class MigrationWaves(ClusterWaves):
         with self.lock:
             down = sorted(self.killed)
         for instance_id in down:
-            with self.lock:
-                pending = [
-                    (obligation, owner)
-                    for obligation, owner in self.owned
-                    if obligation.open and obligation.kind == "process.stopped" and obligation.target == instance_id
-                ]
-            for obligation, owner in pending:
-                problem = self.discharge(obligation, owner, "heal")
-                if problem:
-                    raise RuntimeError(problem)
+            self.restart_killed(instance_id, "heal")
         self.handle.refresh_roles()
 
     def validate(self, number: int, results: list[dict[str, Any]]) -> dict[str, Any]:

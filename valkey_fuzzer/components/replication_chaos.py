@@ -370,19 +370,6 @@ class StandaloneWaves(WaveRun):
 
         return undo
 
-    def restart_killed(self, instance_id: str, stage: str) -> None:
-        """Restart a killed instance: discharge its kill's obligation as ``stage``; raise if that fails."""
-
-        with self.lock:
-            obligation, record = next(
-                (obligation, record)
-                for obligation, record in self.owned
-                if obligation.open and obligation.kind == "process.stopped" and obligation.target == instance_id
-            )
-        problem = self.discharge(obligation, record, stage)
-        if problem:
-            raise RuntimeError(problem)
-
     def _promote(self, record: dict[str, Any], config: dict[str, Any]) -> None:
         target = record["target"]
         with self.topology:

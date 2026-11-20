@@ -22,7 +22,7 @@ from tests.valkey_experiments_support import (
     valkey_experiment,
 )
 from valkey_fuzzer.components import component_registrations, slot_migration, slot_migration_chaos
-from valkey_fuzzer.components.slot_migration import hash_tag, job_of, jobs_of, migration_endpoints
+from valkey_fuzzer.components.slot_migration import hash_tag, job_of, jobs_of, migration_endpoints, read_jobs
 from valkey_fuzzer.components.slot_migration_chaos import SlotMigrationChaosAction, phase_of
 from valkey_fuzzer.components.wave_operations import MIGRATION, check_waves
 from valkey_fuzzer.plan import ComponentSpec
@@ -69,6 +69,26 @@ class _Client(FakeClient):
     def ping(self):
         return True
 
+    def __exit__(self, *exc_info):
+        self.close()
+        return False
+
+    def close(self):
+        self.cluster.closed.append(self.instance_id)
+
+
+class _ClusterClient(_Client):
+    """The slot-routing client: each command goes to the primary that owns its first key's slot when it is sent,
+    as a real one does after following MOVED (the keys of one command share a hash tag, so one slot)."""
+
+    def __init__(self, cluster):
+        super().__init__(cluster, "cluster")
+
+    def execute_command(self, *args):
+        self.commands.append(args)
+        owner = self.cluster.primary_of(self.cluster.shard_of(key_slot(str(args[1]).encode())))
+        return self.cluster.command(owner, args)
+
 
 class _Migration:
     def __init__(self, slot, source, target, script, name):
@@ -110,6 +130,9 @@ class FakeMigrationCluster:
         self.logs = None
         self.migrations = []
         self.commands, self.calls, self.restarts, self.validations, self.stopped = {}, [], [], [], []
+        # Every client opened, and every one closed, in order: an instance's ID, or "cluster" for the slot-routing
+        # client.
+        self.clients, self.closed = [], []
         self.mode = SimpleNamespace(value="cluster")
         self.lock = threading.RLock()
 
@@ -174,10 +197,12 @@ class FakeMigrationCluster:
         return self.roles()
 
     def new_client(self, instance_id, timeout=5.0):
+        self.clients.append(instance_id)
         return _Client(self, instance_id)
 
     def cluster_client(self, timeout=5.0):
-        return _Client(self, "cluster")
+        self.clients.append("cluster")
+        return _ClusterClient(self)
 
     def state_check(self, validation=None, *, seed=None):
         validation = dict(validation or {})
@@ -231,7 +256,7 @@ class FakeMigrationCluster:
 
     def command(self, instance_id, args):
         with self.lock:
-            if instance_id != "cluster" and not self.alive[instance_id]:
+            if not self.alive[instance_id]:
                 raise valkey.exceptions.ConnectionError(f"{instance_id} is down")
             if args[0] == "MSET":
                 self.data.update(dict(zip(args[1::2], args[2::2])))
@@ -384,6 +409,23 @@ def test_without_a_shard_a_slot_goes_round_the_shards():
             migration_endpoints(handle, "{s}", 2)
 
 
+def test_the_jobs_are_read_through_one_held_client_which_is_replaced_once_it_failed():
+    handle = FakeMigrationCluster()
+    context = SimpleNamespace(deadline=None, sleep=lambda seconds: True)
+    clients = {}
+    assert read_jobs(handle, clients, "valkey-0", context=context) == ([], None)
+    assert read_jobs(handle, clients, "valkey-0", context=context) == ([], None)
+    assert handle.clients == ["valkey-0"] and list(clients) == ["valkey-0"]
+    # The instance died: the read says so, and its client is closed and dropped.
+    handle.alive["valkey-0"] = False
+    assert read_jobs(handle, clients, "valkey-0", context=context) == (None, "ConnectionError: valkey-0 is down")
+    assert clients == {} and handle.closed == ["valkey-0"]
+    # Back (restarted): the next read opens a new client.
+    handle.alive["valkey-0"] = True
+    assert read_jobs(handle, clients, "valkey-0", context=context) == ([], None)
+    assert handle.clients == ["valkey-0", "valkey-0"]
+
+
 # ---------------------------------------------------------------------------
 # The action
 # ---------------------------------------------------------------------------
@@ -448,6 +490,24 @@ def test_waves_disturb_the_migration_at_its_phases_then_heal_and_validate():
         {"wave": 2, "slot": SLOT, "endpoint": "source", "instance_id": "valkey-0"},
     ]
     assert not context.violations
+
+
+def test_the_run_holds_one_slot_routing_client_and_each_follow_one_client_per_endpoint():
+    handle = FakeMigrationCluster()
+    result, _ = run_chaos(handle, [[migrate()], [migrate()]])
+    assert result.status is ComponentStatus.PASS, result.summary
+    first, second = (chaos_operation(result, index)["migration"] for index in ("1.0", "2.0"))
+    assert (first["source"], first["target"], second["source"], second["target"]) == tuple(
+        f"valkey-{n}" for n in (0, 2, 2, 4)
+    )
+    # Each follow read its source and its target 63 times (SCRIPT's length), through one client each: per wave,
+    # the plan's INFO of the three replicas, the MIGRATESLOTS, then the follow's two. The slot keys' MSET and the
+    # two MGETs went through one slot-routing client, opened before the first wave and closed last.
+    assert [handle.commands[node].count(("CLUSTER", "GETSLOTMIGRATIONS")) for node in ("valkey-0", "valkey-2", "valkey-4")] == [63, 126, 63]  # fmt: skip
+    assert handle.clients == ["cluster", "valkey-1", "valkey-3", "valkey-5", "valkey-0", "valkey-0", "valkey-2",
+                              "valkey-1", "valkey-3", "valkey-5", "valkey-2", "valkey-2", "valkey-4"]  # fmt: skip
+    assert [args[0] for args in handle.commands["cluster"]] == ["MSET", "MGET", "MGET"]
+    assert handle.closed == [*handle.clients[1:], "cluster"]
 
 
 def test_conform_reads_a_chaos_runs_target_kill_as_the_models_crash_and_how_each_job_ended(tmp_path):
