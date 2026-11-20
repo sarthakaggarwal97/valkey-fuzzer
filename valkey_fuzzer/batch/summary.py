@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from ..outcomes import EXIT_INTERRUPTED, exit_code
+from ..reports import FORMAT_VERSION
 from . import hooks
 from .results import results_of
 from .spec import worst
@@ -98,6 +99,7 @@ def summarize(runner: "BatchRunner") -> dict[str, Any]:
     status = worst(statuses)
     complete = finished == len(runner.jobs) and not runner.stop_requested
     return {
+        "format_version": FORMAT_VERSION,
         "batch_id": runner.options.batch_id,
         "folder": runner.folder,
         "profile": runner.options.profile,

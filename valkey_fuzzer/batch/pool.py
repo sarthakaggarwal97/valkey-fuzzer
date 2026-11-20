@@ -17,7 +17,7 @@ from ..deadlines import wait_for
 from ..deployment.local.ports import LOCK_DIRECTORY
 from ..hoststate import Owner, open_shared_lock, owner_of, shared_directory, sweep
 from ..provenance import catalog_digest
-from ..reports import REPORT_FILE, SCENARIO_FILE, write_document
+from ..reports import FORMAT_VERSION, REPORT_FILE, SCENARIO_FILE, format_version_problem, write_document
 from ..service import DEFAULT_TIMEOUT_S, RunService
 from . import hooks
 from .jobs import Expansion, ids_per_signature, job_definition
@@ -94,6 +94,9 @@ class BatchRunner:
     def __init__(self, folder: str):
         self.folder = os.path.abspath(folder)
         spec = read_json(os.path.join(self.folder, "batch.json"))
+        problem = format_version_problem(spec, os.path.join(self.folder, "batch.json"))
+        if problem is not None:
+            raise BatchError(problem)
         self.options = BatchOptions(**spec["options"])
         self.spec = spec
         self.jobs: list[dict[str, Any]] = read_json(os.path.join(self.folder, "jobs.json"))
@@ -121,6 +124,7 @@ class BatchRunner:
         os.makedirs(folder, exist_ok=True)
         _copy_experiments(folder, options.experiment_directories)
         spec = {
+            "format_version": FORMAT_VERSION,
             "options": asdict(options),
             "sources": list(sources),
             "invalid": expansion.invalid,

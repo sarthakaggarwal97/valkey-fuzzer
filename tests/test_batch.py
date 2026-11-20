@@ -19,7 +19,7 @@ from unittest.mock import Mock, patch
 import pytest
 import yaml
 
-from valkey_fuzzer import batch, hoststate
+from valkey_fuzzer import __version__, batch, hoststate
 from valkey_fuzzer._data import to_plain_data
 from valkey_fuzzer.batch import (
     PORT_BLOCK,
@@ -605,6 +605,28 @@ def test_a_profile_sets_the_seeds_and_deadline_and_pruning_keeps_a_passing_runs_
     assert "plan.json" in {item.name for item in Path(runner.folder, "runs", _id(1)).iterdir()}
 
 
+def test_the_batch_files_carry_the_format_version_and_a_resume_refuses_another_versions_folder(tmp_path, workers, stub):
+    runner = _batch(tmp_path, [_random(1)])
+    summary = runner.run()
+    spec_path = Path(runner.folder, "batch.json")
+    assert list(summary)[:2] == ["format_version", "batch_id"] and summary["format_version"] == 1
+    assert list(json.loads(Path(runner.folder, "summary.json").read_text()))[:2] == ["format_version", "batch_id"]
+    assert list(json.loads(spec_path.read_text()))[:2] == ["format_version", "options"]
+    # A folder a later fuzzer wrote cannot be resumed: the message names the file and both versions.
+    spec_path.write_text(json.dumps({**json.loads(spec_path.read_text()), "format_version": 2}))
+    with pytest.raises(BatchError) as raised:
+        BatchRunner(runner.folder)
+    assert str(raised.value) == (
+        f"{spec_path} has format_version 2, which an older or newer valkey-fuzzer wrote; "
+        f"this one ({__version__}) reads format_version 1"
+    )
+    # One from before the field is read as this version.
+    spec = json.loads(spec_path.read_text())
+    del spec["format_version"]
+    spec_path.write_text(json.dumps(spec))
+    assert BatchRunner(runner.folder).jobs == runner.jobs
+
+
 def test_each_run_draws_for_its_workers_share_of_the_cores_the_batch_was_created_with(
     tmp_path, workers, stub, monkeypatch
 ):
@@ -825,8 +847,16 @@ def test_a_run_that_checked_itself_is_not_checked_again_and_its_verdict_stands(t
     (tmp_path / "report.json").write_text(json.dumps(older))
     monkeypatch.setattr(conform_plugin, "conform_run", lambda folder, timeout_s: recorded)
     conform_plugin._conform(str(tmp_path), 300.0)
-    assert json.loads((tmp_path / "conform.json").read_text()) == recorded
+    assert json.loads((tmp_path / "conform.json").read_text()) == {"format_version": 1, "bundles": recorded}
     assert conform_plugin._conformance(str(tmp_path), older) == recorded
+    # A conform.json another version of the fuzzer wrote is an error naming the file and both versions.
+    (tmp_path / "conform.json").write_text(json.dumps({"format_version": 2, "bundles": recorded}))
+    (entry,) = conform_plugin._conformance(str(tmp_path), older).values()
+    assert entry["status"] == "error"
+    assert entry["error"] == (
+        f"{tmp_path / 'conform.json'} has format_version 2, which an older or newer valkey-fuzzer wrote; "
+        f"this one ({__version__}) reads format_version 1"
+    )
 
 
 def test_a_missing_conformance_is_held_against_the_run_only_for_approved_claims(tmp_path, workers, stub, monkeypatch):
@@ -897,7 +927,7 @@ def test_a_check_that_does_not_finish_still_writes_why_for_each_bundle(tmp_path,
 
     monkeypatch.setattr(conform, "conform_folder", broken)
     conform_plugin._conform(str(tmp_path), 300.0)
-    assert json.loads((tmp_path / "conform.json").read_text()) == {
+    assert json.loads((tmp_path / "conform.json").read_text())["bundles"] == {
         "replication": {
             "status": "error",
             "approved": False,

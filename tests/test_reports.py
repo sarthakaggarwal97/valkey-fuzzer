@@ -13,7 +13,7 @@ import yaml
 
 from tests.conform_support import approved_register, register_service, scenario_file, stub_tlc
 from tests.support import make_plan, recorded_report
-from valkey_fuzzer import coverage, provenance, reports
+from valkey_fuzzer import __version__, coverage, provenance, reports
 from valkey_fuzzer.cli import main
 from valkey_fuzzer.compiler import Overrides
 from valkey_fuzzer.minimize import failure_signature, same_failure
@@ -269,7 +269,8 @@ def _failed_report(service, canned_runs, tmp_path):
 
 def test_report_json_leads_with_the_verdict_and_keeps_every_key_a_tool_reads(service, canned_runs, tmp_path):
     _, report = _failed_report(service, canned_runs, tmp_path)
-    assert list(report)[:5] == ["status", "summary", "failed_components", "reproduce", "look_at"]
+    assert list(report)[:6] == ["format_version", "status", "summary", "failed_components", "reproduce", "look_at"]
+    assert report["format_version"] == reports.FORMAT_VERSION == 1
     assert set(report) >= LEGACY_REPORT_KEYS
     assert set(report["reproducer"]) >= LEGACY_REPRODUCER_KEYS
     assert [row["component_id"] for row in report["failed_components"]] == ["data"]
@@ -291,7 +292,7 @@ def test_a_run_naming_a_spec_bundle_checks_itself_and_its_report_carries_what_co
     stub_tlc(monkeypatch)
     service, record, report = _register_report(tmp_path, monkeypatch, bundle, lost=True)
     # The section comes with the reading aids, and every old key stays.
-    assert list(report)[:6] == ["status", "summary", "failed_components", "reproduce", "look_at", "conform"]
+    assert list(report)[1:7] == ["status", "summary", "failed_components", "reproduce", "look_at", "conform"]
     assert set(report) >= LEGACY_REPORT_KEYS
     # An approved bundle's claimed violation fails the run through a named component, as an oracle's FAIL would.
     assert (report["status"], record.outcome.status) == ("FAIL", OutcomeStatus.FAIL)
@@ -402,3 +403,60 @@ def test_an_old_report_without_the_readable_keys_still_loads_and_replays(service
     assert reports.as_run_report(json.loads(Path(path).read_text()), path) is not None
     prepared = service.prepare_replay(path)
     assert prepared.verified
+
+
+def _versioned(version):
+    def edit(report):
+        report["format_version"] = version
+
+    return edit
+
+
+def _version_message(path, version):
+    return (
+        f"{path} has format_version {version!r}, which an older or newer valkey-fuzzer wrote; "
+        f"this one ({__version__}) reads format_version 1"
+    )
+
+
+@pytest.mark.parametrize("version", [0, 2, "1"])
+def test_replay_and_minimize_refuse_a_report_of_another_format_version_and_name_both(
+    service, canned_runs, tmp_path, version
+):
+    canned_runs.status = OutcomeStatus.FAIL
+    path = recorded_report(service, tmp_path, edit=_versioned(version))
+    with pytest.raises(InputError) as replay:
+        service.prepare_replay(path)
+    assert str(replay.value) == _version_message(path, version)
+    with pytest.raises(InputError) as minimize:
+        service.prepare_minimization(path)
+    assert str(minimize.value) == str(replay.value)
+
+
+def test_a_report_without_a_format_version_is_read_as_this_one(service, canned_runs, tmp_path):
+    def drop(report):
+        del report["format_version"]
+
+    path = recorded_report(service, tmp_path, edit=drop)
+    assert reports.format_version_problem(json.loads(Path(path).read_text()), path) is None
+    assert service.prepare_replay(path).verified
+
+
+def test_plan_json_carries_the_format_version_and_replays_only_at_this_one(service, canned_runs, tmp_path):
+    prepared = service.prepare_run(EXAMPLE)
+    record = service.execute(prepared.plan, scenario=prepared.scenario, report_dir=str(tmp_path / "r"))
+    plan_path = Path(record.report_dir) / "plan.json"
+    written = json.loads(plan_path.read_text())
+    assert list(written)[:2] == ["format_version", "scenario_id"] and written["format_version"] == 1
+    # The marker is the file's, not the plan's: the plan replays as recorded, with the same digest.
+    assert {key: value for key, value in written.items() if key != "format_version"} == record.outcome.plan.to_data()
+    replay = service.prepare_replay(str(plan_path))
+    assert replay.verified and not replay.drift
+    written["format_version"] = 2
+    plan_path.write_text(json.dumps(written))
+    with pytest.raises(InputError) as raised:
+        service.prepare_replay(str(plan_path))
+    assert str(raised.value) == _version_message(str(plan_path), 2)
+    # The CLI reports it as an input error.
+    with patch("sys.argv", ["valkey-fuzzer", "replay", str(plan_path)]):
+        assert main() == 64

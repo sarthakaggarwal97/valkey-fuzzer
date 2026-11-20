@@ -417,6 +417,7 @@ instead, into the run's `conform.json`, with the same verdict.
 
 | Key | Contents |
 | --- | --- |
+| `format_version` | The version of the files the fuzzer writes, `1`, as in a [run report](#run-reports). `batch.json` carries it too, and `--resume` refuses a folder another version wrote. |
 | `status`, `exit_code`, `complete` | The worst result (see [Exit codes](#exit-codes)), its exit code, and whether every job finished. |
 | `batch_id`, `folder`, `profile`, `created_at`, `updated_at`, `jobs`, `finished` | The batch and how far it got. |
 | `counts` | Runs by status, zoo runs, serial re-runs, and smoke runs left out. |
@@ -777,14 +778,16 @@ has no counterexample; a search whose TLC run failed). A failed gate outranks an
 Every key below is always present, and
 `replay` and `minimize` reject a report (or a reproducer) that lacks one,
 except the reading aids (`failed_components`, `reproduce`, `look_at`,
-`conform`, `reproducer.command`, `reproducer.valkey_binary`), which older
-reports lack.
-The keys come in reading order: the verdict and where to look first, then the
-data a tool reads. Tools should read keys by name, not by position.
+`conform`, `reproducer.command`, `reproducer.valkey_binary`) and
+`format_version`, which older reports lack.
+The keys come in reading order: the format version, the verdict and where to
+look first, then the data a tool reads. Tools should read keys by name, not by
+position.
 
 | Key | Contents |
 | --- | --- |
-| `status`, `summary` | The outcome and its one-line summary. First in the file. |
+| `format_version` | The version of the files the fuzzer writes, `1` (see [What is stable](stability.md)). `replay`, `minimize`, and `spec conform` refuse a report of another version, naming the file and both versions; a report without one is read as `1`. `plan.json` carries the same key, and so do a batch's `summary.json`, `batch.json`, and `conform.json`, and a `trace.jsonl` header. |
+| `status`, `summary` | The outcome and its one-line summary. |
 | `failed_components` | Each component that did not pass: `component_id`, `role`, `use`, `status`, `crash`, `summary`, `evidence_total`, and the first five `evidence` items (`evidence_id`, `value`). Text longer than 120 characters is cut and ends with its length and SHA-256; the full text is in `outcome`. Empty for a pass. A spec bundle's conform check that failed the run is the component `spec-conform:<bundle>` (no `role` or `use`: it is not a plan component), its `summary` the violated claims. |
 | `reproduce` | The `valkey-fuzzer replay <report>` command that replays this run; `null` when the report was not written to a file. |
 | `look_at` | `report_folder`, `plan`, `component_files`, and where the full results are (`outcome.component_results`). |

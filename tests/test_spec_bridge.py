@@ -15,6 +15,7 @@ import pytest
 
 from tests.conform_support import approved_register, register_service, scenario_file
 from tests.valkey_experiments_support import valkey_service
+from valkey_fuzzer import __version__
 from valkey_fuzzer.cli import create_parser
 from valkey_fuzzer.commands import spec as spec_command
 from valkey_fuzzer.commands._common import add_common_options
@@ -1106,7 +1107,7 @@ def test_conform_reads_every_run_folder_and_reports_the_unreadable_ones(tmp_path
         (folder / "plan.json").write_text("{}")
 
     runs = tmp_path / "batch" / "runs"
-    for name in ("good", "corrupt", "hung", "empty", "truncated"):
+    for name in ("good", "corrupt", "hung", "empty", "truncated", "newer-report", "newer-trace"):
         trace(runs / name)
     (runs / "good" / "report.json").write_text(json.dumps({"status": "PASS", "outcome": {"plan": {}}}))
     (runs / "corrupt" / "report.json").write_text('{"status": "FAIL", "outcome": ')
@@ -1114,16 +1115,28 @@ def test_conform_reads_every_run_folder_and_reports_the_unreadable_ones(tmp_path
     shutil.rmtree(runs / "empty" / "components")
     with open(runs / "truncated" / "components" / "trace" / "trace.jsonl", "a") as handle:
         handle.write('{"kind": "event", "t": ')
+    # Another fuzzer's format: a report, and a trace whose header says so.
+    newer_report = runs / "newer-report" / "report.json"
+    newer_report.write_text(json.dumps({"format_version": 2, "status": "PASS", "outcome": {"plan": {}}}))
+    newer_trace = runs / "newer-trace" / "components" / "trace" / "trace.jsonl"
+    header, *rest = newer_trace.read_text().splitlines()
+    newer_trace.write_text("\n".join([json.dumps({**json.loads(header), "format_version": 2}), *rest]) + "\n")
 
     collected = {Path(run.source).relative_to(runs).parts[0]: run for run in collect_runs([str(tmp_path / "batch")])}
-    assert sorted(collected) == ["corrupt", "empty", "good", "hung", "truncated"]
+    assert sorted(collected) == ["corrupt", "empty", "good", "hung", "newer-report", "newer-trace", "truncated"]
     assert (collected["good"].problem, collected["hung"].problem) == (None, None)
     assert collected["hung"].meta["scenario_id"] == "hung"
     assert "report.json is not a readable run report" in collected["corrupt"].problem
     assert "no report.json and no trace" in collected["empty"].problem
     assert "trace.jsonl" in collected["truncated"].problem
+    version = f"has format_version 2, which an older or newer valkey-fuzzer wrote; this one ({__version__}) reads"
+    assert collected["newer-report"].problem == f"{newer_report} {version} format_version 1"
+    assert collected["newer-trace"].problem == f"{newer_trace}: {newer_trace} {version} format_version 1"
     result = check_run(load_bundle(str(BUNDLE)), collected["corrupt"], TlaTools(jar="unused"))
     assert (result["status"], result["error"], result["states"]) == ("error", collected["corrupt"].problem, 0)
+    # A trace named on its own is refused outright.
+    with pytest.raises(ValueError, match="has format_version 2"):
+        collect_runs([str(newer_trace)])
 
 
 def _run_folder(folder, status, specs, events=()):

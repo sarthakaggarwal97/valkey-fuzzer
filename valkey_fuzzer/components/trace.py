@@ -24,6 +24,7 @@ from valkey_fuzzer.declarations import Declarations
 from valkey_fuzzer.deployment.local.queries import parse_cluster_info
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.protocols import component_artifact_dir
+from valkey_fuzzer.reports import FORMAT_VERSION
 from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
 from valkey_fuzzer.schema import ConfigError, ConfigField, plain_config
 from valkey_fuzzer.spec.bundle import TRACE_FILE, SampleSpec
@@ -163,6 +164,7 @@ class TraceObserver:
                 nodes[node.instance_id]["config_error"] = error
         self._header = {
             "kind": "header",
+            "format_version": FORMAT_VERSION,
             "t": time.time(),
             "scenario_id": plan.scenario_id,
             "seed": plan.seed,

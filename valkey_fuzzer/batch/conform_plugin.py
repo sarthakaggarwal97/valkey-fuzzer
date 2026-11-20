@@ -17,7 +17,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Optional
 
 from ..minimize import verdict_clauses
-from ..reports import write_document
+from ..reports import FORMAT_VERSION, format_version_problem, write_document
 from ..spec.bundle import SpecBundleError, load_bundle
 from ..spec.conform import CHECKED_RUN_STATUSES, conform_run, describe, plan_bundles, summarize
 from .hooks import BatchPlugin
@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from .pool import BatchRunner
 
 # What a worker writes in its run folder for a run whose report has no conform section: the run checked against
-# the spec bundles its plan names.
+# the spec bundles its plan names, as ``{"format_version": ..., "bundles": {<bundle>: <result>}}``.
 CONFORMANCE_FILE = "conform.json"
 # The batch option that bounds a worker's TLC run on its run's observed states (BatchOptions).
 CONFORM_TIMEOUT_OPTION = "conform_tlc_timeout_s"
@@ -57,7 +57,9 @@ def _conform(report_dir: str, timeout_s: float) -> None:
         results = conform_run(report_dir, timeout_s)
         if not results:
             return
-        write_document(os.path.join(report_dir, CONFORMANCE_FILE), results)
+        write_document(
+            os.path.join(report_dir, CONFORMANCE_FILE), {"format_version": FORMAT_VERSION, "bundles": results}
+        )
     for name, entry in results.items():
         print(f"spec conform {describe(name, entry)}")
 
@@ -73,9 +75,13 @@ def _conformance(run_dir: str, report: Optional[Mapping[str, Any]]) -> dict[str,
     path = os.path.join(run_dir, CONFORMANCE_FILE)
     if os.path.exists(path):
         try:
-            return read_json(path)
+            written = read_json(path)
         except (OSError, ValueError) as exc:
             problem = f"{CONFORMANCE_FILE} cannot be read: {exc}"
+        else:
+            problem = format_version_problem(written, path)
+            if problem is None:
+                return written["bundles"]
     else:
         problem = f"no {CONFORMANCE_FILE}: the worker ended before spec conform checked the run"
     if report is None or report.get("status") not in CHECKED_RUN_STATUSES:

@@ -102,6 +102,8 @@ def test_a_round_samples_what_the_mapping_asks_for_in_one_transaction(tmp_path):
 
     assert result.status is ComponentStatus.PASS, result.summary
     header, *records = _records(result)
+    # The header carries the files' format version, so spec conform can refuse another fuzzer's trace.
+    assert (header["kind"], header["format_version"]) == ("header", 1)
     assert header["samples"] == {
         "info": ["replication"], "digest": True, "digest_keys": [], "cluster": False, "slot_migrations": False,
         "nodes_conf": False, "on": ["replication.*", "*.injected", "*.instance-killed"],
