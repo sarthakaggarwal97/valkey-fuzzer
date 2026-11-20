@@ -16,8 +16,14 @@ sample:
   slot_migrations: true
   on: ['slot-migration.*', '*.injected']
 evidence:
+  # The lines faults trigger on (valkey.fault.process-signal with instance: event lands on the node that logged
+  # the line; valkey.fault.network-partition on its when_event): the migration's start (started, on the source),
+  # its handoff (paused on the source, requested on the target: the source has paused writes and the target asks
+  # for the failover, so a kill of the target there is the model's CrashT before TClaim), its end (finished, on
+  # each endpoint, with the state) and its cancel (cancelled, on the source). The lines are those of
+  # src/cluster_migrateslots.c from 9.0.0 through 9.1.3 and unstable (d5763ea44).
   started:
-    # On the source.
+    # On the source: clusterCommandMigrateSlots.
     event: slot-migration.started
     log: 'Slot migration initiated through CLUSTER MIGRATESLOTS command'
     fields: {instance_id: node}
@@ -44,11 +50,13 @@ evidence:
     fields: {instance_id: node}
     action: TApply
   paused:
+    # On the source: slotExportTryDoPause (9.0.0 logs the line without the remaining_repl_size).
     event: slot-migration.paused
-    log: 'Pausing writes \(remaining_repl_size is -?\d+\) to allow slot migration'
+    log: 'Pausing writes (\(remaining_repl_size is -?\d+\) )?to allow slot migration'
     fields: {instance_id: node}
     action: SPause
   requested:
+    # On the target: clusterCommandSyncSlotsPaused, the handoff's first step there.
     event: slot-migration.failover.requested
     log: 'operation: import, .*state transition: waiting-for-paused -> failover-requested'
     fields: {instance_id: node}
@@ -75,12 +83,22 @@ evidence:
     fields: {instance_id: node}
     action: TCleanup
   cancelled:
+    # On the source: CLUSTER CANCELSLOTMIGRATIONS (clusterCommandCancelSlotMigrations).
     event: slot-migration.cancelled
     log: 'Canceled all in progress slot migrations'
     fields: {instance_id: node}
     action: Cancel
     updates:
       - {incr: faults}
+  finished:
+    # Each endpoint's job as it ends (finishSlotMigrationJob, 9.0 to unstable): the source's export and the
+    # target's import, each with its terminal state. No one model step: the source's success is its Deliver,
+    # the target's its TClaim, and failed and cancelled follow a fault; the line is for faults to trigger on
+    # (valkey.fault.process-signal with when_payload {operation: export, state: success} kills the source
+    # once it let the slot go) and for conform's record of how each side ended.
+    event: slot-migration.finished
+    log: 'operation: (?P<operation>export|import), .* finished\. State: (?P<state>success|failed|cancelled)'
+    fields: {instance_id: node, operation: str, state: str}
   pause-ended:
     event: slot-migration.pause.ended
     log: 'timed out during slot failover|Write loss risk!'
@@ -106,6 +124,15 @@ evidence:
     event: '*.injected'
     where: {signal: SIGKILL, applied: true}
     fields: {target: node}
+    action: CrashT
+    updates:
+      - {incr: faults}
+  crash-wave:
+    # valkey.action.slot-migration-chaos's kill of the wave's migration target (a kill of the source is no step
+    # of the model, which has no CrashS; its partitions show as link-lost).
+    event: '*.endpoint-killed'
+    where: {endpoint: target}
+    fields: {instance_id: node}
     action: CrashT
     updates:
       - {incr: faults}
@@ -228,15 +255,26 @@ scenario:
     - action: CrashT
       after: claimed
       component: kill-target
+  # A scenario injects every fault component of its experiment's plan (a fault
+  # that never fires is an ERROR), and no counterexample takes two of CrashT,
+  # Cancel and DropLink, so this experiment carries the one fault component
+  # the controls need, CrashT. The others have real components in
+  # valkey.slot-migration-chaos (valkey.action.slot-migration-chaos), whose
+  # waves inject them on the migration's phases rather than on a mapped line:
+  # its runs publish this bundle's steps too, for `spec conform`.
   unmapped:
     Cancel: >-
-      No fault component sends CLUSTER CANCELSLOTMIGRATIONS on a log line;
-      valkey.action.command is an action, scheduled by depends_on, not a
-      fault a mapped line triggers.
+      valkey.action.slot-migration-chaos's cancel operation sends CLUSTER
+      CANCELSLOTMIGRATIONS on the source at a migration phase (at: snapshot,
+      handoff); no fault component sends it on a mapped line, and this
+      experiment cannot carry a second fault component (see above).
     DropLink: >-
-      No fault component closes the migration connection alone;
-      valkey.fault.network-partition cuts the cluster bus with it, and needs
-      root and iptables.
+      valkey.action.slot-migration-chaos's partition operation ({target:
+      source, peers: target}) cuts the migration connection between the
+      endpoints at a phase, with the cluster bus between them (Linux, root,
+      iptables, per_instance_loopback); valkey.fault.network-partition does
+      the same on a mapped line (slot-migration.failover.requested). Neither
+      can join this experiment as a second fault component (see above).
     PauseExpires: >-
       The pause ends at cluster-manual-failover-timeout on its own; no
       component holds the target so that it does (DEBUG SLOTMIGRATION
@@ -244,7 +282,9 @@ scenario:
     LoseBus: >-
       The model loses a bus message after its sender died, where no fault can
       act; a partition of the target from its replica before the claim
-      (valkey.fault.network-partition, root and iptables) would stand for it.
+      (valkey.action.slot-migration-chaos partition {target: target, peers:
+      [valkey-3]} at: snapshot, or valkey.fault.network-partition, root and
+      iptables) stands for it, outside this experiment (see above).
   variants:
     inputs:
       kill_delay_s: [0, 0.2, 1]

@@ -460,7 +460,8 @@ seed like every other ([Cluster chaos and CI](cluster-chaos-and-ci.md)).
 
 ### The wave engine
 
-`valkey.action.cluster-chaos` and `valkey.action.replication-chaos` are two
+`valkey.action.cluster-chaos`, `valkey.action.replication-chaos` and
+`valkey.action.slot-migration-chaos` are three
 registrations over one engine: `valkey_fuzzer/components/waves.py` (the run
 loop, claims, and ownership), `wave_operations.py` (the operations and the
 `waves` config), `wave_targets.py` (target selection and kill safety), and
@@ -485,7 +486,11 @@ of the drawn deployment mode.
   compiler rejects a malformed operation with the path to its field. The implementation
   is a `_<name>` method: `kill` is the engine's; `failover` is the
   cluster's; `restart`, `promote`, `repoint`, `partition`, `degrade`, `stall`, and
-  `backlog_pressure` are standalone's.
+  `backlog_pressure` are standalone's; `migrate` and `cancel` are the
+  slot-migration mode's (`slot_migration_chaos.py`, a `ClusterWaves` whose
+  kills, partitions and cancels may name the wave's migration endpoints,
+  `source` and `target`, resolved when they run (`resolves_later`), and wait
+  for a phase of the migration, `at`).
 - **Ownership**: `WaveRun.own` opens an
   [undo obligation](contracts.md#fault-ownership) for every change the
   engine applies and will undo, recorded with the operation that owns it: a
@@ -494,7 +499,9 @@ of the drawn deployment mode.
   `valkey.fault.network-partition`), a degradation (its own netem device,
   through the same `Degradation` as `valkey.fault.network-degrade`), a setting, the validation's
   `CLIENT PAUSE`, and a kill the mode restarts (through `restart_once`;
-  `kill_undo` is None in cluster mode, where a killed node stays down). The
+  `kill_undo` is None in cluster mode, where a killed node stays down, and a
+  restart in the slot-migration mode, whose next migration needs its
+  endpoints). The
   operation discharges its own at the end of `duration_s` (or at once when
   it raised, which frees its claims for the rest of the wave), the heal
   (`release`, stalls first) what is still open, and the final cleanup the
@@ -516,8 +523,11 @@ of the drawn deployment mode.
   test keys (cluster mode seeds every slot), the live members targets
   resolve against, the heal
   (`ClusterWaves` lets Valkey fail over; `StandaloneWaves` restores one
-  primary that every instance follows), the validation, which faults excuse
-  a failed topology change, and whether a failed wave stops the run.
+  primary that every instance follows; `MigrationWaves` restarts the killed
+  instances and lets the cluster take them back), the validation
+  (`MigrationWaves` adds its slot keys, read back through a slot-routing
+  client), which faults excuse a failed topology change, and whether a
+  failed wave stops the run.
 
 Both actions run through `WaveRun.execute`: take the waves the compiler
 resolved and checked, check the host, start the run, write the test keys, run every wave, and finish. A new

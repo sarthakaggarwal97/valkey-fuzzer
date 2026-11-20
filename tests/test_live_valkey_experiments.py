@@ -61,6 +61,30 @@ def _upgraded_every_instance(outcome, report):
     assert all(step["before"]["version"] != step["after"]["version"] for step in restarts)
 
 
+def _every_migration_wave_validated(outcome, report):
+    """The default waves of valkey.slot-migration-chaos: the target killed at the handoff, the source as it
+    snapshots (and restarted), a cancel, and an undisturbed migration; every wave healed and its slot keys intact."""
+
+    schedule = evidence(outcome, "valkey.chaos.schedule")
+    assert [wave["wave"] for wave in schedule["waves"]] == [1, 2, 3, 4]
+    assert all(wave["validation"]["overall_success"] for wave in schedule["waves"]), live.explain(outcome)
+    assert all(wave["validation"]["checks"]["slot_keys"]["success"] for wave in schedule["waves"])
+    assert schedule["slots"] == [3828] and schedule["slot_keys"] == 20
+    operations = {record["index"]: record for record in schedule["operations"]}
+    # Every migration ran to an end; the one nothing disturbed succeeded, and the cancelled one says so.
+    assert all(operations[f"{wave}.0"]["migration"]["state"] for wave in (1, 2, 3, 4))
+    assert operations["4.0"]["migration"]["state"] == "success"
+    assert operations["3.0"]["migration"]["state"] == "cancelled" and operations["3.1"]["success"]
+    # Both kills landed on the endpoint named, while the migration was in the phase waited for or just past it.
+    assert operations["1.1"]["target"] == operations["1.0"]["migration"]["target"]
+    assert operations["2.1"]["target"] == operations["2.0"]["migration"]["source"]
+    assert all(operations[index]["phase"]["landed_in"] for index in ("1.1", "2.1"))
+    # Killed instances were restarted (by the wave's restart or the heal), so none is down on purpose.
+    assert len(schedule["all_kills"]) == 2 and evidence(outcome, "valkey.instances.expected-down")["instances"] == []
+    assert operations["2.2"]["success"]
+    assert "liveness: PASS" in live.explain(outcome)
+
+
 _WAVES = [
     [{"op": "kill", "target": "any"}, {"op": "failover", "shard": 0, "delay_s": 0.5},
      {"op": "failover", "shard": 1, "force": True, "delay_s": 0.5}],
@@ -85,6 +109,9 @@ _WAVES = [
         pytest.param(lambda: scenario("valkey.slot-migration-spec", "cluster", {"kill_delay_s": 0.2}, primaries=3, replicas=1),
                      {"valkey.cluster.slot-migration.result": {"slot": 3828, "source": "valkey-0", "target": "valkey-2"}},
                      None, id="slot-migration-spec-cluster"),
+        # The experiment's default waves: kills of the target and the source at migration phases, a cancel, a restart.
+        pytest.param(lambda: scenario("valkey.slot-migration-chaos", "cluster", primaries=3, replicas=1), {},
+                     _every_migration_wave_validated, id="slot-migration-chaos-cluster"),
         pytest.param(lambda: _two_builds("valkey.mixed-version-cluster", "cluster", on="candidate"),
                      {"valkey.binary.verified": {"mixed": True}}, None, marks=live.needs_old_binary, id="mixed-version-cluster"),
         pytest.param(lambda: _two_builds("valkey.rolling-upgrade", "standalone", {"to_binary": {"$ref": "artifacts.candidate.binary"}},

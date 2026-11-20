@@ -114,6 +114,7 @@ a retry succeeded makes the fault, and the run, `ERROR`.
 | [`valkey.action.cluster-chaos`](#valkeyactioncluster-chaos) | action | cluster | failover waves with process kills |
 | [`valkey.action.cluster-election`](#valkeyactioncluster-election) | action | cluster | forces one failover election |
 | [`valkey.action.migrate-slots`](#valkeyactionmigrate-slots) | action | cluster | moves one hash slot to another shard with `CLUSTER MIGRATESLOTS` |
+| [`valkey.action.slot-migration-chaos`](#valkeyactionslot-migration-chaos) | action | cluster | waves of slot migrations with kills, partitions and cancels on them, healed and validated |
 | [`valkey.action.replication-chaos`](#valkeyactionreplication-chaos) | action | standalone | waves of kills, promotions, repoints, stalls, partitions, and degradations, healed and validated |
 | [`valkey.fault.process-signal`](#valkeyfaultprocess-signal) | fault | any | kills, stops, or pauses an instance |
 | [`valkey.fault.syscall`](#valkeyfaultsyscall) | fault | any (needs `syscall_faults`) | kills, delays, or fails an instance at its nth matching system call |
@@ -167,6 +168,7 @@ schemas.
 | `valkey.action.replication-chaos` | `<id>.instance-killed`<br>`<id>.promoted`<br>`<id>.wave-validated` | `valkey.chaos.schedule`<br>`valkey.chaos.test-keys`<br>`valkey.data.loss-window` (many)<br>`valkey.instances.expected-down` | `network.degrade`<br>`network.partition`<br>`process.paused`<br>`process.stopped`<br>`server.client-pause`<br>`server.config` |
 | `valkey.action.rolling-upgrade` | `<id>.failed-over`<br>`<id>.instance-upgraded` | `valkey.upgrade.completed` | `process.stopped` |
 | `valkey.action.sleep` | none | none | none |
+| `valkey.action.slot-migration-chaos` | `<id>.endpoint-killed`<br>`<id>.instance-killed`<br>`<id>.migration-completed`<br>`<id>.migration-started`<br>`<id>.partitioned`<br>`<id>.wave-validated` | `valkey.chaos.schedule`<br>`valkey.chaos.test-keys`<br>`valkey.instances.expected-down` | `network.partition`<br>`process.stopped` |
 | `valkey.action.tools` | none | `valkey.tool.runs` | `process.private-server` |
 | `valkey.action.wait-event` | none | `valkey.wait.event-observed` | none |
 | `valkey.capability.build-probe` | none | `valkey.capability.supported` | `process.private-server` |
@@ -1066,6 +1068,73 @@ as the source listed it last, its `state` and `message`). Events:
 `<id>.migration-started` once the source accepted the command, and
 `<id>.migration-completed` (with the `state`, and `ended`) once the export
 ended or `timeout_s` passed.
+
+### `valkey.action.slot-migration-chaos`
+
+Cluster mode, at least one replica per primary, Valkey 9.0 or later (atomic
+slot migration). The slot-migration mode of the
+[wave engine](architecture.md#the-wave-engine): each wave moves one hash slot
+with `CLUSTER MIGRATESLOTS` and disturbs the migration (operations, timing,
+evidence, and verdicts as for
+[`valkey.action.replication-chaos`](#valkeyactionreplication-chaos); kill
+targets and safety as for [`valkey.action.cluster-chaos`](#valkeyactioncluster-chaos)).
+Before the first wave it writes `keys_per_slot` keys carrying each migrated
+key's hash tag, so they are in its slot whoever owns it. After every wave it
+heals (removes the partitions, restarts the killed instances, which rejoin
+their shard from their `nodes.conf`) and validates: the deployment's state
+checks (the cluster converges, every slot has one owner in every view, roles,
+replication, the check's own keys), then the slot keys, every one of which
+must read back through a slot-routing client with the value written
+(`slot_keys` in the wave's validation; keys lost in a wave are written again
+for the next). A migration that did not succeed (`failed`, `cancelled`, or
+not ended within its `timeout_s`) is tolerated only when a kill, partition
+or cancel of its wave landed before it ended and touched one of its
+endpoints; otherwise it fails the wave. Faults that must land on a log line
+are `valkey.fault.process-signal` and `valkey.fault.network-partition`
+triggered on the `slot-migration.*` events of
+[`valkey.observer.log-trigger`](#valkeyobserverlog-trigger) with `spec:
+slot-migration` (the bundle's `started`, `paused`, `failover.requested`,
+`finished`, `cancelled` lines; see
+[`formal/slot-migration/mapping.yaml`](../formal/slot-migration/mapping.yaml)).
+
+| Operation | Fields (defaults) | What it does |
+| --- | --- | --- |
+| `migrate` | `key` (required), `shard` (null), `timeout_s` (60) | `CLUSTER MIGRATESLOTS` of `key`'s slot from the primary that owns it to shard `shard`'s primary, or with `shard` null to the shard after the owner's planned one (so a slot migrated wave after wave goes round the shards), waited for until the source's export ends, as [`valkey.action.migrate-slots`](#valkeyactionmigrate-slots) does; when the source was killed, until the target's import ends. One per wave; its record's `migration` holds the slot, `source`, `target`, their node IDs, the final `state` and both jobs' last states. While it runs it reads both endpoints' `CLUSTER GETSLOTMIGRATIONS` every 10 ms for the migration's phase, which the wave's other operations wait for; an experiment that publishes the bundle's events (`slot-migration.paused`, `.failover.requested`, ...) shows a phase on the line too. |
+| `kill` | `target` (`replica`; `source`, `target`, `primary`, `any`, an instance ID, or a list of IDs), `signal` (`SIGKILL`), `at` (null), `phase_timeout_s` (60) | As in cluster chaos, under its kill safety (a shard's last live member and the primaries' quorum are never taken), with `source` and `target` the wave's migration endpoints, picked once the migration started. With `at`, waits for the migration to reach that phase first. Killed instances are restarted by the heal. |
+| `partition` | `target` (`replica`; as `kill`'s, one instance), `peers` (`others`; `source`, `target`, or instance IDs), `duration_s` (1), `at`, `phase_timeout_s` | Drops the traffic between the target and its peers for `duration_s` (Linux, root, iptables, `addressing: per_instance_loopback`); `{target: source, peers: target}` cuts the migration connection and the cluster bus between the endpoints. Undone by the operation, or by the heal. Publishes `<id>.partitioned`. |
+| `cancel` | `at`, `phase_timeout_s` | `CLUSTER CANCELSLOTMIGRATIONS` on the source. One sent after the migration ended gets `No migrations ongoing`, recorded in the operation's `reply` and not a success. |
+| `restart` | `target` (`killed`; or an instance ID) | Restarts an instance killed earlier in the wave; the heal restarts whatever is still down. |
+
+The phases (`at`): `started` once the source accepted the command;
+`snapshot` while the export snapshots or streams (export states
+`snapshotting`, `replicating`, `waiting-to-pause`; import
+`receiving-snapshot`, `waiting-for-paused`); `handoff` from the source's
+pause to the target's claim (`failover-paused`, `failover-granted`;
+`failover-requested`); `finished` once either job ended. A phased
+operation's record carries `phase`: the phase `wanted`, the one `seen` when
+it went ahead, `missed` when the migration passed or ended before the phase,
+and for a kill `landed_in`, the phase at the signal. A handoff lasts a few
+milliseconds on one host, so a kill `at: handoff` often lands `finished`,
+just after the claim; `valkey.slot-migration-spec` kills the target on the
+claim's log line itself.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `waves` | list of lists | | The waves. The experiment's default: the target killed at the handoff; the source killed as it snapshots and restarted; a cancel mid-way; an undisturbed migration. |
+| `validation` | mapping | `{}` | The [state validation](cluster-chaos-and-ci.md#state-validation) settings. A critical failure, or any with `blocking_on_failure`, stops the waves. |
+| `keys_per_slot` | integer, 0 to 1000 | 20 | Keys written into every migrated slot before the first wave. |
+| `heal_timeout_s` | number, 1 to 3600 | 60 | How long a restarted instance may take to be ready. |
+
+Events: `<id>.migration-started` and `<id>.migration-completed` (with the
+wave, slot, endpoints, and the final `state`), `<id>.endpoint-killed` (a
+kill of the migration's `source` or `target`, which the slot-migration
+bundle's mapping reads as the model's `CrashT` when it is the target),
+`<id>.partitioned`, and the engine's `<id>.instance-killed` and
+`<id>.wave-validated`. Evidence: the
+engine's `valkey.chaos.schedule` (each wave summary has the wave's
+`migration` record; the schedule has `slots` and `slot_keys`), `valkey.chaos.test-keys`,
+and `valkey.instances.expected-down` (empty, every kill restarts), which
+[`valkey.oracle.deployment-state`](#valkeyoracledeployment-state) reads.
 
 ### `valkey.action.replication-chaos`
 

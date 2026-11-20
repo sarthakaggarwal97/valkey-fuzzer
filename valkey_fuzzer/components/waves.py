@@ -1,11 +1,13 @@
-"""The wave engine of ``valkey.action.cluster-chaos`` and ``valkey.action.replication-chaos``.
+"""The wave engine of ``valkey.action.cluster-chaos``, ``valkey.action.replication-chaos`` and
+``valkey.action.slot-migration-chaos``.
 
-Both actions run ``waves``: each wave is a list of operations that start
+The actions run ``waves``: each wave is a list of operations that start
 together (each after its ``delay_s``, or after another operation of the wave
 finished), then a heal, then validation (:meth:`WaveRun.run_waves`). The
 building blocks are the :data:`.wave_operations.OPERATIONS`, each run by a
 ``_<name>`` method; the policies are per mode, in a :class:`WaveRun` subclass
-(``cluster_chaos.ClusterWaves``, ``replication_chaos.StandaloneWaves``): the live
+(``cluster_chaos.ClusterWaves``, ``replication_chaos.StandaloneWaves``,
+``slot_migration_chaos.MigrationWaves``): the live
 members targets resolve against, the heal, the validation, and which faults
 excuse a failed topology change. Every operation draws from its own random
 stream, ``wave-<n>-op-<i>``: its target before the wave, then whatever it
@@ -36,7 +38,7 @@ from .instances import deployment
 from .processes import KILL_EXIT_TIMEOUT_S, wait_killed
 from .registration import component_registration
 from .wave_evidence import wave_evidence
-from .wave_operations import OPERATIONS, SIGNALS, check_waves, waves_field
+from .wave_operations import DEPLOYMENT_MODES, OPERATIONS, SIGNALS, check_waves, waves_field
 from .wave_targets import Member, TargetSelector
 
 # The order a heal or the final cleanup undoes changes in: resume stalled processes first (a config restore on
@@ -144,6 +146,11 @@ class WaveRun:
     def kill_view(self) -> Optional[list[Member]]:
         return None
 
+    def resolves_later(self, kind: str, target: Any) -> bool:
+        """Whether operation ``kind``'s ``target`` is picked when it runs rather than before the wave (a target
+        another operation of the wave decides); the mode's ``_<kind>`` then selects it."""
+        return False
+
     # -- the loop ----------------------------------------------------------------
 
     def run_waves(self, waves: Sequence[list[dict[str, Any]]]) -> tuple[list, list, Optional[int]]:
@@ -195,7 +202,7 @@ class WaveRun:
             kind, target = operation["op"], operation.get("target")
             rng = self.rngs[f"{number}.{index}"] = self.context.rng(self.spec.id, f"wave-{number}-op-{index}")
             reason, shard = None, operation.get("shard")
-            if kind != "restart" and OPERATIONS[kind].targets:
+            if kind != "restart" and OPERATIONS[kind].targets and not self.resolves_later(kind, target):
                 member, reason = self.selector.select(kind, target, rng)
                 target, shard = (member.instance_id, member.shard) if member else (None, None)
             record: dict[str, Any] = {
@@ -701,6 +708,6 @@ def wave_registration(
             **fields,
         },
         check=lambda config, spec, plan: check_waves(config["waves"], mode, plain_config(plan.deployment)),
-        deployment_modes=(mode,),
+        deployment_modes=(DEPLOYMENT_MODES[mode],),
         declares=declares,
     )

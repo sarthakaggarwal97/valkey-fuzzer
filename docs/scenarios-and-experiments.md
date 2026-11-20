@@ -530,6 +530,7 @@ scenario for each.
 | `valkey.replication-partial-resync` | standalone or cluster, replicas ≥ 1 | | After the primary drops every replica link, the replicas resume with a partial resync (PSYNC), no full sync happens, and they converge. |
 | `valkey.rolling-upgrade` | standalone or cluster, replicas ≥ 1 | two different builds, the target as an artifact | Every instance moves to the new build under writes, replicas first with graceful failovers, and no acknowledged write is lost. |
 | `valkey.save-crash-points` | standalone or cluster, `syscall_faults: true` | a C compiler | Kills a server at the nth system call (`write`, `fsync`, `fdatasync`, `rename`) of one save in its data directory, before or after the call: `BGSAVE`, `BGREWRITEAOF`, or a `nodes.conf` save that a peer's new `cluster-announce-human-nodename` starts. The preload, acknowledged under `appendfsync always`, must survive the restart. A sweep runs `nth` 1, 2, and so on until the fault no longer fires. With `BGREWRITEAOF` it is the live counterpart of the [persistence model](../formal/persistence/README.md), whose `spec translate` scenarios it runs. |
+| `valkey.slot-migration-chaos` | cluster, primaries ≥ 3, replicas ≥ 1 | Valkey 9.0 or later; partitions: Linux, root, iptables, `addressing: per_instance_loopback` | Seeded `waves` that each move the slot of a hash tag to another shard with `CLUSTER MIGRATESLOTS` and disturb the migration: kill the source or the target at a phase of it (`started`, `snapshot`, `handoff`, `finished`), cut the two apart, cancel it, restart what was killed ([`valkey.action.slot-migration-chaos`](components.md#valkeyactionslot-migration-chaos)). After every wave the cluster must converge with every slot owned once, and the keys the action wrote into the migrated slots must read back unchanged. |
 | `valkey.slot-migration-spec` | cluster, primaries ≥ 3, replicas ≥ 1 | | Migrates the slot of a hash tag from its shard to shard 1 under writes to that slot ([`valkey.action.migrate-slots`](components.md#valkeyactionmigrate-slots)), kills the target as it logs its claim and restarts it once its replica is elected; no acknowledged write is lost outside `loss_window_s` of the kill, and the cluster validates. The live counterpart of the [slot migration model](../formal/slot-migration/README.md) (`spec: slot-migration`). |
 | `valkey.snapshot-equivalence` | standalone, cluster | | A fixed number of seeded operations, then a BGSAVE of the quiesced dataset that must reload; records dataset, RDB, and reply digests. |
 
@@ -594,7 +595,12 @@ issue #120 has the reproduction of two winners in one epoch).
 `valkey.slot-migration-spec` is the live counterpart of
 [`formal/slot-migration/`](../formal/slot-migration/README.md): its kill of
 the target at the claim is the model's `CrashT`, and `spec translate` sets
-its `kill_delay_s` variants. `valkey.aof-durability` and
+its `kill_delay_s` variants. `valkey.slot-migration-chaos` publishes the same
+steps, so `spec conform` replays a one-wave run of it too (the model has one
+migration); its kills, partitions and cancels are the model's `CrashT`,
+`DropLink` and `Cancel` on a migration's phases rather than on a mapped line
+(the mapping's `unmapped` says why the spec experiment carries only
+`CrashT`). `valkey.aof-durability` and
 `valkey.save-crash-points` publish the steps of
 [`formal/persistence/`](../formal/persistence/README.md) with the
 `valkey.persistence-steps` fragment, and the rewrite crash points of
@@ -849,6 +855,7 @@ Inputs not listed use the `valkey.writes` ranges.
 | `valkey.replication-partial-resync` | standalone 1-3 or cluster 1-2 replicas | rate up to 2000, value size up to 1 kB, `disconnect_after_s` 0.5-3 | replication |
 | `valkey.rolling-upgrade` | standalone or cluster, 1-2 replicas | | |
 | `valkey.save-crash-points` | standalone, or 3 primaries, no replicas | `BGREWRITEAOF` (the save with the most calls), `nth` 1-12, `when` | |
+| `valkey.slot-migration-chaos` | 3-4 primaries, 1-2 replicas | `keys_per_slot` 1-100; the `waves` stay the experiment's | |
 | `valkey.slot-migration-spec` | 3-4 primaries, 1-2 replicas | `kill_delay_s` 0-1, `restart_delay_s` 3-6 | |
 | `valkey.snapshot-equivalence` | standalone or cluster, 0-2 replicas | `operations` 1-3000, rate 500-5000, value size up to 8 kB | persistence, replication |
 
