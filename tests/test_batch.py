@@ -690,7 +690,13 @@ def test_spec_conform_of_an_approved_bundle_decides_the_run_and_a_drafts_is_only
         4: {"replication": {"approved": True, "status": "skipped", "reason": "tla2tools.jar not found"}},
         5: {"replication": {"approved": True, **ILLEGAL_STEP}},
     }
-    monkeypatch.setattr(conform, "conform_folder", lambda folder, tools, unavailable="": canned[_seed(folder)])
+    checked = []
+
+    def conform_folder(folder, tools, unavailable=""):
+        checked.append(folder)
+        return canned[_seed(folder)]
+
+    monkeypatch.setattr(conform, "conform_folder", conform_folder)
     sources = [_random(6, experiments=[REPLICATION])]
     runner = _batch(tmp_path, sources, prune_pass=True, serial_reruns=1)
     summary = runner.run()
@@ -699,12 +705,20 @@ def test_spec_conform_of_an_approved_bundle_decides_the_run_and_a_drafts_is_only
 
     assert [results[job_id]["status"] for job_id in ids] == ["PASS", "FAIL", "PASS", "ERROR", "PASS", "FAIL"]
     failed = results[ids[1]]
-    assert failed["summary"].startswith("spec conform replication: OneHistoryPerId violated; ")
+    assert failed["summary"] == "spec conform replication: OneHistoryPerId violated; PASS"
     assert failed["signature"]["failures"]["spec-conform:replication"] == {
         "status": "FAIL",
         "verdict": ["OneHistoryPerId violated"],
     }
     assert "spec-conform:replication:FAIL | OneHistoryPerId violated" in failed["signature_label"]
+    # The run checked itself as its report was written, once (the plug-in reuses the report's conform section
+    # rather than running TLC again), and its own verdict names the finding as a failed component.
+    assert sorted(checked) == sorted(str(Path(runner.folder, "runs", job_id)) for job_id in results)
+    report = json.loads(Path(runner.folder, failed["report"]).read_text())
+    assert report["status"] == "FAIL" and report["conform"] == canned[1]
+    (component,) = report["failed_components"]
+    assert (component["component_id"], component["summary"]) == ("spec-conform:replication", "OneHistoryPerId violated")
+    assert failed["conformance"] == canned[1]
     # The draft's violation is kept with the run, not held against it.
     assert results[ids[2]]["conformance"]["register"]["status"] == "fail" and results[ids[2]]["signature"] is None
     assert results[ids[3]]["signature"]["failures"]["spec-conform:replication"]["status"] == "ERROR"
@@ -712,9 +726,10 @@ def test_spec_conform_of_an_approved_bundle_decides_the_run_and_a_drafts_is_only
     illegal = results[ids[5]]
     assert illegal["summary"].startswith("spec conform replication: transitions violated; ")
     assert illegal["signature"]["failures"]["spec-conform:replication"]["verdict"] == ["transitions violated"]
-    # A pruned passing run keeps what conform found.
+    # A pruned passing run keeps what conform found: its report carries it.
     kept = {item.name for item in Path(runner.folder, "runs", ids[0]).iterdir()}
-    assert kept == {"report.json", "scenario.yaml", "conform.json"}
+    assert kept == {"report.json", "scenario.yaml"}
+    assert json.loads(Path(runner.folder, "runs", ids[0], "report.json").read_text())["conform"] == canned[0]
 
     replication = summary["conformance"]["replication"]
     # The digest reads the claims as shipped, a draft today; the run verdicts above came from the workers' entries.
@@ -788,6 +803,31 @@ def test_a_run_whose_plan_names_a_bundle_but_whose_worker_wrote_no_conformance_i
     assert conform_plugin._approved("replication") is True
 
 
+def test_a_run_that_checked_itself_is_not_checked_again_and_its_verdict_stands(tmp_path, monkeypatch):
+    # The run's report carries its conform section and the verdict it gave (judge_run): the plug-in takes both as
+    # they are, runs no TLC, writes no conform.json, and leaves a run that predates the section to its own path.
+    plan = {"components": [{"use": "valkey.observer.log-trigger", "id": "steps", "config": {"spec": "replication"}}]}
+    recorded = {"replication": {"approved": True, **VIOLATED}}
+    report = {"status": "FAIL", "summary": "spec conform replication: OneHistoryPerId violated; experiment passed",
+              "outcome": {"plan": plan}, "conform": recorded}  # fmt: skip
+    (tmp_path / "report.json").write_text(json.dumps(report))
+    monkeypatch.setattr(conform, "conform_run", Mock(side_effect=AssertionError("TLC ran twice")))
+    conform_plugin._conform(str(tmp_path), 300.0)
+    assert not (tmp_path / "conform.json").exists()
+    assert conform_plugin._conformance(str(tmp_path), report) == recorded
+    signature = {"crashes": [], "failures": {"spec-conform:replication": {"status": "FAIL", "verdict": ["x"]}}}
+    verdict = results.Verdict("FAIL", report["summary"], signature)
+    assert conform_plugin.ConformancePlugin().judge({}, str(tmp_path), report, verdict) == recorded
+    assert (verdict.status, verdict.summary, verdict.signature) == ("FAIL", report["summary"], signature)
+    # A report without the section (an older run, or one that named no bundle) is checked by the worker.
+    older = {**report, "conform": None}
+    (tmp_path / "report.json").write_text(json.dumps(older))
+    monkeypatch.setattr(conform, "conform_run", lambda folder, timeout_s: recorded)
+    conform_plugin._conform(str(tmp_path), 300.0)
+    assert json.loads((tmp_path / "conform.json").read_text()) == recorded
+    assert conform_plugin._conformance(str(tmp_path), older) == recorded
+
+
 def test_a_missing_conformance_is_held_against_the_run_only_for_approved_claims(tmp_path, workers, stub, monkeypatch):
     # The worker wrote no conform.json: the batch's own error entry decides by the bundle's claims.
     monkeypatch.setattr(conform, "conform_folder", lambda folder, tools, unavailable="": {})
@@ -832,11 +872,11 @@ def test_the_conform_tlc_time_limit_is_a_batch_option_named_when_it_stops_a_chec
         return {"replication": {"approved": False, "status": "error", "error": error, "timed_out": True}}
 
     monkeypatch.setattr(conform, "conform_folder", conform_folder)
-    monkeypatch.setattr(conform_plugin.TlaTools, "locate", lambda jar, workers="auto": TlaTools(jar="unused"))
+    monkeypatch.setattr(conform.TlaTools, "locate", lambda jar, workers="auto": TlaTools(jar="unused"))
     runner = _batch(tmp_path, [_random(1, experiments=[REPLICATION])], conform_tlc_timeout_s=7.5)
     runner.run()
     (result,) = _results(runner).values()
-    assert seen["timeout_s"] == 7.5, "the worker's TLC runs under the batch's limit"
+    assert seen["timeout_s"] == 7.5, "the run's own TLC runs under the batch's limit"
     assert result["conformance"]["replication"]["error"] == (
         "TLC was stopped after 7.5s: the time limit ran out before it finished "
         "(conform_tlc_timeout_s = 7.5, a batch option)"

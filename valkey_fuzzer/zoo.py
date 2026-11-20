@@ -4,7 +4,10 @@ Each case is a directory ``zoo/<case id>/`` holding:
 
 - ``case.yaml``: what is broken (``description``), which check must catch it
   (``catches``), the ``scenarios`` that must fail on it, each with the
-  components that must report ``FAIL`` (``fail``), how many ``runs`` to make,
+  components that must report ``FAIL`` (``fail``; ``spec-conform:<bundle>``
+  names the spec conform check of an approved bundle the scenario's plan
+  names, the component a run FAILs through when the model finds a claimed
+  violation), how many ``runs`` to make,
   the ``min_detection_rate`` they must reach, optional ``overrides`` (a
   partial scenario merged onto every scenario of the broken run), and optional
   ``requires`` (``linux``, ``root``);

@@ -1,13 +1,16 @@
 """The bug zoo's loader and verdicts, and that every shipped case compiles against the Valkey experiments."""
 
+import json
 import os
 from pathlib import Path
 
 import pytest
 import yaml
 
+from tests.conform_support import SCENARIO, approved_register, register_service, stub_tlc
 from tests.valkey_experiments_support import valkey_service
 from valkey_fuzzer import zoo
+from valkey_fuzzer.spec.conform import conform_component, plan_bundles
 
 COMMIT, CASES = zoo.load_zoo()
 _CASE = {"description": "broken", "catches": "a check", "runs": 5, "min_detection_rate": 0.8,
@@ -36,7 +39,10 @@ def test_every_zoo_run_compiles_with_its_expected_components(tmp_path, case):
         case.runs + 1
     )
     for run in runs:
-        components = {component.id for component in runtime.compile(dict(run.scenario)).components}
+        plan = runtime.compile(dict(run.scenario))
+        components = {component.id for component in plan.components}
+        # A case may also name the spec conform check of a bundle its plan names: spec-conform:<bundle>.
+        components |= {conform_component(name) for name in plan_bundles(plan.to_data())}
         assert set(run.fail) <= components, f"{run.file}: {set(run.fail) - components} not in the plan"
         assert run.scenario["deployment"]["valkey_binary"] == zoo.binary(tmp_path, None if run.control else case)
     assert len({run.scenario["seed"] for run in runs if not run.control}) == case.runs
@@ -118,6 +124,43 @@ def test_a_case_holds_only_with_a_passing_control_and_runs_that_fail_through_eve
         assert undecided["holds"] is None and undecided["undecided"] in ("ERROR", "SKIP_UNSUPPORTED")
     assert report("FAIL", [True] * 4 + ["ERROR"])["holds"] is False, "a failing control decides it anyway"
     assert case.unmet_requirements() == ([] if os.geteuid() == 0 else ["root"]), "a root-only case is skipped elsewhere"
+
+
+def test_a_case_pins_a_bug_only_spec_conform_catches(tmp_path, monkeypatch):
+    # The broken build loses acknowledged writes in a way no oracle of the toy register experiment judges; the
+    # register model's AckedDurable does. The case names that check as spec-conform:register, and a broken run
+    # detects the bug because the run's own conform check FAILs it through that component.
+    bundle = approved_register(tmp_path, monkeypatch)
+    stub_tlc(monkeypatch)
+    for name in ("clean", "case"):
+        (tmp_path / "builds" / name / "src").mkdir(parents=True)
+        (tmp_path / "builds" / name / "src" / "valkey-server").write_text("#!/bin/sh\n")
+        (tmp_path / "builds" / name / "src" / "valkey-server").chmod(0o755)
+    document = {**_CASE, "catches": "spec conform of the register bundle (AckedDurable)",
+                "scenarios": [{"file": "scenario.yaml", "fail": ["spec-conform:register"]}]}  # fmt: skip
+    case = _case(tmp_path, document, scenario=SCENARIO)
+    service = register_service(
+        tmp_path,
+        monkeypatch,
+        bundle,
+        lost=lambda plan: not plan.deployment["valkey_binary"].startswith(str(tmp_path / "builds" / "clean")),
+    )
+    runs = zoo.zoo_runs(case, tmp_path / "builds", service.catalog)
+    assert [run.control for run in runs] == [True] + [False] * 5 and runs[1].fail == ("spec-conform:register",)
+    rows = []
+    for index, run in enumerate(runs):
+        plan = service.compile(dict(run.scenario))
+        assert set(run.fail) <= {conform_component(name) for name in plan_bundles(plan.to_data())}
+        record = service.execute(plan, scenario=run.scenario, report_dir=str(tmp_path / "runs" / str(index)))
+        report = json.loads(Path(record.report_path).read_text())
+        observed = zoo.observe(report["outcome"], report["status"])
+        rows.append((run, observed, record.report_path))
+    assert rows[0][1] == {"status": "PASS", "failed": []}, "the clean control keeps every write"
+    assert rows[1][1] == {"status": "FAIL", "failed": ["spec-conform:register"]}
+    assert all(zoo.detected(run, observed) for run, observed, _ in rows[1:])
+    verdict = zoo.case_report(case.terms(), rows)
+    assert verdict["holds"] is True and verdict["scenarios"]["scenario.yaml"]["detection_rate"] == 1.0
+    assert verdict["scenarios"]["scenario.yaml"]["expected"] == {"fail": ["spec-conform:register"]}
 
 
 def test_a_case_whose_fix_the_pinned_commit_lacks_is_skipped_until_the_pin_has_it(tmp_path):

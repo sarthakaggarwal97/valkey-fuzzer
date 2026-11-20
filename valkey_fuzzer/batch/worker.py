@@ -15,6 +15,7 @@ from ..plan import ExecutionPlan
 from ..reports import write_document
 from ..service import PreparedRun, RunService
 from . import hooks
+from .conform_plugin import CONFORM_TIMEOUT_OPTION
 from .results import ERROR_FILE, read_json
 from .spec import PORT_BLOCK, BatchError
 
@@ -41,6 +42,7 @@ def run_worker(task_path: str) -> int:
         experiment_directories=task["experiment_directories"],
         artifact_dir=task["artifact_dir"],
         cores=task["cores"],
+        conform_tlc_timeout_s=task[CONFORM_TIMEOUT_OPTION],
     )
     try:
         if "generate" in job:

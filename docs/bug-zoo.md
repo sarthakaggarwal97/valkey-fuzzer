@@ -72,7 +72,15 @@ until `zoo/valkey-commit` moves past the fix and the case gets its patch
 (a revert of that fix). Observers only
 record, so a check on what an `info` or `logs` observer recorded is a
 `valkey.oracle.evidence` oracle, named in `fail` like any other (the
-`psync` oracle of `valkey.replication-partial-resync`, for example).
+`psync` oracle of `valkey.replication-partial-resync`, for example). A bug
+only a [spec bundle](spec-bridge.md#bundles)'s model catches is named by
+its check, `spec-conform:<bundle>` (the component a run FAILs through when
+an approved bundle's claim is violated, [`spec conform` in a
+run](spec-bridge.md#in-a-run)); the scenario's experiment must name the
+bundle (`spec: <bundle>`), and the bundle's claims must be approved, since
+a draft's violation never fails a run. The shipped bundles are drafts, so
+no shipped case names one yet; `tests/test_zoo.py` pins one on the test
+register bundle.
 
 Unknown fields are rejected. A scenario file is an ordinary scenario without
 `deployment.valkey_binary`, because the zoo picks the build. The batch runs it

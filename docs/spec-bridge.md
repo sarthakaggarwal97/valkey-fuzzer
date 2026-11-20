@@ -15,6 +15,7 @@ does not prove that Valkey implements the model.
 - [spec conform](#spec-conform)
   - [Samples](#samples)
   - [The transition check](#the-transition-check)
+  - [In a run](#in-a-run)
   - [In a batch](#in-a-batch)
 - [Writing a bundle](#writing-a-bundle)
 - [Onboarding a protocol with data only](#onboarding-a-protocol-with-data-only)
@@ -28,8 +29,9 @@ Nothing else needs them:
 `pip install` brings no Java, and `run`, `validate` and `batch` work
 without them, including the shipped experiments that name a bundle
 (`spec: cluster-election`), since reading a bundle's mapping needs no TLC.
-The one exception is a batch run of an approved bundle that needs TLC
-([In a batch](#in-a-batch)). Without them a `spec` command exits `2` and
+The one exception is a run of an approved bundle that needs TLC: its own
+check cannot decide the run, so it is an `ERROR` ([In a run](#in-a-run)).
+Without them a `spec` command exits `2` and
 says what is missing and where to get the jar:
 
 ```text
@@ -399,7 +401,7 @@ mapping's `hidden` value, and walks the records in order:
 
 TLC explores every way the model can explain the records (which unobservable
 steps, which parameters) and stops at the first path that explains them all.
-`conform.json` gains, per run:
+The conform report (and a run's own `conform` section) gains, per run:
 
 ```json
 "transitions": {"checked": 34, "max_unobserved_steps": 1, "holds": true, "tlc_states": 333}
@@ -411,7 +413,7 @@ the first record no model step reaches (`index`, the record `to` with its
 event and fields, and the record `from` before it): a `Win` logged before the
 ACKs it needs, a vote ACKed by a candidate after the crash that should have
 lost it. The run then `fail`s, under the same rule as a violated property: an
-approved bundle's run `FAIL`s in a batch, a draft's is reported. The bundle's
+approved bundle's run `FAIL`s ([In a run](#in-a-run)), a draft's is reported. The bundle's
 report counts the runs with a violation (`transitions.violated_in`). Without
 TLC, the check is reported as `skipped` (a draft) or is an error (an approved
 bundle, whose claims decide the run).
@@ -508,42 +510,86 @@ rounds run on their own thread, so a run's wall time does not grow with them:
 the replication chaos example took 33.1 to 34.3 s over four runs with the
 digest and 33.2 to 33.3 s over two without, inside the run-to-run noise.
 
-### In a batch
+### In a run
 
-A [batch](cli.md#batch) checks every run against each bundle its plan
-names (a component whose config has `spec: <protocol>`), so a soak or a
-per-merge batch checks every run that exercises a protocol, and an approved
-model is checked wherever its experiments run. The run's worker does it as
-soon as the run ends, before a passing run's folder is pruned, so the trace
-is still there: the same check as `spec conform BUNDLE RUN`, written to the
-run folder's `conform.json`. TLC comes from `$TLA2TOOLS_JAR` and `java` on
-`PATH`, and runs for at most the batch option `conform_tlc_timeout_s`
-(default 300 seconds; [batch options](cli.md#batch)): a check it stops is an
-error whose reason names the option. Without TLC, a bundle that needs it is not checked, and the
-summary says why: a draft bundle is `skipped`, and an approved one is an
-error, so the run is an `ERROR` (its claims decide the run, and nothing
-checked them). A bundle that needs no TLC is still checked. A run that ended
-`ERROR` or `SKIP_UNSUPPORTED` did not reach its verdict, and is `not_run`.
-A run that took no mapped step is `unexercised`, never a pass: its plan
-names the bundle, but nothing it did shows the protocol (a replication chaos
-wave that only stalls a replica briefly). `spec conform` itself calls such a
-run an error.
+Every run whose plan names a bundle (a component whose config has `spec:
+<protocol>`, as the election and replication experiments' observers do)
+checks itself against it as its report is written, whichever command ran it
+(`run`, `replay`, each `minimize` attempt, a batch's worker), once its trace
+is complete: the same check as `spec conform BUNDLE RUN`, into the report's
+`conform` section, by bundle. TLC comes from `$TLA2TOOLS_JAR` and `java` on
+`PATH`, and runs for at most `conform_tlc_timeout_s` (a [batch
+option](cli.md#batch), default 300 seconds, which a run outside a batch
+uses): a check it stops is an error whose reason names the option. Each
+bundle's entry has:
+
+```json
+"conform": {
+  "cluster-election": {
+    "approved": false,
+    "status": "fail",
+    "violated": ["OneWinnerPerEpoch"],
+    "first_violated": {"claim": "OneWinnerPerEpoch", "state": 41, "step": {"state": 41, "why": "Win", "evidence": "won", "t": 1763.2, "fields": {"node": "valkey-4", "epoch": 9}}},
+    "tlc_seconds": 1.8,
+    "properties": {"OneWinnerPerEpoch": {"status": "violated", "claimed": true, "states": [41, 42], "first": {}, "previous": {}}},
+    "transitions": {"checked": 38, "max_unobserved_steps": 1, "holds": true, "tlc_states": 412}
+  }
+}
+```
+
+`approved` says whether the bundle's claims decide the run; `status` is
+`pass`, `fail`, `error`, `skipped` (a draft that needs TLC, without TLC),
+`unexercised` (the run took no mapped step: its plan names the bundle, but
+nothing it did shows the protocol, as a replication chaos wave that only
+stalls a replica briefly; never a pass), or `not_run` (the run ended
+`ERROR` or `SKIP_UNSUPPORTED`, before its verdict); `violated` lists the
+claimed properties the observed states violated, and `transitions` when the
+[transition check](#the-transition-check) found a step the model cannot
+take; `first_violated` names the first of them, the observed `state` (its
+index in the trace) that violates it, and that `step` as `spec conform`
+reports it; `tlc_seconds` is TLC's time; and the rest is the full check
+(`properties`, `transitions`, `states`, `actions`, `sample_mismatches`,
+`notes`, `constants`, `error` or `reason`), as `spec conform` writes it per
+run. A run whose plan names no bundle has `"conform": null`.
+
+For a bundle whose claims are approved, the check is part of the run's
+verdict: a claimed violation is the failed component `spec-conform:<bundle>`
+of the outcome (its `summary` the violated claims, its `diagnostics` the
+bundle, `violated` and `first_violated`), so the run `FAIL`s with that
+component named in its summary (`spec conform cluster-election:
+OneWinnerPerEpoch violated; ...`), `failed_components`, and failure signature,
+and `minimize` keeps a reduction only while the same claims fail, `replay`
+prints the result (`Spec conform cluster-election: fail: OneWinnerPerEpoch
+violated`), and a [bug zoo](bug-zoo.md#caseyaml) case names the check in
+`fail`. A draft's findings are recorded, never in the verdict.
 
 | Conform result | Approved claims | Draft claims |
 | --- | --- | --- |
 | a claimed property violated, or a step the model cannot take (the transition check) | the run `FAIL`s | reported only |
-| an error (no mapped evidence, a record it cannot apply, a trace the run recorded that is missing or unreadable, TLC failed or ran past `conform_tlc_timeout_s`, or no TLC for a bundle that needs it, or for its transition check) | the run is an `ERROR` | reported only (`skipped` without TLC; the transition check alone is reported as not checked) |
-| no `conform.json` (the worker ended before it checked the run) | the run is an `ERROR` | reported only |
+| an error (no mapped evidence, a record it cannot apply, a trace the run recorded that is missing or unreadable, TLC failed or ran past `conform_tlc_timeout_s`, or no TLC for a bundle that needs it, or for its transition check) | the run is an `ERROR` (`spec-conform:<bundle>` is an errored component) | reported only (`skipped` without TLC; the transition check alone is reported as not checked) |
 | a violation outside the claim, a pass | reported only | reported only |
 
-Every entry says whether the bundle's claims are `approved`, the worker's
-and the batch's own for a missing `conform.json` alike, and only an explicit
-`approved: true` decides a run: an entry without the flag is read as a
-draft's. A bundle the batch cannot load counts as approved: the plan named
-it, and nothing says its claims are a draft. A check that fails outright
-(an exception in the worker's `spec conform`) still writes `conform.json`,
-with the exception as each bundle's error, so the batch reports why rather
-than only that the file is missing.
+Every entry says whether the bundle's claims are `approved`, and only an
+explicit `approved: true` decides a run: an entry without the flag is read as
+a draft's. A bundle that cannot be loaded counts as approved: the plan named
+it, and nothing says its claims are a draft. A check that fails outright (an
+exception in `spec conform`) still gives each bundle an entry with the
+exception as its error, so the report says why rather than nothing. The
+report is written before the check and again after it, so a run killed
+during TLC leaves a report whose `conform` is `null`.
+
+### In a batch
+
+A [batch](cli.md#batch) takes each run's own `conform` section as it is:
+its worker runs no second TLC, its verdict (status, summary, failure
+signature with the failing component `spec-conform:<bundle>`) is the run's,
+and the section is kept when a passing run's folder is pruned. A run from
+before the section (an older report) is checked by its worker after the run,
+into the run folder's `conform.json`, and judged by the batch under the same
+table; such a run whose worker ended before it checked it (no
+`conform.json`) is an `ERROR` for an approved bundle and reported only for a
+draft. So a soak or a per-merge batch checks every run that exercises a
+protocol, and an approved model is checked wherever its experiments run.
 
 The batch's `summary.json` has a `conformance` entry per bundle, and
 `conformance/<protocol>.json` holds the full report over the runs checked

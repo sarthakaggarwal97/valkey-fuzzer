@@ -175,3 +175,15 @@ def describe_drift(entry: Mapping[str, Any]) -> str:
         return re.sub(r"\b([0-9a-f]{12})[0-9a-f]{52}\b", r"\1...", text)
 
     return f"{entry['item']}: recorded {shown(entry['recorded'])}, replay uses {shown(entry['replay'])}"
+
+
+def print_conform(report: Mapping[str, Any]) -> None:
+    """One line per spec bundle the run was checked against (the report's ``conform``); nothing for a run that
+    names none."""
+
+    results = report.get("conform") or {}
+    if results:
+        from ..spec.conform import describe
+
+        for name, entry in sorted(results.items()):
+            print(f"Spec conform {describe(name, entry)}")

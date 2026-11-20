@@ -12,10 +12,12 @@ from unittest.mock import Mock
 
 import pytest
 
+from tests.conform_support import approved_register, register_service, scenario_file
 from tests.valkey_experiments_support import valkey_service
 from valkey_fuzzer.cli import create_parser
 from valkey_fuzzer.commands import spec as spec_command
 from valkey_fuzzer.commands._common import add_common_options
+from valkey_fuzzer.service import RunService
 from valkey_fuzzer.spec import (
     SpecBundleError,
     TlaTools,
@@ -1233,3 +1235,26 @@ def test_a_plan_pins_the_mapping_its_spec_components_read(tmp_path, monkeypatch)
     assert service.compile(scenario).to_json() != plan.to_json()
     with pytest.raises(Exception, match=r"spec 'register': .*mapping\.yaml has sha256 \w+, but the plan was compiled"):
         service.validate_plan(plan)
+
+
+@needs_tlc
+@pytest.mark.slow
+def test_a_run_checks_itself_against_its_bundle_with_tlc(tmp_path, monkeypatch):
+    # The same check as `spec conform register RUN`, run as the report is written: TLC on the run's trace, under the
+    # service's conform_tlc_timeout_s, its result in the report and, for the approved claims, in the verdict.
+    bundle = approved_register(tmp_path, monkeypatch)
+    service = register_service(tmp_path, monkeypatch, bundle, lost=True)
+    prepared = service.prepare_run(scenario_file(tmp_path))
+    record = service.execute(prepared.plan, scenario=prepared.scenario, report_dir=str(tmp_path / "run"))
+    entry = record.report["conform"]["register"]
+    assert record.outcome.status.value == "FAIL" and entry["status"] == "fail", json.dumps(entry)
+    assert entry["violated"] == ["AckedDurable"] and entry["first_violated"]["state"] == 5
+    assert entry["transitions"]["holds"] is True and entry["tlc_seconds"] > 0
+    assert [item.component_id for item in record.outcome.component_results] == ["spec-conform:register"]
+    # A check TLC cannot finish in the time the service allows is an error that names the option, so the run is.
+    service = RunService(experiment_directories=[str(bundle / "experiments")], artifact_dir=str(tmp_path / "reports"),
+                         conform_tlc_timeout_s=0.001)  # fmt: skip
+    record = service.execute(prepared.plan, scenario=prepared.scenario, report_dir=str(tmp_path / "slow"))
+    entry = record.report["conform"]["register"]
+    assert record.outcome.status.value == "ERROR" and entry["status"] == "error" and entry["timed_out"]
+    assert entry["error"].endswith("(conform_tlc_timeout_s = 0.001, a batch option)")

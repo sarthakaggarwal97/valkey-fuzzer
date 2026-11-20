@@ -22,7 +22,7 @@ from ..outcomes import EXIT_FAILURE, EXIT_HARNESS_ERROR, EXIT_SUCCESS, EXIT_USAG
 from ..reports import SCENARIO_FILE, ReportWriteError, export_scenario, replay_command, write_document
 from ..results import OutcomeStatus
 from ..service import PreparedRun
-from ._common import add_common_options, artifact_paths, exclusion, print_header, service_for
+from ._common import add_common_options, artifact_paths, exclusion, print_conform, print_header, service_for
 
 
 def register(subparsers: Any) -> None:
@@ -152,6 +152,7 @@ def run_command(args: argparse.Namespace) -> int:
     print(f"Timeout: {timeout:g}s ({source})")
     record = service.execute(prepared.plan, scenario=prepared.scenario, timeout=timeout, generated=prepared.generated)
     print_outcome(record.outcome, verbose=args.verbose)
+    print_conform(record.report)
     print(f"Report: {record.report_path}")
     replay = replay_command(record.report_path)
     if generating:

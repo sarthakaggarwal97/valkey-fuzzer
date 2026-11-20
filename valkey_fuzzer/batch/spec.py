@@ -9,6 +9,7 @@ from typing import Any, Optional
 from ..deployment.local.config import CLUSTER_BUS_PORT_OFFSET, MAX_TCP_PORT
 from ..deployment.local.ports import ephemeral_overlap
 from ..schema import ConfigError, ConfigField, ConfigSchema, load_yaml_mapping
+from ..service import CONFORM_TLC_TIMEOUT_S
 from . import hooks
 
 # Client ports per worker: a cluster of 16 primaries with 5 replicas each is 96 instances.
@@ -47,8 +48,9 @@ _SPEC = ConfigSchema({**_OPTION_FIELDS, "sources": ConfigField(list, required=Fa
 class BatchOptions:
     """How a batch runs; ``timeout_s`` None means the profile's budget, or :data:`DEFAULT_TIMEOUT_S`.
 
-    ``conform_tlc_timeout_s`` bounds the TLC run of each worker's ``spec conform`` on its run's observed states
-    (:mod:`.conform_plugin`); a run it stops is a conform ``error`` that names this option.
+    ``conform_tlc_timeout_s`` bounds the TLC run of each run's ``spec conform`` check on its observed states
+    (:meth:`~valkey_fuzzer.service.RunService.write_run_report`, :mod:`.conform_plugin`); a run it stops is a
+    conform ``error`` that names this option.
     """
 
     batch_id: str = "batch"
@@ -59,7 +61,7 @@ class BatchOptions:
     valkey_binary: Optional[str] = None
     prune_pass: bool = False
     serial_reruns: int = 0
-    conform_tlc_timeout_s: float = 300.0
+    conform_tlc_timeout_s: float = CONFORM_TLC_TIMEOUT_S
     experiment_directories: tuple[str, ...] = ()
 
     def check(self) -> None:

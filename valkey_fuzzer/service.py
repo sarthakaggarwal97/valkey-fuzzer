@@ -66,6 +66,9 @@ from .schema import load_yaml_mapping, plain_config
 
 # The deadline of a run that names none and has no search-profile budget (seconds).
 DEFAULT_TIMEOUT_S = 1200.0
+# How long the TLC run of a run's spec conform check may take (seconds): the batch option conform_tlc_timeout_s,
+# whose default this is.
+CONFORM_TLC_TIMEOUT_S = 300.0
 
 
 def derive_timeout(
@@ -288,6 +291,8 @@ class RunService:
     its report folder. ``cores`` is how many cores a run may use, which a
     random draw's deployment must fit (:mod:`~valkey_fuzzer.capacity`); None
     for any number. A scenario read from a file runs as written.
+    ``conform_tlc_timeout_s`` bounds the TLC run of each run's spec conform
+    check (:meth:`write_run_report`; a batch passes its option).
     """
 
     def __init__(
@@ -298,6 +303,7 @@ class RunService:
         catalog: Optional[Catalog] = None,
         artifact_dir: str = "",
         cores: Optional[float] = None,
+        conform_tlc_timeout_s: float = CONFORM_TLC_TIMEOUT_S,
     ):
         self._catalog_options = {
             "experiment_directories": tuple(experiment_directories),
@@ -305,6 +311,7 @@ class RunService:
         }
         self._artifact_dir = normalize_artifact_root(artifact_dir)
         self._cores = cores
+        self._conform_tlc_timeout_s = conform_tlc_timeout_s
         self._catalog = catalog
         self._compiler: Optional[ScenarioCompiler] = None
         self._runner: Optional[Runner] = None
@@ -525,10 +532,11 @@ class RunService:
             try:
                 outcome = self.run_plan(plan, timeout=timeout, run_dir=report_dir)
             except BaseException as interrupt:
-                # An interrupted run still reports what it found before it (a crash stands).
+                # An interrupted run still reports what it found before it (a crash stands); it is not checked
+                # against its spec bundles, which could hold the interrupt up for a TLC run.
                 partial = getattr(interrupt, "partial_outcome", None)
                 if partial is not None:
-                    self.write_run_report(report_dir, partial, scenario=scenario, generated=generated)
+                    self.write_run_report(report_dir, partial, scenario=scenario, generated=generated, conform=False)
                 raise
         return self.write_run_report(report_dir, outcome, scenario=scenario, generated=generated)
 
@@ -540,15 +548,48 @@ class RunService:
         scenario: Optional[Mapping[str, Any]] = None,
         provenance: Optional[Mapping[str, Any]] = None,
         generated: Optional[Mapping[str, Any]] = None,
+        conform: bool = True,
     ) -> RunRecord:
-        """Write ``report.json`` for ``outcome``; every command's run reports are written here."""
+        """Write ``report.json`` for ``outcome``; every command's run reports are written here.
+
+        With ``conform``, a run whose plan names a spec bundle is then checked against it (:meth:`conform`), and
+        the report written again with the results under ``conform`` and the verdict they give
+        (:func:`~valkey_fuzzer.spec.conform.judge_run`): an approved bundle's claimed violation is a failed
+        component ``spec-conform:<bundle>``, so the run FAILs. The record holds that outcome and report.
+        """
 
         report_path = os.path.join(report_dir, REPORT_FILE)
         report = self.run_report(
             outcome, scenario=scenario, provenance=provenance, generated=generated, report_path=report_path
         )
         write_document(report_path, report)
+        if conform:
+            results = self.conform(report_dir, outcome)
+            if results:
+                from .spec.conform import judge_run
+
+                outcome = judge_run(outcome, results)
+                report = self.run_report(
+                    outcome,
+                    scenario=scenario,
+                    provenance=provenance,
+                    generated=generated,
+                    report_path=report_path,
+                    conform=results,
+                )
+                write_document(report_path, report)
         return RunRecord(outcome=outcome, report=report, report_dir=report_dir)
+
+    def conform(self, report_dir: str, outcome: RunOutcome) -> dict[str, dict[str, Any]]:
+        """The run in ``report_dir`` (its ``report.json`` written) checked against each spec bundle its plan names,
+        by bundle (:func:`~valkey_fuzzer.spec.conform.conform_run`, TLC bounded by ``conform_tlc_timeout_s``);
+        empty when it names none, so a run without a bundle never loads the spec tools."""
+
+        if not any((component.config or {}).get("spec") for component in outcome.plan.components):
+            return {}
+        from .spec.conform import conform_run
+
+        return conform_run(report_dir, self._conform_tlc_timeout_s)
 
     def run_report(
         self,
@@ -558,6 +599,7 @@ class RunService:
         provenance: Optional[Mapping[str, Any]] = None,
         generated: Optional[Mapping[str, Any]] = None,
         report_path: Optional[str] = None,
+        conform: Optional[Mapping[str, Any]] = None,
     ) -> dict[str, Any]:
         """:func:`~valkey_fuzzer.reports.run_report` of ``outcome`` through this service's catalog."""
 
@@ -568,6 +610,7 @@ class RunService:
             provenance=provenance,
             generated=generated,
             report_path=report_path,
+            conform=conform,
         )
 
     # -- replay --------------------------------------------------------------

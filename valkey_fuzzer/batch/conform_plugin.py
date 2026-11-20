@@ -1,11 +1,14 @@
 """Spec conformance as a batch plug-in: each run checked against the spec bundles its plan names, as
 ``valkey-fuzzer spec conform`` would, and a conform report per bundle over the batch's runs.
 
-The worker writes ``conform.json`` into its run folder (TLC from ``$TLA2TOOLS_JAR``, bounded by the batch's
-``conform_tlc_timeout_s``; without TLC a bundle that needs it is skipped, or an error if its claims are approved).
-For a bundle whose claims are approved, a claimed property violated on the run's observed states fails the run,
-and a check that could not decide is an ERROR; a draft's findings are only reported. The summary writes
-``conformance/<bundle>.json`` and a digest of it, claimed violations first.
+A run checks itself as its report is written (:meth:`~valkey_fuzzer.service.RunService.write_run_report`, under
+the batch's ``conform_tlc_timeout_s``): its ``report.json`` carries the results under ``conform`` and the verdict
+they give, so the plug-in reuses them rather than running TLC twice. For a run that predates that section, the
+worker writes ``conform.json`` into its run folder after the run (TLC from ``$TLA2TOOLS_JAR``, bounded the same
+way; without TLC a bundle that needs it is skipped, or an error if its claims are approved), and the verdict is
+formed here: for a bundle whose claims are approved, a claimed property violated on the run's observed states
+fails the run, and a check that could not decide is an ERROR; a draft's findings are only reported. The summary
+writes ``conformance/<bundle>.json`` and a digest of it, claimed violations first.
 
 :mod:`~valkey_fuzzer.spec.conform` is imported where it is used, never when this module loads: registering the
 plug-in leaves the spec bridge's tools unloaded for a batch whose runs name no bundle.
@@ -16,11 +19,9 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Optional
 
-from .._data import error_record
 from ..minimize import verdict_clauses
 from ..reports import write_document
 from ..spec.bundle import SpecBundleError, load_bundle
-from ..spec.tla import TlaError, TlaTools
 from .hooks import BatchPlugin
 from .results import Verdict, read_json
 from .spec import BatchOptions, worst
@@ -28,55 +29,51 @@ from .spec import BatchOptions, worst
 if TYPE_CHECKING:
     from .pool import BatchRunner
 
-# What a worker writes in its run folder: the run checked against the spec bundles its plan names.
+# What a worker writes in its run folder for a run whose report has no conform section: the run checked against
+# the spec bundles its plan names.
 CONFORMANCE_FILE = "conform.json"
 # The batch option that bounds a worker's TLC run on its run's observed states (BatchOptions).
 CONFORM_TIMEOUT_OPTION = "conform_tlc_timeout_s"
 CONFORMANCE_DIRECTORY = "conformance"
 
 
-def _conform(report_dir: str, timeout_s: float) -> None:
-    """Write ``conform.json``: the run checked against every spec bundle its plan names, with TLC from
-    ``$TLA2TOOLS_JAR`` for at most ``timeout_s`` (without TLC, a bundle that needs it is skipped, or an error if
-    its claims are approved). A check that fails outright still writes the file, with why, for each bundle."""
+def _recorded(report: Optional[Mapping[str, Any]]) -> Optional[dict[str, Any]]:
+    """The run's own conform results, from its report's ``conform`` section; None for a run that predates it (or
+    checked no bundle), whose check and verdict are the plug-in's."""
 
-    from ..spec.conform import conform_folder, plan_bundles
+    recorded = (report or {}).get("conform")
+    return dict(recorded) if isinstance(recorded, Mapping) and recorded else None
+
+
+def _conform(report_dir: str, timeout_s: float) -> None:
+    """Print the run's own conform results, or, for a run whose report has none, check it now and write
+    ``conform.json``: the run against every spec bundle its plan names, with TLC for at most ``timeout_s``
+    (:func:`~valkey_fuzzer.spec.conform.conform_run`)."""
+
+    from ..spec.conform import conform_run, describe
 
     try:
-        try:
-            tools, unavailable = TlaTools.locate(None, workers="1").within(timeout_s), ""
-        except TlaError as exc:
-            tools, unavailable = None, str(exc)
-        results = conform_folder(report_dir, tools, unavailable)
-    except Exception as exc:
-        # The batch would otherwise see only that conform.json is missing, not why.
-        error = error_record(exc, "conform")
-        problem = f"spec conform did not finish: {error['type']}: {error.get('message', '')}"
-        try:
-            plan = (read_json(os.path.join(report_dir, "report.json")).get("outcome") or {}).get("plan") or {}
-        except (OSError, ValueError):
-            plan = {}
-        results = {
-            name: {"status": "error", "error": problem, "approved": _approved(name)} for name in plan_bundles(plan)
-        }
-    if not results:
-        return
-    for entry in results.values():
-        if entry.get("timed_out"):
-            entry["error"] = f"{entry['error']} ({CONFORM_TIMEOUT_OPTION} = {timeout_s:g}, a batch option)"
-    write_document(os.path.join(report_dir, CONFORMANCE_FILE), results)
+        report = read_json(os.path.join(report_dir, "report.json"))
+    except (OSError, ValueError):
+        report = None
+    results = _recorded(report)
+    if results is None:
+        results = conform_run(report_dir, timeout_s)
+        if not results:
+            return
+        write_document(os.path.join(report_dir, CONFORMANCE_FILE), results)
     for name, entry in results.items():
-        print(
-            f"spec conform {name}: {entry['status']}"
-            + (f": {entry.get('error') or entry.get('reason')}" if entry["status"] not in ("pass", "fail") else "")
-        )
+        print(f"spec conform {describe(name, entry)}")
 
 
 def _conformance(run_dir: str, report: Optional[Mapping[str, Any]]) -> dict[str, Any]:
-    """The worker's ``conform.json``; for a run that reached its verdict and whose plan names spec bundles but
-    that has none, an error for each bundle, saying whether its claims are approved (the batch holds only those
-    against the run)."""
+    """The run's own conform results (its report's ``conform``), else the worker's ``conform.json``; for a run
+    that reached its verdict and whose plan names spec bundles but that has neither, an error for each bundle,
+    saying whether its claims are approved (the batch holds only those against the run)."""
 
+    recorded = _recorded(report)
+    if recorded is not None:
+        return recorded
     path = os.path.join(run_dir, CONFORMANCE_FILE)
     if os.path.exists(path):
         try:
@@ -104,8 +101,9 @@ def _approved(name: str) -> bool:
 
 
 class ConformancePlugin(BatchPlugin):
-    """Spec conformance: the worker checks its run, the verdict takes an approved bundle's claimed violation as a
-    FAIL, and the summary reports each bundle over the runs that exercised it."""
+    """Spec conformance: the run's own check is reused (or the worker checks a run that has none), the verdict
+    takes an approved bundle's claimed violation as a FAIL, and the summary reports each bundle over the runs that
+    exercised it."""
 
     name = "conformance"
     kept_when_pruned = (CONFORMANCE_FILE,)
@@ -118,6 +116,10 @@ class ConformancePlugin(BatchPlugin):
 
     def judge(self, job: Mapping[str, Any], run_dir: str, report: Optional[Mapping[str, Any]], verdict: Verdict) -> Any:
         conformance = _conformance(run_dir, report)
+        if _recorded(report) is not None:
+            # The run judged itself (spec.conform.judge_run): its status, summary and signature, formed from its
+            # outcome, already carry an approved bundle's finding as the failed component spec-conform:<bundle>.
+            return conformance
         for name, entry in sorted(conformance.items()):
             # A draft's findings are reported, not held against the run. Every entry says whether its claims are
             # approved: the worker's (conform_folder), and the ones made here for a run whose worker wrote no
