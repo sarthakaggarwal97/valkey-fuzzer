@@ -2,13 +2,12 @@
 with java and ``$TLA2TOOLS_JAR``, the counterexample of a cancel after the grant."""
 
 import json
-import os
 import re
-import shutil
 from unittest.mock import patch
 
 import pytest
 
+from tests.conftest import needs_tlc
 from tests.fakes import FakeClient, FakeHandle, fake_instances
 from tests.valkey_experiments_support import evidence_values, fake_context, resolved, valkey_experiment
 from valkey_fuzzer.components import slot_migration
@@ -224,19 +223,13 @@ def test_the_slot_migration_experiment_publishes_the_models_steps_and_kills_the_
     ]
 
 
-def _tla_jar():
-    path = os.environ.get("TLA2TOOLS_JAR")
-    return path if path and os.path.exists(path) else None
-
-
 @pytest.mark.slow
-@pytest.mark.skipif(not _tla_jar() or not shutil.which("java"), reason="needs java and TLA2TOOLS_JAR")
-def test_a_cancel_after_the_grant_leaves_two_writers():
+@needs_tlc
+def test_a_cancel_after_the_grant_leaves_two_writers(tla_tools):
     from valkey_fuzzer.spec.check import run_control
-    from valkey_fuzzer.spec.tla import TlaTools
 
     bundle = load_bundle("slot-migration")
-    result, _ = run_control(bundle, bundle.control("cancel_unpauses"), TlaTools.locate(_tla_jar(), workers="1"))
+    result, _ = run_control(bundle, bundle.control("cancel_unpauses"), tla_tools)
 
     assert (result.violation, result.violated) == ("invariant", "OneWriter")
     steps = [state.action for state in result.trace]
@@ -245,13 +238,12 @@ def test_a_cancel_after_the_grant_leaves_two_writers():
 
 
 @pytest.mark.slow
-@pytest.mark.skipif(not _tla_jar() or not shutil.which("java"), reason="needs java and TLA2TOOLS_JAR")
-def test_a_replica_promoted_without_the_claim_deletes_the_imported_slot():
+@needs_tlc
+def test_a_replica_promoted_without_the_claim_deletes_the_imported_slot(tla_tools):
     from valkey_fuzzer.spec.check import run_control
-    from valkey_fuzzer.spec.tla import TlaTools
 
     bundle = load_bundle("slot-migration")
-    result, _ = run_control(bundle, bundle.control("replica_misses_claim"), TlaTools.locate(_tla_jar(), workers="1"))
+    result, _ = run_control(bundle, bundle.control("replica_misses_claim"), tla_tools)
 
     assert (result.violation, result.violated) == ("invariant", "NoAckedWriteLost")
     steps = [state.action for state in result.trace]

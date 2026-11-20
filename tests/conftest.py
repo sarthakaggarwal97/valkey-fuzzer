@@ -1,11 +1,47 @@
 """Fixtures the command, service, and CLI tests share."""
 
+import os
+import shutil
 import tempfile
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
 from valkey_fuzzer.results import ComponentResult, ComponentStatus, OutcomeStatus, RunOutcome
+
+TLA_JAR = os.environ.get("TLA2TOOLS_JAR")
+# The tests that run TLC: a model check, a counterexample, or a run conformed to a bundle.
+needs_tlc = pytest.mark.skipif(
+    not (TLA_JAR and os.path.exists(TLA_JAR) and shutil.which("java")), reason="needs java and TLA2TOOLS_JAR"
+)
+
+
+@pytest.fixture
+def tla_tools():
+    """TLC from ``$TLA2TOOLS_JAR`` on one worker, for a ``needs_tlc`` test."""
+
+    from valkey_fuzzer.spec.tla import TlaTools
+
+    return TlaTools.locate(TLA_JAR, workers="1")
+
+
+def cli(*argv, via_main=True):
+    """Run ``valkey-fuzzer argv`` and return its exit code.
+
+    ``via_main`` runs :func:`valkey_fuzzer.cli.main`, which maps a command's exceptions to exit codes as the
+    installed command does; without it the command's handler runs on the parsed arguments and its exceptions
+    propagate to the test.
+    """
+
+    from valkey_fuzzer.cli import create_parser, main
+
+    argv = [str(item) for item in argv]
+    if via_main:
+        with patch("sys.argv", ["valkey-fuzzer", *argv]):
+            return main()
+    args = create_parser().parse_args(argv)
+    return args.handler(args)
 
 
 class CannedRuns:

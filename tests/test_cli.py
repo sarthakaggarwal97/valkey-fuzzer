@@ -12,10 +12,10 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from tests.conftest import cli as _cli
 from tests.support import sigterm_during
 from tests.valkey_experiments_support import valkey_service
 from valkey_fuzzer import batch, hoststate
-from valkey_fuzzer.cli import main
 from valkey_fuzzer.commands._common import add_common_options
 from valkey_fuzzer.components import history
 from valkey_fuzzer.deployment.local import config as local_config
@@ -29,13 +29,6 @@ EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "valkey"
 EXAMPLE = str(EXAMPLES / "snapshot_equivalence.yaml")
 
 pytestmark = pytest.mark.usefixtures("report_root")
-
-
-def _cli(*argv):
-    """Run ``valkey-fuzzer argv`` and return its exit code."""
-
-    with patch("sys.argv", ["valkey-fuzzer", *map(str, argv)]):
-        return main()
 
 
 def _run_report(tmp_path, *options):
@@ -568,8 +561,7 @@ def test_an_error_goes_to_stderr_and_names_its_type_when_its_message_does_not(ca
         raise error
 
     monkeypatch.setattr("valkey_fuzzer.commands.listing.list_command", fail)
-    with patch("sys.argv", ["valkey-fuzzer", "list", "experiments", "--format", "json"]):
-        assert main() == EXIT_HARNESS_ERROR
+    assert _cli("list", "experiments", "--format", "json") == EXIT_HARNESS_ERROR
     captured = capsys.readouterr()
     assert captured.out == "" and captured.err.strip() == shown
 

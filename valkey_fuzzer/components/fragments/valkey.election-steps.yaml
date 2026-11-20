@@ -1,0 +1,27 @@
+# The cluster-election model's steps (formal/cluster-election), as the nodes
+# log them: the `election-log` observer publishes every line that
+# formal/cluster-election/mapping.yaml maps to a step (HandleRequest,
+# ReceiveVote, Win), with the mapping's patterns (spec: cluster-election), and
+# the `trace` observer records the events as trace.jsonl, which
+# `valkey-fuzzer spec conform cluster-election RUN` maps onto the model's
+# variables to check the claims on every observed state. An experiment lists
+# `- id: election-log` and `- id: trace` before its actions, so the observers
+# see the whole run, and names `trace` in its election-safety oracle.
+components:
+  - use: valkey.observer.log-trigger
+    id: election-log
+    config:
+      instances: all
+      poll_interval_s: 0.001
+      switch_interval_s: 0.0002
+      spec: cluster-election
+      rules:
+        - {publish: cluster.vote.granted, evidence_id: valkey.cluster.vote-granted-logged, required: true}
+        - {publish: cluster.vote.acked}
+        - {publish: cluster.vote.denied}
+        - {publish: cluster.election.started}
+        - {publish: cluster.election.won, evidence_id: valkey.cluster.election-won-logged, required: true}
+
+  - use: valkey.observer.trace
+    id: trace
+    config: {interval_s: 0.25, spec: cluster-election}

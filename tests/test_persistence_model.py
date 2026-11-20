@@ -2,12 +2,11 @@
 with java and ``$TLA2TOOLS_JAR``, the counterexample of a manifest written before the base it names."""
 
 import json
-import os
 import re
-import shutil
 
 import pytest
 
+from tests.conftest import needs_tlc
 from valkey_fuzzer.components import experiments
 from valkey_fuzzer.spec.bundle import load_bundle
 from valkey_fuzzer.spec.conform import ObservedRun, collect_runs
@@ -92,19 +91,13 @@ def test_the_persistence_experiments_publish_the_models_steps_before_they_act(ex
     assert actions and all(order.index("persistence-steps") < order.index(action) for action in actions)
 
 
-def _tla_jar():
-    path = os.environ.get("TLA2TOOLS_JAR")
-    return path if path and os.path.exists(path) else None
-
-
 @pytest.mark.slow
-@pytest.mark.skipif(not _tla_jar() or not shutil.which("java"), reason="needs java and TLA2TOOLS_JAR")
-def test_a_manifest_written_before_its_base_names_a_missing_file():
+@needs_tlc
+def test_a_manifest_written_before_its_base_names_a_missing_file(tla_tools):
     from valkey_fuzzer.spec.check import run_control
-    from valkey_fuzzer.spec.tla import TlaTools
 
     bundle = load_bundle("persistence")
-    result, _ = run_control(bundle, bundle.control("manifest_before_base"), TlaTools.locate(_tla_jar(), workers="1"))
+    result, _ = run_control(bundle, bundle.control("manifest_before_base"), tla_tools)
 
     assert (result.violation, result.violated) == ("invariant", "ManifestFilesExist")
     assert [state.action for state in result.trace][-2:] == ["StartRewrite", "MutantPersistManifest"]

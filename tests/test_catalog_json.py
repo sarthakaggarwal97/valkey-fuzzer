@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import cli
 from tests.valkey_experiments_support import valkey_service
-from valkey_fuzzer.cli import create_parser
 from valkey_fuzzer.components import component_registrations
 from valkey_fuzzer.service import RunService
 
@@ -18,9 +18,10 @@ pytestmark = pytest.mark.usefixtures("report_root")
 
 
 def _cli(capsys, *argv):
+    """The exit code and the stdout of ``valkey-fuzzer argv``; a command's exception propagates."""
+
     capsys.readouterr()
-    args = create_parser().parse_args(list(argv))
-    code = args.handler(args)
+    code = cli(*argv, via_main=False)
     return code, capsys.readouterr().out
 
 

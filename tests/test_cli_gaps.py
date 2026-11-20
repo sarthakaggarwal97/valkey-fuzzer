@@ -10,10 +10,11 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from tests.conftest import cli as _cli
 from tests.test_batch import _batch, _random, stub, workers  # noqa: F401  (the batch tests' fixtures)
 from tests.valkey_experiments_support import shared_catalog, valkey_service
 from valkey_fuzzer.batch import normalize_source
-from valkey_fuzzer.cli import create_parser, main
+from valkey_fuzzer.cli import create_parser
 from valkey_fuzzer.deployment.local.config import deployment_config_from_document
 from valkey_fuzzer.deployment.local.planner import plan_deployment
 from valkey_fuzzer.fields import did_you_mean, strict_fields
@@ -24,11 +25,6 @@ EXAMPLES = ROOT / "examples"
 EXPERIMENTS = EXAMPLES / "experiments"
 
 pytestmark = pytest.mark.usefixtures("report_root")
-
-
-def _cli(*argv):
-    with patch("sys.argv", ["valkey-fuzzer", *map(str, argv)]):
-        return main()
 
 
 def _ports(plan):
