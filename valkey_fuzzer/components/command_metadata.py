@@ -34,6 +34,7 @@ import valkey
 from valkey.crc import key_slot
 
 from valkey_fuzzer.declarations import Declarations
+from valkey_fuzzer.deployment.local.queries import parse_info_text
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.protocols import component_artifact_dir
 from valkey_fuzzer.results import ComponentStatus, Evidence, make_evidence, make_result
@@ -45,7 +46,6 @@ from .instances import deployment, is_cluster
 from .polling import poll_until
 from .registration import component_registration
 from .schemas import INTEGER, LIST, TEXT, declared, mapping_of
-from .server import info_fields
 from .snapshots import instance_modules
 
 EVIDENCE = "valkey.command.metadata"
@@ -85,12 +85,7 @@ def read_metadata(info: Sequence[Any]) -> dict[str, dict[str, Any]]:
     ``COMMAND`` (RESP2): its ``arity``, ``flags``, ``range`` (first, last, step), and key ``specs``."""
 
     metadata = {}
-    entries = list(info)
-    while entries:
-        entry = entries.pop()
-        if len(entry) > 9 and entry[9]:
-            entries.extend(entry[9])
-            continue
+    for entry in command_table.command_entries(info):
         specs = []
         for flat in entry[8] if len(entry) > 8 else ():
             spec = command_table.pairs(flat)
@@ -345,7 +340,7 @@ class _Run:
             digest = checks.ask(self.side, 0, "DEBUG", "DIGEST")
         if "reply" not in info or "reply" not in digest:
             return None
-        fields = info_fields(info["reply"])
+        fields = parse_info_text(info["reply"])
         return {
             "digest": digest["reply"],
             "master_repl_offset": fields.get("master_repl_offset"),
@@ -560,7 +555,7 @@ class CommandMetadataOracle:
             return f"REPLICAOF failed on the replica: {sent.get('error')}"
 
         def linked() -> tuple[bool, Any]:
-            fields = info_fields(checks.ask(side, 1, "INFO", "replication").get("reply", ""))
+            fields = parse_info_text(checks.ask(side, 1, "INFO", "replication").get("reply", ""))
             return fields.get("master_link_status") == "up", fields.get("master_link_status")
 
         done, status = poll_until(linked, timeout_s=checks.SYNC_TIMEOUT_S, interval_s=0.05, context=context)

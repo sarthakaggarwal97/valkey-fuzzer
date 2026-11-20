@@ -3,7 +3,7 @@
 ``PrivateServer`` starts a throwaway server on a unix socket (no TCP port) for
 capability probes and RDB reloads; ``binary_version`` reads what a binary
 reports about itself; ``server_identity`` and ``instance_role`` read what a
-running instance reports, and ``info_fields`` parses an INFO reply's text.
+running instance reports.
 """
 
 import os
@@ -16,36 +16,14 @@ from typing import Any, Optional
 
 import valkey
 
-from valkey_fuzzer.deployment.local.processes import kill_server, version_env
-from valkey_fuzzer.deployment.local.queries import parse_replication, replication_role
+from valkey_fuzzer.deployment.local.processes import kill_server, parse_version_output, version_output
+from valkey_fuzzer.deployment.local.queries import close_quietly, parse_replication, replication_role
 from valkey_fuzzer.deployment.local.server_config import arguments_for_build
 from valkey_fuzzer.hoststate import server_tag_arguments, tag_directory
 
 from ..deadlines import wait_for
-from .instances import close_quietly, replication_info
+from .instances import replication_info
 from .polling import remaining
-
-_VERSION_RE = re.compile(r"\bv=(\S+)")
-_SHA_RE = re.compile(r"sha=([0-9a-f]{7,40}):", re.IGNORECASE)
-
-
-def parse_version_output(output: str) -> dict[str, Optional[str]]:
-    """``{version, git_sha}`` from ``valkey-server --version`` output."""
-
-    version = _VERSION_RE.search(output)
-    sha = _SHA_RE.search(output)
-    return {"version": version.group(1) if version else None, "git_sha": sha.group(1).lower() if sha else None}
-
-
-def version_output(binary: str) -> str:
-    """The raw ``--version`` output of ``binary``; raises ``RuntimeError`` if it cannot run."""
-
-    try:
-        return subprocess.run(
-            [binary, "--version"], capture_output=True, text=True, timeout=10, check=True, env=version_env()
-        ).stdout
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise RuntimeError(f"cannot run {binary} --version: {exc}") from exc
 
 
 def binary_version(binary: str) -> dict[str, Optional[str]]:
@@ -61,13 +39,6 @@ def version_tuple(text: str) -> tuple[int, ...]:
     """``"8.1.2"`` -> ``(8, 1, 2)``; empty when ``text`` has no digits."""
 
     return tuple(int(part) for part in re.findall(r"\d+", text)[:3])
-
-
-def info_fields(reply: Any) -> dict[str, str]:
-    """The ``name:value`` fields of an INFO or CLUSTER INFO ``reply`` as a raw connection records it (the server's
-    text; a record's missing reply, as ``""``, has none)."""
-
-    return dict(line.split(":", 1) for line in str(reply).split() if ":" in line)
 
 
 def server_identity(info: Mapping[str, Any]) -> dict[str, Any]:
@@ -254,15 +225,3 @@ def config_value(value: str) -> str:
     return (
         '"' + "".join(escapes.get(char, char if char.isprintable() else f"\\x{ord(char):02x}") for char in value) + '"'
     )
-
-
-def server_arguments(config: Mapping[str, Any]) -> list[str]:
-    """Render ``{option: value}`` as valkey-server command-line arguments."""
-
-    arguments: list[str] = []
-    for option, raw in config.items():
-        for value in raw if isinstance(raw, (list, tuple)) else (raw,):
-            if isinstance(value, bool):
-                value = "yes" if value else "no"
-            arguments.extend((f"--{option}", str(value)))
-    return arguments

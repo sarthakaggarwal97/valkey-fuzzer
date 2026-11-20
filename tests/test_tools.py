@@ -331,7 +331,7 @@ def test_an_older_builds_tools_are_found_by_its_servers_prefix(builds):
         ({"runs": [{"tool": "valkey-cli", "expect": {"status": {"equals": 0}}}]}, "status"),
         ({"files": {"../x": "a"}, "runs": [{"tool": "valkey-cli"}]}, "plain file name"),
         ({"files": {"x": 1}, "runs": [{"tool": "valkey-cli"}]}, "text or a !!binary"),
-        ({"ignore": ["("], "runs": [{"tool": "valkey-cli"}]}, "not a regular expression"),
+        ({"ignore": ["("], "runs": [{"tool": "valkey-cli"}]}, "not a valid regex"),
         ({"cluster": True, "runs": [{"tool": "valkey-cli"}]}, "cluster needs server"),
     ],
 )

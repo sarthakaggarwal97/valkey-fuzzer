@@ -19,7 +19,7 @@ from valkey_fuzzer.schema import ConfigField, ConfigSchema
 
 from .cluster import read_view, view_summary
 from .faults import FAULT_INJECTED, INJECTED_PAYLOAD
-from .instances import check_shard, deployment, wait_following
+from .instances import check_shard, deployment, running_instances, wait_following
 from .polling import poll_each, poll_until, remaining
 from .processes import pause_owned, stop_owned, wait_killed
 from .registration import component_registration
@@ -163,7 +163,7 @@ class ElectionAction:
         if winner is not None and config["wait_synced"]:
             record["replicas_synced"] = wait_following(context, handle, members, winner, config["timeout_s"])[1]
         handle.refresh_roles()
-        after = {instance_id: read_view(handle, instance_id) for instance_id in members if handle.is_alive(instance_id)}
+        after = {instance_id: read_view(handle, instance_id) for instance_id in running_instances(handle, members)}
         record["after"] = {instance_id: view_summary(view) for instance_id, view in after.items()}
         record["winner"] = winner
         record["winner_config_epoch"] = (after.get(winner) or {}).get("config_epoch") if winner else None
@@ -227,7 +227,7 @@ class ElectionAction:
         def seen() -> tuple[bool, tuple[dict[str, Any], list[str], list[str]]]:
             polled = poll_each(
                 context,
-                [instance_id for instance_id in members if handle.is_alive(instance_id)],
+                running_instances(handle, members),
                 lambda instance_id: _answered(read_view(handle, instance_id)),
                 timeout_s=max(0.0, deadline - time.monotonic()),
             )

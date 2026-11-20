@@ -40,6 +40,7 @@ from valkey_fuzzer._data import to_plain_data
 from valkey_fuzzer.clock import now
 from valkey_fuzzer.declarations import Declarations
 from valkey_fuzzer.deployment.local import processes
+from valkey_fuzzer.deployment.local.queries import close_quietly
 from valkey_fuzzer.deployment.local.server_config import (
     CLUSTER_DEFAULT_SERVER_CONFIG,
     DEFAULT_SERVER_CONFIG,
@@ -50,7 +51,7 @@ from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
 from valkey_fuzzer.schema import ConfigField
 
-from .instances import close_quietly, deployment
+from .instances import deployment
 from .polling import StoppableThread
 from .registration import component_registration
 from .schemas import INTEGER, LIST, declared, mapping_of

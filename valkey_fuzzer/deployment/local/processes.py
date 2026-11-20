@@ -72,8 +72,9 @@ _COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 # CLUSTER NODES flags of a node its peers do not count on.
 _UNHEALTHY_FLAGS = frozenset({"fail", "fail?", "handshake", "noaddr"})
 
-# Matches the `sha=<hex>:<dirty>` field from `valkey-server --version`.
+# The version and the `sha=<hex>:<dirty>` field of `valkey-server --version`.
 # Example output: "Valkey server v=8.1.0 sha=abc1234:0 malloc=jemalloc-5.3.0 ..."
+_VERSION_RE = re.compile(r"\bv=(\S+)")
 _VERSION_SHA_RE = re.compile(r"sha=([0-9a-f]{7,40}):", re.IGNORECASE)
 
 
@@ -190,6 +191,25 @@ def version_env() -> dict[str, str]:
     return env
 
 
+def version_output(binary: str) -> str:
+    """The raw ``--version`` output of ``binary``; raises ``RuntimeError`` if it cannot run."""
+
+    try:
+        return subprocess.run(
+            [binary, "--version"], capture_output=True, text=True, timeout=10, check=True, env=version_env()
+        ).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"cannot run {binary} --version: {exc}") from exc
+
+
+def parse_version_output(output: str) -> dict[str, Optional[str]]:
+    """``{version, git_sha}`` from ``valkey-server --version`` output."""
+
+    version = _VERSION_RE.search(output)
+    sha = _VERSION_SHA_RE.search(output)
+    return {"version": version.group(1) if version else None, "git_sha": sha.group(1).lower() if sha else None}
+
+
 def detect_valkey_sha(binary: str) -> Optional[str]:
     """Return the git SHA the binary was built from, or None if unavailable.
 
@@ -198,24 +218,11 @@ def detect_valkey_sha(binary: str) -> Optional[str]:
     None so callers don't try to clone an all-zero commit.
     """
     try:
-        out = subprocess.run(
-            [binary, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=True,
-            env=version_env(),
-        ).stdout
-    except (OSError, subprocess.SubprocessError) as exc:
-        logger.debug("Could not run %s --version: %s", binary, exc)
+        sha = parse_version_output(version_output(binary))["git_sha"]
+    except RuntimeError as exc:
+        logger.debug("%s", exc)
         return None
-    m = _VERSION_SHA_RE.search(out)
-    if not m:
-        return None
-    sha = m.group(1).lower()
-    if set(sha) == {"0"}:
-        return None
-    return sha
+    return None if sha is None or set(sha) == {"0"} else sha
 
 
 def resolve_binary_path(configured_binary: str, label: str = "valkey_binary") -> str:

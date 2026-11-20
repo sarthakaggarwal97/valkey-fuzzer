@@ -31,7 +31,12 @@ from valkey._parsers.base import SERVER_CLOSED_CONNECTION_ERROR
 from valkey_fuzzer._data import canonical_json
 from valkey_fuzzer.declarations import Declarations
 from valkey_fuzzer.deployment.local.ports import ephemeral_port_range
-from valkey_fuzzer.deployment.local.server_config import MANAGED_SERVER_OPTIONS, canonicalize_server_config
+from valkey_fuzzer.deployment.local.queries import parse_info_text
+from valkey_fuzzer.deployment.local.server_config import (
+    MANAGED_SERVER_OPTIONS,
+    build_server_config_arguments,
+    canonicalize_server_config,
+)
 from valkey_fuzzer.hoststate import OWNER_FILE
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.protocols import component_artifact_dir
@@ -41,12 +46,13 @@ from valkey_fuzzer.schema import BASE64_KEY, ConfigError, ConfigField, plain_con
 from .actions import _matches
 from .capabilities import Probed, resolve_binary, starts_with
 from .instances import deployment, select_instances
+from .keyspace import exact
 from .oracles import CRASH_PATTERNS, crash_cause, fatal_exit, scan_for_crashes
 from .polling import poll_until
 from .predicates import PREDICATE_FIELDS, validate_predicate
 from .registration import component_registration
 from .schemas import FLAG, INTEGER, TEXT, declared, mapping_of, optional
-from .server import PrivateServer, info_fields, server_arguments
+from .server import PrivateServer
 
 _COMPARE_MODES = ("equal", "unordered", "unordered-pairs", "json", "skip")
 _MAX_NODES = 6
@@ -367,27 +373,18 @@ def _packed(arguments: Sequence[Any]) -> bytes:
     return b"*%d\r\n" % len(parts) + b"".join(b"$%d\r\n%s\r\n" % (len(part), part) for part in parts)
 
 
-def text(value: bytes) -> Any:
-    """A bulk string as the evidence records it: the string when it is valid UTF-8, else ``{"$base64": ...}``."""
-
-    try:
-        return value.decode("utf-8")
-    except UnicodeDecodeError:
-        return {BASE64_KEY: base64.b64encode(value).decode("ascii")}
-
-
 def raw_reply(value: Any) -> Any:
-    """A reply as the connection parsed it, as JSON data: bytes through :func:`text`, a RESP3 set sorted, an
-    error inside an array (a transaction's) as ``{"$error": ...}``, and nothing reshaped."""
+    """A reply as the connection parsed it, as JSON data: bytes through :func:`~.keyspace.exact`, a RESP3 set
+    sorted, an error inside an array (a transaction's) as ``{"$error": ...}``, and nothing reshaped."""
 
     if isinstance(value, bytes):
-        return text(value)
+        return exact(value)
     if isinstance(value, (list, tuple)):
         return [raw_reply(item) for item in value]
     if isinstance(value, (set, frozenset)):
         return sorted((raw_reply(item) for item in value), key=canonical_json)
     if isinstance(value, Mapping):
-        keys = ((text(key) if isinstance(key, bytes) else key) for key in value)
+        keys = ((exact(key) if isinstance(key, bytes) else key) for key in value)
         return {
             (f"{BASE64_KEY}:{key[BASE64_KEY]}" if isinstance(key, dict) else str(key)): raw_reply(item)
             for key, item in zip(keys, value.values())
@@ -814,7 +811,7 @@ class Side:
 
         for index, node in enumerate(self.nodes):
             for attempt in range(_START_ATTEMPTS):
-                arguments = server_arguments({**server_config, **self.options, **node.options})
+                arguments = build_server_config_arguments({**server_config, **self.options, **node.options})
                 node.server = PrivateServer(
                     self.binary, arguments, timeout_s=_START_TIMEOUT_S, prefix="vfc-", files=files, config_file=True
                 )
@@ -875,7 +872,7 @@ class Side:
 
             def formed(node: _Node = node) -> tuple[bool, Any]:
                 info = node.connections["main"].send(["CLUSTER", "INFO"])
-                fields = info_fields(info.get("reply", ""))
+                fields = parse_info_text(info.get("reply", ""))
                 ready = fields.get("cluster_state") == "ok" and fields.get("cluster_known_nodes") == str(
                     len(self.nodes)
                 )
@@ -911,7 +908,7 @@ class Side:
 
             def settled() -> tuple[bool, str]:
                 info = self.connection(index, "main").send(["CLUSTER", "INFO"])
-                fields = info_fields(info.get("reply", ""))
+                fields = parse_info_text(info.get("reply", ""))
                 return fields.get("cluster_state") == "ok", fields.get("cluster_state") or str(info)
 
             done, state = poll_until(settled, timeout_s=self.timeout_s, interval_s=0.1, context=context)
@@ -1460,27 +1457,24 @@ def reply_at(replies: Sequence[Mapping[str, Any]], index: int) -> Optional[dict[
     return next((without_index(record) for record in replies if record["index"] == index), None)
 
 
-def _violations(commands: Sequence[Mapping[str, Any]], replies: Sequence[Mapping[str, Any]]) -> list[str]:
-    """The answered replies that violate their command's ``expect``, described."""
-
-    return [
-        f"command {record['index']} ({step_text(commands[record['index']])}) replied "
-        f"{canonical_json(without_index(record))}, not {canonical_json(plain_config(commands[record['index']]['expect']))}"
-        for record in replies
-        if not record.get("unanswered")
-        and not _sequence_matches(commands[record["index"]]["expect"], record, commands[record["index"]]["compare"])
-    ]
-
-
 def _violating(commands: Sequence[Mapping[str, Any]], replies: Sequence[Mapping[str, Any]]) -> list[int]:
-    """The indexes of the answered replies that violate their command's ``expect``, in the order of
-    :func:`_violations`."""
+    """The indexes of the answered replies that violate their command's ``expect``."""
 
     return [
         record["index"]
         for record in replies
         if not record.get("unanswered")
         and not _sequence_matches(commands[record["index"]]["expect"], record, commands[record["index"]]["compare"])
+    ]
+
+
+def _violations(commands: Sequence[Mapping[str, Any]], replies: Sequence[Mapping[str, Any]]) -> list[str]:
+    """The answered replies that violate their command's ``expect``, described, in the order of :func:`_violating`."""
+
+    return [
+        f"command {index} ({step_text(commands[index])}) replied "
+        f"{canonical_json(reply_at(replies, index))}, not {canonical_json(plain_config(commands[index]['expect']))}"
+        for index in _violating(commands, replies)
     ]
 
 
@@ -1677,7 +1671,6 @@ __all__ = [
     "reply_at",
     "run_sequence",
     "step_text",
-    "text",
     "validate_sequence_command",
     "without_index",
 ]

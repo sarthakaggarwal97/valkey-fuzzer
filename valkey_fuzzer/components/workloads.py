@@ -51,6 +51,7 @@ from typing import Any, Optional
 import valkey
 
 from valkey_fuzzer.declarations import Declarations
+from valkey_fuzzer.deployment.local.queries import close_quietly
 from valkey_fuzzer.hoststate import owner_tag
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.protocols import component_artifact_dir
@@ -60,7 +61,8 @@ from valkey_fuzzer.schema import ConfigError, ConfigField, ConfigSchema
 from ..clock import now
 from ..deadlines import WaitInterruptedError
 from .files import write_jsonl
-from .instances import close_quietly, deployment, is_cluster, select_instances
+from .instances import deployment, is_cluster, select_instances
+from .keyspace import batches
 from .polling import StoppableThread, poll_until
 from .registration import component_registration
 from .schemas import FLAG, INTEGER, LIST, MAPPING, NUMBER, TEXT, declared, mapping_of, nullable, optional
@@ -477,18 +479,10 @@ class KeyValueWorkload:
 
         for index, key in enumerate(keys):
             client = self._target.connect()
-            digest = hashlib.sha256()
-            chunk: list[str] = []
-            for element in list_elements(index, length, size):
-                digest.update(element.encode("utf-8"))
-                digest.update(b"\0")
-                chunk.append(element)
-                if len(chunk) == batch:
-                    client.rpush(key, *chunk)
-                    chunk = []
-            if chunk:
+            for chunk in batches(list_elements(index, length, size), batch):
                 client.rpush(key, *chunk)
-            self._lists.append({"key": key, "length": length, "digest": digest.hexdigest()})
+            digest = list_digest(list_elements(index, length, size))
+            self._lists.append({"key": key, "length": length, "digest": digest})
 
     def _read_list(self, op: str, key: str, op_rng: random.Random, config: dict[str, Any], target: _Target) -> str:
         """Pipeline ``list_read_batch`` reads of ``key``; ``ok`` when every reply came back, else ``failed``."""

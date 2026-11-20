@@ -7,7 +7,7 @@ from typing import Any, Optional
 import valkey
 
 from valkey_fuzzer.deployment.local.cluster_nodes import parse_cluster_nodes, parse_slot_ranges
-from valkey_fuzzer.deployment.local.queries import parse_cluster_info
+from valkey_fuzzer.deployment.local.queries import parse_info_text
 
 
 def parse_slots(tokens: Sequence[str]) -> list[list[int]]:
@@ -32,7 +32,7 @@ def parse_cluster_view(info_reply: Any, nodes_reply: Any) -> dict[str, Any]:
     primary it knows (slots as ranges), and under ``nodes`` its CLUSTER NODES as parsed, for
     :func:`~valkey_fuzzer.deployment.local.cluster_nodes.split_slots`."""
 
-    info = parse_cluster_info(info_reply)
+    info = parse_info_text(info_reply)
     nodes = parse_cluster_nodes(nodes_reply)
     myself = next((node for node in nodes if node["is_myself"]), None)
     if myself is None:

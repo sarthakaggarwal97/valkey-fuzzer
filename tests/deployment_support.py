@@ -14,7 +14,7 @@ from valkey_fuzzer.deployment.local.formation import Formation
 from valkey_fuzzer.deployment.local.models import DeploymentConfig, DeploymentMode, InstanceInfo
 from valkey_fuzzer.deployment.local.planner import plan_deployment
 from valkey_fuzzer.deployment.local.processes import ProcessManager
-from valkey_fuzzer.deployment.local.queries import parse_cluster_info, parse_replication
+from valkey_fuzzer.deployment.local.queries import parse_info_text, parse_replication
 from valkey_fuzzer.deployment.local.topology import DeploymentConnection, TopologyNode
 from valkey_fuzzer.deployment.local.validation.snapshot import Snapshot
 
@@ -244,6 +244,6 @@ def snapshot_of(
         instances=list(instances),
         rows=list(rows),
         replication={f"127.0.0.1:{port}": parse_replication(info) for port, info in (replication or {}).items()},
-        cluster_info={f"127.0.0.1:{port}": parse_cluster_info(text) for port, text in (cluster_info or {}).items()},
+        cluster_info={f"127.0.0.1:{port}": parse_info_text(text) for port, text in (cluster_info or {}).items()},
         cluster_nodes={f"127.0.0.1:{port}": view for port, view in views.items()},
     )

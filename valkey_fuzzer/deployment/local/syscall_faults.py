@@ -9,6 +9,7 @@ passes every call through.
 import hashlib
 import os
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 
 from .models import LocalDeploymentError
@@ -44,16 +45,20 @@ def build_library(directory: str) -> str:
     return path
 
 
-def server_environment(library: str, rules: str) -> dict[str, str]:
-    """The environment of a server that loads ``library`` and reads its rules from ``rules``.
+def preload(env: Mapping[str, str], library: str) -> dict[str, str]:
+    """``env`` with ``library`` appended to its preload list. A gcc AddressSanitizer build links its runtime
+    dynamically and refuses to start behind another preloaded library, though the runtime still intercepts what it
+    must, so that check is turned off (once, however many libraries are preloaded)."""
 
-    A gcc AddressSanitizer build links its runtime dynamically and refuses to start when another library comes
-    first in the preload list; the runtime still intercepts what it must with the library first, so that check
-    is turned off.
-    """
-
-    env = dict(os.environ)
+    env = dict(env)
     env["LD_PRELOAD"] = " ".join(part for part in (env.get("LD_PRELOAD", ""), library) if part)
-    env[RULE_DIR_ENV] = rules
-    env["ASAN_OPTIONS"] = ":".join(part for part in (env.get("ASAN_OPTIONS", ""), "verify_asan_link_order=0") if part)
+    options = env.get("ASAN_OPTIONS", "")
+    if "verify_asan_link_order=0" not in options:
+        env["ASAN_OPTIONS"] = ":".join(part for part in (options, "verify_asan_link_order=0") if part)
     return env
+
+
+def server_environment(library: str, rules: str) -> dict[str, str]:
+    """The environment of a server that loads ``library`` (:func:`preload`) and reads its rules from ``rules``."""
+
+    return {**preload(os.environ, library), RULE_DIR_ENV: rules}

@@ -16,10 +16,10 @@ from valkey_fuzzer.results import ComponentStatus, Evidence, evidence_of, make_e
 from valkey_fuzzer.schema import ConfigError, ConfigField, plain_config
 
 from .files import LOG_LINE
-from .instances import deployment, stopped_on_purpose
+from .instances import deployment, read_each, running_instances, stopped_on_purpose
 from .observers import FORBIDDEN_LOG_MATCH
 from .polling import poll_each
-from .registration import component_registration
+from .registration import component_registration, validate_regex
 from .schemas import FLAG, LIST, MAPPING, TEXT, declared, mapping_of, optional
 from .server import binary_version, server_identity
 
@@ -51,10 +51,7 @@ _LIVENESS_FIELDS = {
 
 def _validate_liveness(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -> None:
     for index, pattern in enumerate(config["extra_crash_patterns"]):
-        try:
-            re.compile(pattern)
-        except re.error as exc:
-            raise ConfigError(f"extra_crash_patterns[{index}] is not a valid regex: {exc}") from exc
+        validate_regex(pattern, f"extra_crash_patterns[{index}]")
 
 
 def scan_for_crashes(paths: dict[str, str], patterns: Sequence[str]) -> dict[str, list[str]]:
@@ -242,9 +239,7 @@ class LivenessOracle:
                     return False, f"{type(exc).__name__}: {exc}"
 
         ids = [instance.instance_id for instance in handle.instances]
-        polled = poll_each(
-            context, [item for item in ids if handle.is_alive(item)], responsive, timeout_s=config["timeout_s"]
-        )
+        polled = poll_each(context, running_instances(handle), responsive, timeout_s=config["timeout_s"])
         stopped = stopped_on_purpose(handle, evidence)
         status = {
             item: polled[item][1]
@@ -492,17 +487,8 @@ class BinaryCheckOracle:
         config = spec.config
         handle = deployment(context)
 
-        def read(instance_id: str) -> tuple[bool, Any]:
-            with handle.new_client(instance_id, timeout=5.0) as client:
-                try:
-                    return True, client.info("server")
-                except Exception as exc:
-                    return False, f"{type(exc).__name__}: {exc}"
-
         ids = [instance.instance_id for instance in handle.instances]
-        polled = poll_each(
-            context, [item for item in ids if handle.is_alive(item)], read, timeout_s=_BINARY_READ_TIMEOUT_S
-        )
+        polled = read_each(context, handle, lambda client: client.info("server"), timeout_s=_BINARY_READ_TIMEOUT_S)
         unread = {instance_id: value for instance_id, (answered, value) in polled.items() if not answered}
         unchecked = [item for item in ids if item not in polled or item in unread]
         expected_by_binary: dict[str, dict[str, Optional[str]]] = {}

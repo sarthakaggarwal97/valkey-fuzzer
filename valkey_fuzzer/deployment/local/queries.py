@@ -155,8 +155,9 @@ def query_replication(client: valkey.Valkey) -> Replication:
     return parse_replication(client.info("replication"))
 
 
-def parse_cluster_info(response: object) -> dict[str, str]:
-    """Parse CLUSTER INFO output from raw or mapping-based client responses."""
+def parse_info_text(response: object) -> dict[str, str]:
+    """The ``name:value`` fields of an INFO or CLUSTER INFO ``response``: the server's text (one field per line;
+    a missing reply, as ``""``, has none), or the mapping a decoding client made of it, as text."""
     if isinstance(response, Mapping):
         return {
             response_text(key).strip(): response_text(value).strip()
@@ -178,7 +179,7 @@ def parse_cluster_info(response: object) -> dict[str, str]:
 
 def query_cluster_info(client: valkey.Valkey) -> dict[str, str]:
     """Query the canonical CLUSTER INFO command and normalize its response."""
-    return parse_cluster_info(client.execute_command("CLUSTER", "INFO"))
+    return parse_info_text(client.execute_command("CLUSTER", "INFO"))
 
 
 @contextmanager
@@ -194,11 +195,18 @@ def valkey_client(host: str, port: int, timeout: float, decode_responses: bool =
         )
         yield client
     finally:
+        close_quietly(client)
+
+
+def close_quietly(*clients: Any) -> None:
+    """Close every client that is not None; a connection that is already gone is not an error."""
+
+    for client in clients:
         if client is not None:
             try:
                 client.close()
             except Exception:
-                pass  # Ignore errors during cleanup
+                pass
 
 
 def query_or_none(host: str, port: int, timeout: float, query: Callable[[valkey.Valkey], T]) -> Optional[T]:

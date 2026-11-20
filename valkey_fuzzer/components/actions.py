@@ -18,7 +18,7 @@ import valkey
 from valkey_fuzzer._data import jsonable
 from valkey_fuzzer.clock import now
 from valkey_fuzzer.declarations import Declarations
-from valkey_fuzzer.deployment.local.queries import replication_role
+from valkey_fuzzer.deployment.local.queries import close_quietly, replication_role
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.protocols import component_artifact_dir
 from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
@@ -26,13 +26,13 @@ from valkey_fuzzer.schema import ConfigError, ConfigField, ConfigSchema
 
 from .instances import (
     check_shard,
-    close_quietly,
     deployment,
     graceful_failover,
     is_cluster,
     select_instance,
     select_instances,
     send_to,
+    shard_primary,
     wait_following,
 )
 from .polling import poll_until, read_retrying, remaining
@@ -432,14 +432,7 @@ class FailoverAction:
         target = f"shard-{shard}-primary"
         roles = handle.roles()
         # The primary that may lose acknowledged writes to a forced failover.
-        primary_before = next(
-            (
-                instance.instance_id
-                for instance in handle.instances
-                if instance.shard_id == shard and roles.get(instance.instance_id) == "primary"
-            ),
-            None,
-        )
+        primary_before = shard_primary(handle, shard, roles)
         started_at = now()
         ok = handle.failover(
             shard,

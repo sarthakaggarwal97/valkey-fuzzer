@@ -30,7 +30,7 @@ from .models import (
     LocalDeploymentError,
 )
 from .processes import ProcessManager, kill_server, process_output_path, resolve_binary_path
-from .queries import Replication, query_or_none, query_replication, valkey_client, wait_until
+from .queries import Replication, close_quietly, query_or_none, query_replication, valkey_client, wait_until
 from .topology import DeploymentConnection
 from .validation.check import DeploymentStateCheck, adapt_validation_config, scenario_rng
 from .validation.config import validation_config_from_document
@@ -240,11 +240,7 @@ class ValkeyDeploymentService:
         self._close_clients()
 
     def _close_clients(self) -> None:
-        for client in list(self._clients):
-            try:
-                client.close()
-            except Exception:  # pragma: no cover - best effort
-                pass
+        close_quietly(*self._clients)
         self._clients.clear()
 
     def _info(self, instance_id: str) -> InstanceInfo:
