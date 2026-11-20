@@ -232,8 +232,8 @@ def _tla_jar():
 @pytest.mark.slow
 @pytest.mark.skipif(not _tla_jar() or not shutil.which("java"), reason="needs java and TLA2TOOLS_JAR")
 def test_a_cancel_after_the_grant_leaves_two_writers():
-    from valkey_fuzzer.spec import TlaTools
     from valkey_fuzzer.spec.check import run_control
+    from valkey_fuzzer.spec.tla import TlaTools
 
     bundle = load_bundle("slot-migration")
     result, _ = run_control(bundle, bundle.control("cancel_unpauses"), TlaTools.locate(_tla_jar(), workers="1"))
@@ -247,8 +247,8 @@ def test_a_cancel_after_the_grant_leaves_two_writers():
 @pytest.mark.slow
 @pytest.mark.skipif(not _tla_jar() or not shutil.which("java"), reason="needs java and TLA2TOOLS_JAR")
 def test_a_replica_promoted_without_the_claim_deletes_the_imported_slot():
-    from valkey_fuzzer.spec import TlaTools
     from valkey_fuzzer.spec.check import run_control
+    from valkey_fuzzer.spec.tla import TlaTools
 
     bundle = load_bundle("slot-migration")
     result, _ = run_control(bundle, bundle.control("replica_misses_claim"), TlaTools.locate(_tla_jar(), workers="1"))

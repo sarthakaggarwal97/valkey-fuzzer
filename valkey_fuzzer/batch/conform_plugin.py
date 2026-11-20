@@ -9,9 +9,6 @@ way; without TLC a bundle that needs it is skipped, or an error if its claims ar
 formed here: for a bundle whose claims are approved, a claimed property violated on the run's observed states
 fails the run, and a check that could not decide is an ERROR; a draft's findings are only reported. The summary
 writes ``conformance/<bundle>.json`` and a digest of it, claimed violations first.
-
-:mod:`~valkey_fuzzer.spec.conform` is imported where it is used, never when this module loads: registering the
-plug-in leaves the spec bridge's tools unloaded for a batch whose runs name no bundle.
 """
 
 import os
@@ -22,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Optional
 from ..minimize import verdict_clauses
 from ..reports import write_document
 from ..spec.bundle import SpecBundleError, load_bundle
+from ..spec.conform import CHECKED_RUN_STATUSES, conform_run, describe, plan_bundles, summarize
 from .hooks import BatchPlugin
 from .results import Verdict, read_json
 from .spec import BatchOptions, worst
@@ -49,8 +47,6 @@ def _conform(report_dir: str, timeout_s: float) -> None:
     """Print the run's own conform results, or, for a run whose report has none, check it now and write
     ``conform.json``: the run against every spec bundle its plan names, with TLC for at most ``timeout_s``
     (:func:`~valkey_fuzzer.spec.conform.conform_run`)."""
-
-    from ..spec.conform import conform_run, describe
 
     try:
         report = read_json(os.path.join(report_dir, "report.json"))
@@ -82,8 +78,6 @@ def _conformance(run_dir: str, report: Optional[Mapping[str, Any]]) -> dict[str,
             problem = f"{CONFORMANCE_FILE} cannot be read: {exc}"
     else:
         problem = f"no {CONFORMANCE_FILE}: the worker ended before spec conform checked the run"
-    from ..spec.conform import CHECKED_RUN_STATUSES, plan_bundles
-
     if report is None or report.get("status") not in CHECKED_RUN_STATUSES:
         return {}
     plan = (report.get("outcome") or {}).get("plan") or {}
@@ -154,8 +148,6 @@ class ConformancePlugin(BatchPlugin):
         """For each spec bundle the runs' plans name (zoo runs and serial re-runs left out, as from ``counts``):
         its conform report over the runs checked against it, written to ``conformance/<bundle>.json``, and a
         digest of it, claimed violations first."""
-
-        from ..spec.conform import summarize
 
         by_bundle: dict[str, list[dict[str, Any]]] = {}
         for result in main:

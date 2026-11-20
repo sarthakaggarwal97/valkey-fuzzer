@@ -505,8 +505,8 @@ without one goes without:
 Several providers may implement one mode. A scenario then selects one with
 `deployment.provider`, and may leave it out when only one is registered.
 `local_deployment_provider_registrations()` in
-`valkey_fuzzer/deployment/local/provider.py` registers the local deployment's
-providers, one per mode.
+`valkey_fuzzer/deployment/local/provider.py` builds the local deployment's
+providers, one per mode; the `valkey` pack registers them.
 
 ## Register components and experiments
 
@@ -520,6 +520,7 @@ the `valkey` entry point of the `valkey_fuzzer.packs` group, registers what
 | components | `REGISTRATIONS` of each module that `_MODULES` in `components/__init__.py` names |
 | generator hooks | `GENERATORS` in `components/generators.py` |
 | artifact and resource providers | `ENVIRONMENT_PROVIDERS` in `components/providers.py` |
+| deployment providers | `local_deployment_provider_registrations()` in `valkey_fuzzer/deployment/local/provider.py` |
 | experiment fragments | `components/fragments/<name>.yaml`, named after the file |
 | experiments | `components/experiments/<id>.yaml`; each also extends `valkey.liveness` |
 
@@ -568,9 +569,9 @@ appear in a plan. `valkey-fuzzer list generators` prints them.
 
 A pack is a Python package of your own that adds components, providers,
 fragments, generator hooks, and experiments, with no edit to the fuzzer.
-Every command, and every batch worker, builds its catalog the same way: the
-local deployment providers, then each installed pack, then the
-`--experiment-dir` directories. A pack is an entry point of the
+Every command, and every batch worker, builds its catalog the same way: each
+installed pack (the `valkey` pack brings the local deployment providers),
+then the `--experiment-dir` directories. A pack is an entry point of the
 `valkey_fuzzer.packs` group whose value is a `register(catalog)` function;
 packs run in entry-point name order.
 

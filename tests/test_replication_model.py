@@ -239,7 +239,8 @@ def _tla_jar():
 @pytest.mark.slow
 @pytest.mark.skipif(not _tla_jar() or not shutil.which("java"), reason="needs java and TLA2TOOLS_JAR")
 def test_conform_checks_same_offset_same_data_on_sampled_runs(tmp_path):
-    from valkey_fuzzer.spec import TlaTools, conform_runs
+    from valkey_fuzzer.spec.conform import conform_runs
+    from valkey_fuzzer.spec.tla import TlaTools
 
     tools = TlaTools.locate(_tla_jar(), workers="1")
     bundle = load_bundle("replication")
@@ -272,8 +273,8 @@ def test_conform_checks_same_offset_same_data_on_sampled_runs(tmp_path):
 @pytest.mark.slow
 @pytest.mark.skipif(not _tla_jar() or not shutil.which("java"), reason="needs java and TLA2TOOLS_JAR")
 def test_a_promotion_before_continue_names_two_histories_with_one_id():
-    from valkey_fuzzer.spec import TlaTools
     from valkey_fuzzer.spec.check import run_control
+    from valkey_fuzzer.spec.tla import TlaTools
 
     bundle = load_bundle("replication")
     result, _ = run_control(bundle, bundle.control("keep_old_id_on_load"), TlaTools.locate(_tla_jar(), workers="1"))

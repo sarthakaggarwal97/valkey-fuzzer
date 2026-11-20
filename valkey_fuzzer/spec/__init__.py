@@ -12,38 +12,8 @@ tools over it:
 - :mod:`~valkey_fuzzer.spec.conform`: observed-state checks and action
   coverage of real runs (not refinement).
 
-The names below are imported on first use. The components read a bundle's
-mapping through :mod:`~valkey_fuzzer.spec.bundle`, so every run imports this
-package; the three tools, which need java and ``tla2tools.jar`` to do
-anything, are loaded only by the ``spec`` commands and a batch's conform step.
+Each name is imported from its module. Importing any of them needs no Java:
+the tools need java and ``tla2tools.jar`` only to run SANY or TLC, and
+without them a ``spec`` command, or a run's conform check, prints
+:data:`~valkey_fuzzer.spec.tla.TOOLS_HINT`.
 """
-
-import importlib
-from typing import Any
-
-_MODULE_OF = {
-    "Bundle": "bundle",
-    "SpecBundleError": "bundle",
-    "SpecMapping": "bundle",
-    "find_bundle": "bundle",
-    "load_bundle": "bundle",
-    "load_spec_mapping": "bundle",
-    "check_bundle": "check",
-    "collect_runs": "conform",
-    "conform_runs": "conform",
-    "TlaError": "tla",
-    "TlaTools": "tla",
-    "TranslateError": "translate",
-    "bundle_service": "translate",
-    "search_model": "translate",
-    "translate_trace": "translate",
-}
-
-__all__ = sorted(_MODULE_OF)
-
-
-def __getattr__(name: str) -> Any:
-    module = _MODULE_OF.get(name)
-    if module is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    return getattr(importlib.import_module(f".{module}", __name__), name)

@@ -145,13 +145,15 @@ so a report never holds a run-time path it did not declare.
 first use and keeps, with its compiler and runner (a `RunService` given a
 catalog, as the testing helpers build one, uses that one instead):
 
-1. it registers the local deployment provider for `standalone` and `cluster`
-   (`valkey-fuzzer.deployment.local`);
+1. it registers the deployment providers its caller passes, if any (the
+   core ships none of its own);
 2. each installed pack (an entry point of the `valkey_fuzzer.packs` group,
    in name order; the Valkey components are the `valkey` pack) registers its
-   components, generator hooks, artifact and resource providers, fragments,
-   and experiments as one transaction: every entry is validated before
-   anything changes, so a conflict leaves the catalog untouched;
+   components, generator hooks, artifact and resource providers, deployment
+   providers (the `valkey` pack's are the local deployment's for `standalone`
+   and `cluster`, `valkey-fuzzer.deployment.local`), fragments, and
+   experiments as one transaction: every entry is validated before anything
+   changes, so a conflict leaves the catalog untouched;
 3. it parses the experiment directories, which can extend the packs'
    fragments;
 4. it freezes every registry.

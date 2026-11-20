@@ -1,9 +1,7 @@
 """``spec``: check a TLA+ bundle, translate its counterexamples into scenarios, and conform real runs to it.
 
-The three tools (:mod:`~valkey_fuzzer.spec.check`, :mod:`~valkey_fuzzer.spec.translate`,
-:mod:`~valkey_fuzzer.spec.conform`) are imported when a handler runs, not when the parser is built, so a command
-other than ``spec`` never loads them. Without java and ``tla2tools.jar`` a command that needs TLC prints
-:data:`~valkey_fuzzer.spec.tla.TOOLS_HINT` and exits 2.
+Without java and ``tla2tools.jar`` a command that needs TLC prints :data:`~valkey_fuzzer.spec.tla.TOOLS_HINT` and
+exits 2.
 """
 
 import argparse
@@ -18,7 +16,10 @@ import yaml
 from ..outcomes import EXIT_FAILURE, EXIT_HARNESS_ERROR, EXIT_SUCCESS
 from ..reports import write_document
 from ..spec.bundle import SPEC_PATH_VARIABLE, Bundle, SpecBundleError, load_bundle
+from ..spec.check import check_bundle, run_control
+from ..spec.conform import TRANSITIONS_UNCHECKED, collect_runs, conform_runs, needs_tlc
 from ..spec.tla import TOOLS_HINT, TlaError, TlaTools, config_model_values, read_tlc_output
+from ..spec.translate import TranslateError, bundle_service, search_model, translate_trace
 from ._common import add_common_options, positive_count, positive_seconds
 
 # How long one spec command may run SANY and TLC, unless --timeout says otherwise.
@@ -158,8 +159,6 @@ def _write(args: argparse.Namespace, report: dict[str, Any]) -> None:
 
 
 def check_command(args: argparse.Namespace) -> int:
-    from ..spec.check import check_bundle
-
     try:
         tools = _tools(args)
     except TlaError as exc:
@@ -200,9 +199,6 @@ def check_command(args: argparse.Namespace) -> int:
 
 
 def translate_command(args: argparse.Namespace) -> int:
-    from ..spec.check import run_control
-    from ..spec.translate import TranslateError, bundle_service, translate_trace
-
     searching = bool(args.reach or args.mutate)
     if (args.control or args.trace) and searching:
         print("Error: --reach and --mutate search the model on their own; leave out --control and --trace", file=sys.stderr)  # fmt: skip
@@ -307,8 +303,6 @@ def _found_by(source: Mapping[str, Any]) -> str:
 def _search(args: argparse.Namespace, bundle: Bundle, compile_scenario: Any) -> int:
     """``translate --reach``/``--mutate``: search the model, write every scenario, and report the search."""
 
-    from ..spec.translate import TranslateError, search_model
-
     try:
         tools = _tools(args)
     except TlaError as exc:
@@ -380,8 +374,6 @@ def _search(args: argparse.Namespace, bundle: Bundle, compile_scenario: Any) -> 
 
 
 def conform_command(args: argparse.Namespace) -> int:
-    from ..spec.conform import TRANSITIONS_UNCHECKED, collect_runs, conform_runs, needs_tlc
-
     bundle = load_bundle(args.bundle)
     transitions = not args.no_transitions and bundle.claims.transitions_excluded is None
     tools = None

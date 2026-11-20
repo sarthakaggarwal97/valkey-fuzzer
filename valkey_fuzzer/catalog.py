@@ -17,7 +17,6 @@ from types import MappingProxyType
 from typing import Any, Optional, TextIO, Union
 
 from ._data import freeze_mapping
-from .deployment.local.provider import local_deployment_provider_registrations
 from .documents import merge
 from .environment import EnvironmentProviderRegistration, EnvironmentProviderRegistry
 from .fields import (
@@ -532,18 +531,18 @@ def build_catalog(
     *,
     deployment_providers: Optional[Iterable[DeploymentProviderRegistration]] = None,
 ) -> Catalog:
-    """A frozen catalog: the deployment providers, every installed pack, then ``experiment_directories``.
+    """A frozen catalog: ``deployment_providers``, every installed pack, then ``experiment_directories``.
 
-    ``deployment_providers`` default to the local deployment's. Each pack's
+    The core registers no provider of its own: each pack registers the
+    providers it ships (the Valkey pack, the local deployment's), and
+    ``deployment_providers`` are the caller's, registered first. Each pack's
     ``register(catalog)`` runs in name order (:func:`installed_packs`). The
     experiment directories load last, since data-only experiments may extend
     a pack's experiment fragments.
     """
 
     catalog = Catalog()
-    if deployment_providers is None:
-        deployment_providers = local_deployment_provider_registrations().values()
-    catalog.deployment_providers.register_many(deployment_providers)
+    catalog.deployment_providers.register_many(deployment_providers or ())
     for register in installed_packs().values():
         register(catalog)
     catalog.load_experiment_directories(experiment_directories)

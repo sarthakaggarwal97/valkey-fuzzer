@@ -15,7 +15,7 @@ from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.results import ComponentStatus
 from valkey_fuzzer.schema import ConfigError
-from valkey_fuzzer.spec import SpecBundleError, load_bundle
+from valkey_fuzzer.spec.bundle import SpecBundleError, load_bundle
 
 REPLICATION = Path(__file__).resolve().parents[1] / "formal" / "replication"
 INFO = "# Replication\r\nrole:master\r\nmaster_replid:{}\r\nmaster_replid2:{}\r\nmaster_repl_offset:1234567890123456789012345678901234567890\r\n"
