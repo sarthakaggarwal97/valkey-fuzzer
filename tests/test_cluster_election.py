@@ -56,11 +56,14 @@ class FakeHandle(BaseHandle):
         replies = self.replies(node_id)
 
         class Client(FakeClient):
-            def config_get(self, name):
-                reply = replies.get(("CONFIG", name), "sync")
-                if isinstance(reply, Exception):
-                    raise reply
-                return {name: reply}
+            def config_get(self, *names):
+                values = {}
+                for name in names:
+                    reply = replies.get(("CONFIG", name), "sync")
+                    if isinstance(reply, Exception):
+                        raise reply
+                    values[name] = reply
+                return values
 
         return Client(self.commands.setdefault(node_id, []), replies)
 

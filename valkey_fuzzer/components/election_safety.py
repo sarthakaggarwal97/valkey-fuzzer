@@ -29,17 +29,16 @@ it, not as a failure; the checks the model does not claim (a win's quorum,
 a split primary) always fail the run.
 """
 
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Mapping, Sequence
-from typing import Any, Optional
+from typing import Any
 
 from valkey_fuzzer.declarations import Declarations
 from valkey_fuzzer.deployment.local.cluster_nodes import split_slots
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.results import ComponentStatus, Evidence, evidence_of, make_evidence, make_result
 from valkey_fuzzer.schema import ConfigError, ConfigField, plain_config
-from valkey_fuzzer.spec.bundle import Property, SpecBundleError, load_spec_claims
-from valkey_fuzzer.spec.tla import render
+from valkey_fuzzer.spec.bundle import SpecBundleError, claimed_under, derive_constants, load_spec_claims
 
 from .cluster import ranges_overlap, read_view, view_summary
 from .faults import FAULT_INJECTED
@@ -131,39 +130,6 @@ def win_epochs(
         else:
             unplaced.append(dict(win))
     return placed, unplaced
-
-
-def claim_constants(
-    mapping: Any, configs: Mapping[str, Mapping[str, Any]], unread: Sequence[str], inputs: Mapping[str, Any]
-) -> dict[str, str]:
-    """The model constants as ``spec conform`` derives them from a run, as TLA+ text: a pinned ``value``; a
-    ``config`` every node must equal (FALSE once one known setting differs, TRUE when every node's is read
-    and equals, else unknown and left out); a scenario ``input``. ``max_of`` constants are left out."""
-
-    values: dict[str, str] = {}
-    for name, spec in mapping.constants.items():
-        if "value" in spec:
-            values[name] = str(spec["value"])
-        elif "config" in spec:
-            seen = [node[spec["config"]] for node in configs.values() if spec["config"] in node]
-            if any(item != spec["equals"] for item in seen):
-                values[name] = render(False)
-            elif seen and not unread:
-                values[name] = render(True)
-        elif "input" in spec and spec["input"] in inputs:
-            values[name] = render(inputs[spec["input"]] == spec["equals"])
-    return values
-
-
-def claimed_under(prop: Optional[Property], constants: Mapping[str, str]) -> Optional[bool]:
-    """Whether ``prop`` is claimed under ``constants`` (its ``holds_when``); None when one it needs is unknown,
-    and True for a property the claims do not list (nothing conditions it)."""
-
-    if prop is None:
-        return True
-    if any(key not in constants for key in prop.holds_when):
-        return None
-    return prop.holds_under(constants)
 
 
 def votes_by_epoch(votes: Sequence[Mapping[str, Any]]) -> dict[tuple[str, int], set[str]]:
@@ -369,8 +335,13 @@ class ElectionSafetyOracle:
         )
         configs, unread_save = self._configs(context, handle, config["converge_timeout_s"], config_keys)
         save_behavior = {instance_id: values.get(_SAVE_BEHAVIOR) for instance_id, values in configs.items()}
-        # The constants spec conform derives for this run decide which claimed properties hold here.
-        constants = claim_constants(mapping, configs, unread_save, plain_config(context.plan.inputs))
+        # The constants spec conform derives for this run decide which claimed properties hold here; a node whose
+        # settings could not be read leaves every constant they decide unknown (unless another node's differs).
+        constants, unknown = derive_constants(
+            mapping,
+            {node.instance_id: configs.get(node.instance_id, {}) for node in handle.instances},
+            plain_config(context.plan.inputs),
+        )
         violations: dict[str, Any] = {}
         # Findings of a claimed property where the claim does not hold under the constants: reported, not failed.
         outside_claim: dict[str, Any] = {}
@@ -431,7 +402,7 @@ class ElectionSafetyOracle:
             for entry in view["primaries"]:
                 if entry["slots"]:
                     owners[entry["node_id"]] = entry["config_epoch"]
-        duplicate_epochs = sorted({epoch for epoch in owners.values() if list(owners.values()).count(epoch) > 1})
+        duplicate_epochs = sorted(epoch for epoch, owned in Counter(owners.values()).items() if owned > 1)
 
         record = {
             "save_behavior": save_behavior,
@@ -529,11 +500,12 @@ class ElectionSafetyOracle:
             )
         if unjudged:
             # The claim holds under constants a setting nobody could read decides: the finding may be a violation.
+            undecided = sorted({key for prop in claims.properties for key in prop.holds_when} & set(unknown))
             return make_result(
                 spec,
                 ComponentStatus.ERROR,
-                f"cannot tell whether {', '.join(sorted(unjudged))} break the claim: the setting of "
-                f"{', '.join(unread_save)} is unknown",
+                f"cannot tell whether {', '.join(sorted(unjudged))} break the claim: "
+                + "; ".join(f"{name} {unknown[name]}" for name in undecided),
                 diagnostics={**record, "unjudged": unjudged, "unread_save_behavior": unread_save},
             )
         if unplaced_wins:
@@ -587,10 +559,7 @@ class ElectionSafetyOracle:
         def read(instance_id: str) -> tuple[bool, Any]:
             with handle.new_client(instance_id, timeout=2.0) as client:
                 try:
-                    values: dict[str, Any] = {}
-                    for key in keys:
-                        values.update(client.config_get(key))
-                    return True, values
+                    return True, client.config_get(*keys)
                 except Exception:
                     return False, None
 
