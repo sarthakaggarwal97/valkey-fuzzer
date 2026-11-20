@@ -24,10 +24,34 @@ from valkey_fuzzer.schema import ConfigError
 
 
 class Iptables:
-    """Records iptables calls; ``fail`` maps (verb, nth call of that verb) to an error text or an exception."""
+    """Records iptables calls; ``fail`` maps (verb, nth call of that verb) to an error text or an exception. A
+    ``restore`` (``iptables-restore``'s stdin) runs its rule lines as calls, so the verbs count across both."""
 
     def __init__(self, fail=None):
         self.calls, self.fail, self.chains, self.jumps = [], dict(fail or {}), set(), []
+        self.restores = []  # every iptables-restore stdin, as given
+
+    def install(self, monkeypatch):
+        """Route the network module's iptables and iptables-restore calls here."""
+
+        monkeypatch.setattr(network, "run_iptables", self)
+        monkeypatch.setattr(network, "run_iptables_restore", self.restore)
+        return self
+
+    def restore(self, text):
+        """``iptables-restore -w -n``'s stdin: the filter table's rules between ``*filter`` and ``COMMIT``, run in
+        order up to the first that fails, which the stderr names by line as the legacy tool does."""
+
+        self.restores.append(text)
+        lines = text.splitlines()
+        assert text.endswith("\n") and lines[0] == "*filter" and lines[-1] == "COMMIT", text
+        for number, line in enumerate(lines[1:-1], start=2):
+            assert line.split()[0] in ("-A", "-I"), line
+            result = self(*line.split())
+            if result.returncode != 0:
+                error = f"{result.stderr}\niptables-restore: line {number} failed"
+                return SimpleNamespace(returncode=1, stdout="", stderr=error)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     def __call__(self, *args):
         self.calls.append(args)
@@ -57,9 +81,23 @@ class Tc:
         self.calls, self.fail, self.ingress = [], dict(fail or {}), ingress
         self.devices: dict = {}  # name -> its netem arguments, once a qdisc is on it
         self.filters: dict = {pref: [(1, "10.0.0.1", "10.0.0.2", "other0")] for pref in taken}
+        self.batches = []  # every tc -batch stdin, as given
 
     def tc(self, *args):
         return self("tc", *args)
+
+    def tc_batch(self, text):
+        """``tc -force -batch -``'s stdin: one tc command per line, each run as a call and every line tried, as
+        ``-force`` does; the stderr names each failed line after its own error, as the real tool's does."""
+
+        self.batches.append(text)
+        assert text.endswith("\n"), text
+        stderr = ""
+        for number, line in enumerate(text.splitlines(), start=1):
+            result = self.tc(*line.split())
+            if result.returncode != 0:
+                stderr += f"{result.stderr}\nCommand failed -:{number}\n"
+        return self._reply(1 if stderr else 0, stderr=stderr)
 
     def ip(self, *args):
         return self("ip", *args)
@@ -170,6 +208,7 @@ class Tc:
         beside ``tmp_path`` instead of the host's shared directory."""
 
         monkeypatch.setattr(network, "run_tc", self.tc)
+        monkeypatch.setattr(network, "run_tc_batch", self.tc_batch)
         monkeypatch.setattr(network, "run_ip", self.ip)
         monkeypatch.setattr(hoststate, "default_root", lambda: str(tmp_path.parent / f"{tmp_path.name}-host"))
         if self.ingress:
@@ -262,8 +301,7 @@ def _fire(fault, handle, use, component_id="fault", **config):
     ids=["kill", "pause", "partition", "degrade"],
 )  # fmt: skip
 def test_a_fault_owns_its_change_until_its_recovery_undoes_it(monkeypatch, tmp_path, make, use, config, kind):
-    iptables = Iptables()
-    monkeypatch.setattr(network, "run_iptables", iptables)
+    iptables = Iptables().install(monkeypatch)
     tc = Tc().install(monkeypatch, tmp_path)
     handle = _Handle(root=str(tmp_path))
     os.makedirs(handle.data_dir("valkey-0"))
@@ -332,7 +370,8 @@ def _partition(fail, heal=None):
                 raise subprocess.TimeoutExpired(command, timeout)
 
             monkeypatch.setattr(subprocess, "run", hung)
-        monkeypatch.setattr(network, "run_iptables", network.run_iptables if fail == "hung" else Iptables(fail))
+        else:
+            Iptables(fail).install(monkeypatch)
         context, spec, fault = _fire(
             network.PartitionFault(), _Handle(), "valkey.fault.network-partition", isolate="valkey-0", heal_event="heal"
         )
@@ -398,13 +437,21 @@ _BUSY = "Device or resource busy"
         (_paused_without_resume, "ERROR", "fault recovery failed", 1),
         (_restart_never_ready, "ERROR", "did not become ready", 1),
         (_partition({("-A", 2): OSError("iptables vanished")}), "", "iptables vanished", 0),
+        # The second rule fails: the error names the restore's line (the first is ``*filter``) and the rule.
+        (_partition({("-A", 2): "Bad rule"}), "", "iptables-restore -w -n (line 3: -A VF-", 0),
         (_partition({("-A", 2): "Bad rule", ("-X", 1): _BUSY}), "", "", 0),
         (_partition({("-I", 1): "no INPUT", ("-X", 1): _BUSY, ("-X", 2): _BUSY}), "ERROR", _BUSY, 1),
         (_partition({("-X", 1): _BUSY}, heal=True), "ERROR", "heal failed", 0),
         (_partition("hung"), "", "timed out", 0),
         (_cancelled_fill, "", "cancelled", 0),
-        # The third filter fails: the two before it, the ingress qdisc, and the device are removed again.
-        (_degrade({("tc filter add", 3): "RTNETLINK answers: Invalid argument"}), "", "Invalid argument", 0),
+        # The third filter (the batch's second line, after the claim) fails: the error names the batch's line and
+        # its filter; the others, the ingress qdisc, and the device are removed again.
+        (
+            _degrade({("tc filter add", 3): "RTNETLINK answers: Invalid argument"}),
+            "",
+            "tc -force -batch - (line 2: filter add dev lo ingress protocol ip pref ",
+            0,
+        ),
         # The kernel lacks netem: the device is removed again, and the error says what is missing.
         (
             _degrade({("tc qdisc add", 1): "Error: Specified qdisc kind is unknown."}),
@@ -423,6 +470,7 @@ _BUSY = "Device or resource busy"
         "pause-not-resumed",
         "restart-never-ready",
         "partition-fails-partway",
+        "partition-rule-refused",
         "partition-cleanup-retried",
         "partition-chain-stays",
         "partition-heal-fails",
@@ -750,6 +798,68 @@ def test_two_degradations_of_one_process_get_their_own_devices(monkeypatch, tmp_
     assert not tc.devices and not tc.filters and not tc.ingress and not tc.marked
 
 
+def _filter_line(pref, handle, source, destination, device):
+    return (
+        f"filter add dev lo ingress protocol ip pref {pref} handle {handle} flower ip_proto tcp"
+        f" src_ip {source} dst_ip {destination} action mirred egress redirect dev {device}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("make", "use", "config", "spawned"),
+    [
+        # The device, up, its netem, lo's ingress qdisc, the claiming filter, the other nine filters in one batch.
+        (network.DegradeFault, "valkey.fault.network-degrade", {"instances": "valkey-0", "loss_pct": 5},
+         ["ip link add", "ip link set", "tc qdisc add", "tc qdisc add", "tc filter add", "tc -force -batch"]),
+        # The chain, then its ten rules and the jump in one restore.
+        (network.PartitionFault, "valkey.fault.network-partition", {"isolate": "valkey-0"},
+         ["iptables -w -N", "iptables-restore -w -n"]),
+    ],
+    ids=["degrade", "partition"],
+)  # fmt: skip
+def test_an_install_against_five_peers_spawns_one_batch_for_its_filters_or_rules(
+    monkeypatch, tmp_path, make, use, config, spawned
+):
+    tc, iptables, spawns = Tc(), Iptables(), []
+
+    def run_bounded(command, **kwargs):
+        # Every tc, ip, iptables, and iptables-restore process the install starts, with the batch tools' stdin.
+        spawns.append(command)
+        tool, *args = command
+        if tool == "iptables-restore":
+            return iptables.restore(kwargs["input"])
+        if tool == "iptables":
+            return iptables(*args[1:])  # after -w
+        if args[:3] == ["-force", "-batch", "-"]:
+            return tc.tc_batch(kwargs["input"])
+        return tc(tool, *args)
+
+    monkeypatch.setattr(hoststate, "run_bounded", run_bounded)
+    monkeypatch.setattr(hoststate, "default_root", lambda: str(tmp_path / "host"))
+    monkeypatch.setattr(network.secrets, "randbelow", lambda n: 0)
+    handle = _Handle()
+    handle.instances = fake_instances(6, host=lambda n: f"127.0.0.{n + 2}")
+    context, spec, fault = _fire(make(), handle, use, **config)
+    assert fault._record["applied"], fault._record
+    assert [" ".join(command[:3]) for command in spawns] == spawned and len(spawns) == len(spawned)
+    peers = [f"127.0.0.{n}" for n in range(3, 8)]
+    flows = [flow for peer in peers for flow in (("127.0.0.2", peer), (peer, "127.0.0.2"))]
+    if make is network.DegradeFault:
+        device = hoststate.netem_device_name(0)
+        assert spawns[4][1:] == _filter_line(10000, 1, *flows[0], device).split()
+        lines = [_filter_line(10000, handle, source, destination, device) for handle, (source, destination) in
+                 enumerate(flows[1:], start=2)]  # fmt: skip
+        assert tc.batches == ["".join(f"{line}\n" for line in lines)]
+        assert fault._record["rules"] == [f"{source}->{destination}" for source, destination in flows]
+    else:
+        rules = [f"-A {fault._chain} -s {source} -d {destination} -j DROP" for source, destination in flows]
+        assert iptables.restores == [
+            "".join(f"{line}\n" for line in ("*filter", *rules, f"-I INPUT 1 -j {fault._chain}", "COMMIT"))
+        ]
+    assert fault.recover(context, spec).status is ComponentStatus.PASS
+    assert not tc.devices and not tc.filters and not iptables.chains
+
+
 @pytest.mark.parametrize(
     ("addresses", "message"),
     [
@@ -830,8 +940,7 @@ def test_netem_support_needs_tc_ip_and_cap_net_admin_and_never_sudo(
 
 
 def test_a_partition_timer_that_fires_once_recovery_began_does_nothing(monkeypatch):
-    iptables = Iptables()
-    monkeypatch.setattr(network, "run_iptables", iptables)
+    iptables = Iptables().install(monkeypatch)
     context, spec, fault = _fire(
         network.PartitionFault(), _Handle(), "valkey.fault.network-partition", isolate="valkey-0", duration_s=60
     )

@@ -43,6 +43,7 @@ for ``sudo``.
 """
 
 import ipaddress
+import re
 import secrets
 import uuid
 from collections.abc import Mapping, Sequence
@@ -53,13 +54,13 @@ from valkey_fuzzer.hoststate import (
     ensure_lo_ingress,
     lo_ingress_lock,
     netem_device_name,
-    release_lo_ingress,
     remove_chain,
-    remove_lo_filters,
-    remove_netem_device,
+    remove_degradation,
     run_ip,
     run_iptables,
+    run_iptables_restore,
     run_tc,
+    run_tc_batch,
 )
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.schema import ConfigError, ConfigField, ConfigSchema, plain_config
@@ -73,6 +74,17 @@ from .schemas import LIST, MAPPING, TEXT, optional
 _HARNESS_ADDRESS = ipaddress.ip_address("127.0.0.1")
 # How many prefs a degradation tries before it gives up finding a free one.
 _PREF_TRIES = 64
+# Where a batch tool's stderr names a line of its stdin that failed: tc's ``Command failed -:N`` (one per failed
+# line under ``-force``), iptables-restore's ``line N failed`` (legacy) or ``Error occurred at line: N`` (nf_tables).
+_FAILED_LINE_RE = re.compile(r"Command failed -:(\d+)|\bline:? (\d+)")
+
+
+def _batch_step(tool: str, lines: Sequence[str], stderr: str) -> str:
+    """``tool`` and the ``lines`` of its stdin that ``stderr`` says failed, for the error that names the step."""
+
+    numbers = sorted({int(a or b) for a, b in _FAILED_LINE_RE.findall(stderr)})
+    failed = "; ".join(f"line {n}: {lines[n - 1]}" for n in numbers if 0 < n <= len(lines))
+    return f"{tool} ({failed})" if failed else tool
 
 
 class PartitionError(Exception):
@@ -117,25 +129,26 @@ def _refuse_unsafe_addresses(
 
 
 def drop_between(chain: str, addresses: Mapping[str, str], isolated: Sequence[str], peers: Sequence[str]) -> list[str]:
-    """Add a DROP rule each way between every isolated instance and every peer to ``chain``, then jump to it
-    from INPUT; the rules (``source->destination``), or :class:`PartitionError` at the first failed step.
+    """Add a DROP rule each way between every isolated instance and every peer to ``chain`` and the jump to it
+    from INPUT, in one ``iptables-restore`` (one process, one commit: all land or none); the rules
+    (``source->destination``), or :class:`PartitionError` naming the line that failed.
 
     Refuses, before any iptables call, addresses that are not all distinct loopback addresses."""
 
     _refuse_unsafe_addresses(addresses, isolated, peers, PartitionError, "partition")
-    rules = []
+    rules, lines = [], ["*filter"]
     for one in isolated:
         for peer in peers:
             a, b = addresses[one], addresses[peer]
             for source, destination in ((a, b), (b, a)):
-                rule = ("-A", chain, "-s", source, "-d", destination, "-j", "DROP")
-                added = run_iptables(*rule)
-                if added.returncode != 0:
-                    raise PartitionError(f"iptables {' '.join(rule)}: {added.stderr.strip()}")
+                lines.append(f"-A {chain} -s {source} -d {destination} -j DROP")
                 rules.append(f"{source}->{destination}")
-    jump = run_iptables("-I", "INPUT", "1", "-j", chain)
-    if jump.returncode != 0:
-        raise PartitionError(f"cannot install jump: {jump.stderr.strip()}")
+    lines += [f"-I INPUT 1 -j {chain}", "COMMIT"]
+    restored = run_iptables_restore("".join(f"{line}\n" for line in lines))
+    if restored.returncode != 0:
+        raise PartitionError(
+            f"{_batch_step('iptables-restore -w -n', lines, restored.stderr)}: {restored.stderr.strip()}"
+        )
     return rules
 
 
@@ -254,7 +267,8 @@ class Degradation:
 
     def install(self) -> list[str]:
         """Netem on the device, the ingress qdisc on ``lo`` if it has none, and one redirect filter per direction
-        of each pair, all at one free ``pref``; the rules (``source->destination``)."""
+        of each pair, all at one free ``pref``: the first filter claims the pref in a call of its own, the rest go
+        in one ``tc -batch``; the rules (``source->destination``)."""
 
         assert self.device is not None, "create_device first"
         up = ("link", "set", "dev", self.device, "up")
@@ -282,46 +296,51 @@ class Degradation:
             # The first flow's filter claims the pref: an explicit handle makes a taken pref a ``File exists``.
             start = 10000 + secrets.randbelow(50000)
             for pref in range(start, start + _PREF_TRIES):
-                if self._redirect(pref, 1, *flows[0], claim=True):
+                if self._claim(pref, *flows[0]):
                     self.pref = pref
                     break
             else:
                 raise DegradeError(f"no free filter pref among {start}..{start + _PREF_TRIES - 1} on lo")
-            self.rules = [f"{flows[0][0]}->{flows[0][1]}"]
-            for handle, (source, destination) in enumerate(flows[1:], start=2):
-                self._redirect(self.pref, handle, source, destination, claim=False)
-                self.rules.append(f"{source}->{destination}")
+            # The other flows' filters, one line each at the claimed pref, in one tc process.
+            lines = [
+                " ".join(self._filter(self.pref, handle, source, destination))
+                for handle, (source, destination) in enumerate(flows[1:], start=2)
+            ]
+            result = run_tc_batch("".join(f"{line}\n" for line in lines))
+            if result.returncode != 0:
+                raise _failed(_batch_step("tc -force -batch -", lines, result.stderr), result)
+            self.rules = [f"{source}->{destination}" for source, destination in flows]
         return list(self.rules)
 
-    def _redirect(self, pref: int, handle: int, source: str, destination: str, *, claim: bool) -> bool:
-        """Add the filter redirecting TCP from ``source`` to ``destination`` to the device; False when ``claim``
-        and the ``pref`` is taken, else True, or :class:`DegradeError`."""
+    def _filter(self, pref: int, handle: int, source: str, destination: str) -> tuple[str, ...]:
+        """The ``tc`` command (without ``tc``) adding the filter that redirects TCP from ``source`` to
+        ``destination`` to the device, at ``pref`` with ``handle``."""
 
-        step = (
+        return (
             "filter", "add", "dev", "lo", "ingress", "protocol", "ip", "pref", str(pref), "handle", str(handle),
             "flower", "ip_proto", "tcp", "src_ip", source, "dst_ip", destination,
             "action", "mirred", "egress", "redirect", "dev", self.device,
         )  # fmt: skip
+
+    def _claim(self, pref: int, source: str, destination: str) -> bool:
+        """Add the first flow's filter at ``pref`` (handle 1), which claims the pref: False when it is taken, else
+        True, or :class:`DegradeError`."""
+
+        step = self._filter(pref, 1, source, destination)
         result = run_tc(*step)
         if result.returncode == 0:
             return True
-        if claim and "File exists" in result.stderr:
+        if "File exists" in result.stderr:
             return False
         raise _failed(f"tc {' '.join(step)}", result)
 
     def remove(self) -> None:
         """The undo: the filters, then ``lo``'s ingress qdisc once the fuzzer added it and no filter is left on
-        it, then the device (idempotent); raise while any remains."""
+        it, then the device (idempotent, :func:`remove_degradation`); raise while any remains."""
 
-        errors = []
-        with lo_ingress_lock():
-            if self.pref is not None:
-                errors += remove_lo_filters([self.pref], run_tc)
-            if not errors:
-                errors += release_lo_ingress(run_tc)
-        if self.device is not None and not errors:
-            # Only once no filter redirects to it: a filter whose device is gone drops what it matches.
-            errors += remove_netem_device(self.device, run_ip)
+        if self.device is None:
+            return
+        errors = remove_degradation(self.device, [] if self.pref is None else [self.pref], run_tc, run_ip)
         if errors:
             raise RuntimeError(f"netem device {self.device} remains: {errors}")
 
