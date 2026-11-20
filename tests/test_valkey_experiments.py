@@ -12,10 +12,15 @@ import pytest
 from tests.valkey_experiments_support import valkey_service
 from valkey_fuzzer.components import experiments, providers
 from valkey_fuzzer.components.providers import ENVIRONMENT_PROVIDERS, LocalBinaryProvider
+from valkey_fuzzer.deployment.local.models import LocalDeploymentError
 from valkey_fuzzer.plan import RunMode
 from valkey_fuzzer.schema import ScenarioCompileError
 
 REPOSITORY = Path(__file__).resolve().parents[1]
+
+
+def _missing_library():
+    raise LocalDeploymentError("libfaketime is not installed (install the libfaketime package)")
 
 
 @pytest.fixture(scope="module")
@@ -41,6 +46,40 @@ def test_every_experiment_is_judged_by_liveness_and_one_without_required_inputs_
         }
         with pytest.raises(ScenarioCompileError, match=r"replicas_per_primary must be at least 1, got 0"):
             runtime.compile(scenario)
+
+
+@pytest.mark.parametrize(
+    ("experiment", "deployment", "target", "missing", "reason"),
+    [
+        pytest.param(
+            "valkey.clock-skew-expiry",
+            {"mode": "standalone", "replicas_per_primary": 1, "clock_faults": True},
+            "valkey_fuzzer.deployment.local.clock_faults.find_library",
+            _missing_library,
+            "libfaketime is not installed",
+            id="clock-skew-without-libfaketime",
+        ),
+        pytest.param(
+            "valkey.replication-cpu-starvation",
+            {"mode": "standalone", "replicas_per_primary": 1},
+            "valkey_fuzzer.cgroups.delegated",
+            lambda controllers, **where: (None, "cgroup v2 is not mounted at /sys/fs/cgroup"),
+            "cgroup v2 is not mounted",
+            id="resource-pressure-without-cgroup-v2",
+        ),
+    ],
+)  # fmt: skip
+def test_a_fault_without_its_host_capability_errors_with_the_reason_instead_of_passing(
+    runtime, monkeypatch, experiment, deployment, target, missing, reason
+):
+    # The batch path (service.run_plan) turns the component probe's refusal into an ERROR outcome naming the
+    # missing capability, before anything starts: a run on a host without libfaketime or a delegated cgroup is
+    # an ERROR-with-reason, never a silent PASS or SKIP.
+    monkeypatch.setattr(target, missing)
+    plan = runtime.compile({"scenario_id": "x", "seed": 1, "experiment": {"id": experiment}, "deployment": deployment})
+    outcome = runtime.run_plan(plan, timeout=30)
+    assert outcome.status.value == "ERROR", outcome.summary
+    assert "cannot run on this host" in outcome.summary and reason in outcome.summary
 
 
 def test_a_full_disk_is_logged_evidence_whether_the_save_forks_or_not():

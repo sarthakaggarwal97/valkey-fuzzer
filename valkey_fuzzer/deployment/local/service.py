@@ -19,7 +19,7 @@ from valkey.retry import Retry
 
 from ..._data import to_plain_data
 from ...protocols import RunContext
-from . import syscall_faults
+from . import clock_faults, syscall_faults
 from .cluster_nodes import slot_hash_tags
 from .failover import failover_shard
 from .models import (
@@ -394,6 +394,14 @@ class ValkeyDeploymentService:
             if not self._deployment.config.syscall_faults:
                 return None
             return syscall_faults.rule_dir(self._info(instance_id).data_dir)
+
+    def clock_fault_file(self, instance_id: str) -> Optional[str]:
+        """The instance's libfaketime timestamp file for ``valkey.fault.clock-skew``; None unless the deployment
+        sets ``clock_faults``."""
+        with self._operation():
+            if not self._deployment.config.clock_faults:
+                return None
+            return clock_faults.timestamp_file(self._info(instance_id).data_dir)
 
     def binary(self, instance_id: str) -> str:
         """Return the valkey-server binary the instance's next (re)start uses."""

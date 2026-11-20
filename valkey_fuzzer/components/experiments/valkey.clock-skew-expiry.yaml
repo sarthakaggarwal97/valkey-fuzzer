@@ -1,0 +1,131 @@
+# Set the primary's clock back by `offset_s` (libfaketime, this process only;
+# the host clock is untouched) and check how a volatile key expires across the
+# replication link. Valkey replicates an expiry as an absolute time: the
+# primary, whose clock is behind, sets `vf:volatile` to expire `ttl_s` seconds
+# ahead by its own clock, a moment the replicas' clocks have already passed.
+# The documented contract is that a replica reads a key as expired by its own
+# clock (TTL -2, GET nil) but never deletes it itself: it waits for the DEL
+# the primary sends when it expires the key. So while the primary still
+# serves the key with its TTL running, every replica reads it as gone, and
+# `expired_keys` rises only on the primary, never on a replica. Then the
+# fault restores the primary's clock: the key's expiry is in the primary's
+# past too, it expires it, and the DEL reaches the replicas. The preloaded
+# dataset must converge on every replica regardless (valkey.base).
+#
+# Why this, of the places a skewed clock shows: key expiry is the one that
+# crosses the replication link as an absolute time, so a skew between primary
+# and replica changes what each side answers, and Valkey documents exactly
+# what they must answer. Cluster failure detection and WAIT measure durations
+# on one node, which an offset does not change.
+#
+# Needs deployment.clock_faults: true and libfaketime on the host; without
+# it the fault's probe makes the run an ERROR naming the package.
+extends: [valkey.base]
+id: valkey.clock-skew-expiry
+deployment:
+  modes: [standalone]
+  replicas_per_primary: {minimum: 1}
+  clock_faults: {type: boolean, enum: [true]}
+metadata:
+  description: Set the primary's clock back and check that replicas read a volatile key as expired by their own clock but delete it only on the primary's DEL
+  generator:
+    deployment:
+      clock_faults: true
+      standalone: {replicas_per_primary: {minimum: 1, maximum: 2}}
+    inputs:
+      # The writes are the preload: a static dataset, so only expiry changes it.
+      mutation_rate: fixed
+      # Every offset is further back than every ttl_s, so the replicas always read the key as expired.
+      offset_s: {values: [-30, -300, -86400]}
+      ttl_s: {values: [5, 10, 20]}
+inputs:
+  properties:
+    stable_keys: {default: 200}
+    mutable_keys: {default: 50}
+    mutation_rate: {default: 0}
+    offset_s:
+      type: number
+      minimum: -31622400
+      maximum: -1
+      default: -30
+      description: seconds the primary's clock is set back; further back than ttl_s
+    ttl_s: {type: integer, minimum: 1, maximum: 3600, default: 10, description: the volatile key's TTL by the primary's clock}
+components:
+  - use: valkey.observer.info
+    id: primary-stats
+    config:
+      instances: primary
+      sections: [stats]
+      interval_s: 0.1
+      expectations:
+        - {evidence_id: valkey.expiry.primary-expired, field: expired_keys, delta_min: 1}
+
+  - use: valkey.observer.info
+    id: replica-stats
+    config:
+      instances: replicas
+      sections: [stats]
+      interval_s: 0.1
+      expectations:
+        - {evidence_id: valkey.expiry.replicas-expired-nothing, field: expired_keys, delta_max: 0, instances: all}
+
+  - use: valkey.fault.clock-skew
+    id: skew
+    config:
+      when_event: writes.seeded
+      instance: primary
+      offset_s: {$ref: inputs.offset_s}
+      release_event: primary-still-serves.completed
+
+  - use: valkey.workload.key-value
+    id: writes
+    depends_on: [skew, primary-stats, replica-stats]
+
+  # Set by the primary's clock, which is offset_s behind: the key's absolute expiry is in the replicas' past.
+  - use: valkey.action.command
+    id: set-volatile
+    depends_on: [writes]
+    config:
+      instances: primary
+      command: [SET, "vf:volatile", skewed, EX, {$ref: inputs.ttl_s}]
+
+  - use: valkey.action.poll
+    id: replicas-read-expired
+    depends_on: [set-volatile]
+    config:
+      instances: replicas
+      command: [TTL, "vf:volatile"]
+      predicate: {equals: -2}
+      timeout_s: 10
+
+  - use: valkey.action.command
+    id: primary-still-serves
+    depends_on: [replicas-read-expired]
+    config:
+      instances: primary
+      command: [TTL, "vf:volatile"]
+      expect: {min: 1, max: {$ref: inputs.ttl_s}}
+
+  # The clock is restored on primary-still-serves.completed: the expiry is now in the primary's past too.
+  - use: valkey.action.poll
+    id: primary-expires
+    depends_on: [primary-still-serves]
+    config:
+      instances: primary
+      command: [EXISTS, "vf:volatile"]
+      predicate: {equals: 0}
+      timeout_s: 30
+
+  - use: valkey.oracle.evidence
+    id: expiry
+    depends_on: [primary-stats, replica-stats]
+    config:
+      require:
+        - {evidence_id: valkey.expiry.primary-expired, source: primary-stats}
+        - {evidence_id: valkey.expiry.replicas-expired-nothing, source: replica-stats}
+required_events: [writes.seeded, skew.released, primary-expires.completed]
+required_evidence:
+  - {evidence_id: valkey.fault.injected, source: skew}
+  - {evidence_id: valkey.poll.satisfied, source: replicas-read-expired}
+  - {evidence_id: valkey.command.replies, source: primary-still-serves}
+  - {evidence_id: valkey.poll.satisfied, source: primary-expires}

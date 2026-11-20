@@ -1,0 +1,17 @@
+# Starve the primary of CPU for 5 seconds under 1000 writes a second: a cgroup
+# v2 quota of half a percent of one core, then released. The replica links
+# must survive it without a resync, and every acknowledged write converge.
+# Needs a delegated cgroup v2 of the run's own, for example
+#   systemd-run --user --scope valkey-fuzzer run examples/valkey/replication_cpu_starvation.yaml
+# Without one the run is an ERROR that says what is missing.
+scenario_id: replication-cpu-starvation
+seed: 3
+experiment:
+  id: valkey.replication-cpu-starvation
+  inputs:
+    cpu_percent: 0.5
+    starve_s: 5
+deployment:
+  mode: standalone
+  replicas_per_primary: 1
+  base_port: 7950

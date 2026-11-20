@@ -43,6 +43,33 @@
   every workflow, and `test.yml`'s server tests restore the Valkey build at `zoo/valkey-commit` (about 90 s to
   make) instead of building it on every run.
 
+### Added: clock-skew and resource-pressure faults, each host-safe (PR-C2)
+
+- `valkey.fault.clock-skew` shifts one instance's view of the wall clock without touching the host clock. A
+  deployment with `clock_faults: true` starts every server with [libfaketime](https://github.com/wolfcw/libfaketime)
+  in `LD_PRELOAD`, each reading a timestamp file of its own on every call (`FAKETIME_NO_CACHE`); the fault rewrites
+  the target's file to `+<offset> x<rate>` and restores the real time on `release_event` or at recovery.
+  `DONT_FAKE_MONOTONIC` keeps the event loop on the host's monotonic clock, so only the wall clock (key expiry,
+  `TIME`, wall-clock timeouts) moves. The library is the host's `libfaketime` package or `VALKEY_FUZZER_LIBFAKETIME`;
+  without it the fault's probe is an `ERROR` naming the package. The fault reads `TIME` and compares it with the
+  host's clock: a skew the server does not show (libfaketime not loaded) is not applied. Used by
+  `valkey.clock-skew-expiry`: the primary's clock is set back so a volatile key's absolute expiry is in the
+  replicas' past, and every replica reads it as expired (TTL -2) but deletes it only on the primary's `DEL`.
+- `valkey.fault.resource-pressure` puts cgroup v2 `cpu.max`/`memory.max` limits on one instance for a window, then
+  releases them. It moves the target's server into a cgroup leaf of the run's own, needs a delegated cgroup v2 of
+  the run's own (cgroup v2 mounted, this process's cgroup not the root one, writable, with the controllers and only
+  this user's processes), and refuses anything else with the reason (`ERROR`). Nothing is written outside that
+  cgroup, no other process is moved, and `valkey-fuzzer sweep` removes a leaf a dead fuzzer left. A limit that
+  never bit (no throttled period, no `memory.events` `max`) is not applied. No fallback without cgroups: a fully
+  stopped instance is already `valkey.fault.process-signal` with `SIGSTOP`. Used by
+  `valkey.replication-cpu-starvation`: the primary's CPU is throttled under writes for less than `repl-timeout`,
+  and the replica links must survive it with no resync and every write converge.
+- New deployment option `clock_faults`; the cgroup subtree lives in `valkey_fuzzer/cgroups.py`; the host probes
+  `libfaketime_supported` and `cgroup_v2_supported` back the two faults' detection. `docs/components.md`,
+  `docs/scenarios-and-experiments.md`, and `examples/valkey/` cover both. The live tests
+  (`tests/test_live_valkey_experiments.py`) are guarded by capability detection, so CI's server-tests job skips an
+  unmet one as `SKIP_UNSUPPORTED`/`ERROR` rather than failing.
+
 ### Added: `spec conform` checks the run's steps against the model (PR-P1-a)
 
 - `spec conform` checked only that every observed state satisfies the claimed properties; a run that took a step

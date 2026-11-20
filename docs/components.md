@@ -119,6 +119,8 @@ a retry succeeded makes the fault, and the run, `ERROR`.
 | [`valkey.fault.syscall`](#valkeyfaultsyscall) | fault | any (needs `syscall_faults`) | kills, delays, or fails an instance at its nth matching system call |
 | [`valkey.fault.network-partition`](#valkeyfaultnetwork-partition) | fault | any (needs per-instance addresses) | drops traffic between instances |
 | [`valkey.fault.disk-fill`](#valkeyfaultdisk-fill) | fault | any | fills the run's tmpfs |
+| [`valkey.fault.clock-skew`](#valkeyfaultclock-skew) | fault | any (needs `clock_faults`) | shifts one instance's wall clock with libfaketime |
+| [`valkey.fault.resource-pressure`](#valkeyfaultresource-pressure) | fault | any (needs a delegated cgroup v2) | limits one instance's CPU or memory with cgroup v2 |
 | [`valkey.observer.info`](#valkeyobserverinfo) | observer | any | samples INFO and checks expectations |
 | [`valkey.observer.log`](#valkeyobserverlog) | observer | any | scans instance logs |
 | [`valkey.observer.log-trigger`](#valkeyobserverlog-trigger) | observer | any | turns log lines into events |
@@ -168,9 +170,11 @@ schemas.
 | `valkey.action.wait-event` | none | `valkey.wait.event-observed` | none |
 | `valkey.capability.build-probe` | none | `valkey.capability.supported` | `process.private-server` |
 | `valkey.capability.host-probe` | none | `valkey.host.supported` | none |
+| `valkey.fault.clock-skew` | `<id>.injected`<br>`<id>.released` | `valkey.fault.injected` | `clock.skewed` |
 | `valkey.fault.disk-fill` | `<id>.injected`<br>`<id>.released` | `valkey.fault.injected` | `disk.filled` |
 | `valkey.fault.network-partition` | `<id>.healed`<br>`<id>.injected`<br>`<id>.partitioned` | `valkey.fault.injected` | `network.partition` |
 | `valkey.fault.process-signal` | `<id>.injected`<br>`<id>.recovered` | `valkey.fault.injected`<br>`valkey.instances.expected-down` | `process.paused`<br>`process.stopped` |
+| `valkey.fault.resource-pressure` | `<id>.injected`<br>`<id>.released` | `valkey.fault.injected` | `cgroup.limited` |
 | `valkey.fault.syscall` | `<id>.injected`<br>`<id>.recovered` | `valkey.fault.injected`<br>`valkey.instances.expected-down` | `process.stopped`<br>`syscall.rule` |
 | `valkey.observer.info` | none | `{config.expectations[].evidence_id}` | none |
 | `valkey.observer.log` | none | `valkey.log.forbidden-match`<br>`{config.expect[].evidence_id}` | none |
@@ -1294,6 +1298,80 @@ disk.
 
 Events: `<id>.injected`, `<id>.released`. Evidence: `valkey.fault.injected`
 (bytes written, free bytes after).
+
+### `valkey.fault.clock-skew`
+
+Shifts one instance's view of the wall clock, without touching the host
+clock. It needs a deployment with `clock_faults: true`, whose servers start
+with [libfaketime](https://github.com/wolfcw/libfaketime) in `LD_PRELOAD`,
+each reading its time from a timestamp file of its own on every call
+(`FAKETIME_NO_CACHE`). When the trigger fires, the fault rewrites the target's
+file to `+<offset> x<rate>`: the server's wall clock then reads `offset_s`
+seconds ahead of (or behind) the host's and runs `rate` times as fast. Only
+the wall clock moves — `DONT_FAKE_MONOTONIC` keeps the event loop and its
+timers on the host's monotonic clock — so a skew looks to the server like a
+stepped or drifting system clock, not a faster event loop. It affects key
+expiry, `TIME`, and the timeouts Valkey measures against the wall clock.
+
+The library is the host's `libfaketime` package (`libfaketime.so.1` under
+`/usr/lib/*/faketime`, `/usr/lib64/faketime`, `/usr/lib/faketime`, or
+`/usr/local/lib/faketime`), or whatever `VALKEY_FUZZER_LIBFAKETIME` names.
+Without it the fault's probe makes the run an `ERROR` that names the package.
+After writing the file the fault reads `TIME` on the instance and compares it
+with the host's clock: a skew the server does not show (libfaketime not
+loaded) leaves the fault not applied (`ERROR`). The real time is restored on
+`release_event` or at recovery, the clock measured once more before it is. A
+restart keeps the instance's file, so a skewed instance restarts skewed until
+the fault restores it.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `instance` | selector or `event` | `primary` | The first selected instance. |
+| `offset_s` | number, -31,622,400 to 31,622,400 | 0 | Seconds the clock is ahead (positive) or behind (negative) when the fault lands. |
+| `rate` | number, 0.01 to 100 | 1 | How fast the clock runs from then on, relative to the host's. |
+| `release_event` | string or null | `null` | Restore the real time when this event is published. |
+
+Set an `offset_s` other than 0, a `rate` other than 1, or both. Events:
+`<id>.injected`, `<id>.released`. Evidence: `valkey.fault.injected` (target,
+the spec written, the skew measured when it landed and when it was released).
+
+### `valkey.fault.resource-pressure`
+
+Puts cgroup v2 limits on one instance for a window, then releases them: it
+moves the target's server (and the children it forks from then on) into a
+cgroup leaf of the run's own with `cpu.max` from `cpu_percent` and
+`memory.max` from `memory_max_mb`. The instance keeps running, slower: a CPU
+quota throttles it for the rest of each period once the quota is spent (a
+slow but live primary, where `valkey.fault.process-signal` with `SIGSTOP` is a
+stopped one); a memory limit makes the kernel reclaim its page cache and, when
+its anonymous memory alone exceeds the limit, kills it (the liveness oracle
+reports that). On `release_event` or at recovery the server moves back to an
+unlimited leaf, the leaf is removed, and its counters are recorded. A limit
+that never bit (`cpu.stat` counted no throttled period, `memory.events` no
+`max`) leaves the fault not applied (`ERROR`): the run did not test what it
+meant to.
+
+It needs a delegated cgroup v2 of the run's own (for example under
+`systemd-run --user --scope valkey-fuzzer ...`): cgroup v2 mounted at
+`/sys/fs/cgroup`, this process's cgroup not the root one, writable by this
+user, holding the controllers the limits need and only this user's processes.
+Otherwise the fault's probe and its firing refuse with the reason, and the run
+is an `ERROR`. Nothing is ever written outside that cgroup, no process but the
+run's own is moved, and a leaf a dead fuzzer left is removed by
+`valkey-fuzzer sweep`. There is no fallback without cgroups: a fully stopped
+instance is already `valkey.fault.process-signal` with `SIGSTOP`.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `instance` | selector or `event` | `primary` | The first selected instance. |
+| `cpu_percent` | number, 0.1 to 100, or null | `null` | Percent of one CPU (100 is a whole core); `null` sets no CPU limit. |
+| `memory_max_mb` | integer, 1 to 1,048,576, or null | `null` | `memory.max` in MiB; `null` sets no memory limit. |
+| `release_event` | string or null | `null` | Release the limits when this event is published. |
+
+Set `cpu_percent`, `memory_max_mb`, or both. Events: `<id>.injected`,
+`<id>.released`. Evidence: `valkey.fault.injected` (target, the limits, and
+the `cpu.stat`, `memory.events` and `memory.current` counters read at
+release).
 
 ## Observers
 

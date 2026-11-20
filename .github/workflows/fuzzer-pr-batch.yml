@@ -331,12 +331,15 @@ jobs:
             experiment_dirs+=(--experiment-dir "${EXPERIMENTS_DIR}")
           fi
           # The random baseline: seeds from the commit, so a rerun of this commit draws the same scenarios.
-          # The experiments that need a second build are left out: this batch has one. io-threads 4 is left out
+          # The experiments that need a second build are left out: this batch has one. The clock-skew and
+          # resource-pressure experiments are left out: this runner has no libfaketime and no delegated cgroup v2,
+          # so every draw of them would be an ERROR (the faults refuse with a reason). io-threads 4 is left out
           # too: a server then has at most one always-active IO thread, as a four-core runner can carry.
           random=()
           if [ "${RANDOM_SEEDS}" != "0" ]; then
             random=(--random all --seeds "${RANDOM_SEEDS}" --first-seed "$((16#${INPUT_VALKEY_SHA:0:7}))"
               --exclude experiment=valkey.rolling-upgrade --exclude experiment=valkey.mixed-version-cluster
+              --exclude experiment=valkey.clock-skew-expiry --exclude experiment=valkey.replication-cpu-starvation
               --exclude server_config.io-threads=4)
             for experiment in ${EXCLUDE_EXPERIMENTS}; do
               random+=(--exclude "experiment=${experiment}")

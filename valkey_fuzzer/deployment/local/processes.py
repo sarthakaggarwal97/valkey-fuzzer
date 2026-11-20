@@ -32,7 +32,7 @@ from ...hoststate import (
     untag_directory,
 )
 from ...protocols import RunContext
-from . import syscall_faults
+from . import clock_faults, syscall_faults
 from .cluster_nodes import parse_cluster_nodes
 from .models import (
     DEFAULT_BASE_DATA_DIR,
@@ -481,13 +481,23 @@ class ProcessManager:
 
     def _server_env(self, data_dir: str) -> Optional[dict[str, str]]:
         """The environment of the server whose data directory is ``data_dir``: None (this process's) unless the
-        deployment loads the syscall fault library, built into the instance's deployment directory."""
-        if not self.config.syscall_faults:
-            return None
-        rules = syscall_faults.rule_dir(data_dir)
-        os.makedirs(rules, exist_ok=True)
-        library = syscall_faults.build_library(os.path.dirname(os.path.dirname(rules)))
-        return syscall_faults.server_environment(library, rules)
+        deployment loads the syscall fault library, built into the instance's deployment directory, or
+        libfaketime, reading the instance's timestamp file (kept across a restart: a skewed instance restarts
+        skewed)."""
+        env = None
+        if self.config.syscall_faults:
+            rules = syscall_faults.rule_dir(data_dir)
+            os.makedirs(rules, exist_ok=True)
+            library = syscall_faults.build_library(os.path.dirname(os.path.dirname(rules)))
+            env = syscall_faults.server_environment(library, rules)
+        if self.config.clock_faults:
+            timestamp = clock_faults.timestamp_file(data_dir)
+            if not os.path.exists(timestamp):
+                os.makedirs(os.path.dirname(timestamp), exist_ok=True)
+                clock_faults.write_timestamp(timestamp, clock_faults.REAL_TIME)
+            library = clock_faults.find_library()
+            env = clock_faults.server_environment(dict(os.environ) if env is None else env, library, timestamp)
+        return env
 
     def _start_process(self, cmd: list[str], log_file: str, env: Optional[dict[str, str]] = None) -> subprocess.Popen:
         """Start valkey-server with stdout/stderr appended to a per-instance file.

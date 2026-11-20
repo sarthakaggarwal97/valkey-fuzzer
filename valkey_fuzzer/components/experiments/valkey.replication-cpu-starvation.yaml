@@ -1,0 +1,109 @@
+# Starve the primary of CPU under writes: for `starve_s`, a cgroup v2 quota
+# (valkey.fault.resource-pressure) lets its server run `cpu_percent` of one
+# core, so it answers late and in bursts but never stops; then the quota is
+# released. A slow primary is not a dead one: as long as the starvation is
+# shorter than repl-timeout (60 s by default, which the random config space
+# leaves alone), the replication links must survive it, with no partial or full
+# resync, every replica's link up once the quota is gone, and every acknowledged
+# write on every replica (valkey.base). The fault records how often the kernel
+# throttled the server (cpu.stat), and is not applied if it never did.
+#
+# valkey.fault.process-signal with SIGSTOP covers the fully stopped primary;
+# this covers the one that is alive but late, which the replicas' timeouts and
+# the clients' retries must tell apart from a dead one.
+#
+# Needs a delegated cgroup v2 of the run's own (systemd-run --user --scope
+# valkey-fuzzer ...); without one the fault's probe makes the run an ERROR
+# that says what is missing.
+extends: [valkey.base]
+id: valkey.replication-cpu-starvation
+deployment:
+  modes: [standalone]
+  replicas_per_primary: {minimum: 1}
+metadata:
+  description: Throttle the primary's CPU with a cgroup quota under writes; the replica links must survive it and every write converge
+  generator:
+    deployment:
+      standalone: {replicas_per_primary: {minimum: 1, maximum: 3}}
+    inputs:
+      # Little enough CPU that a write rate in the thousands always hits the quota.
+      cpu_percent: {values: [0.2, 0.5, 1]}
+      starve_s: {minimum: 2, maximum: 8}
+      run_before_starve_s: {minimum: 0.5, maximum: 3}
+      mutation_rate: {minimum: 1000, maximum: 3000}
+inputs:
+  properties:
+    stable_keys: {default: 500}
+    mutable_keys: {default: 300}
+    mutation_rate: {minimum: 1, default: 1000}
+    cpu_percent:
+      type: number
+      minimum: 0.1
+      maximum: 100
+      default: 0.5
+      description: of one core, for the primary's server while starved
+    # Below repl-timeout (60 s): past it a replica rightly drops a link that carried nothing.
+    starve_s: {type: number, minimum: 0.1, maximum: 50, default: 5}
+    run_before_starve_s: {type: number, minimum: 0, maximum: 600, default: 1}
+components:
+  - use: valkey.observer.info
+    id: info
+    config:
+      instances: primary
+      sections: [stats, replication]
+      interval_s: 0.1
+      expectations:
+        - {evidence_id: valkey.replication.no-full-resync, field: sync_full, delta_max: 0}
+        - {evidence_id: valkey.replication.no-partial-resync, field: sync_partial_ok, delta_max: 0}
+        - {evidence_id: valkey.replication.links-online, field: slave*.state, equals: online, when: final}
+
+  - use: valkey.workload.key-value
+    id: writes
+    config:
+      # A throttled server answers late: a reply that takes long is not a lost one.
+      op_timeout_s: 5.0
+
+  - use: valkey.fault.resource-pressure
+    id: starve
+    config:
+      when_event: run-then-starve.completed
+      instance: primary
+      cpu_percent: {$ref: inputs.cpu_percent}
+      release_event: starving.completed
+
+  - use: valkey.action.sleep
+    id: run-then-starve
+    depends_on: [writes, info, starve]
+    config: {seconds: {$ref: inputs.run_before_starve_s}}
+
+  - use: valkey.action.sleep
+    id: starving
+    depends_on: [run-then-starve]
+    config: {seconds: {$ref: inputs.starve_s}}
+
+  - use: valkey.action.poll
+    id: links-up
+    depends_on: [starving]
+    config:
+      instances: replicas
+      section: replication
+      field: master_link_status
+      predicate: {equals: up}
+      timeout_s: 60
+
+  - use: valkey.oracle.ledger
+    id: data
+    config: {converge_timeout_s: 60}
+
+  - use: valkey.oracle.evidence
+    id: links-survived
+    depends_on: [info]
+    config:
+      require:
+        - {evidence_id: valkey.replication.no-full-resync, source: info}
+        - {evidence_id: valkey.replication.no-partial-resync, source: info}
+        - {evidence_id: valkey.replication.links-online, source: info}
+required_events: [run-then-starve.completed, starve.released, starving.completed]
+required_evidence:
+  - {evidence_id: valkey.fault.injected, source: starve}
+  - {evidence_id: valkey.poll.satisfied, source: links-up}
