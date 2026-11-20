@@ -11,8 +11,11 @@ fuzzer-pr-batch.yml:
 check-inputs  check the dispatch inputs, and write the scenarios, spec bundles, and experiments they carry
 drop-ledgers  remove the write ledgers of a batch folder's runs that passed
 
-fuzzer-pr-batch.yml and fuzzer-run.yml:
+fuzzer-pr-batch.yml, fuzzer-run.yml and module-fuzz.yml:
 summary       a batch folder's runs and failure signatures, appended to the job summary
+
+module-fuzz.yml:
+module-base   the batch's --base file: the caller's base, if any, loading the module it built
 """
 
 import glob
@@ -624,6 +627,30 @@ def check_inputs(env):
     print(f"{len(experiments)} experiment(s) written to {experiments_dir}")
 
 
+def module_base(module_path, base_file, out):
+    """Write the partial scenario module-fuzz.yml merges over every draw to ``out``: the caller's ``base_file``
+    (empty: none), with ``deployment.server_config.loadmodule`` set to ``module_path``, the module the workflow
+    built, which the caller cannot know the path of; SystemExit when the base is not a mapping or loads a module
+    itself."""
+
+    import yaml
+
+    from valkey_fuzzer.documents import merge
+
+    base = {}
+    if base_file:
+        with open(base_file, encoding="utf-8") as handle:
+            base = _yaml_mapping(handle.read(), f"base {base_file}")
+    server_config = (base.get("deployment") or {}).get("server_config") or {}
+    if isinstance(server_config, dict) and "loadmodule" in server_config:
+        raise SystemExit(
+            f"base {base_file} sets deployment.server_config.loadmodule; the workflow loads the module it built"
+        )
+    merged = merge(base, {"deployment": {"server_config": {"loadmodule": os.path.abspath(module_path)}}})
+    with open(out, "w", encoding="utf-8") as handle:
+        yaml.safe_dump(merged, handle, sort_keys=False)
+
+
 def _print_outputs(values):
     for name, value in values.items():
         print(f"{name}={value}")
@@ -663,6 +690,8 @@ def main(command):
         check_inputs(env)
     elif command == "drop-ledgers":
         drop_passing_ledgers(env["BATCH_DIR"])
+    elif command == "module-base":
+        module_base(env["MODULE_PATH"], env.get("BASE_FILE", ""), env["BASE_OUT"])
     elif command == "summary":
         valkey = ""
         if env.get("VALKEY_SHA"):
@@ -685,7 +714,7 @@ def main(command):
     else:
         raise SystemExit(
             f"unknown command {command!r}; expected resolve, matrix, metadata, summarize, check-inputs, drop-ledgers, "
-            "or summary"
+            "module-base, or summary"
         )
 
 

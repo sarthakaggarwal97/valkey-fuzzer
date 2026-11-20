@@ -19,7 +19,7 @@ from _pytest.mark.expression import Expression
 
 from valkey_fuzzer._data import to_plain_data
 from valkey_fuzzer.cli import create_parser
-from valkey_fuzzer.generator import GeneratorBlock, generate, installed_pools, opted_in
+from valkey_fuzzer.generator import GeneratorBlock, GeneratorError, generate, installed_pools, opted_in
 from valkey_fuzzer.reports import write_document
 from valkey_fuzzer.results import ComponentResult, ComponentStatus, OutcomeStatus, RunOutcome
 from valkey_fuzzer.spec.tla import TLA_TOOLS_RELEASES, TLA_TOOLS_VERSION
@@ -97,8 +97,8 @@ def _fuzzer_commands(name):
 
 @pytest.mark.parametrize("name", WORKFLOW_NAMES)
 def test_every_valkey_fuzzer_command_in_a_workflow_parses_with_the_cli(name):
-    # The workflows that only run pytest or ruff, or build the package, name no valkey-fuzzer command.
-    no_cli = ("lint.yml", "release.yml", "test.yml", "valkey-experiments-live.yml")
+    # The workflows that only run pytest or ruff, build the package, or build the image name no valkey-fuzzer command.
+    no_cli = ("build-image.yml", "lint.yml", "release.yml", "test.yml", "valkey-experiments-live.yml")
     assert _fuzzer_commands(name) or name in no_cli
 
 
@@ -121,9 +121,12 @@ def _drawn():
 def test_every_experiment_and_exclusion_a_workflow_names_is_drawn(name):
     experiments, paths = _drawn()
     for args in _fuzzer_commands(name):
-        # A proposed.* experiment is one the workflow writes itself.
+        # A proposed.* experiment is one the workflow writes itself; "1" stands for a shell variable (an input of
+        # a reusable workflow).
         for experiment in getattr(args, "experiments", None) or []:
-            assert experiment in experiments or experiment == "all" or experiment.startswith("proposed."), experiment
+            assert experiment in experiments or experiment in ("all", "1") or experiment.startswith("proposed."), (
+                experiment
+            )
         for item in getattr(args, "excludes", None) or []:
             if item.path == "experiment":
                 assert item.value in experiments, f"{name} excludes {item}, which is not a shipped experiment"
@@ -1082,3 +1085,166 @@ def test_the_search_chaos_workflow_starts_valkey_search_with_its_index_check_on(
     # The other modules' experiments forbid no line.
     for other in ("json", "bloom"):
         assert not any(item.use == "valkey.observer.log" for item in plan(other).components)
+
+
+# ---------------------------------------------------------------------------
+# The image and the module repositories' reusable workflow (docs/module-repos.md)
+# ---------------------------------------------------------------------------
+
+EXAMPLE_EXPERIMENTS = ROOT / "examples" / "valkey" / "experiments"
+MODULE_CHAOS_BASE = {
+    "deployment": {"server_config": {"loadmodule": "/opt/module/libjson.so"}},
+    "experiment": {
+        "inputs": {
+            "module_command": "JSON.SET",
+            "load": [{"command": ["JSON.SET", "j:1", "$", '{"a": 1}'], "expect": {"equals": "OK"}}],
+            "during": [{"command": ["JSON.SET", "j:1", "$.a", "2"]}],
+            "verify": [{"command": ["JSON.GET", "j:1", "$.a"], "expect": {"equals": "[2]"}}],
+            "forbidden_logs": [{"pattern": "Index validation failed"}],
+        }
+    },
+}
+
+
+def test_the_image_workflow_pushes_only_on_a_tag_and_builds_without_pushing_otherwise():
+    workflow = _workflow("build-image.yml")
+    assert set(workflow["on"]) == {"pull_request", "push", "workflow_dispatch"}
+    assert workflow["on"]["push"] == {"tags": ["v*"]} and "Dockerfile" in workflow["on"]["pull_request"]["paths"]
+    assert workflow["permissions"] == {"contents": "read"}
+    build, publish = workflow["jobs"]["build"], workflow["jobs"]["publish"]
+    assert "permissions" not in build and "push" not in "\n".join(_run_scripts({"jobs": {"build": build}}))
+    assert publish["if"] == "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')"
+    assert publish["needs"] == "build" and publish["permissions"] == {"contents": "read", "packages": "write"}
+    (push,) = [step for step in publish["steps"] if "docker push" in step.get("run", "")]
+    assert "ghcr.io/${OWNER,,}/valkey-fuzzer" in push["run"] and push["env"]["TAG"] == "${{ github.ref_name }}"
+    # The build job proves the image runs an experiment with porcupine and valkey-server, as its non-root user.
+    (smoke,) = [
+        step for step in build["steps"] if "docker run" in step.get("run", "") and "aof_durability" in step["run"]
+    ]
+    assert "--user" not in smoke["run"]
+
+
+def test_the_module_fuzz_workflow_keeps_its_inputs_and_runs_in_the_image_or_on_the_runner():
+    workflow = _workflow("module-fuzz.yml")
+    assert set(workflow["on"]) == {"workflow_call"} and workflow["permissions"] == {"contents": "read"}
+    inputs = workflow["on"]["workflow_call"]["inputs"]
+    assert {name for name, rule in inputs.items() if rule.get("required")} == {"module", "fuzzer_ref"}
+    for name in ("build", "module_artifact", "experiment", "experiment_dir", "base", "image", "valkey_version"):
+        assert name in inputs and not inputs[name].get("required"), name
+    assert inputs["experiment"]["default"] == "example.module-chaos"
+    assert inputs["fail_on_error"] == {"description": inputs["fail_on_error"]["description"], "required": False, "type": "boolean", "default": False}  # fmt: skip
+    (job,) = workflow["jobs"].values()
+    assert job["container"] == "${{ inputs.image }}" and job["timeout-minutes"] == "${{ inputs.timeout_minutes }}"
+    assert job["defaults"]["run"]["shell"] == "bash"
+    text = (WORKFLOWS / "module-fuzz.yml").read_text(encoding="utf-8")
+    assert "secrets." not in text and "github.token" not in text
+    steps = {step["name"]: step for step in job["steps"]}
+    # What the image brings is built on the runner only, and the fuzzer the caller pinned is installed either way.
+    for name in ("Set up Python", "Build Valkey", "Set up Go", "Build the porcupine checker"):
+        assert steps[name]["if"] == "inputs.image == ''", name
+    assert "if" not in steps["Install the fuzzer"] and steps["Install the fuzzer"]["run"].strip().endswith(" .")
+    assert steps["Checkout valkey-fuzzer"]["with"]["ref"] == "${{ inputs.fuzzer_ref }}"
+    assert steps["Checkout the module repository"]["with"] == {"path": "module", "persist-credentials": False}
+    # The caller's build command and the inputs reach the shell through the environment, never spliced in.
+    for step in job["steps"]:
+        assert "${{ inputs." not in step.get("run", ""), step["name"]
+    assert steps["Build the module"]["if"] == "inputs.build != ''"
+    # The batch's exit code is kept for the last step, so the summary and the upload run on a FAIL too.
+    assert "set +e" in steps["Run the batch"]["run"] and 'echo "code=$?"' in steps["Run the batch"]["run"]
+    assert steps["Summarize the batch"]["if"] == "always()" and steps["Upload the batch"]["if"] == "always()"
+    assert steps["Upload the batch"]["with"]["name"] == "${{ inputs.artifact_name }}"
+    (env,) = _step_env("module-fuzz.yml", "summary")
+    assert {"SUMMARY_TITLE", "BATCH_DIR", "MODULE_REPOSITORY", "MODULE_SHA"} <= set(env)
+    (env,) = _step_env("module-fuzz.yml", "module-base")
+    assert "BASE_OUT" in env and "MODULE_PATH=" in steps["Write the batch's base file"]["run"]
+
+
+@pytest.mark.parametrize(
+    ("code", "fail_on_error", "fails"),
+    [("0", "false", False), ("1", "false", True), ("2", "false", False), ("3", "false", False), ("2", "true", True), ("64", "false", True)],
+)  # fmt: skip
+def test_the_module_fuzz_workflow_fails_the_job_on_a_fail_and_on_an_error_only_when_asked(code, fail_on_error, fails):
+    (job,) = _workflow("module-fuzz.yml")["jobs"].values()
+    (step,) = [step for step in job["steps"] if step["name"] == "Fail on FAIL"]
+    result = subprocess.run(
+        ["bash", "-eo", "pipefail", "-c", step["run"]],
+        env={**os.environ, "CODE": code, "FAIL_ON_ERROR": fail_on_error},
+        capture_output=True,
+        text=True,
+    )
+    assert (result.returncode != 0) is fails, result.stdout
+
+
+def test_the_module_base_loads_the_built_module_over_the_callers_base(tmp_path, monkeypatch):
+    base = tmp_path / "base.yaml"
+    base.write_text(
+        yaml.safe_dump(
+            {
+                "deployment": {"server_config": {"search.rdb-validate-on-write": "yes"}},
+                "experiment": {"inputs": {"module_command": "FT.CREATE"}},
+            }
+        )
+    )
+    out = tmp_path / "out.yaml"
+    monkeypatch.chdir(tmp_path)
+    CI.module_base("module/libsearch.so", str(base), str(out))
+    assert yaml.safe_load(out.read_text()) == {
+        "deployment": {
+            "server_config": {
+                "search.rdb-validate-on-write": "yes",
+                "loadmodule": str(tmp_path / "module" / "libsearch.so"),
+            }
+        },
+        "experiment": {"inputs": {"module_command": "FT.CREATE"}},
+    }
+    # Without a base, only the module.
+    CI.module_base("/opt/module/libjson.so", "", str(out))
+    assert yaml.safe_load(out.read_text()) == {
+        "deployment": {"server_config": {"loadmodule": "/opt/module/libjson.so"}}
+    }
+    # A base that loads a module itself would load two, or the wrong one.
+    base.write_text(yaml.safe_dump({"deployment": {"server_config": {"loadmodule": "/elsewhere.so"}}}))
+    with pytest.raises(SystemExit, match=r"sets deployment\.server_config\.loadmodule"):
+        CI.module_base("/opt/module/libjson.so", str(base), str(out))
+    base.write_text("- not a mapping\n")
+    with pytest.raises(SystemExit, match="must be a mapping"):
+        CI.module_base("/opt/module/libjson.so", str(base), str(out))
+
+
+def test_the_module_chaos_example_takes_a_modules_commands_as_inputs_and_draws_the_faults(tmp_path):
+    runtime = valkey_service(experiment_directories=(str(EXAMPLE_EXPERIMENTS),))
+    plans = [
+        generate(runtime.catalog, seed, compile_fn=runtime.compile, experiment="example.module-chaos", base=MODULE_CHAOS_BASE)
+        for seed in range(6)
+    ]  # fmt: skip
+    components = {item.id: item for item in plans[0].plan.components}
+    inputs = MODULE_CHAOS_BASE["experiment"]["inputs"]
+    assert to_plain_data(components["build"].config["commands"]) == ["JSON.SET"]
+    assert to_plain_data(components["build"].config["deployment_config"]) == ["loadmodule"]
+    for name in ("load", "during", "verify"):
+        # The compiled items carry the sequence's defaults beside what the input gave.
+        compiled = to_plain_data(components[name].config["commands"])
+        assert [{key: item[key] for key in given} for item, given in zip(compiled, inputs[name])] == inputs[name], name
+    assert components["verify"].config["instances"] == "all"
+    assert to_plain_data(components["logs"].config["forbidden"]) == inputs["forbidden_logs"]
+    for generated in plans:
+        for instance in to_plain_data(generated.plan.instances).values():
+            assert instance["server_config"]["loadmodule"] == "/opt/module/libjson.so"
+        runtime.validate_plan(generated.plan)
+    # The faults vary with the seed; the module's commands do not.
+    drawn = {generated.scenario["experiment"]["inputs"]["signal"] for generated in plans}
+    assert len(drawn) > 1
+    assert all(generated.plan.deployment_mode == "standalone" for generated in plans)
+    # Without the module's commands there is no scenario to draw.
+    with pytest.raises(GeneratorError, match="missing required field 'module_command'"):
+        generate(runtime.catalog, 1, compile_fn=runtime.compile, experiment="example.module-chaos")
+    # The shape is .github/scripts/module_chaos.py's: the same components, in the same order, with the module's data.
+    script = ROOT / ".github" / "scripts" / "module_chaos.py"
+    subprocess.run([sys.executable, str(script), str(tmp_path)], check=True, capture_output=True)
+    json_doc = yaml.safe_load((tmp_path / "proposed.json-chaos.yaml").read_text())
+    example = yaml.safe_load((EXAMPLE_EXPERIMENTS / "module-chaos.yaml").read_text())
+    ids = [item["id"] for item in example["components"]]
+    assert ids == ["build", "logs", *(item["id"] for item in json_doc["components"] if item["id"] != "build")]
+    assert example["required_events"] == json_doc["required_events"]
+    assert example["required_evidence"] == json_doc["required_evidence"]
+    assert example["metadata"]["generator"] == json_doc["metadata"]["generator"]
