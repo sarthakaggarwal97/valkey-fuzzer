@@ -148,13 +148,18 @@ def test_every_workflow_pins_its_actions_to_a_commit(name):
         assert action.startswith("./") or re.fullmatch(r"[\w.-]+/[\w./-]+@[0-9a-f]{40} # v\d+(\.\d+)*", action), action
 
 
-# The jobs that write: the one that posts the PR comment the read-only summarize job rendered, and the two of a
-# release that post the built distributions to a GitHub release and to PyPI (its OIDC token).
+# The jobs that write: the one that posts the PR comment the read-only summarize job rendered, the two of a
+# release that post the built distributions to a GitHub release and to PyPI (its OIDC token), and the one that
+# pushes the image on a tag.
 WRITING_JOBS = {
     ("valkey-pr-fuzzer.yml", "comment"): {"issues": "write", "pull-requests": "write"},
     ("release.yml", "github-release"): {"contents": "write"},
     ("release.yml", "pypi"): {"id-token": "write"},
+    ("build-image.yml", "publish"): {"packages": "write"},
 }
+# The image push builds the tag's Dockerfile and pushes it: a maintainer pushed the tag, no PR's code is near, and
+# pushing is what the token is for (test_the_image_workflow_pushes_only_on_a_tag_and_builds_without_pushing_otherwise).
+RUNS_WITH_A_WRITE_TOKEN = {("build-image.yml", "publish")}
 
 
 @pytest.mark.parametrize("name", WORKFLOW_NAMES)
@@ -167,7 +172,7 @@ def test_every_workflow_holds_a_read_only_token_except_the_job_that_posts_the_co
     for job_name, job in workflow["jobs"].items():
         raised = {scope: level for scope, level in job.get("permissions", {}).items() if level != "read"}
         assert raised == WRITING_JOBS.get((name, job_name), {}), (name, job_name)
-        if raised:
+        if raised and (name, job_name) not in RUNS_WITH_A_WRITE_TOKEN:
             assert not any("run" in step or "checkout" in step.get("uses", "") for step in job["steps"]), job_name
 
 
@@ -176,9 +181,22 @@ def test_every_workflow_serializes_its_runs_and_bounds_every_job(name):
     # Without a concurrency group a schedule that outlasts its interval runs beside itself; without a timeout a hung
     # job holds a runner for six hours.
     workflow = _workflow(name)
-    assert workflow["concurrency"]["group"] and workflow["concurrency"]["cancel-in-progress"] is False, name
+    if set(workflow["on"]) == {"workflow_call"}:
+        # A called workflow has no run of its own: each of its jobs carries the group.
+        for job_name, job in workflow["jobs"].items():
+            assert job["concurrency"]["group"] and job["concurrency"]["cancel-in-progress"] is False, (name, job_name)
+    else:
+        assert workflow["concurrency"]["group"] and workflow["concurrency"]["cancel-in-progress"] is False, name
+    inputs = workflow["on"].get("workflow_call", {}).get("inputs", {})
     for job_name, job in workflow["jobs"].items():
-        assert isinstance(job.get("timeout-minutes"), int), (name, job_name)
+        timeout = job.get("timeout-minutes")
+        # A reusable workflow's caller sets the budget, through a number input that has a default.
+        given = re.fullmatch(r"\$\{\{ inputs\.(\w+) \}\}", str(timeout))
+        if given:
+            rule = inputs[given.group(1)]
+            assert rule["type"] == "number" and isinstance(rule["default"], int), (name, job_name)
+        else:
+            assert isinstance(timeout, int), (name, job_name)
 
 
 OWNING_REPOSITORIES = ("valkey-io/valkey-fuzzer", "sarthakaggarwal97/valkey-fuzzer")
@@ -1115,8 +1133,11 @@ def test_the_image_workflow_pushes_only_on_a_tag_and_builds_without_pushing_othe
     assert "permissions" not in build and "push" not in "\n".join(_run_scripts({"jobs": {"build": build}}))
     assert publish["if"] == "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')"
     assert publish["needs"] == "build" and publish["permissions"] == {"contents": "read", "packages": "write"}
-    (push,) = [step for step in publish["steps"] if "docker push" in step.get("run", "")]
-    assert "ghcr.io/${OWNER,,}/valkey-fuzzer" in push["run"] and push["env"]["TAG"] == "${{ github.ref_name }}"
+    image, push = [step for step in publish["steps"] if "docker" in step.get("run", "")]
+    assert "ghcr.io/${OWNER,,}/valkey-fuzzer" in image["run"] and image["env"]["TAG"] == "${{ github.ref_name }}"
+    # The token reaches the push step alone, after the Dockerfile ran without it.
+    assert "secrets." not in str(image) and push["env"]["REGISTRY_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}"
+    assert "docker push" in push["run"] and "docker build" not in push["run"]
     # The build job proves the image runs an experiment with porcupine and valkey-server, as its non-root user.
     (smoke,) = [
         step for step in build["steps"] if "docker run" in step.get("run", "") and "aof_durability" in step["run"]
@@ -1135,6 +1156,7 @@ def test_the_module_fuzz_workflow_keeps_its_inputs_and_runs_in_the_image_or_on_t
     assert inputs["fail_on_error"] == {"description": inputs["fail_on_error"]["description"], "required": False, "type": "boolean", "default": False}  # fmt: skip
     (job,) = workflow["jobs"].values()
     assert job["container"] == "${{ inputs.image }}" and job["timeout-minutes"] == "${{ inputs.timeout_minutes }}"
+    assert "${{ inputs.module }}" in job["concurrency"]["group"] and "${{ inputs.experiment }}" in job["concurrency"]["group"]  # fmt: skip
     assert job["defaults"]["run"]["shell"] == "bash"
     text = (WORKFLOWS / "module-fuzz.yml").read_text(encoding="utf-8")
     assert "secrets." not in text and "github.token" not in text

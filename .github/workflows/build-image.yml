@@ -20,6 +20,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: build-image-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -65,16 +69,25 @@ jobs:
           persist-credentials: false
 
       # A registry path is lowercase; a repository owner need not be.
-      - name: Build and push the image
+      - name: Build the image
+        id: image
         env:
           OWNER: ${{ github.repository_owner }}
           TAG: ${{ github.ref_name }}
-          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           image="ghcr.io/${OWNER,,}/valkey-fuzzer"
           docker build --tag "${image}:${TAG}" --tag "${image}:latest" \
             --build-arg "SOURCE_URL=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" .
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+
+      # The token reaches only this step: the build above ran the Dockerfile without it.
+      - name: Push the image
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+          TAG: ${{ github.ref_name }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
           echo "${REGISTRY_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
-          docker push "${image}:${TAG}"
-          docker push "${image}:latest"
-          echo "- Pushed \`${image}:${TAG}\` and \`${image}:latest\`" >> "$GITHUB_STEP_SUMMARY"
+          docker push "${IMAGE}:${TAG}"
+          docker push "${IMAGE}:latest"
+          echo "- Pushed \`${IMAGE}:${TAG}\` and \`${IMAGE}:latest\`" >> "$GITHUB_STEP_SUMMARY"
