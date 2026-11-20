@@ -22,17 +22,18 @@ undoes, and the run is ERROR.
 
 import signal
 import threading
-import time
 from collections.abc import Mapping
 from typing import Any, Optional
 
 from valkey_fuzzer._data import jsonable
+from valkey_fuzzer.clock import now
 from valkey_fuzzer.declarations import Declarations
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
 from valkey_fuzzer.schema import ConfigError, ConfigField, ConfigSchema, plain_config
 
 from .instances import EXPECTED_DOWN, deployment, select_instance
+from .polling import remaining
 from .predicates import payload_matches
 from .processes import KILL_EXIT_TIMEOUT_S, pause_owned, wait_killed
 from .registration import component_registration
@@ -46,6 +47,8 @@ EVENT_TARGET = "event"
 _EVENT_RECORD_KEYS = ("target", "targets", "signal", "disk_vars_at_kill")
 
 _SIGNALS = {"SIGKILL": signal.SIGKILL, "SIGTERM": signal.SIGTERM, "SIGSTOP": signal.SIGSTOP}
+# How long recovery waits, at most, for a firing still in progress.
+_FIRE_WAIT_S = 600.0
 
 # The <id>.injected payload: whether and when it fired, and the record fields
 # _EVENT_RECORD_KEYS copies.
@@ -159,7 +162,7 @@ class EventFault:
         # Triggers may be published from any thread (workload, timers).  Once
         # recovery has begun the fault must never fire, and recovery waits for a
         # firing that is already in progress so nothing is installed after it.
-        received_at = time.time()
+        received_at = now()
         with self._lock:
             if self._record is not None or self._recovering:
                 return
@@ -172,12 +175,24 @@ class EventFault:
             self._fire_done.clear()
         try:
             self._fire_once(event, received_at)
+        except BaseException as exc:
+            # An interrupt (Ctrl-C) in the dispatch: recovery reads a record, not a firing that never ends.
+            with self._lock:
+                if self._record == {"status": "firing"}:
+                    self._record = {
+                        "applied": False,
+                        "error": f"interrupted while firing: {type(exc).__name__}: {exc}",
+                        "event": event.name,
+                        "event_sequence": event.sequence,
+                        "occurrence": self._matches,
+                    }
+            raise
         finally:
             self._fire_done.set()
 
     def _fire_once(self, event: Any, received_at: float) -> None:
         delayed = not self._config["delay_s"] or self._context.sleep(self._config["delay_s"])
-        fired_at = time.time()
+        fired_at = now()
         try:
             if not delayed:
                 record = {"applied": False, "error": "cancelled during delay_s, before the fault fired"}
@@ -196,7 +211,7 @@ class EventFault:
                 "trigger_payload": jsonable(event.payload),
                 "trigger_received_at": received_at,
                 "applied_at": fired_at,
-                "completed_at": time.time(),
+                "completed_at": now(),
             }
         )
         self._event_sequence = event.sequence
@@ -245,7 +260,8 @@ class EventFault:
             self._subscription = None
         with self._lock:
             self._recovering = True
-        if not self._fire_done.wait(timeout=600):
+        # A firing in progress ends within its own call's deadline; past this call's, recovery cannot wait for it.
+        if not self._fire_done.wait(timeout=remaining(context, _FIRE_WAIT_S)):
             return make_result(spec, ComponentStatus.ERROR, "fault was still firing when recovery timed out")
         for subscription in self._subscriptions:
             context.event_bus.unsubscribe(subscription)
@@ -371,7 +387,7 @@ class ProcessSignalFault(EventFault):
         if name in ("SIGKILL", "SIGTERM"):
             try:
                 handle.send_signal(self._target, _SIGNALS[name])
-                record["signal_sent_at"] = time.time()
+                record["signal_sent_at"] = now()
                 record["applied"] = True
             except ProcessLookupError as exc:
                 record["applied"] = False
@@ -447,13 +463,13 @@ class ProcessSignalFault(EventFault):
             context.event_bus.publish(f"{spec.id}.recovered", source=spec.id, payload={"instance_id": self._target})
 
     def _restart(self, handle: Any, record: dict[str, Any]) -> None:
-        started = time.time()
+        started = now()
         handle.restart(self._target, wait_ready=True, ready_timeout=self._config["ready_timeout_s"])
         record["restarted"] = True
         # The new process can vote and acknowledge from its spawn on, before it is ready.
         record["restart_spawned_at"] = handle.started_at(self._target)
-        record["restart_ready_at"] = time.time()
-        record["restart_seconds"] = round(time.time() - started, 3)
+        record["restart_ready_at"] = now()
+        record["restart_seconds"] = round(now() - started, 3)
         record["restart_pid"] = handle.pid(self._target)
 
     def _quiesce(self) -> None:

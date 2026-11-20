@@ -11,6 +11,7 @@ import threading
 import time
 from typing import Any, Optional
 
+from valkey_fuzzer.clock import now
 from valkey_fuzzer.declarations import Declarations
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
@@ -117,7 +118,7 @@ class ElectionAction:
         if config["trigger"] == "force_failover":
             for attempt in range(config["attempts"]):
                 replies = _parallel_failover(handle, candidates)
-                record["attempts"].append({"attempt": attempt, "replies": replies, "at": time.time()})
+                record["attempts"].append({"attempt": attempt, "replies": replies, "at": now()})
                 winner, unread = self._wait_winner(context, handle, members, old_primary, old_epoch, config, timeout)
                 if winner is not None:
                     break
@@ -130,7 +131,7 @@ class ElectionAction:
             else:
                 # A kill without restart_killed lasts until the deployment is removed.
                 handle.send_signal(old_primary, signal.SIGKILL)
-            record["killed_at"] = crash["applied_at"] = time.time()
+            record["killed_at"] = crash["applied_at"] = now()
             exited = wait_killed(handle, old_primary, signal.SIGKILL, cluster_vars=True)
             record["old_primary_exited"] = exited["exited"]
             crash["disk_vars_at_kill"] = exited["disk_vars_at_kill"]
@@ -149,14 +150,14 @@ class ElectionAction:
             record["crash"] = crash
         else:
             paused = pause_owned(own, handle, old_primary)
-            record["paused_at"] = time.time()
+            record["paused_at"] = now()
             try:
                 winner, unread = self._wait_winner(
                     context, handle, members, old_primary, old_epoch, config, min(config["pause_s"], timeout)
                 )
             finally:
                 paused.discharge()
-                record["resumed_at"] = time.time()
+                record["resumed_at"] = now()
         if winner is not None and handle.is_alive(old_primary):
             record["old_primary_demoted"] = self._wait_demoted(context, handle, old_primary, config["timeout_s"])
         if winner is not None and config["wait_synced"]:
@@ -319,7 +320,7 @@ def _parallel_failover(handle: Any, candidates: list[str]) -> dict[str, Any]:
         client = clients[instance_id]
         try:
             barrier.wait(timeout=10)
-            sent_at = time.time()
+            sent_at = now()
             sent[instance_id] = {"reply": str(client.execute_command("CLUSTER", "FAILOVER", "FORCE")), "at": sent_at}
         except Exception as exc:
             sent[instance_id] = {"error": f"{type(exc).__name__}: {exc}"}

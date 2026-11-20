@@ -25,6 +25,7 @@ from valkey_fuzzer.deployment.local import syscall_faults as library
 from valkey_fuzzer.deployment.local.config import deployment_config_from_document
 from valkey_fuzzer.deployment.local.models import DeploymentConfig, LocalDeploymentError
 from valkey_fuzzer.deployment.local.processes import ProcessManager
+from valkey_fuzzer.hoststate import current_owner, server_owner
 from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.results import ComponentStatus
@@ -444,6 +445,8 @@ def test_the_benchmark_workload_loads_each_target_with_its_build_and_starts_one_
     workload = BenchmarkWorkload()
     assert workload.start(context, spec).status is ComponentStatus.PASS
     _wait(lambda: (tmp_path / "args").exists() and len((tmp_path / "args").read_text().splitlines()) == 4)
+    # Tagged like a server, in argv[0], so a sweep finds a benchmark the harness left behind.
+    assert all(server_owner(" ".join(process.args)) == current_owner() for process in workload._processes.values())
     result = workload.stop(context, spec)
     assert result.status is ComponentStatus.PASS, result.summary
     assert sorted((tmp_path / "args").read_text().splitlines())[0] == (

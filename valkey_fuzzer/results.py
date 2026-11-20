@@ -2,7 +2,6 @@
 results and evidence with.
 """
 
-import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
@@ -10,6 +9,7 @@ from functools import partial
 from typing import Any, Optional
 
 from ._data import canonical_json, freeze, freeze_mapping, jsonable, to_plain_data
+from .clock import now
 from .fields import (
     as_tuple,
     model_from_data,
@@ -185,7 +185,7 @@ def make_evidence(
         evidence_id=evidence_id,
         source=spec.id,
         phase=phase,
-        observed_at=time.time(),
+        observed_at=now(),
         value=jsonable(value),
         event_sequence=event_sequence,
         artifacts=tuple(artifacts),

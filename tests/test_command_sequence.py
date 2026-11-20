@@ -3,6 +3,7 @@ connection, so arguments go out as bytes and replies come back as the server sen
 
 import hashlib
 import os
+import random
 import shutil
 import socket
 import subprocess
@@ -101,7 +102,7 @@ class FakeServer:
         self.output_path = os.path.join(self.workdir, "output.log")
         self.process, self.client, self.stopped = FakeProcess(), None, False
 
-    def start(self):
+    def start(self, context=None):
         self.build.starts.append(self.arguments)
         if self.shut_downs and self.build.restart_exits:
             with open(self.log_path, "a") as log:
@@ -2521,14 +2522,14 @@ def test_a_private_server_whose_port_was_taken_starts_again_on_fresh_ports(build
     # its free check and Valkey's bind, and Valkey aborts, "Failed listening on port".
     start, failures = FakeServer.start, []
 
-    def contested(server):
+    def contested(server, context=None):
         if server.node and server.build is BUILDS[builds["candidate"]] and len(failures) < taken:
             failures.append(server.option("port"))
             with open(server.log_path, "w") as log:
                 log.write(f"1:M 07 Nov 2026 03:01:23.689 # Failed listening on port {server.option('port')} (tcp)\n")
             server.process.returncode = 1
             return f"Failed listening on port {server.option('port')} (tcp), aborting."
-        return start(server)
+        return start(server, context)
 
     monkeypatch.setattr(FakeServer, "start", contested)
     result, _ = run(builds, [{"command": ["PING"]}])
@@ -2553,6 +2554,22 @@ def test_a_batch_worker_takes_private_ports_from_its_own_slice_and_never_twice(m
     low = 61000 + 2 * actions._PRIVATE_SLICE
     assert all(low <= port < low + actions._PRIVATE_SLICE for port in first + second)
     assert not set(first) & set(second)
+
+
+def test_private_ports_outside_a_slice_are_drawn_from_the_runs_rng(monkeypatch):
+    # A replay draws the same ports as the run it replays (F21); the draw was the unseeded global generator's.
+    monkeypatch.setattr(actions, "ephemeral_port_range", lambda: (32768, 60999))
+    monkeypatch.setattr(actions, "_bindable", lambda port: port)
+    actions._private_port_span.cache_clear()
+    try:
+        draws = []
+        for _ in range(2):
+            monkeypatch.setattr(actions, "_GIVEN", set())
+            draws.append(actions._free_ports(5, rng=random.Random(7)))
+    finally:
+        actions._private_port_span.cache_clear()
+    assert draws[0] == draws[1] and len(set(draws[0])) == 5
+    assert all(61000 <= port <= 65535 for port in draws[0])
 
 
 def test_concurrent_connections_each_run_the_whole_sequence(builds):

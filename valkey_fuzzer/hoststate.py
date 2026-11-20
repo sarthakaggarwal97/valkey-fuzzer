@@ -76,8 +76,9 @@ _OWNER_RE = re.compile(rf"^{_OWNER}$")
 _TITLE_RE = re.compile(rf"{re.escape(TITLE_TAG)}{_OWNER}(?!\S)")
 _CHAIN_RE = re.compile(rf"^-N ({re.escape(CHAIN_PREFIX)}{_OWNER}-[0-9a-f]{{8}})$")
 # The server, and the children it forks (valkey-rdb-bgsave, valkey-aof-rewrite, valkey-rdb-to-replicas,
-# valkey-module-fork, ...), which carry its title, tag included, and outlive a SIGKILLed server.
-_SERVER_BINARY_RE = re.compile(r"(valkey|redis)-(server|rdb-|aof-|module-fork|slot-migration-)")
+# valkey-module-fork, ...), which carry its title, tag included, and outlive a SIGKILLed server; and the benchmark
+# a workload runs beside it, tagged in its argv[0] (:class:`~valkey_fuzzer.components.workloads.BenchmarkWorkload`).
+_SERVER_BINARY_RE = re.compile(r"(valkey|redis)-(server|benchmark|rdb-|aof-|module-fork|slot-migration-)")
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +367,12 @@ def _own_tag(path: str) -> Optional[dict[str, Any]]:
     return read_tag(path)
 
 
+def owner_tag() -> str:
+    """``valkey-fuzzer-owner=<owner>``: this process's tag, as a process title or an argument carries it."""
+
+    return f"{TITLE_TAG}{current_owner().token}"
+
+
 def server_tag_arguments() -> list[str]:
     """valkey-server arguments that put this process's tag in the server's process title.
 
@@ -374,7 +381,7 @@ def server_tag_arguments() -> list[str]:
     itself still carries the tag.
     """
 
-    return ["--proc-title-template", f"{{title}} {{listen-addr}} {{server-mode}} {TITLE_TAG}{current_owner().token}"]
+    return ["--proc-title-template", f"{{title}} {{listen-addr}} {{server-mode}} {owner_tag()}"]
 
 
 def chain_name(label: str) -> str:

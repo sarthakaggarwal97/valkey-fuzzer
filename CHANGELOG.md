@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Fixed: process cleanup, readiness waits, the ledger's clock, and seeded ports (PR-H1)
+
+- A fault's `SIGKILL` (`valkey.fault.process-signal`, the chaos actions' kills) now takes the server's forked
+  children (a BGSAVE, an AOF rewrite) with it, as cleanup always did: one left behind kept writing into the data
+  directory while the instance restarted. A `valkey-benchmark` the benchmark workload starts carries the owner
+  tag in its `argv[0]`, so `valkey-fuzzer sweep` finds one a killed harness left looping. An interrupt (Ctrl-C)
+  while a server is stopped at cleanup kills it with its children instead of leaving it on `SIGTERM` alone.
+- Cluster formation polls for readiness instead of pausing: no fixed 0.1 s per `CLUSTER MEET` (the convergence
+  poll follows), and `CLUSTER RESET HARD` waits until every node knows only itself and holds no slot (10 s at
+  most) rather than 1 s. A restarted cluster node is ready only once a running peer agrees on its role and,
+  for a replica, its link is up: an old primary that still read itself as primary from `nodes.conf` was
+  "ready" before.
+- A fault interrupted while firing records the interrupt; its recovery no longer waits up to 600 s and reports
+  `fault could not be applied: None`. Recovery's wait for a firing ends at its own deadline.
+- Operation times, loss windows, fault times, and evidence `observed_at` are read from one run clock
+  (`valkey_fuzzer.clock.now`): the monotonic clock anchored to wall time at process start, so a wall-clock step
+  mid-run reorders no ledger and moves no window. Values still read as epoch seconds.
+- A private server's start wait (capability probes, RDB loads, command sequences) ends with the run's deadline
+  or a cancelled call, instead of running out its own timeout (15 s or more).
+- A private server's port outside a worker's slice is drawn from the run's `ports` stream, so a replay draws
+  the same ports.
+- The batch runner skips the `SIGKILL` of a finished worker's process group when a new process already leads a
+  group of that id (a reused PID).
+
 ### Changed: the spec bridge loads only when used, and says how to get TLC when it is missing
 
 - `run`, `validate`, `batch` and the other commands no longer import the spec bridge's tools

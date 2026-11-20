@@ -22,6 +22,7 @@ from typing import Any, Optional
 
 import valkey
 
+from ...clock import now
 from ...hoststate import (
     open_shared_lock,
     run_bounded,
@@ -42,7 +43,14 @@ from .models import (
     LocalDeploymentError,
 )
 from .ports import ensure_ports_free
-from .queries import query_cluster_info, query_replication, response_text, valkey_client, wait_until
+from .queries import (
+    query_cluster_info,
+    query_cluster_nodes,
+    query_replication,
+    response_text,
+    valkey_client,
+    wait_until,
+)
 from .server_config import arguments_for_build, build_server_config_arguments, effective_server_config
 
 logger = logging.getLogger(__name__)
@@ -56,6 +64,9 @@ BUILD_TIMEOUT_S = 1800.0
 SOURCE_BUILD_DIR = "/tmp/valkey-build"
 VALKEY_REPOSITORY = "https://github.com/valkey-io/valkey.git"
 VALKEY_SOURCE_REF = "9.1.3"
+
+# CLUSTER NODES flags of a node its peers do not count on.
+_UNHEALTHY_FLAGS = frozenset({"fail", "fail?", "handshake", "noaddr"})
 
 # Matches the `sha=<hex>:<dirty>` field from `valkey-server --version`.
 # Example output: "Valkey server v=8.1.0 sha=abc1234:0 malloc=jemalloc-5.3.0 ..."
@@ -115,7 +126,8 @@ def _stop_process(process: subprocess.Popen) -> None:
     """Send SIGTERM, then SIGKILL (to it and its children) if the process has not exited after 5 seconds.
 
     A server refuses a SIGTERM while it writes its first AOF (a replica after a full sync does), and its
-    rewrite child would outlive a SIGKILL of the server alone.
+    rewrite child would outlive a SIGKILL of the server alone. An interrupt during the wait kills it too: nobody
+    waits for it again, and a server that saw only the SIGTERM may still be running.
     """
     process.terminate()
     try:
@@ -123,6 +135,10 @@ def _stop_process(process: subprocess.Popen) -> None:
     except subprocess.TimeoutExpired:
         kill_server(process)
         process.wait()
+    except BaseException:
+        if process.poll() is None:
+            kill_server(process)
+        raise
 
 
 def verify_cluster_node_identity(instance: InstanceInfo, client: valkey.Valkey) -> str:
@@ -395,7 +411,7 @@ class ProcessManager:
                         **asdict(plan),
                         pid=process.pid,
                         process=process,
-                        started_at=time.time(),
+                        started_at=now(),
                         data_dir=instance_data_dir,
                         log_file=log_file,
                     )
@@ -425,7 +441,7 @@ class ProcessManager:
                     # unless the process left a crash report, which the liveness post-mortem turns into a FAIL.
                     raise LocalDeploymentError(
                         f"Instance {instance.instance_id} exited with code {exit_code} after "
-                        f"{time.time() - instance.started_at:.1f}s, before answering a PING"
+                        f"{now() - instance.started_at:.1f}s, before answering a PING"
                         f"{self._process_output_tail(instance.log_file, lines=5)}"
                     )
                 if not answered:
@@ -569,7 +585,7 @@ class ProcessManager:
             # Update instance info with new process
             instance.process = process
             instance.pid = process.pid
-            instance.started_at = time.time()
+            instance.started_at = now()
             self._spawned_instances[instance.instance_id] = instance
 
             logger.info("Restarted %s with new PID %s", instance.instance_id, process.pid)
@@ -638,6 +654,12 @@ class ProcessManager:
         primary is ready once every replica whose process is running is
         connected.
 
+        A cluster node is ready once it is healthy in its own view and in a
+        running peer's, which agree on its role: a restarted old primary still
+        reads itself as primary from its nodes.conf until gossip brings the new
+        epoch, and an action on it then would act on a node about to be
+        demoted. A replica also needs its link to its primary up.
+
         Raises InstanceIdentityError if the answering server is not the restarted
         process or, for cluster nodes, does not carry the instance's saved ID.
         """
@@ -660,16 +682,22 @@ class ProcessManager:
                 return False
 
             cluster_node_id = verify_cluster_node_identity(instance, client)
-            unhealthy_flags = {"fail", "fail?", "handshake", "noaddr"}
             healthy_members = [
                 node
                 for node in parse_cluster_nodes(response_text(client.execute_command("CLUSTER", "NODES")))
-                if unhealthy_flags.isdisjoint(node["flags"].split(",")) and node["link_state"] == "connected"
+                if _UNHEALTHY_FLAGS.isdisjoint(node["flags"].split(",")) and node["link_state"] == "connected"
             ]
-            self_is_healthy = any(node["is_myself"] and node["node_id"] == cluster_node_id for node in healthy_members)
+            myself = next(
+                (node for node in healthy_members if node["is_myself"] and node["node_id"] == cluster_node_id), None
+            )
 
             # Itself and at least one peer: cluster mode has at least three primaries.
-            return self_is_healthy and len(healthy_members) >= 2
+            if myself is None or len(healthy_members) < 2:
+                return False
+            seen = self._peer_view(instance, cluster_node_id)
+            if seen is None or (seen["is_replica"], seen["primary_id"]) != (myself["is_replica"], myself["primary_id"]):
+                return False
+            return not myself["is_replica"] or query_replication(client).link_up
 
         replication = query_replication(client)
 
@@ -691,6 +719,18 @@ class ProcessManager:
             for other in self._spawned_instances.values()
         )
         return (replication.connected_replicas or 0) >= expected_replicas
+
+    def _peer_view(self, instance: InstanceInfo, cluster_node_id: str) -> Optional[dict]:
+        """A running peer's CLUSTER NODES row for the restarted node: the first peer that answers and lists it
+        healthy gives it; None when none does (gossip has not settled on it yet)."""
+        for peer in self._spawned_instances.values():
+            if peer.instance_id == instance.instance_id or not peer.is_running:
+                continue
+            rows = query_cluster_nodes({"host": peer.host, "port": peer.port}, timeout=0.5)
+            for row in rows or ():
+                if row["node_id"] == cluster_node_id:
+                    return row if _UNHEALTHY_FLAGS.isdisjoint(row["flags"].split(",")) else None
+        return None
 
     def cleanup_deployment(self, instances: list[InstanceInfo]) -> None:
         """Clean up every instance and resource, then report any failures."""

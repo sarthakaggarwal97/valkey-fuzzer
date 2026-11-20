@@ -732,7 +732,7 @@ class _Checks:
         """``count`` loopback ports, free now, that no check of the sequence took before (see
         :func:`actions._free_ports`, which never hands a port out twice in a run)."""
 
-        return actions._free_ports(count, actions._port_block(self.context))
+        return actions._free_ports(count, actions._port_block(self.context), self.context.rng(self.spec.id, "ports"))
 
     def start(
         self,

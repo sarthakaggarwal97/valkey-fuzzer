@@ -4,6 +4,7 @@ import signal
 import time
 from typing import Any, Callable
 
+from ..clock import now
 from .files import nodes_conf_path, read_cluster_vars
 
 # Opens the undo obligation of a change just applied: ``own(kind, target, undo)``.
@@ -83,7 +84,7 @@ def wait_killed(handle: Any, instance_id: str, signum: int, *, cluster_vars: boo
 
     record: dict[str, Any] = {"exited": wait_exit_signalling(handle, instance_id, KILL_EXIT_TIMEOUT_S, signum)}
     if record["exited"]:
-        record["exited_at"] = time.time()
+        record["exited_at"] = now()
     if cluster_vars:
         record["disk_vars_at_kill"] = (
             read_cluster_vars(nodes_conf_path(handle, instance_id)) if record["exited"] else None

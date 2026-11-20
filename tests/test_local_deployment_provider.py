@@ -283,6 +283,14 @@ def test_the_service_controls_each_instances_process_and_follows_failovers(tmp_p
         process.kill()
         process.wait()
 
+    # A fault's SIGKILL takes the server's forked children along, as cleanup's does (F14); other signals go to
+    # the server alone.
+    with patch(f"{SERVICE}.kill_server") as kill_server:
+        handle.send_signal("valkey-1", signal.SIGTERM)
+        handle.send_signal("valkey-1", signal.SIGKILL)
+    nodes[1].process.send_signal.assert_called_once_with(signal.SIGTERM)
+    kill_server.assert_called_once_with(nodes[1].process)
+
     # Roles follow a failover the service did not make; only a cluster fails over on request.
     handle._live_replication = lambda: {
         "valkey-0": Replication("replica", "127.0.0.1", 7001),

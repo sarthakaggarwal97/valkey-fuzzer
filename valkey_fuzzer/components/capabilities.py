@@ -241,7 +241,7 @@ def _run_private_server(
     facts: dict[str, Any] = {"binary": resolved}
     try:
         try:
-            exit_reason = server.start()
+            exit_reason = server.start(context)
         except (OSError, TimeoutError) as exc:
             return _crashed(server, facts) or (ComponentStatus.ERROR, f"probe server failed: {exc}", facts)
         if exit_reason is not None:

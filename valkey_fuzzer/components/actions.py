@@ -27,6 +27,7 @@ import valkey
 from valkey._parsers.base import SERVER_CLOSED_CONNECTION_ERROR
 
 from valkey_fuzzer._data import canonical_json, jsonable
+from valkey_fuzzer.clock import now
 from valkey_fuzzer.declarations import Declarations
 from valkey_fuzzer.deployment.local.ports import ephemeral_port_range
 from valkey_fuzzer.deployment.local.queries import replication_role
@@ -104,7 +105,7 @@ def run_command_on_instances(context: Any, spec: ComponentSpec, config: dict) ->
     replies = []
     for instance_id in select_instances(handle, config["instances"]):
         for attempt in range(config["repeat"]):
-            record: dict[str, Any] = {"instance_id": instance_id, "attempt": attempt, "at": time.time()}
+            record: dict[str, Any] = {"instance_id": instance_id, "attempt": attempt, "at": now()}
             record.update(
                 send_to(handle, instance_id, config["command"], timeout_s=config["timeout_s"], context=context)
             )
@@ -920,8 +921,7 @@ class _Side:
                     spec, "process.private-server", node.server.workdir, node.server.stop
                 )
                 try:
-                    # PrivateServer.start polls with time.sleep: not cancellable, but bounded by its timeout.
-                    exit_output = node.server.start()
+                    exit_output = node.server.start(context)
                 except (OSError, TimeoutError) as exc:
                     return f"the {node.name} server did not start: {exc}"
                 if (
@@ -933,7 +933,11 @@ class _Side:
                 # Another process took a port between its free check and Valkey's bind (a batch runs dozens of
                 # workers at once): the node starts again on fresh ports.
                 node.owned.discharge()
-                fresh = iter(_free_ports(1 + ("cluster-port" in node.options), _port_block(context)))
+                fresh = iter(
+                    _free_ports(
+                        1 + ("cluster-port" in node.options), _port_block(context), context.rng(spec.id, "ports")
+                    )
+                )
                 node.options["port"] = next(fresh)
                 if "cluster-port" in node.options:
                     node.options["cluster-port"] = next(fresh)
@@ -999,7 +1003,7 @@ class _Side:
         if not node.server.shut_down(_STOP_TIMEOUT_S):
             return {"error": f"the server did not stop within {_STOP_TIMEOUT_S:g}s", "unanswered": True}
         try:
-            exit_output = node.server.start()
+            exit_output = node.server.start(context)
         except (OSError, TimeoutError) as exc:
             return {"error": f"the server did not start again: {exc}", "unanswered": True}
         if exit_output is not None:
@@ -1162,10 +1166,11 @@ def _port_block(context: Any) -> Optional[int]:
     return block if isinstance(block, int) and block > 0 else None
 
 
-def _free_ports(count: int, block: Optional[int] = None) -> list[int]:
+def _free_ports(count: int, block: Optional[int] = None, rng: Optional[random.Random] = None) -> list[int]:
     """``count`` distinct TCP ports free on the loopback address right now, none handed out before by this process:
     above the ephemeral range where it leaves room (see :func:`_private_port_span`), in worker ``block``'s own slice
-    of it while that has room, else any the kernel hands out."""
+    of it while that has room, else any the kernel hands out. The draw outside the slice is ``rng``'s (the run's
+    ``ports`` stream, so a replay draws the same ports) or, without one, the process-wide generator's."""
 
     span = _private_port_span()
     if span is not None and block is not None:
@@ -1173,6 +1178,7 @@ def _free_ports(count: int, block: Optional[int] = None) -> list[int]:
         own = range(low, min(low + _PRIVATE_SLICE, span[1] + 1))
     else:
         own = range(0)
+    draw = random.randint if rng is None else rng.randint
     ports: list[int] = []
     with _GIVEN_LOCK:
         for port in own:
@@ -1181,7 +1187,7 @@ def _free_ports(count: int, block: Optional[int] = None) -> list[int]:
             if port not in _GIVEN and _bindable(port):
                 ports.append(port)
         while len(ports) < count:
-            port = _bindable(0 if span is None else random.randint(*span))
+            port = _bindable(0 if span is None else draw(*span))
             if port and port not in _GIVEN and port not in ports:
                 ports.append(port)
         _GIVEN.update(ports)
@@ -1291,7 +1297,13 @@ class CommandsAction:
             "candidate": list(config["modules"]),
             "parent": list(config["modules"] if config["modules_parent"] is None else config["modules_parent"]),
         }
-        ports = iter(_free_ports(2 * config["nodes"] * (2 if config["cluster"] else 1), _port_block(context)))
+        ports = iter(
+            _free_ports(
+                2 * config["nodes"] * (2 if config["cluster"] else 1),
+                _port_block(context),
+                context.rng(spec.id, "ports"),
+            )
+        )
         candidate = new_side("candidate", candidate_binary, config, modules["candidate"], ports)
         parent = new_side("parent", parent_binary, config, modules["parent"], ports)
 
@@ -1763,9 +1775,9 @@ class _SaveTarget:
 
         while True:
             try:
-                self.sent_at = time.time()
+                self.sent_at = now()
                 self.reply = jsonable(self.client.execute_command("BGSAVE", *args))
-                self.replied_at = time.time()
+                self.replied_at = now()
                 return
             except valkey.exceptions.ResponseError as exc:
                 busy = any(text in str(exc) for text in _BGSAVE_BUSY)
@@ -1799,7 +1811,7 @@ class _SaveTarget:
             self.observed_types.add(str(current))
         if str(persistence.get("rdb_bgsave_in_progress")) == "0":
             self.finished = True
-            self.finished_at = time.time()
+            self.finished_at = now()
             self.final = _persistence_record(
                 persistence, "rdb_saves", "rdb_last_bgsave_type", "rdb_last_bgsave_status", "rdb_last_bgsave_time_sec"
             )
@@ -1843,7 +1855,7 @@ class BgsaveAction:
             # fails (e.g. CONFIG GET is rejected) still closes the earlier ones.
             for instance_id in instances:
                 targets.append(_SaveTarget(handle, instance_id))
-            started_at = time.time()
+            started_at = now()
             deadline = time.monotonic() + config["timeout_s"]
             for target in targets:
                 target.send(config["args"], context, deadline, config["poll_interval_s"])
@@ -1897,7 +1909,7 @@ class BgsaveAction:
             spec,
             ComponentStatus.FAIL if problems else ComponentStatus.ERROR if unseen else ComponentStatus.PASS,
             "; ".join([*problems, *unseen])
-            or f"BGSAVE {config['expect']} on {len(results)} instance(s) in {time.time() - started_at:.2f}s",
+            or f"BGSAVE {config['expect']} on {len(results)} instance(s) in {now() - started_at:.2f}s",
             evidence=evidence,
             diagnostics={"started_event": started.sequence, "results": results},
         )
@@ -1976,7 +1988,7 @@ class FailoverAction:
             ),
             None,
         )
-        started_at = time.time()
+        started_at = now()
         ok = handle.failover(
             shard,
             force=config["force"],
@@ -1993,7 +2005,7 @@ class FailoverAction:
             "roles": handle.roles(),
             "primary_before": primary_before,
             "started_at": started_at,
-            "completed_at": time.time(),
+            "completed_at": now(),
         }
         return make_result(
             spec,
@@ -2273,7 +2285,7 @@ class RollingUpgradeAction:
         stopped = stop_owned(functools.partial(context.obligations.open, spec), handle, instance_id, wait_ready=True)
         if not wait_exit_signalling(handle, instance_id, config["step_timeout_s"]):
             raise _UpgradeFailedError(f"{instance_id} did not exit within {config['step_timeout_s']}s")
-        started = time.time()
+        started = now()
         stopped.discharge()
         after = instance_identity(handle, instance_id)
         expected_version = config["target"].get("version")
@@ -2286,7 +2298,7 @@ class RollingUpgradeAction:
                 "instance_id": instance_id,
                 "before": before,
                 "after": after,
-                "seconds": round(time.time() - started, 3),
+                "seconds": round(now() - started, 3),
             }
         )
         if role == "replica":
@@ -2314,7 +2326,7 @@ class RollingUpgradeAction:
         steps: list,
     ) -> None:
         target = replicas[0]
-        started = time.time()
+        started = now()
         if cluster:
             with handle.new_client(target, timeout=15.0) as client:
                 client.execute_command("CLUSTER", "FAILOVER")
@@ -2346,7 +2358,7 @@ class RollingUpgradeAction:
                     raise RuntimeError(f"{failure}; an instance did not answer INFO replication")
                 raise _UpgradeFailedError(failure)
         handle.refresh_roles()
-        steps.append({"kind": "failover", "from": primary, "to": target, "seconds": round(time.time() - started, 3)})
+        steps.append({"kind": "failover", "from": primary, "to": target, "seconds": round(now() - started, 3)})
         context.event_bus.publish(f"{spec.id}.failed-over", source=spec.id, payload={"from": primary, "to": target})
 
 

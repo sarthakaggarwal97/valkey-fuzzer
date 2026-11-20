@@ -9,7 +9,7 @@ from typing import Callable, Optional
 
 import valkey
 
-from ...deadlines import WaitInterruptedError, pause
+from ...deadlines import WaitInterruptedError
 from ...protocols import RunContext
 from .cluster_nodes import HASH_SLOTS, parse_cluster_nodes
 from .models import DeploymentMode, InstanceInfo, LocalDeploymentError
@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 # assigned; the health wait outlasts that window, as the meet, slot and instance-start waits do, and a healthy
 # deployment is no slower for the margin.
 SETTLE_TIMEOUT_S = 60.0
+# How long the nodes may take to answer CLUSTER INFO as reset: the reset itself is done when the command returns.
+RESET_TIMEOUT_S = 10.0
 
 
 class Formation:
@@ -55,7 +57,6 @@ class Formation:
         for node in nodes[1:]:
             logger.debug("Meeting %s (port %s)", node.instance_id, node.port)
             first_node_client.execute_command("CLUSTER", "MEET", node.host, node.port)
-            pause(self._context, 0.1, "CLUSTER MEET")
 
         logger.info("CLUSTER MEET complete")
 
@@ -79,7 +80,7 @@ class Formation:
         logger.info("All nodes see each other and are a part of the cluster")
 
     def reset_cluster_state(self, nodes: list[InstanceInfo]) -> None:
-        """Reset cluster state on all nodes"""
+        """Reset cluster state on all nodes, and wait until each knows only itself and holds no slot."""
         logger.debug("Resetting cluster state")
         for node in nodes:
             client = self.get_client(node)
@@ -87,7 +88,17 @@ class Formation:
             # it to a process this deployment started.
             verify_instance_process_identity(node, client)
             client.execute_command("CLUSTER", "RESET", "HARD")
-        pause(self._context, 1.0, "CLUSTER RESET")
+
+        def reset() -> bool:
+            return all(
+                (info.get("cluster_known_nodes"), info.get("cluster_slots_assigned")) == ("1", "0")
+                for info in (query_cluster_info(self.get_client(node)) for node in nodes)
+            )
+
+        if not wait_until(reset, timeout=RESET_TIMEOUT_S, interval=0.1, what="CLUSTER RESET", context=self._context):
+            raise LocalDeploymentError(
+                f"the cluster nodes did not reset within {RESET_TIMEOUT_S:g}s of CLUSTER RESET HARD"
+            )
 
     def assign_and_verify_slots(self, nodes: list[InstanceInfo]) -> dict[str, str]:
         """Assign hash slots to primary nodes and verify assignment"""

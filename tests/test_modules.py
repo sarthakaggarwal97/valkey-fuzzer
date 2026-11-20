@@ -89,7 +89,7 @@ class ProbeServer:
     def _restore(self, key, ttl, payload):
         self.stored[key] = ProbeServer.dumps(self.index, payload)
 
-    def start(self):
+    def start(self, context=None):
         return ProbeServer.exit_output
 
     def stop(self):
@@ -291,7 +291,7 @@ class _ModuleProbeServer:
         info = {"valkey_version": "9.0.0", "valkey_git_sha1": "abc"}
         self.client = SimpleNamespace(info=lambda section: info, execute_command=execute_command)
 
-    def start(self):
+    def start(self, context=None):
         unknown = [module for module in self.modules if module != "/m/libjson.so"]
         return f"Module {unknown[0]} failed to load: no such file" if unknown else None
 

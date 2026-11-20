@@ -106,7 +106,7 @@ class InstanceInfo(InstancePlan):
 
     pid: int = 0
     process: Optional[subprocess.Popen] = None
-    # Wall-clock time the current process was spawned: from then on it, not its
+    # When the current process was spawned (:func:`valkey_fuzzer.clock.now`): from then on it, not its
     # predecessor, may be the one acting, even before it is ready.
     started_at: float = 0.0
     data_dir: str = ""

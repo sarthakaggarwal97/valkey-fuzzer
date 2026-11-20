@@ -301,7 +301,9 @@ class ToolsAction:
 
         try:
             if config["server"]:
-                ports = iter(_free_ports(4 if config["cluster"] else 2, _port_block(context)))
+                ports = iter(
+                    _free_ports(4 if config["cluster"] else 2, _port_block(context), context.rng(spec.id, "ports"))
+                )
                 for side in sides:
                     side.port = next(ports)
                     side.server = _ServerSide(side.label, side.binary, 1, 2, config["timeout_s"])

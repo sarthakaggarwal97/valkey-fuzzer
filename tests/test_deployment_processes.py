@@ -273,6 +273,22 @@ def test_spawn_and_formation_waits_end_at_the_runs_deadline(tmp_path, monkeypatc
         formation.form([instance()], mode=DeploymentMode.STANDALONE)
 
 
+def test_a_private_servers_start_wait_ends_with_its_call(monkeypatch):
+    # A cancelled run waited out the private server's own timeout (F30, 15 s here): its wait is the harness's.
+    VirtualClock().install(monkeypatch, deadlines)
+    never_answers = Mock(**{"poll.return_value": None})
+    server = PrivateServer("/usr/bin/valkey-server", timeout_s=15.0)
+    try:
+        with patch("valkey_fuzzer.components.server.subprocess.Popen", return_value=never_answers):
+            with pytest.raises(WaitInterruptedError, match="cancelled while waiting for the private server"):
+                server.start(Mock(deadline=None, **{"sleep.return_value": False}))
+            # The run's deadline ends the wait as the server's own timeout would.
+            with pytest.raises(TimeoutError, match=r"did not become ready within 15\.0s"):
+                server.start(Mock(deadline=time.monotonic(), **{"sleep.return_value": True}))
+    finally:
+        server.stop()
+
+
 def test_a_server_whose_termination_failed_keeps_its_data_and_a_retry_stops_it(tmp_path):
     manager = process_manager(tmp_path, mode=DeploymentMode.CLUSTER, primaries=3)
     stuck, other = instance("valkey-0"), instance("valkey-1", port=7001)
@@ -349,6 +365,14 @@ def test_a_server_that_refuses_sigterm_is_killed_with_its_children():
         processes._stop_process(server)
     kill_server.assert_called_once_with(server)
     server.kill.assert_not_called()
+
+
+def test_an_interrupt_while_a_server_stops_kills_it_and_its_children():
+    # The interrupt moves on to the next instance: a server that saw only the SIGTERM would keep running.
+    server = Mock(**{"wait.side_effect": KeyboardInterrupt(), "poll.return_value": None})
+    with patch(f"{PROCESSES}.kill_server") as kill_server, pytest.raises(KeyboardInterrupt):
+        processes._stop_process(server)
+    kill_server.assert_called_once_with(server)
 
 
 def test_a_relative_base_data_dir_gives_absolute_paths(tmp_path, monkeypatch):
@@ -458,39 +482,57 @@ def test_a_replica_restarts_after_its_old_server_stopped_and_must_rejoin_its_pri
     assert new.terminate.called is bool(error)
 
 
-_OK = "cluster_state:ok\r\ncluster_known_nodes:1\r\n"
-_ME = "abc 127.0.0.1:7000@17000 myself,master{} - 0 0 1 connected 0-8191\ndef 127.0.0.1:7001@17001 master - 0 0 2 connected"
+_OK = "cluster_state:ok\r\ncluster_known_nodes:2\r\n"
+_CL = {"cluster_enabled": 1}
+
+
+def _view(flags, primary="-"):
+    """CLUSTER NODES as a node sees it: abc (the restarted node) with ``flags``, and its peer def."""
+    return f"abc 127.0.0.1:7000@17000 {flags} {primary} 0 0 1 connected\ndef 127.0.0.1:7001@17001 master - 0 0 2 connected 0-16383"
 
 
 @pytest.mark.parametrize(
-    ("role", "info", "replies", "primary_alive", "ready"),
+    ("role", "info", "replies", "peer", "primary_alive", "ready"),
     [
         # A primary waits for its running replicas.
-        ("primary", {"role": "master", "connected_slaves": 1}, None, True, True),
-        ("primary", {"role": "slave"}, None, True, False),
+        ("primary", {"role": "master", "connected_slaves": 1}, None, None, True, True),
+        ("primary", {"role": "slave"}, None, None, True, False),
         # A replica waits for its link, unless the primary it follows was killed: then the link cannot come up.
-        ("replica", _replica_info(pid=7001, link="down"), None, True, False),
-        ("replica", _replica_info(pid=7001, link="down"), None, False, True),
-        ("cluster", {"cluster_enabled": 1}, [_OK, "abc", _ME.format("")], True, True),
-        ("cluster", {"cluster_enabled": 1}, [_OK, "abc", _ME.format(",fail")], True, False),
-        ("cluster", {"cluster_enabled": 1}, ["cluster_state:fail\r\n"], True, False),
-        ("cluster", {"cluster_enabled": 1}, [_OK, "other-id"], True, InstanceIdentityError),
+        ("replica", _replica_info(pid=7001, link="down"), None, None, True, False),
+        ("replica", _replica_info(pid=7001, link="down"), None, None, False, True),
+        # A cluster node is ready once it and a peer see it healthy and agree on its role.
+        ("cluster", _CL, [_OK, "abc", _view("myself,master")], _view("master"), True, True),
+        ("cluster", _CL, [_OK, "abc", _view("myself,master,fail")], _view("master"), True, False),
+        ("cluster", _CL, ["cluster_state:fail\r\n"], None, True, False),
+        ("cluster", _CL, [_OK, "other-id"], None, True, InstanceIdentityError),
+        # The old primary reads itself as primary from nodes.conf until gossip brings the new epoch (F15).
+        ("cluster", _CL, [_OK, "abc", _view("myself,master")], _view("slave", "def"), True, False),
+        ("cluster", _CL, [_OK, "abc", _view("myself,master")], _view("master,fail?"), True, False),
+        ("cluster", _CL, [_OK, "abc", _view("myself,master")], None, True, False),
+        ("cluster", {**_CL, "master_link_status": "up"}, [_OK, "abc", _view("myself,slave", "def")], _view("slave", "def"), True, True),
+        ("cluster", {**_CL, "master_link_status": "down"}, [_OK, "abc", _view("myself,slave", "def")], _view("slave", "def"), True, False),
     ],
-)
-def test_a_restarted_server_is_ready_once_it_rejoins_in_its_role(tmp_path, role, info, replies, primary_alive, ready):
+)  # fmt: skip
+def test_a_restarted_server_is_ready_once_it_rejoins_in_its_role(
+    tmp_path, role, info, replies, peer, primary_alive, ready
+):
     manager, replica = _pair(tmp_path)
     manager._spawned_instances["valkey-0"].process.poll.return_value = None if primary_alive else -9
     node = replica if role == "replica" else instance(cluster_node_id="abc")
     if role == "cluster":
         manager.config.mode = DeploymentMode.CLUSTER
-        manager._spawned_instances = {"valkey-0": node}
+        manager._spawned_instances = {"valkey-0": node, "valkey-1": instance("valkey-1", port=7001)}
     client = fake_client({"process_id": node.pid, **info}, replies)
+    rows = None if peer is None else cluster_nodes.parse_cluster_nodes(peer)
 
-    if ready is InstanceIdentityError:
-        with pytest.raises(InstanceIdentityError, match="expected abc"):
-            manager._restart_is_ready(node, client, manager.config.mode)
-    else:
-        assert manager._restart_is_ready(node, client, manager.config.mode) is ready
+    with patch(f"{PROCESSES}.query_cluster_nodes", return_value=rows) as asked:
+        if ready is InstanceIdentityError:
+            with pytest.raises(InstanceIdentityError, match="expected abc"):
+                manager._restart_is_ready(node, client, manager.config.mode)
+        else:
+            assert manager._restart_is_ready(node, client, manager.config.mode) is ready
+    # Only a running peer is asked, never the restarted node itself.
+    assert all(call.args[0]["port"] == 7001 for call in asked.call_args_list)
 
 
 @pytest.mark.parametrize("failure", [RuntimeError("formation failed"), KeyboardInterrupt()])
@@ -535,6 +577,33 @@ def test_formation_points_each_replica_at_the_primary_and_resets_only_its_own_se
     primary.process.poll.return_value = 0
     with pytest.raises(InstanceIdentityError, match="has exited"):
         formation.reset_cluster_state([primary])
+
+
+def test_cluster_reset_waits_until_each_node_knows_only_itself_and_no_slot(monkeypatch):
+    # The reset is done when CLUSTER RESET HARD returns: the poll replaces a fixed 1 s pause (F22).
+    clock = VirtualClock().install(monkeypatch, deadlines)
+    nodes = [instance(f"valkey-{n}", port=7000 + n) for n in range(2)]
+
+    def client(port, infos):
+        def execute(*args):
+            return "OK" if args[:2] == ("CLUSTER", "RESET") else infos.pop(0)
+
+        return Mock(execute_command=Mock(side_effect=execute), info=Mock(return_value={"process_id": port}))
+
+    stale, reset = (
+        "cluster_known_nodes:2\r\ncluster_slots_assigned:16384\r\n",
+        "cluster_known_nodes:1\r\ncluster_slots_assigned:0\r\n",
+    )
+    clients = {7000: client(7000, [stale, reset]), 7001: client(7001, [reset])}
+    formation = Formation()
+    formation.get_client = lambda node: clients[node.port]
+    formation.reset_cluster_state(nodes)
+    assert clock.elapsed == pytest.approx(0.1), "done on the second round"
+    assert all(call("CLUSTER", "RESET", "HARD") in clients[port].execute_command.call_args_list for port in clients)
+
+    clients = {7000: client(7000, [stale] * 200), 7001: client(7001, [reset] * 200)}
+    with pytest.raises(LocalDeploymentError, match="did not reset within 10s"):
+        formation.reset_cluster_state(nodes)
 
 
 def test_a_cluster_is_formed_only_once_every_node_sees_each_replica_of_its_primary():
@@ -662,6 +731,8 @@ def test_cluster_meet_outlasts_a_convergence_window_a_loaded_host_stretches(monk
 
     met(cleared_at=45.0)  # past the old 30 s wait, within SETTLE_TIMEOUT_S
     assert 45.0 <= clock.elapsed <= SETTLE_TIMEOUT_S, "waited out the convergence window instead of erroring at 30 s"
+    met(cleared_at=0.0)
+    assert clock.elapsed == 0.0, "no fixed pause per MEET: the convergence poll is the wait (F22)"
 
     # Nodes that never learn of each other still fail provisioning.
     with pytest.raises(LocalDeploymentError, match=r"did not all learn of each other within 60.00s"):

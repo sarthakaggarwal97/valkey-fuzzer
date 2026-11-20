@@ -36,11 +36,11 @@ import json
 import os
 import shutil
 import subprocess
-import time
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import Any, Optional
 
+from valkey_fuzzer.clock import now
 from valkey_fuzzer.declarations import Declarations
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.protocols import component_artifact_dir
@@ -258,7 +258,7 @@ class HistoryOracle:
                 f"the workload ran {clients} client(s), fewer than min_clients {config['min_clients']}",
             )
         keys = sorted({entry["key"] for entry in ledger} | {key for key in preload if not is_stable_key(key)})
-        read_at = time.time()
+        read_at = now()
         values, error = read_retrying(
             context, lambda: _read_keys(handle, None, keys), timeout_s=ledger_config["converge_timeout_s"]
         )
@@ -271,7 +271,7 @@ class HistoryOracle:
         history, unchecked = register_history(
             preload,
             ledger,
-            (values, read_at, time.time()),
+            (values, read_at, now()),
             started_at=summary.get("started_at", 0.0),
             preload_acks=preload_acks,
             loss_windows=windows,

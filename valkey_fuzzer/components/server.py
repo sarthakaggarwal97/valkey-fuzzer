@@ -11,7 +11,6 @@ import re
 import shutil
 import subprocess
 import tempfile
-import time
 from collections.abc import Mapping, Sequence
 from typing import Any, Optional
 
@@ -22,7 +21,9 @@ from valkey_fuzzer.deployment.local.queries import parse_replication, replicatio
 from valkey_fuzzer.deployment.local.server_config import arguments_for_build
 from valkey_fuzzer.hoststate import server_tag_arguments, tag_directory
 
+from ..deadlines import wait_for
 from .instances import close_quietly, replication_info
+from .polling import remaining
 
 _VERSION_RE = re.compile(r"\bv=(\S+)")
 _SHA_RE = re.compile(r"sha=([0-9a-f]{7,40}):", re.IGNORECASE)
@@ -134,7 +135,9 @@ class PrivateServer:
         self.process: Optional[subprocess.Popen] = None
         self.client: Optional[valkey.Valkey] = None
 
-    def start(self) -> Optional[str]:
+    def start(self, context: Any = None) -> Optional[str]:
+        """Start the server and wait for it to answer, within ``timeout_s`` and the run's deadline; a cancelled
+        ``context`` ends the wait (see :func:`~valkey_fuzzer.deadlines.wait_for`)."""
         command = [
             self.binary,
             "--port", "0",
@@ -159,24 +162,31 @@ class PrivateServer:
         # Appended to, so a second start keeps what the first wrote.
         with open(self.output_path, "ab") as output:
             self.process = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT, cwd=self.workdir)
-        deadline = time.monotonic() + self.timeout_s
-        while time.monotonic() < deadline:
+
+        def answered() -> tuple[bool, Optional[str]]:
             if self.process.poll() is not None:
-                return self.exit_output()
-            if os.path.exists(self.socket_path):
-                client = valkey.Valkey(unix_socket_path=self.socket_path, socket_timeout=10, decode_responses=True)
-                try:
-                    client.ping()
-                    self.client = client
-                    return None
-                except valkey.exceptions.BusyLoadingError:
-                    self.client = client
-                    return None
-                except valkey.exceptions.ConnectionError:
-                    client.close()
-            # A helper without a run context; the wait is bounded by timeout_s.
-            time.sleep(0.05)
-        raise TimeoutError(f"private server did not become ready within {self.timeout_s}s")
+                return True, self.exit_output()
+            if not os.path.exists(self.socket_path):
+                return False, None
+            client = valkey.Valkey(unix_socket_path=self.socket_path, socket_timeout=10, decode_responses=True)
+            try:
+                client.ping()
+            except valkey.exceptions.BusyLoadingError:
+                pass
+            except valkey.exceptions.ConnectionError:
+                client.close()
+                return False, None
+            self.client = client
+            return True, None
+
+        # The run's deadline ends the wait as a timeout; a cancelled call raises WaitInterruptedError.
+        timeout_s = self.timeout_s if context is None else remaining(context, self.timeout_s)
+        done, output = wait_for(
+            answered, timeout_s=timeout_s, interval_s=0.05, reason="the private server", context=context
+        )
+        if not done:
+            raise TimeoutError(f"private server did not become ready within {self.timeout_s}s")
+        return output
 
     def exit_output(self) -> str:
         output = ""

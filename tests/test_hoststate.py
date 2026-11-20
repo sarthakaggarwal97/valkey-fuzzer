@@ -110,9 +110,13 @@ def test_servers_chains_and_mounts_name_their_owner_and_scenarios_cannot_replace
     for child in ("valkey-rdb-bgsave", "valkey-aof-rewrite", "valkey-rdb-to-replicas", "redis-rdb-to-slaves",
                   "valkey-module-fork", "valkey-slot-migration-to-target"):  # fmt: skip
         assert hoststate.server_owner(f"{child} 127.0.0.1:7000  {hoststate.TITLE_TAG}{owner.token}") == owner, child
+    # A workload's benchmark loops forever and has no title to tag: its argv[0] carries the tag (F10).
+    benchmark = f"/b/valkey-benchmark {hoststate.owner_tag()} -h 127.0.0.1 -l PING"
+    assert hoststate.server_owner(benchmark) == current_owner()
     for command in (
         "/usr/bin/valkey-server 127.0.0.1:7001",
         f"/usr/bin/valkey-server *:7000 {hoststate.TITLE_TAG}4242-abcdefX",
+        f"/usr/bin/valkey-cli {hoststate.TITLE_TAG}{owner.token}",
     ):
         assert hoststate.server_owner(command) is None, command
     with pytest.raises(ValueError, match="managed by the local deployment"):

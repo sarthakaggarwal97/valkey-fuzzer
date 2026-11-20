@@ -418,7 +418,7 @@ class BatchRunner:
         run_dir = self._path("runs", job["id"])
         leaks = self._sweep(slot, item.owner)
         # After the sweep, which reports tagged servers as leaks: whatever untagged is left in the group goes too.
-        _signal_worker(item.process.pid, signal.SIGKILL)
+        _kill_orphaned_group(item.process.pid)
         logs = os.path.join(self._work(slot), "data", "logs")
         if os.path.isdir(logs):
             shutil.copytree(logs, os.path.join(run_dir, "logs"), dirs_exist_ok=True)
@@ -475,3 +475,18 @@ def _signal_worker(pid: int, sig: int) -> None:
             os.kill(pid, sig)
     except (ProcessLookupError, PermissionError):
         pass
+
+
+def _kill_orphaned_group(pid: int) -> None:
+    """SIGKILL what a reaped worker left in its process group (untagged processes the sweep cannot find).
+
+    The worker is gone, so ``pid`` may name a new process by now. Its group outlives it only while a member does,
+    and a group of this id with a live leader is a new process's own: that one is left alone.
+    """
+
+    try:
+        if os.getpgid(pid) == pid:
+            return
+    except ProcessLookupError:
+        pass
+    _signal_worker(pid, signal.SIGKILL)

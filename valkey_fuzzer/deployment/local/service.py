@@ -2,6 +2,7 @@
 
 import logging
 import random
+import signal
 import threading
 import time
 import weakref
@@ -27,7 +28,7 @@ from .models import (
     LocalDeployment,
     LocalDeploymentError,
 )
-from .processes import ProcessManager, process_output_path, resolve_binary_path
+from .processes import ProcessManager, kill_server, process_output_path, resolve_binary_path
 from .queries import Replication, query_or_none, query_replication, valkey_client, wait_until
 from .topology import DeploymentConnection
 from .validation.check import DeploymentStateCheck, adapt_validation_config, scenario_rng
@@ -325,7 +326,8 @@ class ValkeyDeploymentService:
             return self._info(instance_id).pid
 
     def started_at(self, instance_id: str) -> float:
-        """Return when the instance's current server process was spawned (``time.time()``), before it was ready."""
+        """Return when the instance's current server process was spawned (:func:`valkey_fuzzer.clock.now`), before
+        it was ready."""
         with self._operation():
             return self._info(instance_id).started_at
 
@@ -342,12 +344,19 @@ class ValkeyDeploymentService:
             return -code if code is not None and code < 0 else None
 
     def send_signal(self, instance_id: str, signum: int) -> None:
-        """Deliver a POSIX signal to the instance's current server process."""
+        """Deliver a POSIX signal to the instance's current server process.
+
+        A ``SIGKILL`` takes the children the server forked (a BGSAVE, an AOF rewrite) with it, as cleanup does:
+        left alone, one keeps writing into the data directory while the instance restarts.
+        """
         with self._operation():
             info = self._info(instance_id)
             if not info.is_running:
                 raise ProcessLookupError(f"instance {instance_id!r} is not running")
-            info.process.send_signal(signum)
+            if signum == signal.SIGKILL:
+                kill_server(info.process)
+            else:
+                info.process.send_signal(signum)
 
     def wait_exit(self, instance_id: str, timeout: float = 10.0) -> bool:
         """Wait for (and reap) the instance's current process; False on timeout."""

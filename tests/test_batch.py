@@ -246,6 +246,27 @@ def test_a_worker_is_interrupted_alone_and_only_a_kill_reaches_its_process_group
     assert sent == [("kill", 7, signal.SIGINT), ("kill", 7, signal.SIGTERM), ("killpg", 7, signal.SIGKILL)]
 
 
+@pytest.mark.parametrize(
+    ("group_of_pid", "killed"),
+    [(ProcessLookupError(), True), (3, True), (7, False)],
+    ids=["pid-free", "pid-reused-in-another-group", "pid-reused-as-a-leader"],
+)
+def test_a_reaped_workers_group_is_killed_unless_its_pid_leads_a_new_one(monkeypatch, group_of_pid, killed):
+    # The worker was reaped before the sweep: a new process may have its PID (L3). Its own group's leftovers
+    # are leaderless, so a group of that id with a live leader belongs to someone else.
+    sent = []
+    monkeypatch.setattr(pool.os, "killpg", lambda pid, sig: sent.append((pid, sig)))
+
+    def getpgid(pid):
+        if isinstance(group_of_pid, Exception):
+            raise group_of_pid
+        return group_of_pid
+
+    monkeypatch.setattr(pool.os, "getpgid", getpgid)
+    pool._kill_orphaned_group(7)
+    assert sent == ([(7, signal.SIGKILL)] if killed else [])
+
+
 def test_what_a_worker_leaves_in_its_process_group_is_killed_after_the_sweep(tmp_path, workers, stub):
     _batch(tmp_path, [_random(2)]).run()
     assert [sig for _, sig in workers.signals] == [signal.SIGKILL, signal.SIGKILL]
