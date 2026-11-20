@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Changed: the Valkey pack registers the local deployment provider, and the spec bridge imports plainly (PR-R3-5)
+
+- `build_catalog` registers no deployment provider of its own: the `valkey` pack registers the local
+  deployment's (`valkey-fuzzer.deployment.local`, for `standalone` and `cluster`) with its components, as
+  `docs/extending.md` has packs do, and `valkey_fuzzer/catalog.py` no longer imports `valkey_fuzzer.deployment.local`.
+  A catalog built without a pack has no provider; `build_catalog(deployment_providers=...)` and
+  `RunService(deployment_providers=...)` still register the caller's. Importing the core (`valkey_fuzzer.catalog`,
+  `.service`, the CLI parser) no longer pulls in the local deployment and the `valkey` client: `create_parser()`
+  and `import valkey_fuzzer.batch` import about 20 ms less; `build_catalog()` is unchanged, since the pack loads
+  them.
+- The spec bridge's tools are imported where they are used: `valkey_fuzzer/commands/spec.py` and
+  `valkey_fuzzer/batch/conform_plugin.py` import `spec.check`, `spec.conform` and `spec.translate` at the top, and
+  `valkey_fuzzer.spec` no longer resolves names on first use; import each from its module (`spec.bundle`,
+  `spec.check`, `spec.conform`, `spec.tla`, `spec.translate`). The three modules cost 1.6 ms to import; `spec.bundle`
+  and `spec.tla` were already imported by every catalog build. What holds from the lazy loading: a base install
+  needs neither Java nor `tla2tools.jar` (importing the tools runs nothing), `run`, `validate` and `batch` work
+  without them, and a `spec` command without them exits `2` with the message naming what is missing and the jar's
+  download command. A `RunService` used as a library still loads `spec.conform` only for a run whose plan names a
+  bundle.
+
 ### Changed: the batch's plug-ins are entry points, and the command prints what each describes (PR-R3-4)
 
 - The bug zoo and spec conformance are no longer registered by `valkey_fuzzer.batch` by name: the batch registers

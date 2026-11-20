@@ -2,6 +2,7 @@
 
 import copy
 import json
+import subprocess
 import sys
 from dataclasses import replace
 from importlib.metadata import EntryPoint, entry_points
@@ -16,6 +17,7 @@ from valkey_fuzzer.catalog import (
     PACK_GROUP,
     Catalog,
     DuplicateExperimentError,
+    build_catalog,
     load_experiment_yaml,
 )
 from valkey_fuzzer.compiler import Overrides
@@ -212,6 +214,23 @@ def test_build_catalog_registers_every_installed_pack_and_names_the_pack_of_an_u
     hint = r"no installed pack registers toy\.\* components; install the package whose 'valkey_fuzzer\.packs' entry point is named 'toy'"
     with pytest.raises(ScenarioCompileError, match=rf"uses 'toy\.action\.echo', which is not registered; {hint}"):
         _service(tmp_path / "experiments").compile(scenario)
+
+
+def test_deployment_providers_come_from_the_packs_and_the_caller_not_from_the_core(catalog, monkeypatch):
+    # The Valkey pack registers the local deployment's providers, one per mode, as any pack registers its own.
+    local = "valkey-fuzzer.deployment.local"
+    assert catalog.deployment_providers.registered_ids == (("cluster", local), ("standalone", local))
+
+    # Without a pack the core registers none; the caller's are the only ones.
+    monkeypatch.setattr("valkey_fuzzer.catalog.entry_points", lambda group: ())
+    assert build_catalog().deployment_providers.registered_ids == ()
+    core = build_catalog(deployment_providers=(_deployment(),))
+    assert core.deployment_providers.registered_ids == (("example-mode", "example.deployment.fake"),)
+    assert core.components.registered_ids == ()
+
+    # And the core does not import the local deployment: only the pack does.
+    loaded = "import sys, valkey_fuzzer.catalog; print(sorted(m for m in sys.modules if 'deployment.local' in m))"
+    assert subprocess.run([sys.executable, "-c", loaded], capture_output=True, text=True, check=True).stdout == "[]\n"
 
 
 def test_the_code_digest_covers_the_package_of_every_component_the_plan_uses(tmp_path, monkeypatch):

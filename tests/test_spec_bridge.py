@@ -19,27 +19,15 @@ from valkey_fuzzer.cli import create_parser
 from valkey_fuzzer.commands import spec as spec_command
 from valkey_fuzzer.commands._common import add_common_options
 from valkey_fuzzer.service import RunService
-from valkey_fuzzer.spec import (
-    SpecBundleError,
-    TlaTools,
-    TranslateError,
-    bundle_service,
-    check_bundle,
-    collect_runs,
-    conform,
-    conform_runs,
-    load_bundle,
-    tla,
-    translate,
-    translate_trace,
-)
-from valkey_fuzzer.spec.bundle import load_spec_mapping
-from valkey_fuzzer.spec.check import log_patterns_gate
-from valkey_fuzzer.spec.conform import ObservedRun, check_run, conform_folder
+from valkey_fuzzer.spec import conform, tla, translate
+from valkey_fuzzer.spec.bundle import SpecBundleError, load_bundle, load_spec_mapping
+from valkey_fuzzer.spec.check import check_bundle, log_patterns_gate
+from valkey_fuzzer.spec.conform import ObservedRun, check_run, collect_runs, conform_folder, conform_runs
 from valkey_fuzzer.spec.tla import (
     ModelValue,
     TlaError,
     TlaSet,
+    TlaTools,
     TraceState,
     changed_keys,
     parse_value,
@@ -47,6 +35,7 @@ from valkey_fuzzer.spec.tla import (
     read_tlc_output,
     render,
 )
+from valkey_fuzzer.spec.translate import TranslateError, bundle_service, translate_trace
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "spec"
 BUNDLE = FIXTURES / "register"

@@ -31,7 +31,8 @@ from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.results import ComponentStatus, Evidence
 from valkey_fuzzer.schema import plain_config
-from valkey_fuzzer.spec import collect_runs, load_bundle, load_spec_mapping
+from valkey_fuzzer.spec.bundle import load_bundle, load_spec_mapping
+from valkey_fuzzer.spec.conform import collect_runs
 
 ID = {name: name[-1] * 40 for name in ("valkey-0", "valkey-1", "valkey-2", "valkey-3")}
 
@@ -843,8 +844,8 @@ def _tla_jar():
 @pytest.mark.slow
 @pytest.mark.skipif(not _tla_jar() or not shutil.which("java"), reason="needs java and TLA2TOOLS_JAR")
 def test_conform_checks_the_election_claims_with_tlc(tmp_path):
-    from valkey_fuzzer.spec import TlaTools
     from valkey_fuzzer.spec.conform import check_run
+    from valkey_fuzzer.spec.tla import TlaTools
 
     tools = TlaTools.locate(_tla_jar(), workers="1")
 

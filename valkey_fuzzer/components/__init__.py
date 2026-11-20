@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from valkey_fuzzer.catalog import Catalog, load_experiment_yaml
+from valkey_fuzzer.deployment.local.provider import local_deployment_provider_registrations
 from valkey_fuzzer.registrations import ComponentRegistration
 from valkey_fuzzer.schema import load_yaml_mapping
 
@@ -117,7 +118,8 @@ def experiments(fragments: Optional[Mapping[str, Any]] = None) -> tuple[Any, ...
 
 
 def register(catalog: Catalog) -> None:
-    """Register the Valkey components, generator hooks, environment providers, experiment fragments, and experiments."""
+    """Register the Valkey components, generator hooks, environment providers, the local deployment's providers,
+    experiment fragments, and experiments."""
 
     fragments = experiment_fragments()
     catalog.register(
@@ -125,6 +127,7 @@ def register(catalog: Catalog) -> None:
         generators=GENERATORS,
         experiments=experiments(fragments),
         environment_providers=ENVIRONMENT_PROVIDERS,
+        deployment_providers=tuple(local_deployment_provider_registrations().values()),
         fragments=fragments,
     )
 

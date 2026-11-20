@@ -279,8 +279,9 @@ def test_a_kill_in_the_save_of_a_granted_vote_lands_before_the_vote_is_on_disk(r
 
 
 def test_cluster_election_with_sync_saves_every_vote_before_it_leaves_and_conforms_to_the_model(runtime):
-    from valkey_fuzzer.spec import TlaTools, collect_runs, load_bundle
-    from valkey_fuzzer.spec.conform import ObservedRun, check_run
+    from valkey_fuzzer.spec.bundle import load_bundle
+    from valkey_fuzzer.spec.conform import ObservedRun, check_run, collect_runs
+    from valkey_fuzzer.spec.tla import TlaTools
 
     inputs = {"save_behavior": "sync", "election": "force_failover"}
     outcome = run_scenario(runtime, scenario(ELECTION, "cluster", inputs, primaries=3, replicas=2))

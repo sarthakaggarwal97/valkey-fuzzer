@@ -100,8 +100,8 @@ def _tla_jar():
 @pytest.mark.slow
 @pytest.mark.skipif(not _tla_jar() or not shutil.which("java"), reason="needs java and TLA2TOOLS_JAR")
 def test_a_manifest_written_before_its_base_names_a_missing_file():
-    from valkey_fuzzer.spec import TlaTools
     from valkey_fuzzer.spec.check import run_control
+    from valkey_fuzzer.spec.tla import TlaTools
 
     bundle = load_bundle("persistence")
     result, _ = run_control(bundle, bundle.control("manifest_before_base"), TlaTools.locate(_tla_jar(), workers="1"))

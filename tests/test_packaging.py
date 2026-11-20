@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from setuptools import find_packages
 
-from valkey_fuzzer.spec import SpecBundleError, find_bundle
+from valkey_fuzzer.spec.bundle import SpecBundleError, find_bundle
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -61,20 +61,29 @@ def test_bundles_are_found_by_directory_or_by_protocol_name_on_the_spec_path(tmp
     assert find_bundle("./cluster-election") == tmp_path / "cluster-election"
 
 
-def test_only_the_spec_commands_and_a_batchs_conform_step_load_the_spec_tools():
-    # The components read a bundle's mapping (spec.bundle, which parses TLA+ values with spec.tla); check,
-    # translate and conform, the tools that run TLC, load only when a spec command or a batch's conform runs.
+def test_a_base_install_needs_java_and_the_jar_only_when_a_spec_tool_runs(tmp_path):
+    # With no java on PATH and no jar, the CLI builds, the batch package loads, and a scenario naming a bundle
+    # compiles (the spec bridge imports plainly; only SANY and TLC need the tools). A spec command then exits 2
+    # and says what is missing and how to get the jar.
     loaded = """
 import sys
 from valkey_fuzzer import batch
 from valkey_fuzzer.cli import create_parser
+from valkey_fuzzer.spec.tla import TOOLS_HINT
 import yaml
 from tests.valkey_experiments_support import valkey_service
-create_parser()
+parser = create_parser()
 with open("examples/valkey/cluster_election_durability.yaml") as handle:
     plan = valkey_service().compile(yaml.safe_load(handle))
 assert any(component.config.get("spec") == "cluster-election" for component in plan.components)
-print(" ".join(sorted(name for name in sys.modules if name.startswith("valkey_fuzzer.spec"))))
+args = parser.parse_args(["spec", "check", "cluster-election"])
+assert args.handler(args) == 2
+print(TOOLS_HINT)
 """
-    result = subprocess.run([sys.executable, "-c", loaded], cwd=ROOT, capture_output=True, text=True, check=True)
-    assert result.stdout.split() == ["valkey_fuzzer.spec", "valkey_fuzzer.spec.bundle", "valkey_fuzzer.spec.tla"]
+    environment = {key: value for key, value in os.environ.items() if key != "TLA2TOOLS_JAR"}
+    environment["PATH"] = str(tmp_path)  # a directory without java
+    result = subprocess.run(
+        [sys.executable, "-c", loaded], cwd=ROOT, env=environment, capture_output=True, text=True, check=True
+    )
+    hint = result.stdout.strip()
+    assert result.stderr.strip() == f"Error: tla2tools.jar not found and java not found on PATH: {hint}"

@@ -12,7 +12,6 @@ from valkey_fuzzer.compiler import Overrides
 from valkey_fuzzer.components import EXPERIMENT_DIRECTORY, config_space, experiments, register
 from valkey_fuzzer.components.config_space import build_config_table
 from valkey_fuzzer.deployment.local import processes
-from valkey_fuzzer.deployment.local.provider import local_deployment_provider_registrations
 from valkey_fuzzer.documents import merge
 from valkey_fuzzer.generator import MAX_ATTEMPTS, Exclusion, GeneratorError, generate, installed_pools
 from valkey_fuzzer.registrations import GeneratorRegistration
@@ -50,7 +49,6 @@ def _runtime(tmp_path, generator, *, inputs=_INPUTS, hooks=None, **experiment):
         GeneratorRegistration(f"tests.generator.{name}", hook) for name, hook in (hooks or {}).items()
     )
     catalog = Catalog()
-    catalog.deployment_providers.register_many(local_deployment_provider_registrations().values())
     register(catalog)
     catalog.register(generators=registrations)
     catalog.load_experiment_directories([directory])

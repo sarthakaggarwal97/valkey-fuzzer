@@ -812,7 +812,7 @@ def test_a_run_that_checked_itself_is_not_checked_again_and_its_verdict_stands(t
     report = {"status": "FAIL", "summary": "spec conform replication: OneHistoryPerId violated; experiment passed",
               "outcome": {"plan": plan}, "conform": recorded}  # fmt: skip
     (tmp_path / "report.json").write_text(json.dumps(report))
-    monkeypatch.setattr(conform, "conform_run", Mock(side_effect=AssertionError("TLC ran twice")))
+    monkeypatch.setattr(conform_plugin, "conform_run", Mock(side_effect=AssertionError("TLC ran twice")))
     conform_plugin._conform(str(tmp_path), 300.0)
     assert not (tmp_path / "conform.json").exists()
     assert conform_plugin._conformance(str(tmp_path), report) == recorded
@@ -823,7 +823,7 @@ def test_a_run_that_checked_itself_is_not_checked_again_and_its_verdict_stands(t
     # A report without the section (an older run, or one that named no bundle) is checked by the worker.
     older = {**report, "conform": None}
     (tmp_path / "report.json").write_text(json.dumps(older))
-    monkeypatch.setattr(conform, "conform_run", lambda folder, timeout_s: recorded)
+    monkeypatch.setattr(conform_plugin, "conform_run", lambda folder, timeout_s: recorded)
     conform_plugin._conform(str(tmp_path), 300.0)
     assert json.loads((tmp_path / "conform.json").read_text()) == recorded
     assert conform_plugin._conformance(str(tmp_path), older) == recorded
