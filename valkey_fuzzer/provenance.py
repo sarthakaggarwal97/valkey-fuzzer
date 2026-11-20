@@ -59,8 +59,10 @@ def source_digest(packages: Iterable[str]) -> Optional[str]:
     return digest.hexdigest()
 
 
-def _fuzzer_digest() -> Optional[str]:
-    return source_digest([__name__.split(".")[0]])
+def _fuzzer_digest(packages: Iterable[str] = ()) -> Optional[str]:
+    """:func:`source_digest` of the fuzzer's own package and ``packages``."""
+
+    return source_digest([__name__.split(".")[0], *packages])
 
 
 def _experiment_digest(experiment: Any) -> str:
@@ -94,11 +96,11 @@ def reproducer(catalog: Catalog, plan: ExecutionPlan, outcome: Optional[RunOutco
     """Report-safe provenance needed to reproduce a run exactly."""
 
     used = {component.use for component in plan.components}
-    # Their code is compared through the fuzzer's source digest.
+    entries = [entry for entry in components_by_role(catalog) if entry.component_id in used]
+    # Their code is compared through fuzzer_digest, which covers the package each one is defined in.
     components = [
         {"component_id": entry.component_id, "role": entry.role.value, **_implementation(entry.factory)}
-        for entry in components_by_role(catalog)
-        if entry.component_id in used
+        for entry in entries
     ]
     provider = catalog.deployment_providers.get((plan.deployment_mode, plan.deployment_provider.provider_id))
     experiment_digest = None
@@ -111,8 +113,10 @@ def reproducer(catalog: Catalog, plan: ExecutionPlan, outcome: Optional[RunOutco
         "python": sys.version.split()[0],
         "platform": platform.platform(),
         "experiment": {"id": plan.experiment_id, "digest": experiment_digest},
-        # Replay compares all the code that ran: the fuzzer's package, the Valkey components included.
-        "fuzzer_digest": _fuzzer_digest(),
+        # Replay compares all the code that ran: the fuzzer's package, and the package of every component the
+        # plan uses (a plug-in pack's, when one is), so the same plan on only the fuzzer's components digests as
+        # before.
+        "fuzzer_digest": _fuzzer_digest(_top_package(entry.factory) for entry in entries),
         "components": components,
         # The plan locks the provider's ID; this records which code ran it.
         "deployment_provider": None

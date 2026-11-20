@@ -2080,7 +2080,7 @@ SHA, and optionally verifies them.
 | --- | --- | --- | --- |
 | `path` | string or reference | | A path or a command name on `PATH`. |
 | `expected_version` | string or null | `null` | The version `--version` must report. |
-| `expected_sha` | string or null | `null` | A prefix of the git SHA or of the file's SHA-256. |
+| `expected_sha` | string or null | `null` | A prefix of the git SHA or of the file's SHA-256, at least 7 hex characters (as git abbreviates). |
 
 Output: `binary`, the absolute path.
 

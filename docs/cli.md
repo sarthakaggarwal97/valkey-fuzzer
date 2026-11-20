@@ -572,7 +572,7 @@ Before it starts anything, replay compares this environment with the report's
 | execution plan digest | `reproducer.plan_digest` |
 | the installed experiment's digest | `reproducer.experiment.digest` |
 | each used component's import path | `reproducer.components[].implementation` |
-| the fuzzer's code (SHA-256 over every file of the `valkey_fuzzer` package, the Valkey components included) | `reproducer.fuzzer_digest` |
+| the fuzzer's code (SHA-256 over every file of the `valkey_fuzzer` package, the Valkey components included, and of the package of every component the plan uses, so a plug-in pack's code counts too) | `reproducer.fuzzer_digest` |
 | the deployment provider's identity | the plan's `deployment_provider` |
 | the deployment provider's import path and code (its whole top-level package) | `reproducer.deployment_provider` |
 | each instance's Valkey binary, by SHA-256 | `outcome.diagnostics.deployment.instances` |

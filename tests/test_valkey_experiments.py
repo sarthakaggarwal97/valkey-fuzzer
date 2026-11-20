@@ -85,12 +85,19 @@ def test_a_local_binary_is_fingerprinted_and_must_be_the_version_the_scenario_na
     def resolve(**config):
         return LocalBinaryProvider().acquire(None, spec, registration.config.resolve(config, "with"))
 
-    artifact = resolve(path=str(binary), expected_version="9.1.0", expected_sha="abc1")
+    artifact = resolve(path=str(binary), expected_version="9.1.0", expected_sha="abc1234")
     assert artifact.outputs == {"binary": str(binary)}
     assert (artifact.provenance["version"], artifact.provenance["git_sha"]) == ("9.1.0", "abc12345")
     with pytest.raises(ValueError, match=r"expected '8\.1\.4'"):
         resolve(path=str(binary), expected_version="8.1.4")
     with pytest.raises(ValueError, match="does not match expected_sha"):
-        resolve(path=str(binary), expected_sha="ffff")
+        resolve(path=str(binary), expected_sha="ffffffff")
+    # A prefix shorter than git's abbreviation pins nothing, and the binary's digest is no prefix of the
+    # expectation: "abc1" matched any build whose SHA starts so, and a longer expectation its own prefix.
+    for short in ("abc1", "a", "abc12345" + "0" * 40 + "zz"):
+        with pytest.raises(ValueError, match="must be 7 to 64 hex characters"):
+            resolve(path=str(binary), expected_sha=short)
+    with pytest.raises(ValueError, match="does not match expected_sha"):
+        resolve(path=str(binary), expected_sha="abc12345" + "0" * 32)
     with pytest.raises(FileNotFoundError):
         resolve(path=str(tmp_path / "missing"))

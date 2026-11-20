@@ -60,10 +60,12 @@ logger = logging.getLogger(__name__)
 READY_TIMEOUT_S = 60.0
 # How long a source build (clone and make) may take, at most.
 BUILD_TIMEOUT_S = 1800.0
-# Where valkey-server is built when no binary is configured or on PATH, and the release it builds.
+# Where valkey-server is built when no binary is configured or on PATH, and the release it builds: the tag, for
+# the clone, and the commit it must resolve to, since a tag can be moved.
 SOURCE_BUILD_DIR = "/tmp/valkey-build"
 VALKEY_REPOSITORY = "https://github.com/valkey-io/valkey.git"
 VALKEY_SOURCE_REF = "9.1.3"
+VALKEY_SOURCE_SHA = "29173b67508b2de4c0f0ed551f3b47cf19fc3ca8"
 
 # CLUSTER NODES flags of a node its peers do not count on.
 _UNHEALTHY_FLAGS = frozenset({"fail", "fail?", "handshake", "noaddr"})
@@ -249,6 +251,20 @@ def build_valkey(base_dir: str = SOURCE_BUILD_DIR, timeout: float = BUILD_TIMEOU
                     with open(build_log, "w", encoding="utf-8") as output:
                         clone = ["git", "clone", "--depth", "1", "--branch", VALKEY_SOURCE_REF, VALKEY_REPOSITORY, work]
                         subprocess.run(clone, check=True, timeout=timeout, stdout=output, stderr=subprocess.STDOUT)
+                        # The tag is movable; the commit it resolved to is what the build is pinned to.
+                        resolved = subprocess.run(
+                            ["git", "-C", work, "rev-parse", "HEAD"],
+                            check=True,
+                            timeout=60,
+                            capture_output=True,
+                            text=True,
+                        ).stdout.strip()
+                        if resolved != VALKEY_SOURCE_SHA:
+                            raise LocalDeploymentError(
+                                f"Valkey {VALKEY_SOURCE_REF} resolved to commit {resolved}, not the pinned "
+                                f"{VALKEY_SOURCE_SHA}: the tag moved, or the clone is not {VALKEY_REPOSITORY}"
+                            )
+                        output.write(f"valkey {VALKEY_SOURCE_REF} is commit {resolved}\n")
                         make = ["make", f"-j{os.cpu_count() or 1}"]
                         remaining = max(0.0, deadline - time.monotonic())
                         subprocess.run(
