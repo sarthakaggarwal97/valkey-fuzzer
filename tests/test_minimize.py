@@ -76,18 +76,25 @@ def test_a_reduction_is_the_same_failure_only_with_the_same_failures_errors_and_
     assert not same_failure(reference, _signature(failing=("save",)))
     first, second = (_signature(OutcomeStatus.ERROR, (), diagnostics={"error": {"type": kind}}) for kind in "AB")
     assert same_failure(first, first) and not same_failure(first, second)
+    # A crash is the same failure only with the same status: an ERROR run reporting the FAIL's crash is not it.
+    crash = {"crashes": {"valkey-0": "debug.c:12 'x' is not true"}}
+    failed = _signature(OutcomeStatus.FAIL, diagnostics=crash)
+    errored = _signature(OutcomeStatus.ERROR, diagnostics=crash)
+    assert failed["crashes"] == errored["crashes"] and same_failure(failed, failed)
+    assert not same_failure(failed, errored) and not same_failure(errored, failed)
 
 
 def test_minimize_keeps_only_reductions_that_preserve_the_failure():
-    scenario = {"experiment": {"id": "p", "inputs": {"keys": 800, "flag": True}},
+    scenario = {"experiment": {"id": "p", "inputs": {"keys": 800, "flag": True, "shard": 4}},
                 "deployment": {"mode": "cluster", "primaries": 5, "replicas_per_primary": 2,
                                "server_config": {"maxmemory": "1gb"}, "instance_configs": {"primary": {"a": 1}}}}  # fmt: skip
-    schema = {"properties": {"keys": {"minimum": 10}}}
+    schema = {"properties": {"keys": {"minimum": 10, "shrinkable": True}, "shard": {"minimum": 0}}}
     names = {name for name, _ in reduction_candidates(scenario, schema, deployment_reductions=deployment_reductions)}
     assert {"deployment.replicas_per_primary=0", "deployment.primaries=0", "deployment.primaries=2",
             "drop deployment.server_config.maxmemory", "drop deployment.instance_configs.primary",
             "experiment.inputs.keys=10", "experiment.inputs.keys=400"} <= names  # fmt: skip
-    assert not [name for name in names if "flag" in name]
+    # Only a shrinkable number: a flag has no size, and a smaller shard index is another scenario, not less work.
+    assert not [name for name in names if "flag" in name or "shard" in name]
     # The experiment's requirements bound the shape; the provider's own minimum is left to its compile check.
     bounded = {
         name for name, _ in reduction_candidates(scenario, schema, {"primaries": {"minimum": 3}}, deployment_reductions)
@@ -114,18 +121,56 @@ def test_minimize_keeps_only_reductions_that_preserve_the_failure():
         max_attempts=60,
     )
     assert 100 <= result["scenario"]["experiment"]["inputs"]["keys"] < 200 and result["accepted"]
+    assert result["reproduced"] and result["confirmed"]
+    steps = [item["step"] for item in result["attempts"]]
+    assert steps[0] == "original" and steps[-1] == "confirm"
+    # A reduction rejected once (keys=10 lost the failure) is not run again after each kept step.
+    assert steps.count("experiment.inputs.keys=10") == 1
+
+
+def test_minimize_runs_the_original_first_and_reduces_nothing_that_does_not_reproduce():
+    scenario = {"experiment": {"id": "p", "inputs": {"keys": 800}}, "deployment": {"mode": "standalone"}}
+    runs = []
+
+    def execute(candidate, plan):
+        runs.append(candidate)
+        return _signature_outcome(False)
+
+    result = minimize(scenario, _signature(), compile_fn=lambda candidate: _plan(), execute_fn=execute,
+                      experiment_inputs={"properties": {"keys": {"shrinkable": True}}},
+                      required_evidence=["tests.path"], max_attempts=5)  # fmt: skip
+    assert runs == [scenario] and result["scenario"] == scenario
+    assert (result["reproduced"], result["confirmed"], result["accepted"]) == (False, None, [])
+    assert result["attempts"] == [{"step": "original", "result": "not reproduced", "status": "PASS"}]
+
+
+def test_minimize_confirms_its_result_by_running_it_again():
+    scenario = {"experiment": {"id": "p", "inputs": {"keys": 800}}, "deployment": {"mode": "standalone"}}
+    # The original and the first reduction fail; the confirmation (the third run) does not.
+    statuses = iter([True, True, False])
+    result = minimize(scenario, _signature(), compile_fn=lambda candidate: _plan(),
+                      execute_fn=lambda candidate, plan: _signature_outcome(next(statuses)),
+                      experiment_inputs={"properties": {"keys": {"shrinkable": True}}},
+                      required_evidence=["tests.path"], max_attempts=1)  # fmt: skip
+    assert result["accepted"] == ["experiment.inputs.keys=0"] and result["reproduced"]
+    assert result["confirmed"] is False
+    assert result["attempts"][-1] == {"step": "confirm", "result": "not reproduced", "status": "PASS"}
 
 
 def test_minimize_skips_a_candidate_that_does_not_compile_but_raises_a_bug():
     scenario = {"experiment": {"id": "p", "inputs": {"keys": 800}}, "deployment": {"mode": "standalone"}}
-    options = {"execute_fn": lambda candidate, plan: _signature_outcome(True), "experiment_inputs": {},
+    options = {"execute_fn": lambda candidate, plan: _signature_outcome(True),
+               "experiment_inputs": {"properties": {"keys": {"shrinkable": True}}},
                "required_evidence": ["tests.path"], "max_attempts": 5}  # fmt: skip
 
     def invalid(candidate):
+        # The original compiles (it ran once); every reduction of it is refused.
+        if candidate == scenario:
+            return _plan()
         raise ValueError("keys is too small")
 
     result = minimize(scenario, _signature(), compile_fn=invalid, **options)
-    assert result["accepted"] == [] and {item["result"] for item in result["attempts"]} == {
+    assert result["accepted"] == [] and {item["result"] for item in result["attempts"][1:]} == {
         "invalid: keys is too small"
     }
 

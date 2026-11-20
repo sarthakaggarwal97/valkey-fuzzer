@@ -223,13 +223,16 @@ class Minimization:
 
 @dataclass(frozen=True)
 class MinimizeResult:
-    """The smallest scenario that kept the failure, the reductions taken, and every attempt."""
+    """The smallest scenario that kept the failure, the reductions taken, every attempt, and whether the failure
+    reproduced before anything was reduced (``reproduced``) and the result failed the same way when run again
+    (``confirmed``; None when nothing was reduced because it did not reproduce)."""
 
     scenario: dict[str, Any]
     accepted: list[str]
     attempts: list[dict[str, Any]]
     signature: dict[str, Any]
-    # None when no candidate compiled, so none ran.
+    reproduced: bool
+    confirmed: Optional[bool]
     report_dir: Optional[str]
 
 
@@ -669,7 +672,8 @@ class RunService:
         max_attempts: int = 30,
         log: Optional[Callable[[str], None]] = None,
     ) -> MinimizeResult:
-        """Greedily shrink the scenario while the run keeps failing the same way."""
+        """Greedily shrink the scenario while the run keeps failing the same way; the unreduced scenario runs
+        first (``attempt-1``), and the result once more to confirm it."""
 
         plan = prepared.plan
         spec = self.catalog.experiments.resolve(plan.experiment_id)
@@ -693,5 +697,7 @@ class RunService:
             accepted=list(result["accepted"]),
             attempts=list(result["attempts"]),
             signature=dict(result["signature"]),
+            reproduced=result["reproduced"],
+            confirmed=result["confirmed"],
             report_dir=session.path,
         )

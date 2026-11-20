@@ -35,9 +35,12 @@ def minimize_command(args: argparse.Namespace) -> int:
         return EXIT_SUCCESS
     print(f"Minimizing {prepared.plan.scenario_id}: signature {json.dumps(prepared.reference)}")
     result = service.minimize(prepared, timeout=args.timeout, max_attempts=args.max_attempts, log=print)
-    print(f"Accepted reductions: {', '.join(result.accepted) or 'none'}")
     if result.report_dir:
         print(f"Reports: {result.report_dir}")
+    if not result.reproduced:
+        print("Error: the failure did not reproduce, so nothing was minimized", file=sys.stderr)
+        return EXIT_HARNESS_ERROR
+    print(f"Accepted reductions: {', '.join(result.accepted) or 'none'}")
     text = yaml.safe_dump(result.scenario, sort_keys=False)
     if args.output:
         Path(args.output).write_text(text, encoding="utf-8")
@@ -46,5 +49,8 @@ def minimize_command(args: argparse.Namespace) -> int:
         print(text)
     if not result.accepted:
         print("Error: no reduction kept the failure, so the scenario is not smaller", file=sys.stderr)
+        return EXIT_HARNESS_ERROR
+    if not result.confirmed:
+        print("Error: the minimized scenario did not fail the same way when run again", file=sys.stderr)
         return EXIT_HARNESS_ERROR
     return EXIT_SUCCESS

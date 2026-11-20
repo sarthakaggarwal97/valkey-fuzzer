@@ -375,10 +375,14 @@ must be present after normalization.
   `description`, and `$schema`;
 - each property has `type` (`string`, `integer`, `number`, `boolean`, `array`,
   `object`, `null`, or `environment_reference`), `enum`, `minimum`, `maximum`,
-  `default`, `reference_kinds`, and the annotations `title` and `description`.
+  `default`, `reference_kinds`, `shrinkable`, and the annotations `title` and
+  `description`.
   `type` may be a list, such as `[string, "null"]`, which takes a value of any
   of them; `environment_reference` cannot be in a list, and `null` cannot be
-  alone in one.
+  alone in one. `shrinkable: true` (only on an `integer` or `number`) lets
+  [`minimize`](cli.md#minimize) lower the input: smaller means less of the
+  same work, as for a key count, a rate, or a value size, but not for a shard
+  index, a delay, or a loss window.
 
 A property without `type` accepts any value that holds no artifact or resource
 reference. An `environment_reference` property accepts only an exact
