@@ -17,7 +17,7 @@ release, and the changelog names it.
 | Scenario and experiment YAML | The documents of [Scenarios and experiments](scenarios-and-experiments.md): a scenario's `scenario_id`, `seed`, `experiment`, `deployment`, `artifacts`; an experiment's `extends`, `id`, `deployment`, `inputs`, `components`, `startup_overlays`, `required_events`, `required_evidence`, `metadata`. |
 | Files a run writes | Every key of [`report.json`](cli.md#run-reports) and of a batch's [`summary.json`](cli.md#the-batch-folder), `plan.json`, `scenario.yaml`, and `conform.json`. Tools read keys by name, never by position. |
 | `format_version` | Each of those files, and a `trace.jsonl` header, carries `format_version` (an integer, now `1`). A reader accepts that version, and a file from before the field (read as `1`); it refuses another with one message naming the file and both versions. A key removed or renamed bumps it; a key added does not. |
-| Component ids | The ids of the shipped components (`valkey.workload.*`, `valkey.action.*`, `valkey.fault.*`, `valkey.observer.*`, `valkey.oracle.*`, `valkey.capability.*`), their config fields, and the event and evidence ids they declare, as [Valkey components](components.md) lists them. |
+| Component ids | The ids of the shipped components (`valkey.workload.*`, `valkey.action.*`, `valkey.fault.*`, `valkey.observer.*`, `valkey.oracle.*`, `valkey.capability.*`), their config fields, and the event and evidence ids they declare, as [Valkey components](components/README.md) lists them. |
 | Entry-point groups | `valkey_fuzzer.packs` (a `register(catalog)` function) and `valkey_fuzzer.batch_plugins` (a function returning `BatchPlugin` instances), as [Adding tests](extending.md) describes them. |
 
 ## Not stable

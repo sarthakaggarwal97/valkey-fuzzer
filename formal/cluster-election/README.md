@@ -140,7 +140,7 @@ fault schedule against real `valkey-server` processes. The experiment and an
 example scenario are
 [`valkey_fuzzer/components/experiments/valkey.cluster-election-durability.yaml`](../../valkey_fuzzer/components/experiments/valkey.cluster-election-durability.yaml)
 and [`examples/valkey/cluster_election_durability.yaml`](../../examples/valkey/cluster_election_durability.yaml);
-the components are described in [Valkey components](../../docs/components.md).
+the components are described in [Valkey components](../../docs/components/README.md).
 The experiment needs Valkey 9.2.0 or later, the first to log each counted
 vote with the count and quorum; older builds report `SKIP_UNSUPPORTED`.
 

@@ -102,7 +102,7 @@ survived, and `spec conform` saw `Start` through `TClaim`, `Deliver`, `RApply`, 
 delay, S's pause ran to its timeout ("Write loss risk!", `PauseExpires`) since T died before S learned the claim.
 
 `Cancel`, `DropLink` and `LoseBus` have real components in `valkey.slot-migration-chaos`
-(`valkey.action.slot-migration-chaos`, [components](../../docs/components.md#valkeyactionslot-migration-chaos)): its
+(`valkey.action.slot-migration-chaos`, [components](../../docs/components/actions.md#valkeyactionslot-migration-chaos)): its
 waves kill the source or the target, cut the two apart, or cancel the migration at a phase read from `CLUSTER
 GETSLOTMIGRATIONS` (`started`, `snapshot`, `handoff`, `finished`), heal, and check that the cluster converged and the
 slot's keys survived. They stay `unmapped` for `spec translate` because a scenario injects every fault component of

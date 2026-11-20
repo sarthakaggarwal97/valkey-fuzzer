@@ -157,7 +157,7 @@ Every component registration declares the events it publishes and the
 evidence it emits, each with a schema, and the kinds of state it changes. A
 registration without declarations is rejected when the catalog registers it.
 `valkey-fuzzer list components --format json` prints them, and
-[Valkey components](components.md#events-evidence-and-state-changes) lists
+[Valkey components](components/README.md#events-evidence-and-state-changes) lists
 them for the Valkey components.
 
 At compile time, a required event or evidence ID that no component of the

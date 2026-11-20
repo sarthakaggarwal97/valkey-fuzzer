@@ -6,7 +6,7 @@ experiment: waves of failovers and process kills on a Valkey Cluster,
 validated after every wave. Like every experiment, it runs from a scenario
 file or from generated scenarios; the scenario format is in
 [Scenarios and experiments](scenarios-and-experiments.md), and the action's
-config in [`valkey.action.cluster-chaos`](components.md#valkeyactioncluster-chaos).
+config in [`valkey.action.cluster-chaos`](components/actions.md#valkeyactioncluster-chaos).
 
 - [Running cluster chaos](#running-cluster-chaos)
 - [Scenario inputs](#scenario-inputs)
@@ -80,7 +80,7 @@ deployment:
 
 | Input | Fields |
 | --- | --- |
-| `waves` | Lists of operations that start together, each after its `delay_s` or, with `after: i`, once operation `i` of the wave finished: `failover {shard, force, timeout_s}` (at most one per shard per wave) and `kill {target, signal}` ([operations](components.md#valkeyactioncluster-chaos)). |
+| `waves` | Lists of operations that start together, each after its `delay_s` or, with `after: i`, once operation `i` of the wave finished: `failover {shard, force, timeout_s}` (at most one per shard per wave) and `kill {target, signal}` ([operations](components/actions.md#valkeyactioncluster-chaos)). |
 | `validation` | The [state validation](#state-validation) settings. |
 | `keys_per_slot` | Keys written into every hash slot before the first wave. Default 5. |
 

@@ -589,7 +589,7 @@ operator.
 
 An event is a step: it counts for its model action and applies its updates.
 A sample is an observed state, not a step: the trace observer
-([`valkey.observer.trace`](components.md#valkeyobservertrace)) read it from
+([`valkey.observer.trace`](components/observers.md#valkeyobservertrace)) read it from
 the node, and its updates set the variables to what the node reported, so
 variables the log lines never show (a node's replication ID, offset and data
 set; a cluster node's epochs on disk; a slot migration job's state) become
