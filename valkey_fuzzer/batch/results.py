@@ -77,6 +77,12 @@ def _signature(outcome: Optional[RunOutcome], error: Optional[Mapping[str, Any]]
     return empty_signature("ERROR", error_type=error["type"], error_phase=error.get("phase"))
 
 
+def _leaked(leaks: Sequence[Mapping[str, Any]]) -> str:
+    """The kinds of what a run left behind, as its summary and signature label name them."""
+
+    return ", ".join(sorted({item["kind"] for item in leaks}))
+
+
 @dataclass
 class Verdict:
     """A finished job's verdict as the batch forms it, for the plug-ins to amend before its leaks count."""
@@ -84,6 +90,16 @@ class Verdict:
     status: str
     summary: str
     signature: dict[str, Any]
+
+    def with_leaks(self, leaks: Sequence[Mapping[str, Any]]) -> "Verdict":
+        """The verdict once ``leaks`` (the servers, chains, mounts, or directories the run left behind: its cleanup
+        failed) count: an ERROR whose summary says them first, so a shortened one still does; itself for none."""
+
+        if not leaks:
+            return self
+        left = f"left {len(leaks)} leftover{'' if len(leaks) == 1 else 's'}: {_leaked(leaks)}"
+        summary = f"passed its checks but {left}" if self.status == "PASS" else f"{left}; {self.summary}"
+        return Verdict(worst([self.status, "ERROR"]), summary, self.signature)
 
 
 def job_result(
@@ -123,26 +139,23 @@ def job_result(
             outcome = RunOutcome.from_data(report["outcome"])
         except ValueError as exc:
             status, error = "ERROR", {"type": "UnreadableReport", "message": str(exc), "phase": "batch"}
-    verdict = Verdict(status, report["summary"] if report is not None else f"{error['type']}: {error['message']}",
-                      _signature(outcome, error))  # fmt: skip
+    verdict = Verdict(
+        status,
+        report["summary"] if report is not None else f"{error['type']}: {error['message']}",
+        _signature(outcome, error),
+    )
     judged = {}
     for plugin in hooks.PLUGINS:
         field = plugin.judge(job, run_dir, report, verdict)
         if field is not None:
             judged[plugin.name] = field
-    status, summary, signature = verdict.status, verdict.summary, verdict.signature
-    if leaks:
-        # The run left servers, chains, mounts, or directories behind: its cleanup failed.
-        kinds = ", ".join(sorted({item["kind"] for item in leaks}))
-        left = f"left {len(leaks)} leftover{'' if len(leaks) == 1 else 's'}: {kinds}"
-        # Leftovers first, so a shortened summary still says them.
-        summary = f"passed its checks but {left}" if status == "PASS" else f"{left}; {summary}"
-        status = worst([status, "ERROR"])
+    verdict = verdict.with_leaks(leaks)
+    signature = verdict.signature
     result = {
         "id": job["id"],
         "source": job["source"],
-        "status": status,
-        "summary": summary,
+        "status": verdict.status,
+        "summary": verdict.summary,
         "experiment": experiment,
         "seed": scenario.get("seed", job.get("generate", {}).get("seed")),
         # The attempt that drew the seed's scenario: another number of cores can draw another scenario.
@@ -154,13 +167,13 @@ def job_result(
         "timed_out": timed_out,
         "leaks": [dict(item) for item in leaks],
         **judged,
-        "signature": None if status == "PASS" else signature,
-        "signature_key": None if status == "PASS" else signature_key(experiment, signature),
-        "signature_label": None if status == "PASS" else signature_label(experiment, signature),
+        "signature": None if verdict.status == "PASS" else signature,
+        "signature_key": None if verdict.status == "PASS" else signature_key(experiment, signature),
+        "signature_label": None if verdict.status == "PASS" else signature_label(experiment, signature),
         **extra,
     }
     if leaks and not signature["error_type"] and signature["status"] == "PASS":
-        result["signature_label"] = f"ERROR | {experiment} | leaked {kinds}"
+        result["signature_label"] = f"ERROR | {experiment} | leaked {_leaked(leaks)}"
     for plugin in hooks.PLUGINS:
         field = plugin.record(job, run_dir, report, result)
         if field is not None:

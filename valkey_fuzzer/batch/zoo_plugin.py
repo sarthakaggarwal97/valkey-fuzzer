@@ -134,3 +134,18 @@ class ZooPlugin(BatchPlugin):
         statuses += [case["undecided"] for case in cases if case.get("undecided")]
         statuses += ["SKIP_UNSUPPORTED" for _ in zoo["skipped"]]
         return summary, statuses
+
+    def describe(self, entry: Any) -> list[str]:
+        if entry is None:
+            return []
+        lines = []
+        for case in entry["cases"]:
+            if case.get("pending"):
+                lines.append(f"  zoo {case['case']}: not finished")
+                continue
+            rates = ", ".join(f"{file} {item['detection_rate']:.0%}" for file, item in case["scenarios"].items())
+            controls = "/".join(row["status"] for row in case["controls"])
+            verdict = case["undecided"] or ("OK" if case["holds"] else "FAIL")
+            lines.append(f"  zoo {verdict:<5} {case['case']}: control {controls}; detected {rates}")
+        lines += [f"  zoo SKIP {item['case']}: {item['reason']}" for item in entry["skipped"]]
+        return lines
