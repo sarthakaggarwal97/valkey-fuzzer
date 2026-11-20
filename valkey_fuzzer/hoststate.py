@@ -66,6 +66,7 @@ from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Optional
 
 from . import cgroups
+from .deadlines import wait_for
 from .deployment.local.models import DEFAULT_BASE_DATA_DIR
 
 OWNER_FILE = ".valkey-fuzzer-owner"
@@ -1006,14 +1007,17 @@ def _kill_server(item: Leftover) -> Optional[str]:
         return None
     except PermissionError:
         raise RuntimeError("permission denied: the server belongs to another user") from None
-    deadline = time.monotonic() + KILL_WAIT_S
-    while time.monotonic() < deadline:
+
+    def gone() -> tuple[bool, None]:
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
-            return None
-        time.sleep(0.05)
-    raise RuntimeError(f"still running {KILL_WAIT_S:g}s after SIGKILL")
+            return True, None
+        return False, None
+
+    if not wait_for(gone, timeout_s=KILL_WAIT_S, interval_s=0.05, reason="the server to exit")[0]:
+        raise RuntimeError(f"still running {KILL_WAIT_S:g}s after SIGKILL")
+    return None
 
 
 def _remove_chain(item: Leftover) -> Optional[str]:

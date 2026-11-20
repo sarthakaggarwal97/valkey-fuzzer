@@ -24,6 +24,7 @@ import valkey
 
 from ...cache import cache_dir
 from ...clock import now
+from ...deadlines import wait_for
 from ...hoststate import (
     run_bounded,
     server_tag_arguments,
@@ -43,14 +44,7 @@ from .models import (
     LocalDeploymentError,
 )
 from .ports import ensure_ports_free
-from .queries import (
-    query_cluster_info,
-    query_cluster_nodes,
-    query_replication,
-    response_text,
-    valkey_client,
-    wait_until,
-)
+from .queries import query_cluster_info, query_cluster_nodes, query_replication, response_text, valkey_client
 from .server_config import arguments_for_build, build_server_config_arguments, effective_server_config
 
 logger = logging.getLogger(__name__)
@@ -513,12 +507,18 @@ class ProcessManager:
             for instance in infos:
                 # Ready once it answers as the process we started; an exit ends the wait at once. The first check
                 # runs before the server binds, so the interval is the time a start takes past that.
-                answered = wait_until(
-                    lambda instance=instance: instance.process.poll() is not None or self._answers(instance),
-                    timeout=READY_TIMEOUT_S,
-                    interval=0.05,
-                    what=f"{instance.instance_id} start",
-                    retry=(valkey.ConnectionError, valkey.TimeoutError),
+                def started(instance: InstanceInfo = instance) -> tuple[bool, None]:
+                    try:
+                        return instance.process.poll() is not None or self._answers(instance), None
+                    except (valkey.ConnectionError, valkey.TimeoutError) as exc:
+                        logger.debug("%s start: not yet: %s", instance.instance_id, exc)
+                        return False, None
+
+                answered, _ = wait_for(
+                    started,
+                    timeout_s=READY_TIMEOUT_S,
+                    interval_s=0.05,
+                    reason=f"{instance.instance_id} start",
                     context=context,
                 )
                 exit_code = instance.process.poll()
@@ -687,19 +687,21 @@ class ProcessManager:
             logger.info("Restarted %s with new PID %s", instance.instance_id, process.pid)
 
             # Wait for instance to be ready if requested
-            if wait_ready and not wait_until(
-                lambda: self._ready_after_restart(instance, mode),
-                timeout=ready_timeout,
-                interval=0.05,
-                what=f"{instance.instance_id} restart",
-                context=context,
-            ):
-                self.terminate_instance(instance)
-                process = None
-                raise LocalDeploymentError(
-                    f"Instance {instance.instance_id} failed to become ready within {ready_timeout:.2f}s"
-                    f"{self._process_output_tail(instance.log_file)}"
+            if wait_ready:
+                ready, _ = wait_for(
+                    lambda: (self._ready_after_restart(instance, mode), None),
+                    timeout_s=ready_timeout,
+                    interval_s=0.05,
+                    reason=f"{instance.instance_id} restart",
+                    context=context,
                 )
+                if not ready:
+                    self.terminate_instance(instance)
+                    process = None
+                    raise LocalDeploymentError(
+                        f"Instance {instance.instance_id} failed to become ready within {ready_timeout:.2f}s"
+                        f"{self._process_output_tail(instance.log_file)}"
+                    )
             logger.info("Instance %s is ready after restart", instance.instance_id)
 
             return instance

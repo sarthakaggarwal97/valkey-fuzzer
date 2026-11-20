@@ -168,7 +168,7 @@ class _Pipe:
     def get(self, key):
         self.replies.append(self.values.get(key))
 
-    def execute(self):
+    def execute(self, raise_on_error=True):
         return self.replies
 
 

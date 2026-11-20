@@ -44,7 +44,6 @@ import random
 import string
 import subprocess
 import threading
-import time
 from collections.abc import Iterable, Iterator, Mapping
 from typing import Any, Optional
 
@@ -63,7 +62,7 @@ from ..deadlines import WaitInterruptedError
 from .files import write_jsonl
 from .instances import deployment, is_cluster, select_instances
 from .keyspace import batches
-from .polling import StoppableThread, poll_until
+from .polling import StoppableThread, paced_loop, poll_until, stop_or_error
 from .registration import component_registration
 from .schemas import FLAG, INTEGER, LIST, MAPPING, NUMBER, TEXT, declared, mapping_of, nullable, optional
 
@@ -354,8 +353,7 @@ class KeyValueWorkload:
 
             def client_loop(target: _Target, op_rng: random.Random, value_rng: random.Random):
                 def loop(stop_event) -> None:
-                    next_at = time.monotonic()
-                    while not stop_event.is_set():
+                    def step() -> bool:
                         with self._lock:
                             capped = config["max_ops"] is not None and self._sequence >= config["max_ops"]
                             if not capped:
@@ -372,7 +370,7 @@ class KeyValueWorkload:
                             )
                         if capped:
                             stop_event.wait(0.05)
-                            continue
+                            return False
                         try:
                             outcome = self._issue(
                                 op_id, target, op_rng, value_rng, ops, weights, mutable_keys, list_keys
@@ -382,12 +380,9 @@ class KeyValueWorkload:
                                 self._in_flight -= 1
                         if outcome != "ok":
                             stop_event.wait(0.02)
-                        next_at += interval
-                        delay = next_at - time.monotonic()
-                        if delay > 0:
-                            stop_event.wait(delay)
-                        else:
-                            next_at = time.monotonic()
+                        return True
+
+                    paced_loop(stop_event, interval, step)
 
                 return loop
 
@@ -600,7 +595,6 @@ class KeyValueWorkload:
             target.reset()
 
     def stop(self, context: Any, spec: ComponentSpec):
-        problem = None
         drained = True
         if self._config.get("drain_on_stop") and self._threads:
             try:
@@ -614,13 +608,9 @@ class KeyValueWorkload:
                 # Cancelled: stop draining, but still join the workers and write the ledger.
                 pass
             drained = self._drained.is_set()
-        if self._threads:
-            timeout = max(30.0, self._config.get("op_timeout_s", 2.0) * 3)
-            problems = [thread.stop(timeout=timeout) for thread in self._threads]
-            problem = next((item for item in problems if item is not None), None)
-            if any(thread.is_alive() for thread in self._threads):
-                # A worker still running owns its ledger, acknowledgements, and client: nothing of them is read.
-                return make_result(spec, ComponentStatus.ERROR, f"workload {problem}")
+        problem, error = stop_or_error(spec, max(30.0, self._config.get("op_timeout_s", 2.0) * 3), *self._threads)
+        if error is not None:
+            return error
         for target in {id(item): item for item in (self._target, *self._targets) if item is not None}.values():
             target.reset()
         directory = component_artifact_dir(context, spec)

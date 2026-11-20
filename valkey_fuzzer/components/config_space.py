@@ -52,7 +52,7 @@ from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
 from valkey_fuzzer.schema import ConfigField
 
 from .instances import deployment
-from .polling import StoppableThread
+from .polling import StoppableThread, stop_or_error
 from .registration import component_registration
 from .schemas import INTEGER, LIST, declared, mapping_of
 
@@ -682,11 +682,9 @@ class ConfigChurnWorkload:
         )
 
     def stop(self, context: Any, spec: ComponentSpec):
-        problem = None
-        if self._thread is not None:
-            problem = self._thread.stop(timeout=max(30.0, spec.config["op_timeout_s"] * 3))
-            if self._thread.is_alive():
-                return make_result(spec, ComponentStatus.ERROR, f"workload {problem}")
+        problem, error = stop_or_error(spec, max(30.0, spec.config["op_timeout_s"] * 3), self._thread)
+        if error is not None:
+            return error
         errors = sum(1 for record in self._changes if "error" in record and not record.get("unanswered"))
         unanswered = sum(1 for record in self._changes if record.get("unanswered"))
         summary = {"changes": self._changes, "errors": errors, "unanswered": unanswered}

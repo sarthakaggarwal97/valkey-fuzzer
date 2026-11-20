@@ -1,4 +1,4 @@
-"""Waiting within the run's deadline: polls, retried reads, and worker threads that are always joined."""
+"""Waiting within the run's deadline: polls, retried reads, paced loops, and worker threads that are always joined."""
 
 import threading
 import time
@@ -6,6 +6,8 @@ from collections.abc import Sequence
 from typing import Any, Callable, Optional
 
 from ..deadlines import wait_for
+from ..plan import ComponentSpec
+from ..results import ComponentResult, ComponentStatus, make_result
 
 
 def remaining(context: Any, fallback: float) -> float:
@@ -117,3 +119,41 @@ class StoppableThread:
         if self.error is not None:
             return f"thread {self._thread.name} crashed: {type(self.error).__name__}: {self.error}"
         return None
+
+
+def stop_or_error(
+    spec: ComponentSpec, timeout: float, *threads: Optional[StoppableThread]
+) -> tuple[Optional[str], Optional[ComponentResult]]:
+    """:meth:`~StoppableThread.stop` every worker of ``threads`` (None: one never started) and join it, each within
+    ``timeout``: ``(problem, error)``.
+
+    ``problem`` is why the first worker that did not end cleanly did not, or None. ``error`` is the ``workload ...``
+    ERROR to return at once while a worker still runs: it owns its state (its ledger, counts and clients), so
+    nothing of it is read. It is None once every worker ended, cleanly or not; the caller then builds its own
+    result, with ``problem`` in it.
+    """
+
+    workers = [thread for thread in threads if thread is not None]
+    problems = [thread.stop(timeout) for thread in workers]
+    problem = next((item for item in problems if item is not None), None)
+    if any(thread.is_alive() for thread in workers):
+        return problem, make_result(spec, ComponentStatus.ERROR, f"workload {problem}")
+    return problem, None
+
+
+def paced_loop(stop_event: threading.Event, interval: float, step: Callable[[], bool]) -> None:
+    """Call ``step`` every ``interval`` seconds until ``stop_event`` is set, correcting for drift: a step that ran
+    long shortens the wait after it, and a loop that fell behind starts its clock again rather than catch up in a
+    burst. A step that returns False took no slot (nothing was issued): the next one follows at once.
+    """
+
+    next_at = time.monotonic()
+    while not stop_event.is_set():
+        if not step():
+            continue
+        next_at += interval
+        delay = next_at - time.monotonic()
+        if delay > 0:
+            stop_event.wait(delay)
+        else:
+            next_at = time.monotonic()

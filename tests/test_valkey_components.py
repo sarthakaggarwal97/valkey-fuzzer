@@ -288,6 +288,45 @@ def test_a_worker_thread_says_why_it_did_not_end_cleanly():
     assert stuck.stop() is None
 
 
+def test_a_workload_stops_its_workers_and_errors_at_once_while_one_still_runs():
+    spec = _spec("valkey.workload.key-value", "writes")
+    release = threading.Event()
+    stuck = polling.StoppableThread("stuck", lambda stop_event: release.wait())
+    crashed = polling.StoppableThread("crashes", lambda stop_event: 1 / 0)
+    for thread in (stuck, crashed):
+        thread.start()
+    crashed_problem = "thread crashes crashed: ZeroDivisionError: division by zero"
+    # A worker still running owns its state: the ERROR carries the first problem and nothing of the state.
+    problem, error = polling.stop_or_error(spec, 0.01, None, crashed, stuck)
+    assert problem == crashed_problem and (error.status, error.summary) == (
+        ComponentStatus.ERROR,
+        f"workload {crashed_problem}",
+    )
+    release.set()
+    # Every worker ended (one by crashing): the caller reads its state and builds the result with the problem.
+    assert polling.stop_or_error(spec, 1.0, crashed, stuck) == (crashed_problem, None)
+    assert polling.stop_or_error(spec, 1.0, None) == (None, None), "a workload that never started a worker"
+
+
+def test_a_paced_loop_keeps_its_rate_and_spends_no_slot_on_a_step_that_issued_nothing():
+    stop_event, issued, skipped = threading.Event(), [], []
+
+    def step():
+        if len(skipped) < 3:
+            skipped.append(time.monotonic())
+            return False
+        issued.append(time.monotonic())
+        if len(issued) == 5:
+            stop_event.set()
+        return True
+
+    polling.paced_loop(stop_event, 0.05, step)
+    # Three skipped steps ran back to back; then five paced ones, 50 ms apart (a 20/s rate), within 0.25 s.
+    assert skipped[-1] - skipped[0] < 0.02 and issued[0] - skipped[-1] < 0.02
+    assert 0.18 <= issued[-1] - issued[0] <= 0.35
+    assert all(later - earlier >= 0.04 for earlier, later in zip(issued, issued[1:]))
+
+
 @pytest.mark.parametrize("observer_id", ["valkey.observer.info", "valkey.observer.log-trigger"])
 def test_an_observer_whose_worker_crashed_does_not_pass_on_what_it_saw_before(tmp_path, observer_id):
     (tmp_path / "valkey-0.log").write_text("")

@@ -46,7 +46,7 @@ from valkey_fuzzer.hoststate import chain_name
 from valkey_fuzzer.schema import ConfigField, ConfigSchema, plain_config
 
 from .cluster_chaos import ClusterWaves
-from .instances import send_to
+from .instances import ClientCache, send_to
 from .network import instance_addresses, partition
 from .replication_chaos import excusing_operations
 from .schemas import INTEGER, LIST, MAPPING, TEXT, nullable
@@ -301,7 +301,7 @@ class MigrationWaves(ClusterWaves):
         # NAME): a target that imported the slot before lists that job too, until the new one is created.
         name = None
         # One client per endpoint for the whole follow (:func:`.slot_migration.read_jobs`).
-        clients: dict[str, Any] = {}
+        clients = ClientCache(timeout=2.0)
         try:
             while True:
                 down = self.selector.down
@@ -320,10 +320,10 @@ class MigrationWaves(ClusterWaves):
                     migration.end()
                     return None
         finally:
-            close_quietly(*clients.values())
+            clients.close()
 
     def _job(
-        self, clients: dict[str, Any], instance_id: str, *, slot: Optional[int] = None, name: Optional[str] = None
+        self, clients: ClientCache, instance_id: str, *, slot: Optional[int] = None, name: Optional[str] = None
     ) -> Optional[dict]:
         """``instance_id``'s newest export job of ``slot``, or its job named ``name``, read through the client
         ``clients`` holds for it; None when it lists none, or does not answer."""

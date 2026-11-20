@@ -9,12 +9,12 @@ from typing import Callable, Optional
 
 import valkey
 
-from ...deadlines import WaitInterruptedError
+from ...deadlines import WaitInterruptedError, wait_for
 from ...protocols import RunContext
 from .cluster_nodes import HASH_SLOTS, parse_cluster_nodes
 from .models import DeploymentMode, InstanceInfo, LocalDeploymentError
 from .processes import verify_instance_process_identity
-from .queries import query_cluster_info, query_replication, wait_until
+from .queries import query_cluster_info, query_replication
 
 logger = logging.getLogger(__name__)
 
@@ -63,16 +63,17 @@ class Formation:
         expected_count = len(nodes)
         logger.info("Waiting for cluster convergence for all %s nodes (timeout: %.2fs)", expected_count, timeout)
 
-        def converged() -> bool:
-            return all(
-                int(query_cluster_info(self.get_client(node)).get("cluster_known_nodes", 0)) >= expected_count
-                for node in nodes
-            )
+        def converged() -> tuple[bool, None]:
+            try:
+                return all(
+                    int(query_cluster_info(self.get_client(node)).get("cluster_known_nodes", 0)) >= expected_count
+                    for node in nodes
+                ), None
+            except (valkey.ValkeyError, OSError) as exc:
+                logger.debug("cluster meet: not yet: %s", exc)
+                return False, None
 
-        retry = (valkey.ValkeyError, OSError)
-        if not wait_until(
-            converged, timeout=timeout, interval=0.1, what="cluster meet", retry=retry, context=self._context
-        ):
+        if not wait_for(converged, timeout_s=timeout, interval_s=0.1, reason="cluster meet", context=self._context)[0]:
             raise LocalDeploymentError(
                 f"the {expected_count} cluster nodes did not all learn of each other within {timeout:.2f}s of "
                 "CLUSTER MEET; check the instance logs for cluster bus errors"
@@ -89,13 +90,16 @@ class Formation:
             verify_instance_process_identity(node, client)
             client.execute_command("CLUSTER", "RESET", "HARD")
 
-        def reset() -> bool:
+        def reset() -> tuple[bool, None]:
             return all(
                 (info.get("cluster_known_nodes"), info.get("cluster_slots_assigned")) == ("1", "0")
                 for info in (query_cluster_info(self.get_client(node)) for node in nodes)
-            )
+            ), None
 
-        if not wait_until(reset, timeout=RESET_TIMEOUT_S, interval=0.1, what="CLUSTER RESET", context=self._context):
+        reset_done, _ = wait_for(
+            reset, timeout_s=RESET_TIMEOUT_S, interval_s=0.1, reason="CLUSTER RESET", context=self._context
+        )
+        if not reset_done:
             raise LocalDeploymentError(
                 f"the cluster nodes did not reset within {RESET_TIMEOUT_S:g}s of CLUSTER RESET HARD"
             )
@@ -133,11 +137,11 @@ class Formation:
         # failing well past 20 s although every slot is assigned; a healthy cluster is no slower for the margin.
         seen: dict[str, str] = {}
 
-        def assigned() -> bool:
+        def assigned() -> tuple[bool, None]:
             seen.update(query_cluster_info(self.get_client(nodes[0])))
-            return seen.get("cluster_slots_assigned") == str(HASH_SLOTS) and seen.get("cluster_slots_fail") == "0"
+            return seen.get("cluster_slots_assigned") == str(HASH_SLOTS) and seen.get("cluster_slots_fail") == "0", None
 
-        if not wait_until(assigned, timeout=60.0, interval=0.1, what="slot assignment", context=self._context):
+        if not wait_for(assigned, timeout_s=60.0, interval_s=0.1, reason="slot assignment", context=self._context)[0]:
             raise LocalDeploymentError(
                 f"slot assignment did not propagate within 60s: {seen.get('cluster_slots_assigned')}/{HASH_SLOTS} "
                 f"assigned, {seen.get('cluster_slots_fail')} failed; check the instance logs"
@@ -175,16 +179,16 @@ class Formation:
         # (an overloaded host) does not throw away every link already seen up and fail the next round too.
         pending = {replica.instance_id: replica for replica in replicas}
 
-        def linked() -> bool:
+        def linked() -> tuple[bool, None]:
             for instance_id, replica in list(pending.items()):
                 try:
                     if query_replication(self.get_client(replica)).link_up:
                         del pending[instance_id]
                 except (valkey.ValkeyError, OSError) as exc:
                     logger.debug("%s: link not seen up yet: %s", instance_id, exc)
-            return not pending
+            return not pending, None
 
-        if not wait_until(linked, timeout=timeout, interval=0.1, what="replica links", context=self._context):
+        if not wait_for(linked, timeout_s=timeout, interval_s=0.1, reason="replica links", context=self._context)[0]:
             raise LocalDeploymentError(
                 f"the replicas' links to their primaries did not come up within {timeout:.2f}s "
                 f"({', '.join(sorted(pending))}); check the instance logs for replication errors"
@@ -234,14 +238,14 @@ class Formation:
         """Poll ``problem`` until it reports none (None) or ``timeout`` passes; then the last problem it reported."""
         last: list[Optional[str]] = ["not checked"]
 
-        def healthy() -> bool:
+        def healthy() -> tuple[bool, None]:
             try:
                 last[0] = problem()
             except Exception as exc:
                 last[0] = f"{type(exc).__name__}: {exc}"
-            return last[0] is None
+            return last[0] is None, None
 
-        wait_until(healthy, timeout=timeout, interval=interval, what=what, context=self._context)
+        wait_for(healthy, timeout_s=timeout, interval_s=interval, reason=what, context=self._context)
         return last[0]
 
     def _standalone_problem(self, instance: InstanceInfo) -> Optional[str]:

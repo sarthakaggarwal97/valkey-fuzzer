@@ -2,15 +2,13 @@
 
 import logging
 import re
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, TypeVar
 
 import valkey
 
-from ...deadlines import wait_for
-from ...protocols import RunContext
 from .cluster_nodes import parse_cluster_nodes
 
 logger = logging.getLogger(__name__)
@@ -32,28 +30,6 @@ def response_text(value: object) -> str:
 def replication_role(info: Mapping[str, Any]) -> Optional[str]:
     """The role in an INFO replication reply, as "primary" or "replica"; None if it reports neither."""
     return _REPLICATION_ROLES.get(response_text(info.get("role", "")).lower())
-
-
-def wait_until(
-    check: Callable[[], bool],
-    *,
-    timeout: float,
-    interval: float,
-    what: str,
-    retry: tuple[type[Exception], ...] = (),
-    context: Optional[RunContext] = None,
-) -> bool:
-    """:func:`~valkey_fuzzer.deadlines.wait_for` on a ``check`` that returns a bool: True once it does, False
-    after ``timeout`` seconds. An exception of a ``retry`` type counts as not yet; any other propagates."""
-
-    def attempt() -> tuple[bool, None]:
-        try:
-            return check(), None
-        except retry as exc:
-            logger.debug("%s: not yet: %s", what, exc)
-            return False, None
-
-    return wait_for(attempt, timeout_s=timeout, interval_s=interval, reason=what, context=context)[0]
 
 
 def _int(value: Any) -> Optional[int]:
@@ -207,6 +183,29 @@ def close_quietly(*clients: Any) -> None:
                 client.close()
             except Exception:
                 pass
+
+
+# How many GETs one read pipeline sends.
+READ_BATCH = 1000
+
+
+def read_keys(client: Any, keys: Sequence[str], *, readonly: bool = False, raise_on_error: bool = True) -> list:
+    """GET every key of ``keys`` over non-transactional pipelines of :data:`READ_BATCH` (cluster nodes reject a
+    cross-slot MGET): the values, in order. With ``readonly``, ``READONLY`` is sent once first: a cluster replica
+    answers for its shard's keys only after it. With ``raise_on_error`` false a key's error reply is its exception,
+    in its place, instead of being raised."""
+
+    if readonly:
+        client.execute_command("READONLY")
+    values: list = []
+    for start in range(0, len(keys), READ_BATCH):
+        pipeline = client.pipeline(transaction=False)
+        for key in keys[start : start + READ_BATCH]:
+            pipeline.get(key)
+        values.extend(pipeline.execute(raise_on_error=raise_on_error))
+    if len(values) != len(keys):
+        raise RuntimeError(f"Pipelined read returned {len(values)} values for {len(keys)} keys")
+    return values
 
 
 def query_or_none(host: str, port: int, timeout: float, query: Callable[[valkey.Valkey], T]) -> Optional[T]:

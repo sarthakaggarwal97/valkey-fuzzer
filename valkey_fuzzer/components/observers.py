@@ -20,7 +20,6 @@ from typing import Any, Optional
 
 from valkey_fuzzer.clock import now
 from valkey_fuzzer.declarations import Declarations
-from valkey_fuzzer.deployment.local.queries import close_quietly
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.protocols import component_artifact_dir
 from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
@@ -28,7 +27,7 @@ from valkey_fuzzer.schema import ConfigError, ConfigField, ConfigSchema, plain_c
 from valkey_fuzzer.spec.bundle import LOGGED_BY
 
 from .files import log_line_time, logged_by_child, write_jsonl
-from .instances import deployment, select_instances
+from .instances import ClientCache, deployment, select_instances
 from .polling import StoppableThread
 from .predicates import PREDICATE_FIELDS, compare, validate_predicate
 from .registration import SPEC_SHA256_FIELD, component_registration, pinned_spec_mapping, validate_regex
@@ -132,14 +131,14 @@ class InfoObserver:
         self._handle: Any = None
         # The periodic sampler owns separate clients so it never shares a
         # socket with the event-driven sampler.
-        self._clients: dict[str, Any] = {}
-        self._periodic_clients: dict[str, Any] = {}
+        self._clients = ClientCache(timeout=2.0)
+        self._periodic_clients = ClientCache(timeout=2.0)
         # Held by each event-driven sample: unsubscribing does not wait for one another thread is publishing,
         # so stop takes it before it uses (and closes) the same clients.
         self._event_lock = threading.Lock()
         self._stopped = False
 
-    def _sample(self, phase: str, event: Optional[Any] = None, clients: Optional[dict[str, Any]] = None) -> None:
+    def _sample(self, phase: str, event: Optional[Any] = None, clients: Optional[ClientCache] = None) -> None:
         clients = self._clients if clients is None else clients
         for instance_id in self._instances:
             record: dict[str, Any] = {"phase": phase, "instance_id": instance_id, "at": now()}
@@ -150,14 +149,12 @@ class InfoObserver:
             try:
                 # Counters restart with the process, so a delta across a restart measures nothing.
                 record["pid"] = self._handle.pid(instance_id)
-                client = clients.get(instance_id)
-                if client is None:
-                    client = clients[instance_id] = self._handle.new_client(instance_id, timeout=2.0)
+                client = clients.get(self._handle, instance_id)
                 for section in self._config["sections"]:
                     fields.update(client.info(section))
             except Exception as exc:
                 record["error"] = f"{type(exc).__name__}: {exc}"
-                close_quietly(clients.pop(instance_id, None))
+                clients.drop(instance_id)
             record["fields"] = {key: value for key, value in fields.items() if isinstance(key, str)}
             with self._lock:
                 record["index"] = len(self._samples)
@@ -193,11 +190,11 @@ class InfoObserver:
         problem = self._thread.stop() if self._thread is not None else None
         if problem is not None:
             # The samples are partial, and a sampler still running owns its clients.
-            close_quietly(*self._clients.values())
+            self._clients.close()
             return make_result(spec, ComponentStatus.ERROR, f"INFO sampling {problem}")
-        close_quietly(*self._periodic_clients.values())
+        self._periodic_clients.close()
         self._sample("final")
-        close_quietly(*self._clients.values())
+        self._clients.close()
         path = os.path.join(component_artifact_dir(context, spec), "info-samples.jsonl")
         with self._lock:
             samples = sorted(self._samples, key=lambda item: item["at"])

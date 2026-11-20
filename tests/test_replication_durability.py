@@ -147,18 +147,16 @@ class _Pipe:
     def __init__(self, values):
         self.values, self.replies = values, []
 
-    def execute_command(self, *args):
-        self.replies.append("OK")
-
     def get(self, key):
         self.replies.append(self.values.get(key))
 
-    def execute(self):
+    def execute(self, raise_on_error=True):
         return self.replies
 
 
 class _Client(FakeClient):
-    """What ``new_client`` returns: pipelines over the handle's values, and its CLUSTER NODES as seen from one instance."""
+    """What ``new_client`` returns: pipelines over the handle's values, READONLY (recorded on the handle), and its
+    CLUSTER NODES as seen from one instance."""
 
     def __init__(self, handle, instance_id):
         self.handle, self.instance_id = handle, instance_id
@@ -167,6 +165,9 @@ class _Client(FakeClient):
         return _Pipe(self.handle.values)
 
     def execute_command(self, *args):
+        if args == ("READONLY",):
+            self.handle.readonly.append(self.instance_id)
+            return "OK"
         assert args == ("CLUSTER", "NODES")
         return self.handle.cluster_nodes(self.instance_id)
 
@@ -187,6 +188,8 @@ class _Handle(FakeHandle):
         )  # fmt: skip
         self.alive = primaries
         self.slots = {}
+        # The instances sent READONLY, one entry per connection that was.
+        self.readonly = []
 
     def roles(self):
         return super().roles() if self.alive else {}
@@ -352,7 +355,9 @@ class _ReplicaHandle(_Handle):
     def new_client(self, instance_id, timeout=5.0):
         client = super().new_client(instance_id, timeout)
         if instance_id in self.replicas():
-            client.handle = SimpleNamespace(values=self.replica_values, cluster_nodes=self.cluster_nodes)
+            client.handle = SimpleNamespace(
+                values=self.replica_values, cluster_nodes=self.cluster_nodes, readonly=self.readonly
+            )
         return client
 
 
@@ -392,6 +397,8 @@ def test_check_replicas_with_planned_replicas_needs_a_replica_compared(tmp_path,
     spec = _oracle(check_replicas=True, converge_timeout_s=0.2)
     result = _evaluate(tmp_path, spec, handle, {}, [_op(1, "set", SHARD1_KEY, "ok", "v1")], [])
     assert result.status.value == status and result.summary.startswith(summary), result.summary
+    # A cluster replica is read on its own connection, sent READONLY once; the primaries' slot-routing client is not.
+    assert handle.readonly == (["valkey-4", "valkey-5"] if listed else [])
 
 
 _SCOPED_SLOTS = {**_CLUSTER_CRASH, "loss_window_scope": "fault_target_slots"}
@@ -493,7 +500,7 @@ class _FailingPipe(_Pipe):
         super().__init__({})
         self.error = error
 
-    def execute(self):
+    def execute(self, raise_on_error=True):
         raise self.error
 
 
