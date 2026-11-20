@@ -7,8 +7,6 @@ from collections.abc import Iterable, Iterator, Mapping
 from itertools import islice
 from typing import Any, Optional
 
-from valkey_fuzzer._data import jsonable
-
 # The types canonical_value reads as data; any other is a module's.
 BUILTIN_TYPES = frozenset({"string", "hash", "list", "set", "zset", "stream"})
 # A DUMP payload ends with the RDB version (2 bytes) and a CRC64 (8 bytes) over the rest, which tell the build
@@ -67,7 +65,12 @@ def _read(target: Any, kind: str, key: Any) -> Any:
 
 
 def _canonical(kind: str, reply: Any) -> Optional[list]:
-    """``[kind, content]`` from the reply to :func:`_read`, or None for a module value gone before its DUMP."""
+    """``[kind, content]`` from the reply to :func:`_read`, or None for a module value gone before its DUMP.
+
+    The content is JSON data as :func:`exact` returns it: a reply's bytes become str or ``{"$base64": ...}``, its
+    tuples lists, and a str, int, float or None stays; a zset score is ``repr``ed, a DUMP a hex digest. Nothing walks
+    it again.
+    """
 
     if kind == "string":
         content: Any = exact(reply)
@@ -88,7 +91,7 @@ def _canonical(kind: str, reply: Any) -> Optional[list]:
         if reply is None:
             return None
         content = hashlib.sha256(dump_body(reply)).hexdigest()
-    return [kind, jsonable(content)]
+    return [kind, content]
 
 
 def canonical_value(client: Any, key: Any) -> Optional[list]:

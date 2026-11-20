@@ -21,6 +21,7 @@ from tests.valkey_experiments_support import (
     validation_result,
     valkey_experiment,
 )
+from valkey_fuzzer import runner
 from valkey_fuzzer.components import component_registrations, slot_migration, slot_migration_chaos
 from valkey_fuzzer.components.slot_migration import hash_tag, job_of, jobs_of, migration_endpoints, read_jobs
 from valkey_fuzzer.components.slot_migration_chaos import SlotMigrationChaosAction, phase_of
@@ -34,8 +35,8 @@ from valkey_fuzzer.testing import FakeContext, run_experiment
 PASSED = validation_result()
 SLOT = key_slot(b"{s}")  # 3828, in shard 0 of three
 # An export's states up to its success, with the import's state beside each (cluster_migrateslots.c); the
-# snapshot and the handoff last 30 reads (0.3 s at the action's poll interval), so a fault waiting for them lands
-# in them.
+# snapshot and the handoff last 30 reads (0.3 s at the action's poll interval, 30 ms at TIME_SCALE), so a fault
+# waiting for them lands in them.
 SCRIPT = [
     ("connecting", None),
     *[("snapshotting", "receiving-snapshot")] * 30,
@@ -45,6 +46,9 @@ SCRIPT = [
     ("success", "success"),
 ]
 HASH_SLOTS = 16384
+# The runs that walk whole migrations (63 reads, 10 ms apart) and the default waves' 2 s restart delay wait a
+# tenth of each: the fake answers at once, so only the phase windows above bound how far the waits can shrink.
+TIME_SCALE = 10
 
 
 def _job(slot, operation, state, source, target, name="x" * 40):
@@ -328,8 +332,9 @@ def kill(target, **fields):
     return {"op": "kill", "target": target, **fields}
 
 
-def run_chaos(handle, waves, *, seed=7, **config):
-    """Run the action (held to its declarations by conftest's strict contract) on ``handle``."""
+def run_chaos(handle, waves, *, seed=7, time_scale=1.0, **config):
+    """Run the action (held to its declarations by conftest's strict contract) on ``handle``; its waits (a
+    restart's ``delay_s``, the follow's poll) take ``1 / time_scale`` of their configured seconds."""
 
     spec = resolved(
         ComponentSpec(
@@ -339,7 +344,9 @@ def run_chaos(handle, waves, *, seed=7, **config):
             config={"waves": waves, "keys_per_slot": 3, **config},
         )
     )
-    context = FakeContext(spec, services={"valkey.deployment": handle}, deployment_mode="cluster", seed=seed)
+    context = FakeContext(
+        spec, services={"valkey.deployment": handle}, deployment_mode="cluster", seed=seed, time_scale=time_scale
+    )
     with patch.object(slot_migration, "read_view", lambda handle, instance_id, timeout=2.0: handle.view(instance_id)):
         return SlotMigrationChaosAction().run(context, spec), context
 
@@ -439,7 +446,7 @@ def test_waves_disturb_the_migration_at_its_phases_then_heal_and_validate():
         [migrate(), {"op": "cancel", "at": "snapshot"}],
         [migrate()],
     ]
-    result, context = run_chaos(handle, waves)
+    result, context = run_chaos(handle, waves, time_scale=TIME_SCALE)
     assert result.status is ComponentStatus.PASS, result.summary
     assert "4 wave(s), 2 kill(s), 1 of 4 migration(s) succeeded; every wave validated" in result.summary
     schedule = chaos_schedule(result)
@@ -560,7 +567,7 @@ def test_a_migration_that_did_not_succeed_without_a_fault_fails_the_wave():
 def test_lost_slot_keys_fail_the_wave_and_are_written_again_for_the_next():
     handle = FakeMigrationCluster()
     handle.lose_on_success.add("{s}:slot-migration-chaos:1")
-    result, _ = run_chaos(handle, [[migrate()], [migrate()]])
+    result, _ = run_chaos(handle, [[migrate()], [migrate()]], time_scale=TIME_SCALE)
     assert result.status is ComponentStatus.FAIL
     assert "wave 1 validation failed (slot_keys): 1 of 3 slot key(s) missing and 0 changed" in result.summary
     assert f"in slot(s) [{SLOT}]" in result.summary and "{s}:slot-migration-chaos:1" in result.summary
@@ -571,7 +578,7 @@ def test_lost_slot_keys_fail_the_wave_and_are_written_again_for_the_next():
     assert checks[1]["missing"] == 1 and result.summary.count("validation failed (slot_keys)") == 2
     handle.lose_on_success.clear()
     handle.change_on_success["{s}:slot-migration-chaos:0"] = "changed"
-    result, _ = run_chaos(handle, [[migrate()]])
+    result, _ = run_chaos(handle, [[migrate()]], time_scale=TIME_SCALE)
     assert "0 of 3 slot key(s) missing and 1 changed" in result.summary
 
 
@@ -661,7 +668,7 @@ def test_a_cancel_after_the_migration_ended_is_sent_and_recorded_as_late():
 
 def test_a_wave_validation_failure_is_reported_and_the_next_wave_still_runs():
     handle = FakeMigrationCluster(results=[validation_result("slot_coverage"), PASSED])
-    result, _ = run_chaos(handle, [[migrate()], [migrate()]])
+    result, _ = run_chaos(handle, [[migrate()], [migrate()]], time_scale=TIME_SCALE)
     assert result.status is ComponentStatus.FAIL and "wave 1 validation failed (slot_coverage)" in result.summary
     assert len(handle.validations) == 2
 
@@ -795,7 +802,13 @@ def test_the_experiment_runs_its_default_waves_and_validates_the_cluster_at_the_
         ),
         required_evidence=tuple(item for item in experiment.required_evidence if item.source != "trace"),
     )
-    with patch.object(slot_migration, "read_view", lambda handle, instance_id, timeout=2.0: handle.view(instance_id)):
+    # The run's context is the runner's, which has no time scale: its sleeps (the default waves' 2 s restart
+    # delay, the follow's polls) are divided here as FakeContext(time_scale=) divides the other tests'.
+    sleep = runner._Context.sleep
+    with (
+        patch.object(slot_migration, "read_view", lambda handle, instance_id, timeout=2.0: handle.view(instance_id)),
+        patch.object(runner._Context, "sleep", lambda self, seconds: sleep(self, seconds / TIME_SCALE)),
+    ):
         outcome = run_experiment(
             experiment,
             component_registrations(),

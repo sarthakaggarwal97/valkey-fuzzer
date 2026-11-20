@@ -232,11 +232,27 @@ def test_the_loopback_locks_live_apart_from_the_data_every_user_shares(tmp_path,
     assert stat.S_IMODE(os.stat(tmp_path / "locks").st_mode) == 0o1777
 
 
+def _two_adjacent_ports():
+    """A listener on an ephemeral port P with the port P - 1 bound too, so both are known free of anything else
+    on this host: valkey-0 plans its client port on P - 1 and valkey-1 on P."""
+
+    while True:
+        listener, below = socket.socket(), socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+        try:
+            below.bind(("127.0.0.1", port - 1))
+        except OSError:
+            listener.close()
+            below.close()
+            continue
+        listener.listen(1)
+        return listener, below, port
+
+
 def test_provision_names_every_busy_planned_port_before_starting_anything():
-    listener = socket.socket()
-    listener.bind(("127.0.0.1", 0))  # valkey-1 plans its client port on this one
-    listener.listen(1)
-    port = listener.getsockname()[1]
+    listener, below, port = _two_adjacent_ports()
+    below.close()  # valkey-0's port is free again, valkey-1's is listening
     factory = patch(f"{PROVIDER}.ProcessManager").start()
     try:
         busy = busy_planned_ports({"mode": "standalone", "replicas_per_primary": 1, "base_port": port - 1})
