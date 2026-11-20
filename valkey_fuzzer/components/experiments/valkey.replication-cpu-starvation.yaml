@@ -13,8 +13,8 @@
 # the clients' retries must tell apart from a dead one.
 #
 # Needs a delegated cgroup v2 of the run's own (systemd-run --user --scope
-# valkey-fuzzer ...); without one the fault's probe makes the run an ERROR
-# that says what is missing.
+# valkey-fuzzer ...); without one the host probe makes the run
+# SKIP_UNSUPPORTED saying what is missing.
 extends: [valkey.base]
 id: valkey.replication-cpu-starvation
 deployment:
@@ -46,6 +46,10 @@ inputs:
     starve_s: {type: number, minimum: 0.1, maximum: 50, default: 5}
     run_before_starve_s: {type: number, minimum: 0, maximum: 600, default: 1}
 components:
+  - use: valkey.capability.host-probe
+    id: host
+    config: {requires: [linux, cgroup_v2]}
+
   - use: valkey.observer.info
     id: info
     config:

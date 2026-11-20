@@ -215,10 +215,10 @@ class _EarlyTerminalError(Exception):
 
 
 def _preflight(catalog: Catalog, plan: ExecutionPlan) -> tuple[ExecutionPlan, DeploymentProvider]:
-    """Static checks that need no environment: the provider, then :func:`~valkey_fuzzer.compiler.check_plan`, then each
-    component's host probe (a tool it calls that is not installed).
+    """Static checks that need no environment: the provider, then :func:`~valkey_fuzzer.compiler.check_plan`.
 
-    Returns the checked plan and its deployment provider.
+    Returns the checked plan and its deployment provider. The components' own host probes are
+    :func:`_probe_components`, run after the capability probes.
     """
 
     with _plan_check():
@@ -241,6 +241,14 @@ def _preflight(catalog: Catalog, plan: ExecutionPlan) -> tuple[ExecutionPlan, De
         if bound:
             plan = with_planned_instances(plan, registration)
         plan = check_plan(plan, catalog)
+    return plan, provider
+
+
+def _probe_components(catalog: Catalog, plan: ExecutionPlan) -> None:
+    """Each component's host probe (a tool it calls that is not installed): :class:`RunnerError` naming the
+    component. After the capability probes, so a host-probe that declares the same need makes the run
+    ``SKIP_UNSUPPORTED`` first; a scenario without one is an ``ERROR`` here."""
+
     for spec in plan.components:
         registration = catalog.components.get(spec.use)
         probe = registration.probe if registration is not None else None
@@ -249,7 +257,6 @@ def _preflight(catalog: Catalog, plan: ExecutionPlan) -> tuple[ExecutionPlan, De
                 probe(spec.config, spec, plan)
             except Exception as exc:
                 raise RunnerError(f"component {spec.id!r} ({spec.use}) cannot run on this host: {exc}") from exc
-    return plan, provider
 
 
 def _environment_diagnostics(
@@ -292,7 +299,8 @@ class Runner:
     def validate(self, plan: ExecutionPlan) -> None:
         """Preflight a plan without acquiring, provisioning, or running anything."""
 
-        _preflight(self._catalog, plan)
+        plan, _ = _preflight(self._catalog, plan)
+        _probe_components(self._catalog, plan)
 
     def run(
         self,
@@ -628,6 +636,12 @@ class _Execution:
                     "not the behavior under test, so no trustworthy verdict is possible",
                 )
 
+    def probe_components(self) -> None:
+        """The components' own host probes, once the capabilities have had their say."""
+
+        self.error_phase = "preflight"
+        _probe_components(self.catalog, self.context.plan)
+
     def provision(self) -> None:
         self.error_phase = "deployment.provision"
         plan = self.context.plan
@@ -947,6 +961,7 @@ class _Execution:
             self.instantiate()
             if not references:
                 self.probe_capabilities()
+                self.probe_components()
             self.acquire()
             self.bind(references)
             self.provision()
@@ -998,6 +1013,7 @@ class _Execution:
             self.error_phase = "preflight"
             self.revalidate()
             self.probe_capabilities()
+            self.probe_components()
 
     def release_environment(self) -> None:
         if self.lease is None:

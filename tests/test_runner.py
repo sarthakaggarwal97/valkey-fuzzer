@@ -381,6 +381,50 @@ def test_a_failed_plan_check_is_a_runner_error_that_names_the_field():
     assert type(cause) is RunnerError and cause.path == "components.act.use"
 
 
+def _execute_with_a_probed_fault(plan, calls, capability_status):
+    """``plan`` with a fault whose registration probe refuses this host, beside a capability of ``capability_status``."""
+
+    def refuse(config, spec, plan):
+        calls.append(f"{spec.id}.registration-probe")
+        raise RuntimeError("libfaketime is not installed")
+
+    registry = ComponentRegistry()
+    registry.register_many(
+        (
+            component_registration(
+                "tests.fault.fake", factory=lambda: _Component(calls), declares=DECLARES, probe=refuse
+            ),
+            component_registration(
+                "tests.capability.fake", factory=lambda: _Component(calls, capability_status), declares=DECLARES
+            ),
+        )
+    )
+    providers = deployment_registrations(standalone=lambda: _provider(calls))
+    return Runner(make_catalog(registry, providers)).run(plan)
+
+
+def test_a_host_probes_skip_comes_before_a_components_own_refusal_which_stands_without_one():
+    # The experiment's host-probe says SKIP_UNSUPPORTED (what the host lacks) before the fault's own probe can
+    # make the run an ERROR; a scenario without the host-probe still gets the fault's refusal, naming the component.
+    calls = []
+    outcome = _execute_with_a_probed_fault(_plan((_spec(CAPABILITY, "host"), _spec(FAULT, "skew"))), calls, SKIP)
+    assert outcome.status is OutcomeStatus.SKIP_UNSUPPORTED, outcome.summary
+    assert outcome.summary == "required capability 'host' is unsupported: host probe"
+    assert "skew.registration-probe" not in calls and "standalone.provision" not in calls
+    calls = []
+    outcome = _execute_with_a_probed_fault(_plan((_spec(CAPABILITY, "host"), _spec(FAULT, "skew"))), calls, PASS)
+    assert outcome.status is OutcomeStatus.ERROR, outcome.summary
+    assert (
+        "component 'skew' (tests.fault.fake) cannot run on this host: libfaketime is not installed" in outcome.summary
+    )
+    assert outcome.diagnostics["error"]["phase"] == "preflight" and "standalone.provision" not in calls
+    assert calls.index("host.probe") < calls.index("skew.registration-probe")
+    calls = []
+    outcome = _execute_with_a_probed_fault(_plan((_spec(FAULT, "skew"),)), calls, PASS)
+    assert outcome.status is OutcomeStatus.ERROR and "cannot run on this host" in outcome.summary
+    assert "standalone.provision" not in calls
+
+
 @pytest.mark.parametrize(
     ("provision", "rollback"),
     [(RuntimeError("partial provision"), None), ("invalid", None), (RuntimeError("partial"), RuntimeError("rollback failed"))],

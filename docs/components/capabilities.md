@@ -67,6 +67,6 @@ Returns `SKIP` when the host lacks a requirement.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `requires` | list | | One or more of `linux`, `root`, `not_root`, `tmpfs` (Linux, root, `mount` and `umount`), `iptables` (Linux, root, a working `iptables`), and `per_instance_loopback` (the host can bind `127.0.0.2`). |
+| `requires` | list | | One or more of `linux`, `root`, `not_root`, `tmpfs` (Linux, root, `mount` and `umount`), `iptables` (Linux, root, a working `iptables`), `netem` (Linux, `tc` and `ip` with `CAP_NET_ADMIN`), `libfaketime` (the library `valkey.fault.clock-skew` preloads, or `VALKEY_FUZZER_LIBFAKETIME`), `cgroup_v2` (a delegated cgroup v2 of the run's own with the `cpu` and `memory` controllers, for `valkey.fault.resource-pressure`), and `per_instance_loopback` (the host can bind `127.0.0.2`). |
 
 Evidence: `valkey.host.supported`.

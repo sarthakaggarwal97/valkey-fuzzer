@@ -274,6 +274,47 @@ def test_the_server_tests_build_valkey_only_when_the_pinned_commits_build_is_not
     assert "if" not in steps["Put Valkey on PATH"] and "/tmp/valkey/src" in steps["Put Valkey on PATH"]["run"]
 
 
+def test_the_daily_live_workflow_builds_valkey_8_1_only_when_the_branch_tips_build_is_not_cached():
+    workflow = _workflow("valkey-experiments-live.yml")
+    steps = {step["name"]: step for step in workflow["jobs"]["valkey-experiments-live"]["steps"] if "name" in step}
+    # The key is the branch's tip, read before the cache is consulted, so a patch release builds once.
+    tip = steps["Resolve the tip of Valkey 8.1"]
+    assert "git ls-remote https://github.com/valkey-io/valkey.git refs/heads/8.1" in tip["run"]
+    assert 'echo "sha=${sha}" >> "${GITHUB_OUTPUT}"' in tip["run"]
+    restore, save = steps["Restore the Valkey 8.1 build"], steps["Save the Valkey 8.1 build"]
+    assert restore["uses"].startswith("actions/cache/restore@") and save["uses"].startswith("actions/cache/save@")
+    assert restore["with"]["path"] == save["with"]["path"] == "/tmp/valkey-8.1"
+    assert f"${{{{ steps.{tip['id']}.outputs.sha }}}}" in restore["with"]["key"]
+    assert save["with"]["key"] == f"${{{{ steps.{restore['id']}.outputs.cache-primary-key }}}}"
+    # Built only on a miss, at the tip the key names, and saved right after, whatever the experiments do later.
+    build = steps["Build Valkey 8.1 at that tip"]
+    miss = f"steps.{restore['id']}.outputs.cache-hit != 'true'"
+    assert build["if"] == save["if"] == miss
+    assert build["env"]["VALKEY_8_1_SHA"] == f"${{{{ steps.{tip['id']}.outputs.sha }}}}"
+    assert 'fetch --quiet --depth 1 https://github.com/valkey-io/valkey.git "${VALKEY_8_1_SHA}"' in build["run"]
+    assert "git clone" not in build["run"] and "--branch 8.1" not in build["run"]
+    # unstable moves daily and is still cloned and built every night, before the cache steps.
+    names = list(steps)
+    assert (
+        "git clone --depth 1 https://github.com/valkey-io/valkey.git /tmp/valkey-unstable"
+        in steps["Build Valkey unstable"]["run"]
+    )
+    assert (
+        names.index("Build Valkey unstable")
+        < names.index("Resolve the tip of Valkey 8.1")
+        < names.index("Restore the Valkey 8.1 build")
+    )
+    assert (
+        names.index("Restore the Valkey 8.1 build")
+        < names.index("Build Valkey 8.1 at that tip")
+        < names.index("Save the Valkey 8.1 build")
+    )
+    # Both live steps still run the old build from the cached tree.
+    for script in _run_scripts(workflow):
+        if "-m live" in script:
+            assert "VALKEY_FUZZER_OLD_BINARY=/tmp/valkey-8.1/src/valkey-server" in script
+
+
 def test_lint_installs_the_ruff_version_the_dev_extra_pins():
     (install,) = [script.strip() for script in _run_scripts(_workflow("lint.yml")) if "pip install" in script]
     (pinned,) = re.findall(r'"ruff==([\d.]+)"', (ROOT / "pyproject.toml").read_text(encoding="utf-8"))
