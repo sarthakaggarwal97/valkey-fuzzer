@@ -275,6 +275,19 @@ def definitions(text: str) -> dict[str, str]:
     return found
 
 
+def definition_body(text: str, name: str) -> Optional[str]:
+    """The text after ``==`` of the top-level definition ``name``, comments removed, lines and indentation kept
+    (TLA+ reads a ``/\\`` or ``\\/`` list by its layout); None when the module has no such definition."""
+
+    body = strip_comments(text)
+    starts = list(_TOP_LEVEL.finditer(body))
+    for index, match in enumerate(starts):
+        if match.group(1) == name:
+            end = starts[index + 1].start() if index + 1 < len(starts) else len(body)
+            return body[match.end() : end].rstrip()
+    return None
+
+
 # The modules every TLA+ distribution ships (Specifying Systems, plus TLC's): a
 # bundle's modules may extend or instantiate only these and each other.
 STANDARD_MODULES = frozenset({"Bags", "FiniteSets", "Integers", "Naturals", "RealTime", "Reals", "Sequences", "TLC"})

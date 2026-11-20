@@ -23,6 +23,7 @@ from valkey_fuzzer.spec import (
     bundle_service,
     check_bundle,
     collect_runs,
+    conform,
     conform_runs,
     load_bundle,
     tla,
@@ -420,11 +421,12 @@ def test_translate_refuses_what_the_experiment_cannot_run(tmp_path, monkeypatch)
 # ---------------------------------------------------------------------------
 
 
-def _run(tmp_path, name, *, appendonly="yes", loaded=1, crash_source="crash"):
-    """A register run as its experiment records it: one write acknowledged, a crash, and the reload's key count."""
+def _run(tmp_path, name, *, appendonly="yes", loaded=1, crash_source="crash", keys=1):
+    """A register run as its experiment records it: ``keys`` writes acknowledged at once, a crash, and the reload's
+    key count."""
 
     events = [
-        ("writes.seeded", "writes", {"keys": 1}),
+        ("writes.seeded", "writes", {"keys": keys}),
         ("crash.injected", crash_source, {"signal": "SIGKILL", "applied": True, "target": "valkey-0"}),
         ("crash.recovered", "crash", {}),
         ("register.loaded", "reload-log", {"keys": loaded, "instance_id": "valkey-0"}),
@@ -596,7 +598,7 @@ def test_conform_needs_no_tools_for_a_bundle_tlc_has_nothing_to_evaluate(tmp_pat
 ELECTION_OBSERVATIONS = [
     {"kind": "observation", "t": 0.1, "round": 1, "node": node, "role": role, "slots": slots, "current_epoch": 8,
      "disk": {"currentEpoch": 8, "lastVoteEpoch": 0}}
-    for node, role, slots in (("valkey-0", "primary", [[0, 8191]]), ("valkey-3", "primary", [[8192, 16383]]), ("valkey-1", "replica", []))
+    for node, role, slots in (("valkey-0", "primary", [[0, 8191]]), ("valkey-3", "primary", [[8192, 16383]]), ("valkey-1", "replica", []), ("valkey-2", "replica", []))
 ]  # fmt: skip
 ELECTION_EVENTS = [
     ("cluster.election.started", {"instance_id": "valkey-1", "epoch": 9}),
@@ -684,9 +686,10 @@ def test_conform_takes_a_wins_epoch_from_the_election_its_winner_started(tmp_pat
     assert render(observed.states[-1]["winners"]) == "{<<cand_valkey_1, 10>>}"
     assert observed.steps[-1]["fields"] == {"instance_id": "valkey-1", "epoch": 10}
     # A win line that no started line of the winner precedes has no epoch: a record conform cannot apply, never a
-    # win at a made-up epoch.
+    # win at a made-up epoch. The grants and ACKs of an election that never started are records it cannot apply too.
     observed = _election_run(tmp_path, [*ELECTION_EVENTS[2:7], won])
-    assert observed.unapplied == ["won: no started record (instance_id valkey-1) before or after it"]
+    assert "won: no started record (instance_id valkey-1) before or after it" in observed.unapplied
+    assert "granted: no started record (instance_id valkey-1, epoch 9) before or after it" in observed.unapplied
     assert "Win" not in observed.actions
     # No won line, no Win: the model's state is what the run logged, and a missing Win is no violation.
     observed = _election_run(tmp_path, ELECTION_EVENTS[:7])
@@ -733,6 +736,289 @@ def test_conform_fails_a_lost_acknowledged_write_only_inside_the_claim(tmp_path)
     output = tmp_path / "conform.json"
     base = ("conform", BUNDLE, "--tla2tools", JAR, "--workers", 1, "--output", output)
     assert _cli(*base, names[0]) == 0 and _cli(*base, names[1]) == 1
+    # Every run's observed steps are steps of the model: the lost write is a Crash the model allows.
+    assert all(run["transitions"]["holds"] for run in report["runs"])
+    assert report["transitions"] == {"max_unobserved_steps": 1, "violated_in": 0}
+
+
+# ---------------------------------------------------------------------------
+# conform: transitions
+# ---------------------------------------------------------------------------
+
+
+def _election_trace(tmp_path, events, behavior="best-effort", name="unit"):
+    """An election run's trace file: the observations, then ``events`` 0.1 s apart."""
+
+    nodes = {n: {"node_id": ID[n], "config": {"cluster-config-save-behavior": behavior}} for n in ID}
+    records = [{"kind": "header", "scenario_id": name, "seed": 1, "nodes": nodes}, *ELECTION_OBSERVATIONS]
+    for index, (event, payload) in enumerate(events):
+        records.append(
+            {"kind": "event", "t": 1 + index / 10, "sequence": 10 + index, "name": event, "payload": payload}
+        )
+    path = tmp_path / f"{name}.jsonl"
+    path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+    return str(path)
+
+
+# The election without the kill: every vote is saved, both ACKs arrive, the candidate wins.
+ELECTION_CORRECT = [event for event in ELECTION_EVENTS if event[0] not in ("fault.injected", "node.recovered")]
+DENIED = ("cluster.vote.denied", {"instance_id": "valkey-0", "candidate": ID["valkey-2"]})
+
+
+def test_claims_take_the_transition_checks_knobs(tmp_path):
+    bundle = _copy(tmp_path)
+    claims = load_bundle(str(bundle)).claims
+    assert (claims.max_unobserved_steps, claims.transitions_excluded) == (1, None)
+    _edit(bundle / "claims.yaml", "status: draft\n", "status: draft\nmax_unobserved_steps: 0\n")
+    assert load_bundle(str(bundle)).claims.max_unobserved_steps == 0
+    _edit(bundle / "claims.yaml", "max_unobserved_steps: 0\n", "transitions: {excluded: no roles in the lines}\n")
+    assert load_bundle(str(bundle)).claims.transitions_excluded == "no roles in the lines"
+    for index, (field, message) in enumerate(
+        (
+            ("max_unobserved_steps: -1", "0 or more"),
+            ("max_unobserved_steps: true", "must be an integer"),
+            ("transitions: {excluded: ' '}", "must say why"),
+            ("transitions: {reason: x}", "transitions"),
+        )
+    ):
+        broken = _copy(tmp_path / f"broken{index}")
+        _edit(broken / "claims.yaml", "status: draft\n", f"status: draft\n{field}\n")
+        with pytest.raises(SpecBundleError, match=message):
+            load_bundle(str(broken))
+
+
+def test_a_record_reports_what_its_updates_say_about_the_state(tmp_path):
+    observed = _election_run(tmp_path, [*ELECTION_EVENTS[:5], DENIED])
+    by_why = {}
+    for report in observed.reports:
+        by_why.setdefault(report["why"], report)
+    p0, c1 = ModelValue("prim_valkey_0"), ModelValue("cand_valkey_1")
+    vote = {"type": "vote", "from": p0, "to": c1, "epoch": 9}
+    assert by_why["initial state"]["kind"] == "init" and observed.reports[1]["kind"] == "sample"
+    # A sample reports lower bounds (nodes.conf samples lag), which raise the model's values.
+    assert observed.reports[1]["lo"] == [("currentEpoch", p0), ("diskEpoch", p0), ("diskVote", p0)]
+    assert observed.reports[1]["eq"] == [] and observed.reports[1]["state"] == 2
+    # A grant: lastVote is set, the vote is in held, the mapping's step rule says lastVote changes; its max on
+    # currentEpoch is a lower bound a step cannot check.
+    granted = by_why["HandleRequest"]
+    assert (granted["kind"], granted["action"], granted["evidence"]) == ("step", "HandleRequest", "granted")
+    assert granted["eq"] == [("lastVote", p0)] and granted["has"] == [(("held", p0), vote)] and granted["lo"] == []
+    assert (granted["changes"], granted["unchanged"]) == (["lastVote"], [])
+    acked = by_why["ReceiveVote"]
+    assert acked["lacks"] == [(("held", p0), vote)]
+    assert acked["has"] == [(("msgs",), vote), (("granted", c1), p0)] and acked["eq"] == []
+    # A denial changes nothing observed, so it is no state, but it is a step the model must allow (or not take).
+    denied = observed.reports[-1]
+    assert denied["evidence"] == "denied" and denied["state"] == len(observed.states)
+    assert denied["unchanged"] == ["lastVote"] and denied["eq"] == denied["has"] == []
+    assert len(observed.reports) == len(observed.states) + 1
+
+
+def test_split_next_keeps_the_named_actions_of_the_models_next():
+    model = load_bundle("cluster-election").model_text
+    assert conform.split_next(model, {"Win", "Crash"}, {"StartElection", "LearnEpoch", "ReceiveVote", "HandleRequest", "SaveConfig", "BioWrite", "FlushEarly"}) == (
+        "\n    \\/ \\E c \\in Candidates :\n          M!Win(c)\n    \\/ \\E p \\in Primaries :\n          M!Crash(p)"
+    )  # fmt: skip
+    register = load_bundle(str(BUNDLE)).model_text
+    assert conform.split_next(register, {"Save"}, {"Write", "Ack", "Crash"}) == "\n M!Save"
+    assert conform.split_next(register, set(), {"Write", "Ack", "Save", "Crash"}) == " FALSE"
+    # A defined set in a quantifier comes from the instance too; an operator that takes steps itself does not.
+    migration = load_bundle("slot-migration")
+    others = (set(migration.mapping.actions()) | set(migration.mapping.unobservable)) - {"Deliver"}
+    assert "\\E n \\in M!Nodes : M!Deliver(n)" in conform.split_next(migration.model_text, {"Deliver"}, others)
+    grouped = register.replace(
+        "Next == Write \\/ Ack \\/ Save \\/ Crash", "Faults == Crash\nNext == Write \\/ Ack \\/ Save \\/ Faults"
+    )
+    with pytest.raises(TlaError, match="takes steps through Faults"):
+        conform.split_next(grouped, {"Write"}, {"Ack", "Save", "Crash"})
+
+
+def test_the_trace_module_checks_the_transitions_with_the_models_own_actions(tmp_path):
+    bundle = load_bundle("cluster-election")
+    observed = _election_run(tmp_path, [*ELECTION_CORRECT, DENIED])
+    module, cfg = conform.trace_module(bundle, observed, observed.constants(), ["OneWinnerPerEpoch"], [], 2)
+    lines = module.splitlines()
+    assert lines[4].startswith("VARIABLES i, k, currentEpoch, lastVote, diskEpoch")
+    # The hidden variable starts at the mapping's value and follows the model from there.
+    assert "        /\\ bio = Trace[1].bio" in lines and "bio |-> [p \\in Primaries |-> <<>>]" in module
+    assert "MaxUnobserved == 2" in lines
+    # Each record's action, alone, from the model's Next; the stutter rule; and the unobservable steps.
+    assert "Do_Win ==\n    \\/ \\E c \\in Candidates :\n          M!Win(c)" in module
+    assert "        /\\ Action(Steps[i'].action) \\/ UNCHANGED Vars" in lines
+    assert "Unobservable ==\n    \\/ \\E c \\in Candidates :\n          M!LearnEpoch(c)" in module
+    assert "Unobserved == k < MaxUnobserved /\\ k' = k + 1 /\\ UNCHANGED i /\\ Unobservable" in lines
+    assert (
+        "Repeated == i < Len(Steps) /\\ Steps[i + 1].repeats /\\ UNCHANGED <<i, k>> /\\ Action(Steps[i + 1].action)"
+        in lines
+    )
+    # What the records say, as paths; the denial's step rule.
+    assert (
+        '[kind |-> "step", at |-> 8, action |-> "HandleRequest", eq |-> {<<"lastVote", prim_valkey_0>>}, lo |-> {}, '
+        'has |-> {<<<<"held", prim_valkey_0>>, [epoch |-> 9, from |-> prim_valkey_0, to |-> cand_valkey_1, type |-> "vote"]>>}, '
+        'lacks |-> {}, changes |-> {"lastVote"}, unchanged |-> {}, repeats |-> FALSE]'
+    ) in module
+    assert (
+        '[kind |-> "step", at |-> 12, action |-> "HandleRequest", eq |-> {}, lo |-> {}, has |-> {}, lacks |-> {}, '
+        'changes |-> {}, unchanged |-> {"lastVote"}, repeats |-> FALSE]'
+    ) in module
+    # The old check is still there, and the config checks the trace is explained to its end.
+    assert (
+        'ASSUME PrintT(<<"spec-conform", "violated", "OneWinnerPerEpoch", {j \\in DOMAIN Trace : ~S(j)!OneWinnerPerEpoch}>>)'
+        in lines
+    )
+    assert cfg.endswith("INIT Init\nNEXT Next\nINVARIANT Incomplete\nCHECK_DEADLOCK FALSE\n")
+    # Without the transition check, the module is the observed-state check alone.
+    module, cfg = conform.trace_module(bundle, observed, observed.constants(), ["OneWinnerPerEpoch"], [])
+    assert "VARIABLE checked" in module and "Steps ==" not in module and cfg.endswith("INIT Init\nNEXT Next\n")
+
+
+def _tlc_said(monkeypatch, output):
+    """A TLC that prints ``output`` (its invariant checks found nothing) without running."""
+
+    result = tla.read_tlc_output(output, 0)
+    run = tla.ToolRun(command=["java", "tlc2.TLC"], exit_code=0, output=output, seconds=0.1)
+    monkeypatch.setattr(conform, "tlc", lambda *args, **kwargs: (result, run))
+
+
+def test_check_run_reports_the_transitions_tlc_explained(tmp_path, monkeypatch):
+    bundle = load_bundle(str(BUNDLE))
+    run = collect_runs([_run(tmp_path, "saved")])[0]
+    tools = TlaTools(jar="unused")
+    explained = '<<"spec-conform", "violated", "AckedDurable", {}>>\n' + "".join(
+        f'<<"spec-conform", "matched", {j}>>\n' for j in range(2, 6)
+    )
+    _tlc_said(monkeypatch, explained + "5 states generated, 4 distinct states found, 0 states left on queue.\n")
+    result = check_run(bundle, run, tools)
+    assert result["status"] == "pass"
+    assert result["transitions"] == {"checked": 4, "max_unobserved_steps": 1, "holds": True, "tlc_states": 4}
+    # Short of the last record: the first unexplained record, and the step before it.
+    _tlc_said(monkeypatch, explained.replace('<<"spec-conform", "matched", 5>>\n', ""))
+    result = check_run(bundle, run, tools)
+    assert result["status"] == "fail" and result["properties"]["AckedDurable"]["status"] == "holds"
+    violation = result["transitions"]["first_violation"]
+    assert (violation["index"], violation["event"]) == (5, "loaded")
+    assert (violation["from"]["why"], violation["to"]["why"]) == ("Crash", "loaded sample")
+    assert set(violation["to"]) == {"state", "why", "evidence", "t", "fields"}
+    # Nothing matched: the first observed step is the violation.
+    _tlc_said(monkeypatch, '<<"spec-conform", "violated", "AckedDurable", {}>>\n')
+    assert check_run(bundle, run, tools)["transitions"]["first_violation"]["index"] == 2
+    # Without the check, or without TLC, or excluded by the claims.
+    assert "transitions" not in check_run(bundle, run, tools, transitions=False)
+    excluded = _copy(tmp_path)
+    _edit(excluded / "claims.yaml", "conform: true\n", "conform: {excluded: not on observed states}\n")
+    unchecked = check_run(load_bundle(str(excluded)), run, None)
+    assert unchecked["transitions"] == {"checked": 0, "holds": None, "skipped": conform.TRANSITIONS_UNCHECKED}
+    _edit(excluded / "claims.yaml", "status: draft\n", "status: draft\ntransitions: {excluded: no roles}\n")
+    assert check_run(load_bundle(str(excluded)), run, None)["transitions"] == {
+        "checked": 0,
+        "holds": None,
+        "excluded": "no roles",
+    }
+    # A TLC that fails mid-way is an error, never a violation.
+    _tlc_said(monkeypatch, explained + "Error: Attempted to apply function on a key not in its domain.\n")
+    result = check_run(bundle, run, tools)
+    assert result["status"] == "error" and "TLC failed on the observed states" in result["error"]
+
+
+def test_conform_folder_without_tlc_errors_an_approved_bundle_whose_transitions_are_unchecked(tmp_path, monkeypatch):
+    events = [("replication.link.lost", {"instance_id": "valkey-1"})]
+    run = _run_folder(tmp_path / "run", "PASS", ["replication"], events)
+    bundle = tmp_path / "replication"
+    shutil.copytree(load_bundle("replication").path, bundle)
+    monkeypatch.setenv("VALKEY_FUZZER_SPEC_PATH", str(tmp_path))
+    # A replication whose properties need no TLC and whose constants need no trace header: with the transition
+    # check excluded, checked without tools.
+    _edit(bundle / "claims.yaml", "    conform: true\n", "    conform: {excluded: needs two nodes' samples}\n")
+    _edit(
+        bundle / "mapping.yaml",
+        '  DualChannel: {config: dual-channel-replication-enabled, equals: "yes"}',
+        '  DualChannel: {value: "FALSE"}',
+    )
+    assert conform_folder(run, None, "no java")["replication"]["status"] == "pass"
+    text = (bundle / "claims.yaml").read_text()
+    (bundle / "claims.yaml").write_text(text[: text.index("# conform's transition check")])
+    draft = conform_folder(run, None, "no java")["replication"]
+    assert draft["status"] == "pass" and draft["transitions"]["skipped"] == conform.TRANSITIONS_UNCHECKED
+    _edit(bundle / "claims.yaml", "status: draft", "status: approved\napproved_by: someone")
+    assert conform_folder(run, None, "no java")["replication"] == {
+        "approved": True,
+        "status": "error",
+        "error": "no java",
+    }
+    assert conform_folder(run, None, "no java", transitions=False)["replication"]["status"] == "pass"
+
+
+@needs_tlc
+@pytest.mark.slow
+def test_conform_checks_that_the_models_actions_explain_the_observed_steps(tmp_path):
+    bundle = load_bundle("cluster-election")
+    illegal = [*ELECTION_CORRECT[:4], ELECTION_CORRECT[6], *ELECTION_CORRECT[4:6]]  # the win before any ACK
+    paths = {
+        "correct": _election_trace(tmp_path, [*ELECTION_CORRECT, DENIED], name="correct"),
+        "correct-sync": _election_trace(tmp_path, ELECTION_CORRECT, "sync", name="correct-sync"),
+        "lost-best-effort": _election_trace(tmp_path, ELECTION_EVENTS, name="lost-best-effort"),
+        "lost-sync": _election_trace(tmp_path, ELECTION_EVENTS, "sync", name="lost-sync"),
+        "illegal": _election_trace(tmp_path, illegal, name="illegal"),
+    }
+    results = {name: check_run(bundle, collect_runs([path])[0], _tools()) for name, path in paths.items()}
+    # A correct run, with a denied vote (a step that changes nothing observed) and under either save behavior.
+    for name in ("correct", "correct-sync"):
+        assert results[name]["status"] == "pass" and results[name]["transitions"]["holds"], name
+    assert results["correct"]["transitions"]["checked"] == 12  # 8 steps (one denied) and 4 samples
+    # Under best-effort the model lets a vote leave before its save lands: the kill that loses it is a model
+    # step, and the lost vote is outside the claim.
+    lost = results["lost-best-effort"]
+    assert lost["status"] == "pass" and lost["transitions"]["holds"]
+    assert lost["properties"]["NoVoteLostInCrash"] == {
+        **lost["properties"]["NoVoteLostInCrash"],
+        "status": "violated",
+        "claimed": False,
+    }
+    # Known-bad: under sync, the ACK of a vote the crash lost is a step the model forbids (the vote cannot have
+    # left before its save), at the record of that ACK.
+    violation = results["lost-sync"]["transitions"]["first_violation"]
+    assert results["lost-sync"]["status"] == "fail" and results["lost-sync"]["transitions"]["holds"] is False
+    assert (violation["from"]["why"], violation["to"]["why"], violation["event"]) == ("Crash", "ReceiveVote", "acked")
+    # Known-bad: a win before any vote arrived has no model step, whatever the states say.
+    violation = results["illegal"]["transitions"]["first_violation"]
+    assert (
+        results["illegal"]["status"] == "fail"
+        and results["illegal"]["properties"]["OneWinnerPerEpoch"]["status"] == "holds"
+    )
+    assert (violation["from"]["why"], violation["to"]["why"], violation["event"]) == ("HandleRequest", "Win", "won")
+    # The old check alone passes it.
+    assert check_run(bundle, collect_runs([paths["illegal"]])[0], _tools(), transitions=False)["status"] == "pass"
+    base = ("conform", "cluster-election", "--tla2tools", JAR, "--workers", 1)
+    assert _cli(*base, paths["illegal"]) == 1 and _cli(*base, "--no-transitions", paths["illegal"]) == 0
+
+
+@needs_tlc
+@pytest.mark.slow
+def test_conform_allows_the_mappings_count_of_unobservable_steps_between_records(tmp_path):
+    # Valkey saves before it acknowledges: the Ack needs one unobservable Save between the write and the ACK.
+    bundle = _copy(tmp_path)
+    saved = collect_runs([_run(tmp_path, "saved")])[0]
+    result = check_run(load_bundle(str(bundle)), saved, _tools())
+    assert result["transitions"]["holds"] and result["transitions"]["max_unobserved_steps"] == 1
+    _edit(bundle / "claims.yaml", "status: draft\n", "status: draft\nmax_unobserved_steps: 0\n")
+    result = check_run(load_bundle(str(bundle)), saved, _tools())
+    violation = result["transitions"]["first_violation"]
+    assert result["status"] == "fail" and (violation["from"]["why"], violation["to"]["why"]) == ("Write", "Ack")
+    # The experiment reports every write in one line (step: repeats): 100 keys are 100 Write steps, as the live run
+    # logs them, saved or lost.
+    for name, kwargs in (
+        ("many", {"keys": 100, "loaded": 100}),
+        ("many-lost", {"keys": 100, "loaded": 0, "appendonly": "no"}),
+    ):
+        result = check_run(load_bundle(str(BUNDLE)), collect_runs([_run(tmp_path, name, **kwargs)])[0], _tools())
+        assert result["transitions"]["holds"] and result["transitions"]["tlc_states"] > 100, name
+    # Known-bad: a line that reports fewer writes than the one before it is no Write step (the register only grows).
+    fewer = Path(_run(tmp_path, "fewer", keys=2))
+    records = [json.loads(line) for line in fewer.read_text().splitlines()]
+    records.insert(2, {**records[1], "t": 1.5, "payload": {"keys": 1}})
+    fewer.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+    result = check_run(load_bundle(str(BUNDLE)), collect_runs([str(fewer)])[0], _tools())
+    assert result["transitions"]["first_violation"]["index"] == 4 and result["status"] == "fail"
 
 
 # ---------------------------------------------------------------------------

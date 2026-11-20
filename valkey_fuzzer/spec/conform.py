@@ -15,10 +15,15 @@ sets a variable to another value than the events had it at, the sample is
 taken (the node said so) and the disagreement is reported in
 ``sample_mismatches``, by variable and key, never overwritten in silence.
 
-This is an observed-state check plus action coverage, not refinement: it does
-not check that consecutive observed states are related by the model's Next
-(with stuttering and hidden steps). Observations are partial and coarser than
-model steps; the report says so.
+TLC also checks the transitions (:func:`_transition_section`): from the first
+observed state, with the hidden variables at the mapping's ``hidden`` value,
+the model must take the action each record shows (or no step, when earlier
+steps already account for it) to a state that agrees with what the record
+says, with up to ``max_unobserved_steps`` (``claims.yaml``) steps of the
+actions the mapping calls unobservable in between; a sample only raises what
+it reports. A pass is observed-projection refinement: the run's observed steps
+are steps of the model. It is not full refinement: hidden state is the model's
+own guess, and a record says nothing about the variables it does not update.
 
 A run's records are its committed events, or a trace a component wrote: a
 JSONL file :data:`TRACE_FILE` in the component's artifact folder
@@ -37,6 +42,7 @@ import os
 import re
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -53,13 +59,31 @@ from .bundle import (
     load_bundle,
     where_matches,
 )
-from .tla import ModelValue, TlaError, TlaFunction, TlaSet, TlaTools, print_values, render, tlc
+from .tla import (
+    ModelValue,
+    TlaError,
+    TlaFunction,
+    TlaSet,
+    TlaTools,
+    definition_body,
+    definitions,
+    print_values,
+    render,
+    tlc,
+)
 
 CHECKS = "observed-state check and action coverage"
 REFINEMENT = (
     "not checked: consecutive observed states are not checked against the model's Next (with stuttering and "
     "hidden steps); a pass means every observed state satisfies the checked properties, not that the run "
     "is a behavior of the model"
+)
+CHECKS_WITH_TRANSITIONS = "observed-state check, transition check, and action coverage"
+REFINEMENT_WITH_TRANSITIONS = (
+    "observed-projection refinement: from the first observed state, the model takes the action each record shows "
+    "(or no step) to a state that agrees with what the record says, with up to max_unobserved_steps unobservable "
+    "steps between records; hidden variables follow the model from the mapping's value. Not checked: that hidden "
+    "state matched the run, or the variables a record does not update"
 )
 _TAG = "spec-conform"
 # The run statuses of a run that reached its verdict: the only runs conform_folder checks.
@@ -252,6 +276,13 @@ class ObservedRun:
         self.members = self._members()
         self.states: list[dict[str, Any]] = []
         self.steps: list[dict[str, Any]] = []
+        # Per record that is a mapped action or changes the state (for the transition check): the step's entry
+        # (as in ``steps``, with ``state`` the observed state after it), its ``kind`` (``init``, ``step`` for a
+        # mapped action, ``sample`` for a record without one), its ``action``, and what the record says of that
+        # state: ``eq`` are paths, ``(var,)`` or ``(var, key)``, that hold the state's value; ``has`` and ``lacks``
+        # are ``(path, value)`` pairs the set at the path holds or not; ``lo`` are paths the state's value is a
+        # lower bound of (a ``max`` update).
+        self.reports: list[dict[str, Any]] = []
 
     # -- fields and values --------------------------------------------------
 
@@ -373,6 +404,10 @@ class ObservedRun:
         state = self.initial()
         self.states = [copy.deepcopy(state)]
         self.steps = [{"state": 1, "why": "initial state"}]
+        self.reports = [
+            {"state": 1, "why": "initial state", "kind": "init", "action": None, "repeats": False}
+            | {key: [] for key in ("eq", "has", "lacks", "lo", "changes", "unchanged")}
+        ]
         applied: dict[str, list[Mapping[str, Any]]] = {name: [] for name in self.mapping.evidence}
         # Records waiting for the record they follow: trace order is log time to the millisecond, and two
         # nodes' lines of one millisecond can be read in either order.
@@ -444,28 +479,66 @@ class ObservedRun:
         self, state: dict[str, Any], evidence: Evidence, record: Mapping[str, Any], fields: Mapping[str, Any]
     ) -> None:
         before = copy.deepcopy(state)
+        reported: list[tuple] = []
         for update in evidence.updates:
             # Each update stands alone: a node outside the process set one update ranges over still
             # gets the updates whose variables it is in.
             try:
-                self._apply(state, update, fields, evidence, record)
+                reported.extend(self._apply(state, update, fields, evidence, record))
             except _OutsideProcessError as exc:
                 self._note(f"{evidence.name}: {update.op} {update.var} skipped: {exc}")
             except _SkipError as exc:
                 self.unapplied.append(f"{evidence.name}: {update.op} {update.var}: {exc}")
         if evidence.action:
             self.actions[evidence.action] += 1
+        step = {
+            "state": len(self.states) + (state != before),
+            "why": evidence.action or f"{evidence.name} sample",
+            "evidence": evidence.name,
+            "t": record.get("t"),
+            "fields": {key: value for key, value in fields.items()},
+        }
         if state != before:
             self.states.append(copy.deepcopy(state))
-            self.steps.append(
-                {
-                    "state": len(self.states),
-                    "why": evidence.action or f"{evidence.name} sample",
-                    "evidence": evidence.name,
-                    "t": record.get("t"),
-                    "fields": {key: value for key, value in fields.items()},
-                }
-            )
+            self.steps.append(step)
+        if state != before or evidence.action:
+            # A mapped action that changed nothing observed is still a step the model must allow.
+            self.reports.append({**step, **self._report(evidence, reported)})
+
+    @staticmethod
+    def _report(evidence: Evidence, reported: Sequence[tuple]) -> dict[str, Any]:
+        """What the record says of the state after it, by how its updates said it (see ``reports``). A step's
+        ``add`` and ``remove`` say only that the value is in the set, or not (a vote whose ACK is never logged
+        stays in the observed ``held``); its ``max`` says nothing a step can check. A sample sets what it reports."""
+
+        report: dict[str, Any] = {
+            "kind": "step" if evidence.action else "sample",
+            "action": evidence.action,
+            "eq": [],
+            "has": [],
+            "lacks": [],
+            "lo": [],
+            # The mapping's step rule: the variable the action changes, or leaves unchanged (a denied vote), and
+            # whether one record stands for several steps of the action (a line that reports every write at once).
+            "changes": [evidence.step["changes"]] if evidence.step.get("changes") else [],
+            "unchanged": [evidence.step["unchanged"]] if evidence.step.get("unchanged") else [],
+            "repeats": bool(evidence.step.get("repeats")),
+        }
+        for path, op, value in reported:
+            if evidence.action and op == "add":
+                relation, item = "has", (path, value)
+            elif evidence.action and op == "remove":
+                relation, item = "lacks", (path, value)
+            elif op == "max":
+                if evidence.action:
+                    continue
+                relation, item = "lo", path
+            else:
+                relation, item = "eq", path
+            if item not in report[relation]:
+                report[relation].append(item)
+        report["lo"] = [path for path in report["lo"] if path not in report["eq"]]
+        return report
 
     def _note(self, text: str) -> None:
         if text not in self.notes and len(self.notes) < 100:
@@ -478,7 +551,10 @@ class ObservedRun:
         fields: Mapping[str, Any],
         evidence: Evidence,
         record: Mapping[str, Any],
-    ) -> None:
+    ) -> list[tuple]:
+        """Apply ``update`` to ``state``; for each path it wrote, ``(var,)`` or ``(var, key)``: the path, the
+        update's op, and the value it set, added, or removed."""
+
         var = self.mapping.state[update.var]
         if var.hidden is not None:
             raise _SkipError(f"{var.name} is hidden; it cannot be updated")
@@ -507,6 +583,7 @@ class ObservedRun:
             else:
                 state[var.name][key] = new
             self._set_by[(var.name, key)] = "sample" if evidence.sample else "event"
+        return [((var.name,) if key is None else (var.name, key), update.op, value) for key in targets]
 
     def _mismatch(
         self, evidence: Evidence, record: Mapping[str, Any], var: str, key: Any, inferred: Any, sampled: Any
@@ -563,9 +640,15 @@ class ObservedRun:
 
 
 def trace_module(
-    bundle: Bundle, observed: ObservedRun, constants: Mapping[str, str], names: Sequence[str], targets: Sequence[str]
+    bundle: Bundle,
+    observed: ObservedRun,
+    constants: Mapping[str, str],
+    names: Sequence[str],
+    targets: Sequence[str],
+    max_unobserved: Optional[int] = None,
 ) -> tuple[str, str]:
-    """``ObservedTrace.tla`` and its config: every observed state, and PrintT of where each check fails or holds."""
+    """``ObservedTrace.tla`` and its config: every observed state, PrintT of where each check fails or holds, and,
+    with ``max_unobserved`` (a count of model steps), the transition check (:func:`_transition_section`)."""
 
     mapping = bundle.mapping
     variables = list(mapping.state)
@@ -577,26 +660,33 @@ def trace_module(
         ]
         states.append("[" + ", ".join(fields) + "]")
     model_values = sorted({str(item) for process in mapping.processes for item in observed.identities(process)})
-    substitutions = ",\n    ".join(f"{var} <- Trace[k].{var}" for var in variables)
+    substitutions = ",\n    ".join(f"{var} <- Trace[j].{var}" for var in variables)
     prints = [
-        f'ASSUME PrintT(<<"{_TAG}", "violated", "{name}", {{k \\in DOMAIN Trace : ~M(k)!{name}}}>>)' for name in names
-    ] + [f'ASSUME PrintT(<<"{_TAG}", "reached", "{name}", {{k \\in DOMAIN Trace : M(k)!{name}}}>>)' for name in targets]
+        f'ASSUME PrintT(<<"{_TAG}", "violated", "{name}", {{j \\in DOMAIN Trace : ~S(j)!{name}}}>>)' for name in names
+    ] + [f'ASSUME PrintT(<<"{_TAG}", "reached", "{name}", {{j \\in DOMAIN Trace : S(j)!{name}}}>>)' for name in targets]
     declared = list(constants) + model_values
+    if max_unobserved is None:
+        declared_variables = "VARIABLE checked"
+        behavior = ["Init == checked = TRUE", "Next == UNCHANGED checked"]
+        checks = ["INIT Init", "NEXT Next"]
+    else:
+        declared_variables = f"VARIABLES i, k, {', '.join(variables)}"
+        behavior = _transition_section(bundle, observed, variables, max_unobserved)
+        checks = ["INIT Init", "NEXT Next", "INVARIANT Incomplete", "CHECK_DEADLOCK FALSE"]
     module = "\n".join(
         [
             "---- MODULE ObservedTrace ----",
             f"\\* States observed in {observed.run.source}, rebuilt through {os.path.basename(mapping.path)}.",
             "EXTENDS Naturals, Sequences, TLC",
             f"CONSTANTS {', '.join(declared)}" if declared else "",
-            "VARIABLE checked",
+            declared_variables,
             "Trace == <<",
             "    " + ",\n    ".join(states),
             ">>",
-            "M(k) == INSTANCE model WITH",
+            "S(j) == INSTANCE model WITH",
             "    " + substitutions,
             *prints,
-            "Init == checked = TRUE",
-            "Next == UNCHANGED checked",
+            *behavior,
             "====",
             "",
         ]
@@ -605,19 +695,156 @@ def trace_module(
         ["CONSTANTS"]
         + [f"    {name} = {value}" for name, value in constants.items()]
         + [f"    {name} = {name}" for name in model_values]
-        + ["INIT Init", "NEXT Next", ""]
+        + [*checks, ""]
     )
     return module, cfg
 
 
+def _path(path: tuple) -> str:
+    return "<<" + ", ".join([f'"{path[0]}"', *map(render, path[1:])]) + ">>"
+
+
+def split_next(model_text: str, keep: AbstractSet[str], drop: AbstractSet[str]) -> str:
+    """The body of the model's ``Next`` with the actions in ``keep`` taken from the instance ``M`` and the
+    actions in ``drop`` replaced by FALSE: the model's steps restricted to ``keep``. ``Next`` must apply its
+    actions directly (``\\E p \\in Primaries : Vote(p) \\/ Crash(p)``), as every shipped model does; an operator
+    it names that takes a step itself (one that primes a variable) is a :class:`TlaError`. Other operators
+    (``\\E n \\in Nodes`` over a defined set) are taken from ``M`` too."""
+
+    body = definition_body(model_text, "Next")
+    if body is None:
+        raise TlaError(f"{MODEL_FILE} defines no Next")
+    actions = {name: f"M!{name}" for name in keep} | dict.fromkeys(drop, "FALSE")
+    defined = definitions(model_text)
+
+    def replace(match: re.Match) -> str:
+        name, arguments = match.group(1), match.group(2) or ""
+        if name in actions:
+            return "FALSE" if actions[name] == "FALSE" else actions[name] + arguments
+        if name in defined:
+            body = defined[name]
+            if "'" in body or "UNCHANGED" in body or any(re.search(rf"\b{action}\b", body) for action in actions):
+                raise TlaError(
+                    f"Next of {MODEL_FILE} takes steps through {name}, which the mapping neither maps nor calls "
+                    "unobservable; the transition check needs Next to apply the model's actions directly"
+                )
+            return f"M!{name}{arguments}"
+        return match.group(0)
+
+    restricted = re.sub(r"\b([A-Za-z_]\w*)(\([^()]*\))?", replace, body)
+    # Drop the FALSE disjuncts and the lines left with nothing else; an \E over no kept action stays.
+    restricted = re.sub(r"FALSE \\/ ", "", restricted)
+    restricted = re.sub(r"(?<=\S) \\/ FALSE\b", "", restricted)
+    lines = [
+        line
+        for line in restricted.splitlines()
+        if line.strip() and not re.fullmatch(r"\\/ (\\E [^:]+ : )?FALSE", line.strip())
+    ]
+    if not any("M!" in line for line in lines):
+        return " FALSE"
+    # A \/ list keeps its own lines, so its bullets stay aligned.
+    return ("\n" if lines[0].startswith(" ") else "") + "\n".join(lines)
+
+
+def _transition_section(
+    bundle: Bundle, observed: ObservedRun, variables: Sequence[str], max_unobserved: int
+) -> list[str]:
+    """The lines that check the observed transitions: TLC follows the model from the first observed state and,
+    for each record that shows a model action, takes that action (or none, when earlier steps already account
+    for it) to a state that agrees with what the record says; a sample only raises what it reports. Up to
+    ``max_unobserved`` steps of the actions the mapping calls unobservable may come between two records. Each
+    furthest record a path reaches is printed; a path that reaches the last one violates ``Incomplete``, so TLC
+    stops there."""
+
+    reports = []
+    for report in observed.reports:
+        fields = [f'kind |-> "{report["kind"]}"', f"at |-> {report['state']}", f'action |-> "{report["action"] or ""}"']
+        for name in ("eq", "lo"):
+            fields.append(f"{name} |-> {{{', '.join(_path(path) for path in report[name])}}}")
+        for name in ("has", "lacks"):
+            pairs = ", ".join(f"<<{_path(path)}, {render(value)}>>" for path, value in report[name])
+            fields.append(f"{name} |-> {{{pairs}}}")
+        for name in ("changes", "unchanged"):
+            fields.append(f"{name} |-> {{{', '.join(render(var) for var in report[name])}}}")
+        fields.append(f"repeats |-> {render(report['repeats'])}")
+        reports.append("[" + ", ".join(fields) + "]")
+    mapping = bundle.mapping
+    observable, unobservable = set(mapping.actions()), set(mapping.unobservable)
+    taken = sorted({report["action"] for report in observed.reports if report["action"]})
+    actions = [
+        f"Do_{name} ==" + split_next(bundle.model_text, {name}, (observable | unobservable) - {name}) for name in taken
+    ]
+    cases = "\n                  [] ".join(f'name = "{name}" -> Do_{name}' for name in taken)
+    return [
+        "\\* Each record that is a mapped action or changes the state: the observed state after it (at), its action,",
+        "\\* what it says of that state as paths into it (<<var>> or <<var, key>>: eq holds the observed value, has and",
+        "\\* lacks pair a path with a value its set gained or lost, lo is a lower bound a sample raises to), the",
+        "\\* variables the mapping says the action changes or leaves unchanged, and whether the record stands for",
+        "\\* several steps of its action (repeats).",
+        "Steps == <<",
+        "    " + ",\n    ".join(reports),
+        ">>",
+        f"MaxUnobserved == {max_unobserved}",
+        "M == INSTANCE model",
+        "\\* The model's actions as its Next applies them, each alone, and the ones no record shows.",
+        *actions,
+        f"Action(name) == CASE {cases}" if cases else "Action(name) == FALSE",
+        "Unobservable ==" + split_next(bundle.model_text, unobservable, observable),
+        f"Vars == <<{', '.join(variables)}>>",
+        "State == [" + ", ".join(f"{var} |-> {var}" for var in variables) + "]",
+        "At(s, path) == IF Len(path) = 1 THEN s[path[1]] ELSE s[path[1]][path[2]]",
+        "Max(a, b) == IF a > b THEN a ELSE b",
+        "Matches(j, s) == /\\ \\A p \\in Steps[j].eq : At(s, p) = At(Trace[Steps[j].at], p)",
+        "                 /\\ \\A pv \\in Steps[j].has : pv[2] \\in At(s, pv[1])",
+        "                 /\\ \\A pv \\in Steps[j].lacks : pv[2] \\notin At(s, pv[1])",
+        "\\* Variable `name`, now `old`, raised to what sample j reports of it.",
+        "Raised(j, name, old) ==",
+        "    LET paths == {p \\in Steps[j].eq \\cup Steps[j].lo : p[1] = name}",
+        "        Seen(p) == At(Trace[Steps[j].at], p)",
+        "        New(p, prior) == IF p \\in Steps[j].lo THEN Max(prior, Seen(p)) ELSE Seen(p)",
+        "    IN IF paths = {} THEN old",
+        "       ELSE IF <<name>> \\in paths THEN New(<<name>>, old)",
+        "       ELSE [x \\in DOMAIN old |-> IF <<name, x>> \\in paths THEN New(<<name, x>>, old[x]) ELSE old[x]]",
+        "\\* Each furthest record a path reaches, once per TLC worker.",
+        f'Reached(j) == IF j > TLCGet(1) THEN TLCSet(1, j) /\\ PrintT(<<"{_TAG}", "matched", j>>) ELSE TRUE',
+        "ASSUME TLCSet(1, 1)",
+        "Init == /\\ i = 1 /\\ k = 0",
+        *[f"        /\\ {var} = Trace[1].{var}" for var in variables],
+        'Step == /\\ i < Len(Steps) /\\ Steps[i + 1].kind = "step"',
+        "        /\\ i' = i + 1 /\\ k' = 0",
+        "        /\\ Action(Steps[i'].action) \\/ UNCHANGED Vars",
+        "        /\\ \\A v \\in Steps[i'].changes : State'[v] # State[v]",
+        "        /\\ \\A v \\in Steps[i'].unchanged : State'[v] = State[v]",
+        "        /\\ Matches(i', State') /\\ Reached(i')",
+        'Sample == /\\ i < Len(Steps) /\\ Steps[i + 1].kind = "sample"',
+        "          /\\ i' = i + 1 /\\ UNCHANGED k",
+        *[f"          /\\ {var}' = Raised(i', \"{var}\", {var})" for var in variables],
+        "          /\\ Reached(i')",
+        "Unobserved == k < MaxUnobserved /\\ k' = k + 1 /\\ UNCHANGED i /\\ Unobservable",
+        "\\* A record that stands for several steps of its action: the action, before the record.",
+        "Repeated == i < Len(Steps) /\\ Steps[i + 1].repeats /\\ UNCHANGED <<i, k>> /\\ Action(Steps[i + 1].action)",
+        "Next == Step \\/ Sample \\/ Unobserved \\/ Repeated",
+        "\\* Violated, so TLC stops, once a path explains every record.",
+        "Incomplete == i < Len(Steps)",
+    ]
+
+
 def needs_tlc(bundle: Bundle) -> bool:
-    """Whether checking a run needs TLC: the bundle has a property to check on observed states, or a target."""
+    """Whether checking a run's states needs TLC: the bundle has a property to check on observed states, or a
+    target. The transition check always needs TLC; without it, it is reported as not checked."""
 
     return any(item.conform for item in bundle.claims.properties) or bool(bundle.claims.targets)
 
 
-def check_run(bundle: Bundle, run: RunEvidence, tools: Optional[TlaTools]) -> dict[str, Any]:
-    """Rebuild ``run``'s observed states and check the claims on them (``tools`` only when :func:`needs_tlc`)."""
+TRANSITIONS_UNCHECKED = "not checked: the transition check needs TLC (java and tla2tools.jar)"
+
+
+def check_run(
+    bundle: Bundle, run: RunEvidence, tools: Optional[TlaTools], *, transitions: bool = True
+) -> dict[str, Any]:
+    """Rebuild ``run``'s observed states and check the claims on them, and (``transitions``) that the model's
+    Next relates consecutive observed states. ``tools`` may be None only when the bundle does not
+    :func:`needs_tlc`; the transition check is then reported as not checked."""
 
     claims = bundle.claims
     names = [item.name for item in claims.properties if item.conform]
@@ -664,12 +891,16 @@ def check_run(bundle: Bundle, run: RunEvidence, tools: Optional[TlaTools]) -> di
         result["unexercised"] = True
         return result
     printed: dict[tuple[str, str], list[int]] = {}
+    # The records (observed.reports) a model path explains: the first, the initial state, always.
+    furthest = 1
+    checking = transitions and tools is not None and claims.transitions_excluded is None
     try:
         result["constants"] = observed.constants()
         # A bundle whose properties are all excluded and that has no targets gives TLC nothing to evaluate.
-        if needs_tlc(bundle):
-            module, cfg = trace_module(bundle, observed, result["constants"], names, targets)
-            _, run_tlc = tlc(
+        if needs_tlc(bundle) or checking:
+            max_unobserved = claims.max_unobserved_steps if checking else None
+            module, cfg = trace_module(bundle, observed, result["constants"], names, targets, max_unobserved)
+            found, run_tlc = tlc(
                 tools,
                 "ObservedTrace.tla",
                 "ObservedTrace.cfg",
@@ -678,7 +909,14 @@ def check_run(bundle: Bundle, run: RunEvidence, tools: Optional[TlaTools]) -> di
             if run_tlc.timed_out:
                 result["timed_out"] = True
                 raise TlaError(run_tlc.timeout_error)
-            printed = {(item[1], item[2]): sorted(item[3]) for item in print_values(run_tlc.output, _TAG)}
+            if found.errors:
+                result["tlc_output"] = run_tlc.tail()
+                raise TlaError(f"TLC failed on the observed states: {found.errors[0]}")
+            for item in print_values(run_tlc.output, _TAG):
+                if item[1] == "matched":
+                    furthest = max(furthest, item[2])
+                else:
+                    printed[(item[1], item[2])] = sorted(item[3])
     except TlaError as exc:
         result["status"] = "error"
         result["error"] = str(exc)
@@ -711,21 +949,51 @@ def check_run(bundle: Bundle, run: RunEvidence, tools: Optional[TlaTools]) -> di
         result["targets"][name] = {"reached": bool(reached), "states": reached}
         if reached:
             result["targets"][name]["first"] = observed.steps[reached[0] - 1]
-    result["status"] = (
-        "fail" if any(entry["status"] == "violated" and entry["claimed"] for entry in properties.values()) else "pass"
-    )
+    failed = any(entry["status"] == "violated" and entry["claimed"] for entry in properties.values())
+    if checking:
+        # reports[:furthest] have a model explanation; short of the last, no step of the model (after up to
+        # max_unobserved_steps unobservable ones) takes the model from record furthest to record furthest + 1.
+        holds = furthest >= len(observed.reports)
+        result["transitions"] = {
+            "checked": len(observed.reports) - 1,
+            "max_unobserved_steps": claims.max_unobserved_steps,
+            "holds": holds,
+            "tlc_states": found.distinct_states,
+        }
+        if not holds:
+            shown = ("state", "why", "evidence", "t", "fields")
+            result["transitions"]["first_violation"] = {
+                "index": furthest + 1,
+                "from": {key: observed.reports[furthest - 1].get(key) for key in shown},
+                "to": {key: observed.reports[furthest].get(key) for key in shown},
+                "event": observed.reports[furthest]["evidence"],
+            }
+            failed = True
+    elif transitions and claims.transitions_excluded is not None:
+        result["transitions"] = {"checked": 0, "holds": None, "excluded": claims.transitions_excluded}
+    elif transitions:
+        result["transitions"] = {"checked": 0, "holds": None, "skipped": TRANSITIONS_UNCHECKED}
+    result["status"] = "fail" if failed else "pass"
     return result
 
 
 def conform_runs(
-    bundle: Bundle, runs: Sequence[RunEvidence], tools: Optional[TlaTools], *, group_by: Sequence[str] = ()
+    bundle: Bundle,
+    runs: Sequence[RunEvidence],
+    tools: Optional[TlaTools],
+    *,
+    group_by: Sequence[str] = (),
+    transitions: bool = True,
 ) -> dict[str, Any]:
     """Check every run and summarize: per-run results, live action coverage, targets reached, and groups."""
 
-    return summarize(bundle, [check_run(bundle, run, tools) for run in runs], group_by=group_by)
+    results = [check_run(bundle, run, tools, transitions=transitions) for run in runs]
+    return summarize(bundle, results, group_by=group_by, transitions=transitions)
 
 
-def summarize(bundle: Bundle, results: Sequence[Mapping[str, Any]], *, group_by: Sequence[str] = ()) -> dict[str, Any]:
+def summarize(
+    bundle: Bundle, results: Sequence[Mapping[str, Any]], *, group_by: Sequence[str] = (), transitions: bool = True
+) -> dict[str, Any]:
     """The conformance report of :func:`check_run` results: live action coverage, targets reached, and groups."""
 
     observed_in: Counter = Counter()
@@ -738,12 +1006,13 @@ def summarize(bundle: Bundle, results: Sequence[Mapping[str, Any]], *, group_by:
         for item in bundle.claims.targets
     }
     statuses = [result["status"] for result in results]
+    checked = transitions and bundle.claims.transitions_excluded is None
     report: dict[str, Any] = {
         "kind": "spec-conformance",
         "bundle": bundle.protocol,
         "mapping_sha256": bundle.mapping.sha256,
-        "checks": CHECKS,
-        "refinement": REFINEMENT,
+        "checks": CHECKS_WITH_TRANSITIONS if checked else CHECKS,
+        "refinement": REFINEMENT_WITH_TRANSITIONS if checked else REFINEMENT,
         "properties_checked": [item.name for item in bundle.claims.properties if item.conform],
         "runs": list(results),
         "action_coverage": {
@@ -755,6 +1024,12 @@ def summarize(bundle: Bundle, results: Sequence[Mapping[str, Any]], *, group_by:
         "targets_reached": targets,
         "status": "fail" if "fail" in statuses else ("error" if "error" in statuses or not results else "pass"),
     }
+    if transitions:
+        report["transitions"] = {
+            "max_unobserved_steps": bundle.claims.max_unobserved_steps,
+            "violated_in": sum(1 for result in results if (result.get("transitions") or {}).get("holds") is False),
+            **({"excluded": bundle.claims.transitions_excluded} if bundle.claims.transitions_excluded else {}),
+        }
     if group_by:
         report["groups"] = _groups(results, group_by, [item.name for item in bundle.claims.targets])
     return report
@@ -771,7 +1046,9 @@ def plan_bundles(plan: Mapping[str, Any]) -> list[str]:
     return names
 
 
-def conform_folder(folder: str, tools: Optional[TlaTools], unavailable: str = "") -> dict[str, dict[str, Any]]:
+def conform_folder(
+    folder: str, tools: Optional[TlaTools], unavailable: str = "", *, transitions: bool = True
+) -> dict[str, dict[str, Any]]:
     """The run in ``folder`` checked against each spec bundle its plan names, by bundle; empty when it names none.
 
     Each entry is :func:`check_run`'s result and whether the bundle's claims are ``approved``. A run that did
@@ -779,7 +1056,8 @@ def conform_folder(folder: str, tools: Optional[TlaTools], unavailable: str = ""
     is ``unexercised``: its plan names the bundle, but nothing it did shows the protocol (a replication chaos
     wave that only stalls a replica briefly). Without ``tools``, a bundle that :func:`needs_tlc` cannot be
     checked, with ``unavailable`` as the reason: a draft is ``skipped``, and an approved bundle is an ``error``,
-    since its claims decide the run.
+    since its claims decide the run. An approved bundle whose transition check (``transitions``, unless its
+    claims exclude it) cannot run without ``tools`` is an ``error`` too; a draft's is reported as not checked.
     """
 
     path = os.path.join(folder, "report.json")
@@ -795,16 +1073,15 @@ def conform_folder(folder: str, tools: Optional[TlaTools], unavailable: str = ""
             results[name] = {"status": "error", "error": str(exc), "approved": True}
             continue
         entry: dict[str, Any] = {"approved": bundle.claims.status == "approved"}
+        checks_transitions = transitions and bundle.claims.transitions_excluded is None
         if report.get("status") not in CHECKED_RUN_STATUSES:
             entry.update(status="not_run", reason=f"the run ended {report.get('status')}, before its verdict")
+        elif tools is None and entry["approved"] and (needs_tlc(bundle) or checks_transitions):
+            entry.update(status="error", error=unavailable or "no java and tla2tools.jar")
         elif tools is None and needs_tlc(bundle):
-            reason = unavailable or "no java and tla2tools.jar"
-            if entry["approved"]:
-                entry.update(status="error", error=reason)
-            else:
-                entry.update(status="skipped", reason=reason)
+            entry.update(status="skipped", reason=unavailable or "no java and tla2tools.jar")
         else:
-            entry.update(check_run(bundle, _report_run(path, report), tools))
+            entry.update(check_run(bundle, _report_run(path, report), tools, transitions=transitions))
             if entry.pop("unexercised", False):
                 entry.update(status="unexercised", reason=entry.pop("error"))
         results[name] = entry
@@ -839,7 +1116,10 @@ def _groups(results: Sequence[Mapping[str, Any]], keys: Sequence[str], targets: 
 __all__ = [
     "CHECKED_RUN_STATUSES",
     "CHECKS",
+    "CHECKS_WITH_TRANSITIONS",
     "REFINEMENT",
+    "REFINEMENT_WITH_TRANSITIONS",
+    "TRANSITIONS_UNCHECKED",
     "ObservedRun",
     "RunEvidence",
     "check_run",
@@ -848,6 +1128,7 @@ __all__ = [
     "conform_runs",
     "needs_tlc",
     "plan_bundles",
+    "split_next",
     "summarize",
     "trace_module",
 ]

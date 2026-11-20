@@ -29,6 +29,9 @@ evidence:
     action: HandleRequest
     # Only a granting HandleRequest sets lastVote; its argument is the voter.
     step: {changes: lastVote, process: [lastVote]}
+    # The grant answers the request the candidate's "Starting a failover election" line sent; the two nodes'
+    # lines can be read in either order.
+    after: {evidence: started, match: {instance_id: $candidate, epoch: $epoch}}
     updates:
       - {max: currentEpoch, key: $instance_id, value: $epoch}
       - {set: lastVote, key: $instance_id@Primaries, value: $epoch}

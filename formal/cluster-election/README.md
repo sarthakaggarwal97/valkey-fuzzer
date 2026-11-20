@@ -170,8 +170,18 @@ valkey-fuzzer spec conform cluster-election RUN --tla2tools tla2tools.jar
 
 `VotesSavedBeforeSent` is excluded there: `nodes.conf` samples lag behind the
 file, so an observed `diskVote` is a lower bound. The oracle checks it
-exactly at each crash. This is an observed-state check and action coverage,
-not refinement: observed steps are not checked against the model's `Next`.
+exactly at each crash. The same TLC run checks the run's steps against the
+model ([the transition check](../../docs/spec-bridge.md#the-transition-check)):
+each `started`, `granted`, `acked`, `won` and `crash` line must be the model's
+`StartElection`, `HandleRequest`, `ReceiveVote`, `Win` or `Crash`, with at
+most one unobservable step (`SaveConfig`, `BioWrite`, `LearnEpoch`) between
+two lines. A win without a quorum, or an ACK of a vote that the crash lost
+under `sync`, is a transition violation. The check holds on the shipped
+experiments' runs with one election; a run with a second election after a
+promotion can report a violation at its `Win`, because `IsMajority` counts
+`Primaries`, which the mapping fills with every node that ever voted, while
+Valkey's quorum counts the slot-owning primaries at the time (the `quorum`
+of the ACK line): a model constant for the quorum is the fix.
 
 ## Live batch results
 

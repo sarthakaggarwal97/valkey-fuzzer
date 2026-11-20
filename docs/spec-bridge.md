@@ -2,8 +2,10 @@
 
 The spec bridge links a TLA+ model to real fuzzer runs. It does three things:
 it model-checks the model's claims, turns a counterexample into ordinary
-scenarios, and checks the claims on states observed in real runs, for the
-bundles that have such a check ([What a PASS covers](#what-a-pass-covers)). It
+scenarios, and checks real runs against the model: the claims on the states a
+run shows, for the bundles that have such a check
+([What a PASS covers](#what-a-pass-covers)), and that the steps a run shows
+are steps of the model ([The transition check](#the-transition-check)). It
 does not prove that Valkey implements the model.
 
 - [What a PASS covers](#what-a-pass-covers)
@@ -12,6 +14,7 @@ does not prove that Valkey implements the model.
 - [spec translate](#spec-translate)
 - [spec conform](#spec-conform)
   - [Samples](#samples)
+  - [The transition check](#the-transition-check)
   - [In a batch](#in-a-batch)
 - [Writing a bundle](#writing-a-bundle)
 - [Onboarding a protocol with data only](#onboarding-a-protocol-with-data-only)
@@ -19,7 +22,9 @@ does not prove that Valkey implements the model.
 All three tools need Java 11 or later and `tla2tools.jar` (pass
 `--tla2tools`, or set `TLA2TOOLS_JAR`; CI pins v1.7.4 with TLC 2.19),
 except `conform` of a bundle that gives TLC nothing to evaluate (every
-property `conform: excluded`, and no targets). Nothing else needs them:
+property `conform: excluded`, and no targets): it then runs without them,
+and reports its [transition check](#the-transition-check) as not checked.
+Nothing else needs them:
 `pip install` brings no Java, and `run`, `validate` and `batch` work
 without them, including the shipped experiments that name a bundle
 (`spec: cluster-election`), since reading a bundle's mapping needs no TLC.
@@ -160,7 +165,11 @@ experiment and runs on Valkey (see
 - `targets`: named state predicates of the model that a counterexample
   reaches. `conform` counts the runs that reach each one;
 - `assumptions`, `bounds` (the constants every safe config must use), and
-  `exclusions` (what the model leaves out).
+  `exclusions` (what the model leaves out);
+- `max_unobserved_steps` (default `1`): how many steps of the mapping's
+  `unobservable` actions `conform`'s [transition check](#the-transition-check)
+  allows between two records; and `transitions: {excluded: <why>}` when the
+  mapping cannot support that check.
 
 **`mapping.yaml`** is the only place the implementation patterns live.
 Experiments, observers, and oracles read them from here. Because they all
@@ -204,9 +213,11 @@ on a pattern that matches none.
   them (the election's `won` line names no epoch; the win is of the election
   its winner last `started`).
 - `action`: the model action this evidence shows. `step` says which model
-  steps produce it (`changes` or `unchanged`, a variable) and which
-  variables' changed key is the acting process (`process`). `translate`
-  uses `step`.
+  steps produce it (`changes` or `unchanged`, a variable), which
+  variables' changed key is the acting process (`process`), and whether one
+  record stands for several steps of the action (`repeats: true`, a line that
+  reports every write at once). `translate` uses `step`, and `conform`'s
+  transition check holds the action to it.
 - `updates`: how this evidence changes the observed state. Each update is
   one of `set`, `max`, `add`, `remove`, `clear`, or `incr` on a state
   variable, with an optional `key` and `value`. In those, `$field` is a
@@ -219,7 +230,10 @@ on a pattern that matches none.
   an `evidence` and its `field` that names the node, an optional `where`
   filter, and `require`, the fields that must be present and not empty.
 - `state`: every model variable, either `over` some process sets with an
-  `init` value, or `hidden: <TLA+ expression>` with a reason.
+  `init` value, or `hidden: <TLA+ expression>` with a reason. The
+  observed-state check evaluates the properties with a hidden variable at
+  that expression; the transition check starts it there and lets the model
+  move it.
 - `constants`: every other model constant, as a literal `value`, as a
   per-node `config` that `equals` a value (read from the trace header), as a
   scenario `input` that `equals` a value (for an experiment that sets the
@@ -347,10 +361,102 @@ runs observed each action, plus the unobservable actions), the targets
 reached, and the `--group-by` tables. A run whose trace recorded a different
 mapping digest gets a drift note.
 
-The report says what this command checks: `observed-state check and action
-coverage`. It does **not** check refinement. Consecutive observed states are
-not checked against the model's `Next` with stuttering and hidden steps.
-That needs per-action guards on partial observations, and it is future work.
+The report says what this command checks: `observed-state check, transition
+check, and action coverage`, and the `refinement` it amounts to
+([What the transition check proves](#what-the-transition-check-proves)).
+With `--no-transitions` it is the observed-state check alone, as before.
+
+### The transition check
+
+The same TLC run checks that the run's observed steps are steps of the model.
+TLC starts from the first observed state, with every hidden variable at the
+mapping's `hidden` value, and walks the records in order:
+
+- A record with an `action` is a **step**: the model must take that action
+  (any of its parameters: `\E p \in Primaries : HandleRequest(p)`), from the
+  model's own `Next`, to a state that agrees with what the record says. Its
+  `set`, `incr` and `clear` updates say the variable (at that key) now holds
+  the observed value; `add` and `remove` say the set at that key holds, or
+  lacks, the value; a `max` update is a lower bound a step cannot check. The
+  mapping's `step` rule adds what the action `changes` or leaves `unchanged`
+  (a denied vote leaves `lastVote`), and whether the record stands for
+  several steps of its action (`repeats: true`: the register's one
+  `writes.seeded` line is as many `Write` steps as it reports keys). A step
+  whose updates changed nothing
+  observed (a denied vote, a save) still counts: the action must be possible.
+  A step may also take **no model step** when earlier steps already account
+  for it (the stutter rule, as in `[Next]_vars`).
+- Between two records the model may take up to `max_unobserved_steps`
+  (`claims.yaml`, default `1`) steps of the actions the mapping lists as
+  `unobservable`, and no other: the save of `nodes.conf` before the vote it
+  lets leave, a candidate learning an epoch. An action a line would show
+  must be shown by a line.
+- A record without an `action` (a `sample`) is not a step: it **raises** the
+  variables it reports to what it reports (`max`) or sets them (`set`), and
+  the model goes on from there. The run began in a cluster with a history
+  (the epochs its formation bumped), so the first samples calibrate the
+  model's epochs; nodes.conf samples lag the file, so they only raise.
+
+TLC explores every way the model can explain the records (which unobservable
+steps, which parameters) and stops at the first path that explains them all.
+`conform.json` gains, per run:
+
+```json
+"transitions": {"checked": 34, "max_unobserved_steps": 1, "holds": true, "tlc_states": 333}
+```
+
+`checked` counts the records after the first (steps and samples). When no
+path explains every record, `holds` is `false` and `first_violation` gives
+the first record no model step reaches (`index`, the record `to` with its
+event and fields, and the record `from` before it): a `Win` logged before the
+ACKs it needs, a vote ACKed by a candidate after the crash that should have
+lost it. The run then `fail`s, under the same rule as a violated property: an
+approved bundle's run `FAIL`s in a batch, a draft's is reported. The bundle's
+report counts the runs with a violation (`transitions.violated_in`). Without
+TLC, the check is reported as `skipped` (a draft) or is an error (an approved
+bundle, whose claims decide the run).
+
+#### What the transition check proves
+
+A pass is **observed-projection refinement**: for every record the mapping
+applies, the model has a behavior that takes the same actions in the same
+order and agrees, after each, with everything the record says. It is not full
+refinement, and three things stay unchecked:
+
+- **Hidden variables.** They start at the mapping's `hidden` value and the
+  model moves them; the run never confirms them. A hidden variable the model
+  reads in a guard (`bio` in `SaveConfig`) is the model's guess, so a step the
+  model forbids only through hidden state is not caught, and a `hidden` value
+  no initial model state has can make the first steps impossible.
+- **What a record does not say.** A step constrains only the variables its
+  updates touch (and its `step` rule); the model is free elsewhere. A step
+  the model can take with some unlogged side effect is accepted.
+- **The actions no line shows.** Up to `max_unobserved_steps` unobservable
+  actions between two records are free: with the default `1`, a run may hide
+  one unlogged save, learned epoch or client write between any two lines. A
+  bundle whose log needs more raises the knob in `claims.yaml`; each step
+  multiplies the branches TLC explores, so measure (`tlc_states` in the
+  report; the election traces of 35 to 80 observed states take 300 to 7,000
+  TLC states and one to three seconds).
+
+The check is only as sharp as the mapping's observed state. `cluster-election`
+observes most of its model, so a win without a quorum, a vote that leaves
+before its save under `sync`, or an ACK of a vote that a crash lost is a
+violation. `persistence` observes only `crashes` and `slot-migration`
+only `faults`, so their checks say little more than that the faults happened
+when the model allows them. `replication` excludes the check
+(`transitions: {excluded: ...}` in `claims.yaml`): its samples carry
+replication IDs as hex and data sets as digests, which the model's steps
+cannot compute (it numbers IDs from `nextId` and appends writes), and the
+primary a replica follows stays hidden, so no model step relates two sampled
+states; the check needs the model's own encodings and `primaryOf` from the
+samples.
+
+The check also needs the model's `Next` to apply its actions directly, as
+every shipped model does (`\E p \in Primaries : HandleRequest(p) \/ Crash(p)`);
+`conform` splits that text by the mapping into the actions a line shows and the
+unobservable ones, and refuses a `Next` that takes steps through another
+operator.
 
 ### Samples
 
@@ -425,8 +531,8 @@ run an error.
 
 | Conform result | Approved claims | Draft claims |
 | --- | --- | --- |
-| a claimed property violated | the run `FAIL`s | reported only |
-| an error (no mapped evidence, a record it cannot apply, a trace the run recorded that is missing or unreadable, TLC failed or ran past `conform_tlc_timeout_s`, or no TLC for a bundle that needs it) | the run is an `ERROR` | reported only (`skipped` without TLC) |
+| a claimed property violated, or a step the model cannot take (the transition check) | the run `FAIL`s | reported only |
+| an error (no mapped evidence, a record it cannot apply, a trace the run recorded that is missing or unreadable, TLC failed or ran past `conform_tlc_timeout_s`, or no TLC for a bundle that needs it, or for its transition check) | the run is an `ERROR` | reported only (`skipped` without TLC; the transition check alone is reported as not checked) |
 | no `conform.json` (the worker ended before it checked the run) | the run is an `ERROR` | reported only |
 | a violation outside the claim, a pass | reported only | reported only |
 
@@ -441,7 +547,8 @@ than only that the file is missing.
 
 The batch's `summary.json` has a `conformance` entry per bundle, and
 `conformance/<protocol>.json` holds the full report over the runs checked
-(see [the batch folder](cli.md#the-batch-folder)).
+(see [the batch folder](cli.md#the-batch-folder)); the entry lists the runs
+with a step the model cannot take under `transition_violations`.
 
 ## Writing a bundle
 

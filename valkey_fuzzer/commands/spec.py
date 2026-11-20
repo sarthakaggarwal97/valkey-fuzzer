@@ -10,14 +10,15 @@ import argparse
 import json
 import os
 import sys
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, Optional
 
 import yaml
 
 from ..outcomes import EXIT_FAILURE, EXIT_HARNESS_ERROR, EXIT_SUCCESS
 from ..reports import write_document
 from ..spec.bundle import SPEC_PATH_VARIABLE, Bundle, SpecBundleError, load_bundle
-from ..spec.tla import TlaError, TlaTools, read_tlc_output
+from ..spec.tla import TOOLS_HINT, TlaError, TlaTools, read_tlc_output
 from ._common import add_common_options, positive_seconds
 
 # How long one spec command may run SANY and TLC, unless --timeout says otherwise.
@@ -57,6 +58,11 @@ def register(subparsers: Any) -> None:
         "runs", nargs="+", help="Run report folders, report.json files, directories, or trace.jsonl files"
     )
     conform.add_argument("--group-by", default="", help="Comma-separated scenario inputs to tabulate runs by")
+    conform.add_argument(
+        "--no-transitions",
+        action="store_true",
+        help="Check only the properties on each observed state, not that the model's Next relates consecutive ones",
+    )
     conform.set_defaults(handler=conform_command)
 
 
@@ -207,14 +213,16 @@ def translate_command(args: argparse.Namespace) -> int:
 
 
 def conform_command(args: argparse.Namespace) -> int:
-    from ..spec.conform import collect_runs, conform_runs, needs_tlc
+    from ..spec.conform import TRANSITIONS_UNCHECKED, collect_runs, conform_runs, needs_tlc
 
     bundle = load_bundle(args.bundle)
+    transitions = not args.no_transitions and bundle.claims.transitions_excluded is None
     tools = None
-    if needs_tlc(bundle):
-        try:
-            tools = _tools(args)
-        except TlaError as exc:
+    try:
+        tools = _tools(args)
+    except TlaError as exc:
+        # The transition check is reported as not checked without TLC; the properties cannot be.
+        if needs_tlc(bundle):
             print(f"Error: {exc}", file=sys.stderr)
             return EXIT_HARNESS_ERROR
     runs = collect_runs(args.runs)
@@ -222,17 +230,18 @@ def conform_command(args: argparse.Namespace) -> int:
         print("Error: no runs found", file=sys.stderr)
         return EXIT_HARNESS_ERROR
     group_by = [key for key in args.group_by.split(",") if key]
-    report = conform_runs(bundle, runs, tools, group_by=group_by)
+    report = conform_runs(bundle, runs, tools, group_by=group_by, transitions=not args.no_transitions)
     for run in report["runs"]:
-        checks = ", ".join(
+        checks = [
             f"{name} {entry['status']}" + ("" if entry["claimed"] else " (outside the claim)")
             for name, entry in (run.get("properties") or {}).items()
-        )
+        ]
+        checks.append(_transitions_text(run.get("transitions")))
         reached = [name for name, entry in (run.get("targets") or {}).items() if entry["reached"]]
         mismatches = run.get("sample_mismatches") or []
         print(
             f"[{run['status'].upper():<5}] {run.get('scenario_id') or run['source']}: {run['states']} observed states; "
-            + (run.get("error") or checks)
+            + (run.get("error") or ", ".join(item for item in checks if item))
             + (f"; reached {', '.join(reached)}" if reached else "")
             + (f"; {len(mismatches)} sample mismatch(es): {mismatches[0]['var']} ..." if mismatches else "")
         )
@@ -243,7 +252,27 @@ def conform_command(args: argparse.Namespace) -> int:
         print(f"Unobservable: {', '.join(coverage['unobservable'])}")
     for row in report.get("groups", []):
         print("  " + ", ".join(f"{key}={value}" for key, value in row.items()))
-    print(f"\nChecked: {report['checks']}. Refinement {report['refinement']}.")
+    print(f"\nChecked: {report['checks']}. Refinement: {report['refinement']}.")
+    if transitions and tools is None:
+        print(f"Transitions {TRANSITIONS_UNCHECKED}: {TOOLS_HINT}")
     print(f"spec conform {report['status'].upper()}")
     _write(args, report)
     return {"pass": EXIT_SUCCESS, "fail": EXIT_FAILURE}.get(report["status"], EXIT_HARNESS_ERROR)
+
+
+def _transitions_text(entry: Optional[Mapping[str, Any]]) -> str:
+    """One run's transition result for the console."""
+
+    if not entry:
+        return ""
+    if entry.get("holds"):
+        return f"transitions hold ({entry['checked']} checked)"
+    if entry.get("holds") is False:
+        violation = entry["first_violation"]
+        return (
+            f"transition violated at record {violation['index']}: {violation['from']['why']} -> "
+            f"{violation['to']['why']} ({violation['event']}) has no model step"
+        )
+    if entry.get("excluded"):
+        return f"transitions excluded: {entry['excluded']}"
+    return f"transitions {entry.get('skipped', 'not checked')}"

@@ -132,6 +132,8 @@ class ConformancePlugin(BatchPlugin):
                     for prop, item in entry["properties"].items()
                     if item["status"] == "violated" and item["claimed"]
                 )
+                if (entry.get("transitions") or {}).get("holds") is False:
+                    violated.append("transitions")
                 clauses, text = [f"{prop} violated" for prop in violated], f"{', '.join(violated)} violated"
             else:
                 clauses, text = verdict_clauses(entry["error"]), entry["error"]
@@ -196,6 +198,11 @@ class ConformancePlugin(BatchPlugin):
                 ),
                 "errors": [
                     {"run": entry["run"], "error": entry["error"]} for entry in checked if entry["status"] == "error"
+                ],
+                "transition_violations": [
+                    {"run": entry["run"], **entry["transitions"]["first_violation"]}
+                    for entry in checked
+                    if (entry.get("transitions") or {}).get("holds") is False
                 ],
                 "action_coverage": report["action_coverage"]["observed"],
                 "never_observed": report["action_coverage"]["never_observed"],

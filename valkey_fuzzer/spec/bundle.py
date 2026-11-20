@@ -55,6 +55,9 @@ LOGGED_BY = ("any", "server")
 FIELD_TYPES = ("int", "str", "bool", "node", "node_id")
 UPDATE_OPS = ("set", "max", "add", "remove", "clear", "incr")
 CLAIM_STATUSES = ("draft", "approved")
+# claims.yaml ``max_unobserved_steps`` when absent: one model step no line shows may come between two observed
+# states (an unobservable save before the vote it lets leave).
+DEFAULT_MAX_UNOBSERVED_STEPS = 1
 
 
 class SpecBundleError(ValueError):
@@ -149,6 +152,10 @@ class Claims:
     assumptions: tuple[str, ...]
     exclusions: tuple[str, ...]
     bounds: dict[str, str]
+    # How many model steps no line shows conform allows between two observed states (its transition check).
+    max_unobserved_steps: int = DEFAULT_MAX_UNOBSERVED_STEPS
+    # Why the transition check cannot apply to this bundle's mapping (``transitions: {excluded: <why>}``), or None.
+    transitions_excluded: Optional[str] = None
 
 
 def _field(rule: Any) -> ConfigField:
@@ -208,7 +215,12 @@ _CLAIMS = _record(
         "exclusions": _TEXTS,
         "bounds": dict,
     },
-    {"approved_by": str, "targets": _list(_record({"name": str, "meaning": str}))},
+    {
+        "approved_by": str,
+        "targets": _list(_record({"name": str, "meaning": str})),
+        "max_unobserved_steps": int,
+        "transitions": _record({"excluded": str}),
+    },
 )
 _CONFORM_EXCLUDED = _record({"excluded": str})
 
@@ -289,6 +301,14 @@ def parse_claims(document: Mapping[str, Any], model: tla.ModelSymbols) -> Claims
     bounds = document["bounds"]
     if not set(bounds) <= constants:
         raise SpecBundleError(f"{where}.bounds must map model constants to the values the safe configs use")
+    unobserved = document.get("max_unobserved_steps")
+    if unobserved is None:
+        unobserved = DEFAULT_MAX_UNOBSERVED_STEPS
+    elif unobserved < 0:
+        raise SpecBundleError(f"{where}.max_unobserved_steps must be a count of model steps, 0 or more")
+    transitions = document.get("transitions") or {}
+    if "excluded" in transitions and not transitions["excluded"].strip():
+        raise SpecBundleError(f"{where}.transitions.excluded must say why the transition check does not apply")
     return Claims(
         protocol=document["protocol"],
         summary=document["summary"],
@@ -300,6 +320,8 @@ def parse_claims(document: Mapping[str, Any], model: tla.ModelSymbols) -> Claims
         assumptions=_texts(document["assumptions"], f"{where}.assumptions"),
         exclusions=_texts(document["exclusions"], f"{where}.exclusions"),
         bounds={key: tla_text(value) for key, value in bounds.items()},
+        max_unobserved_steps=unobserved,
+        transitions_excluded=transitions.get("excluded"),
     )
 
 
@@ -509,7 +531,7 @@ _EVIDENCE = _record(
         "log": str,
         "where": dict,
         "action": str,
-        "step": _record({}, {"changes": str, "unchanged": str, "process": _TEXTS}),
+        "step": _record({}, {"changes": str, "unchanged": str, "process": _TEXTS, "repeats": bool}),
         "updates": _list(dict),
         "component": str,
         "after": _record({"evidence": str, "match": _named(str)}, {"take": _TEXTS}),
