@@ -14,8 +14,8 @@ from ..outcomes import EXIT_HARNESS_ERROR, EXIT_INTERRUPTED, exit_code, print_ou
 from ..plan import ExecutionPlan
 from ..reports import write_document
 from ..service import PreparedRun, RunService
+from ..spec.conform import CONFORM_TIMEOUT_OPTION
 from . import hooks
-from .conform_plugin import CONFORM_TIMEOUT_OPTION
 from .results import ERROR_FILE, read_json
 from .spec import PORT_BLOCK, BatchError
 

@@ -15,6 +15,7 @@ import yaml
 
 from ..outcomes import EXIT_FAILURE, EXIT_HARNESS_ERROR, EXIT_SUCCESS
 from ..reports import write_document
+from ..service import CONFORM_TLC_TIMEOUT_S
 from ..spec.bundle import SPEC_PATH_VARIABLE, Bundle, SpecBundleError, load_bundle
 from ..spec.check import check_bundle, run_control
 from ..spec.conform import TRANSITIONS_UNCHECKED, collect_runs, conform_runs, needs_tlc
@@ -24,9 +25,6 @@ from ._common import add_common_options, positive_count, positive_seconds
 
 # How long one spec command may run SANY and TLC, unless --timeout says otherwise.
 DEFAULT_TIMEOUT_S = 3600.0
-# How long each TLC run of translate's model search may take, unless --tlc-timeout says otherwise: the limit a
-# batch's conform step gives TLC (conform_tlc_timeout_s).
-DEFAULT_TLC_TIMEOUT_S = 300.0
 # How many scenarios one model search writes at most, unless --max-scenarios says otherwise.
 DEFAULT_MAX_SCENARIOS = 50
 
@@ -83,10 +81,10 @@ def register(subparsers: Any) -> None:
     translate.add_argument(
         "--tlc-timeout",
         type=positive_seconds,
-        default=DEFAULT_TLC_TIMEOUT_S,
+        default=CONFORM_TLC_TIMEOUT_S,
         metavar="SECONDS",
         help="How long each TLC run of --reach or --mutate may take; one that runs out is recorded and the search "
-        f"goes on (default {DEFAULT_TLC_TIMEOUT_S:g}, as a batch's conform_tlc_timeout_s)",
+        f"goes on (default {CONFORM_TLC_TIMEOUT_S:g}, as a batch's conform_tlc_timeout_s)",
     )
     translate.add_argument(
         "--max-scenarios",
@@ -334,8 +332,9 @@ def _search(args: argparse.Namespace, bundle: Bundle, compile_scenario: Any) -> 
         return EXIT_HARNESS_ERROR
     os.makedirs(args.out, exist_ok=True)
     for translation in report["translations"]:
-        print(f"\n{translation['counterexample']['name']}: found by {_found_by(translation['source'])}")
-        _write_translation(args.out, bundle, translation, _found_by(translation["source"]))
+        found_by = _found_by(translation["source"])
+        print(f"\n{translation['counterexample']['name']}: found by {found_by}")
+        _write_translation(args.out, bundle, translation, found_by)
     entries = [
         (f"{target} in {config}", entry)
         for target, per_config in report["targets"].items()

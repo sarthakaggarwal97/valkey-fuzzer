@@ -327,14 +327,13 @@ def _scenario_id(protocol: str, name: str, index: int) -> str:
 def reach_files(bundle: Bundle, config: str, target: str) -> dict[str, str]:
     """The files of a TLC run that finds a path of the safe config ``config`` to ``target``.
 
-    The module extends the model with ``Not<target> == ~<target>``, which the
-    config checks along with its own invariants (a safe config's never fire),
-    so the counterexample TLC reports is a shortest path to the target.
+    The module extends the model with ``Not<target> == ~<target>`` (a name
+    :func:`search_model` checks the model leaves free), which the config
+    checks along with its own invariants (a safe config's never fire), so
+    the counterexample TLC reports is a shortest path to the target.
     """
 
     invariant = f"Not{target}"
-    if invariant in symbols(bundle.model_text).definitions:
-        raise TranslateError(f"{MODEL_FILE} defines {invariant}, the name the search needs for ~{target}")
     return {
         MODEL_FILE: bundle.model_text,
         REACH_MODULE: f"---- MODULE reach ----\nEXTENDS model\n{invariant} == ~{target}\n====\n",
@@ -536,7 +535,10 @@ def search_model(
         "targets": {},
         "mutations": {},
     }
+    definitions = symbols(bundle.model_text).definitions if reach else frozenset()
     for target in reach:
+        if f"Not{target}" in definitions:
+            raise TranslateError(f"{MODEL_FILE} defines Not{target}, the name the search needs for ~{target}")
         report["targets"][target] = per_config = {}
         for config in bundle.safe_configs:
             files = reach_files(bundle, config, target)
@@ -563,16 +565,17 @@ def search_model(
                     status="reached",
                 )
     if mutate:
+        # Each safe config's constants (normalized: TRUE and FALSE stay as they are), parsed once for the flips
+        # and for telling a mutant that is another safe config.
         safe = {name: _constants(bundle.files[name]) for name in bundle.safe_configs}
         for config in bundle.safe_configs:
-            constants = parse_config(bundle.files[config]).constants
             entries: dict[str, Any] = {}
             report["mutations"][config] = entries
-            _mutate(search, config, safe, mutations(constants), entries)
+            _mutate(search, config, safe, mutations(safe[config]), entries)
             # Pairs when the single flips were cheap: every run finished, and together they fit one run's budget.
             seconds = sum(entry.get("seconds", 0.0) for entry in entries.values())
             cheap = all(entry["status"] != "timed_out" for entry in entries.values()) and seconds <= tlc_timeout_s
-            pairs = mutations(constants, pairs=True)
+            pairs = mutations(safe[config], pairs=True)
             if cheap:
                 _mutate(search, config, safe, pairs, entries)
             else:

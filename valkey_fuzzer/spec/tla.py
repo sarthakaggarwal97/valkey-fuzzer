@@ -7,6 +7,7 @@ plain Python: integers, booleans, strings (:class:`str`), model values
 (:class:`TlaFunction`). :func:`render` writes the same values back as TLA+.
 """
 
+import functools
 import hashlib
 import json
 import os
@@ -415,8 +416,10 @@ class TlaTools:
     starts after it. Without a deadline a run takes as long as it needs.
 
     :meth:`probed` fills ``tlc_version`` and ``json_trace`` (whether TLC
-    takes ``-dumpTrace json``) from ``tlc2.TLC -h``, and ``warnings`` when
-    the jar is no release the bridge knows; :meth:`locate` does so.
+    takes ``-dumpTrace json``) from ``tlc2.TLC -h``, ``digest`` with the
+    jar's SHA-256, and ``warnings`` when the jar is no release the bridge
+    knows; :meth:`locate` does so. The probe (a JVM start and a hash of
+    the jar) runs once per jar in a process (:func:`_probe`).
     """
 
     jar: str
@@ -426,6 +429,7 @@ class TlaTools:
     deadline: Optional[float] = None
     tlc_version: Optional[str] = None
     json_trace: bool = False
+    digest: Optional[str] = None
     warnings: tuple[str, ...] = ()
 
     @classmethod
@@ -450,25 +454,21 @@ class TlaTools:
         return replace(self, timeout_s=seconds, deadline=time.monotonic() + seconds)
 
     def probed(self, *, strict: bool = False) -> "TlaTools":
-        """These tools with TLC's version and whether it dumps JSON traces, read from ``tlc2.TLC -h``.
+        """These tools with TLC's version, whether it dumps JSON traces, and the jar's SHA-256, read from
+        ``tlc2.TLC -h`` and the jar (:func:`_probe`, once per jar).
 
         A jar that does not run TLC, or runs one older than :data:`MIN_TLC_VERSION`, is a :class:`TlaError`; so is
         a jar that is no release in :data:`TLA_TOOLS_RELEASES` with ``strict``, and a warning without.
         """
 
-        run = _run(replace(self, deadline=time.monotonic() + 120), ["tlc2.TLC", "-h"], {})
-        match = re.search(r"\bVersion (\d+(?:\.\d+)+)", run.output)
-        if match is None:
-            last = (run.tail(1) or ["no output"])[0]
-            raise TlaError(f"{self.jar} does not run TLC (tlc2.TLC -h printed no version: {last}); {TOOLS_HINT}")
-        version = match.group(1)
+        stat = os.stat(self.jar)
+        version, json_trace, digest = _probe(self.java, self.jar, stat.st_mtime_ns, stat.st_size)
         if version_key(version) < version_key(MIN_TLC_VERSION):
             raise TlaError(
                 f"TLC {version} in {self.jar} is older than {MIN_TLC_VERSION}, the oldest the spec bridge runs; "
                 f"{TOOLS_HINT}"
             )
         warnings: tuple[str, ...] = ()
-        digest = self.sha256()
         if digest not in TLA_TOOLS_RELEASES:
             known = ", ".join(sorted(set(TLA_TOOLS_RELEASES.values())))
             message = (
@@ -478,9 +478,13 @@ class TlaTools:
             if strict:
                 raise TlaError(f"{message} (--strict)")
             warnings = (message,)
-        return replace(self, tlc_version=version, json_trace="-dumpTrace" in run.output, warnings=warnings)
+        return replace(self, tlc_version=version, json_trace=json_trace, digest=digest, warnings=warnings)
 
     def sha256(self) -> str:
+        """The jar's SHA-256: ``digest`` once :meth:`probed`, else hashed now."""
+
+        if self.digest is not None:
+            return self.digest
         with open(self.jar, "rb") as handle:
             return hashlib.sha256(handle.read()).hexdigest()
 
@@ -496,6 +500,24 @@ class TlaTools:
             "tlc_version": self.tlc_version,
             "json_trace": self.json_trace,
         }
+
+
+@functools.lru_cache(maxsize=16)
+def _probe(java: str, jar: str, mtime_ns: int, size: int) -> tuple[str, bool, str]:
+    """TLC's version and whether it takes ``-dumpTrace``, from ``java -cp jar tlc2.TLC -h``, and the jar's SHA-256.
+
+    Cached on the jar's path, modification time and size (as ``provenance._package_material`` is on its files'):
+    the answer depends on the jar alone, and the probe is a JVM start. A jar that does not run TLC raises
+    :class:`TlaError`, so a failure is never cached.
+    """
+
+    tools = TlaTools(jar=jar, java=java, deadline=time.monotonic() + 120)
+    run = _run(tools, ["tlc2.TLC", "-h"], {})
+    match = re.search(r"\bVersion (\d+(?:\.\d+)+)", run.output)
+    if match is None:
+        last = (run.tail(1) or ["no output"])[0]
+        raise TlaError(f"{jar} does not run TLC (tlc2.TLC -h printed no version: {last}); {TOOLS_HINT}")
+    return match.group(1), "-dumpTrace" in run.output, tools.sha256()
 
 
 @dataclass
