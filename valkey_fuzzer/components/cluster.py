@@ -27,12 +27,13 @@ def _epoch(node: Mapping[str, Any]) -> Optional[int]:
         return None
 
 
-def cluster_view(client: Any) -> dict[str, Any]:
-    """One node's view: its own epochs and role plus every primary it knows (slots as ranges), and under
-    ``nodes`` its CLUSTER NODES as parsed, for :func:`~valkey_fuzzer.deployment.local.cluster_nodes.split_slots`."""
+def parse_cluster_view(info_reply: Any, nodes_reply: Any) -> dict[str, Any]:
+    """One node's view from its CLUSTER INFO and CLUSTER NODES replies: its own epochs and role plus every
+    primary it knows (slots as ranges), and under ``nodes`` its CLUSTER NODES as parsed, for
+    :func:`~valkey_fuzzer.deployment.local.cluster_nodes.split_slots`."""
 
-    info = parse_cluster_info(client.execute_command("CLUSTER", "INFO"))
-    nodes = parse_cluster_nodes(client.execute_command("CLUSTER", "NODES"))
+    info = parse_cluster_info(info_reply)
+    nodes = parse_cluster_nodes(nodes_reply)
     myself = next((node for node in nodes if node["is_myself"]), None)
     if myself is None:
         raise RuntimeError("CLUSTER NODES has no myself entry")
@@ -56,6 +57,12 @@ def cluster_view(client: Any) -> dict[str, Any]:
         ],
         "nodes": nodes,
     }
+
+
+def cluster_view(client: Any) -> dict[str, Any]:
+    """:func:`parse_cluster_view` of what ``client`` answers now, in two round trips."""
+
+    return parse_cluster_view(client.execute_command("CLUSTER", "INFO"), client.execute_command("CLUSTER", "NODES"))
 
 
 def read_view(handle: Any, instance_id: str, timeout: float = 2.0) -> Optional[dict[str, Any]]:

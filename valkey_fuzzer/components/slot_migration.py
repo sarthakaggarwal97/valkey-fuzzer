@@ -13,12 +13,12 @@ migrations in waves with faults on them; it shares this module's endpoint
 resolution and job reading.
 """
 
-import time
 from collections.abc import Mapping, Sequence
 from typing import Any, Optional
 
 from valkey.cluster import key_slot
 
+from valkey_fuzzer.clock import now
 from valkey_fuzzer.declarations import Declarations
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
@@ -163,7 +163,7 @@ class MigrateSlotsAction:
             # Nothing can be migrated: the run never reached what it tests.
             return make_result(spec, ComponentStatus.ERROR, str(exc))
         key, slot, source, target = record["key"], record["slot"], record["source"], record["target"]
-        record["started_at"] = time.time()
+        record["started_at"] = now()
         command = ["CLUSTER", "MIGRATESLOTS", "SLOTSRANGE", slot, slot, "NODE", record["target_node_id"]]
         reply = send_to(handle, source, command, timeout_s=config["timeout_s"], context=context)
         record["reply"] = reply
@@ -190,7 +190,7 @@ class MigrateSlotsAction:
         done, last = poll_until(
             ended, timeout_s=config["timeout_s"], interval_s=config["poll_interval_s"], context=context
         )
-        record["ended_at"] = time.time()
+        record["ended_at"] = now()
         record["job"] = last if isinstance(last, dict) else None
         record["state"] = str(last.get("state", "")).lower() if isinstance(last, dict) else None
         record["message"] = str(last.get("message") or "") if isinstance(last, dict) else None

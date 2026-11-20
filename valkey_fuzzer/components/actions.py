@@ -185,8 +185,9 @@ class _SaveTarget:
         self.instance_id = instance_id
         self.client = handle.new_client(instance_id, timeout=5.0)
         try:
-            directory = self.client.config_get("dir").get("dir") or handle.data_dir(instance_id)
-            dbfilename = self.client.config_get("dbfilename").get("dbfilename") or "dump.rdb"
+            configs = self.client.config_get("dir", "dbfilename")
+            directory = configs.get("dir") or handle.data_dir(instance_id)
+            dbfilename = configs.get("dbfilename") or "dump.rdb"
             self.rdb_path = os.path.join(directory, dbfilename)
             self.read_before()
             # A primary's snapshot holds every write acknowledged before
