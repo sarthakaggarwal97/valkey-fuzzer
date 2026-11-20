@@ -232,13 +232,21 @@ class SearchClient:
         }
         self.indexed = indexed
         self.searches = 0
+        # Round trips of the hashes' read: one SCAN page, one per HGETALL, one per pipeline executed.
+        self.round_trips = 0
 
     def scan_iter(self, match=None, count=1000):
         prefix = match.rstrip(b"*")
+        self.round_trips += 1
         return iter(sorted(key for key in self.hashes if key.startswith(prefix)))
 
     def hgetall(self, key):
+        self.round_trips += 1
         return self.hashes.get(key, {})
+
+    def pipeline(self, transaction=True):
+        assert transaction is False, "the hashes' reads need no MULTI/EXEC"
+        return _Pipeline(self)
 
     def execute_command(self, *args):
         assert args[0] == "FT.SEARCH" and args[2:3] != ("",)
@@ -260,6 +268,26 @@ class SearchClient:
 
     def __exit__(self, *exc_info):
         pass
+
+
+class _Pipeline:
+    """Queues the client's HGETALLs and answers them all on ``execute``: one round trip."""
+
+    def __init__(self, client):
+        self.client, self.queued = client, []
+
+    def hgetall(self, key):
+        self.queued.append(key)
+
+    def execute(self):
+        self.client.round_trips += 1
+        return [self.client.hashes.get(key, {}) for key in self.queued]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.queued = []
 
 
 def _parse(text):
@@ -307,6 +335,18 @@ def test_every_instance_whose_index_answers_from_its_own_hashes_passes(monkeypat
 
     assert result.status == ComponentStatus.PASS, result.summary
     assert result.evidence[0].value["queries"] == 40
+
+
+def test_the_hashes_are_read_with_one_hgetall_pipeline_per_scan_batch_not_one_round_trip_per_hash():
+    client = SearchClient({f"d:{i}": {"tag": f"t{i % 4}", "n": str(i)} for i in range(2500)})
+    handle = FakeHandle()
+    handle.clients = {"valkey-0": client}
+
+    hashes = SearchResultsOracle._hashes(handle, "valkey-0", "d:")
+
+    assert hashes == client.hashes_by_name()
+    # One SCAN page, then one pipeline per batch of up to 1000 keys.
+    assert client.round_trips == 1 + 3
 
 
 def test_a_replica_whose_index_holds_a_tag_its_hash_no_longer_has_fails(monkeypatch):

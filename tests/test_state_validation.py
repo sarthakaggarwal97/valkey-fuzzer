@@ -927,6 +927,15 @@ def test_failovers_and_validations_end_their_waits_at_the_run_deadline_or_a_canc
     assert clock.elapsed < 2.0
 
 
+def test_a_settled_failover_is_seen_within_a_tenth_of_a_second(monkeypatch):
+    # The failover's completed_at ends the window in which the ledger excuses lost acknowledged writes, so every
+    # tenth of a second the settle poll waits is a tenth of a second more of excused loss.
+    clock = VirtualClock().install(monkeypatch, failover, deadlines)
+    with patch(f"{LOCAL}failover._shard_settled", side_effect=[False, False, False, False, True]):
+        assert wait_until_settled(Mock(instances=[]), 30.0, shard_id=0, old_primary="p") is True
+    assert clock.elapsed == pytest.approx(0.4)
+
+
 def test_a_failover_that_cannot_be_observed_raises_instead_of_reporting_that_valkey_did_not_fail_over(monkeypatch):
     VirtualClock().install(monkeypatch, failover, deadlines)
     primary, replica = node_row("p", 7000), node_row("r", 7001, "replica", primary_id="p")

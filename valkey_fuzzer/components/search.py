@@ -17,6 +17,7 @@ import math
 import random
 import struct
 from collections.abc import Sequence
+from itertools import islice
 from typing import Any, Optional
 
 import valkey
@@ -529,10 +530,15 @@ class SearchResultsOracle:
     def _hashes(handle: Any, instance_id: str, prefix: str) -> dict[str, dict[bytes, bytes]]:
         with handle.new_client(instance_id, timeout=10.0, decode_responses=False) as client:
             hashes = {}
-            for key in client.scan_iter(match=prefix.encode() + b"*", count=1000):
-                fields = client.hgetall(key)
-                if fields:
-                    hashes[key.decode("utf-8", "replace")] = fields
+            keys = client.scan_iter(match=prefix.encode() + b"*", count=1000)
+            # One HGETALL pipeline per batch of up to 1000 keys, not one round trip per hash.
+            while batch := list(islice(keys, 1000)):
+                with client.pipeline(transaction=False) as pipe:
+                    for key in batch:
+                        pipe.hgetall(key)
+                    for key, fields in zip(batch, pipe.execute()):
+                        if fields:
+                            hashes[key.decode("utf-8", "replace")] = fields
             return hashes
 
     @staticmethod
