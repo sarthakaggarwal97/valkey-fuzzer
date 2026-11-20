@@ -295,7 +295,7 @@ class DeploymentStateCheck:
                 "shard": row.shard_id,
                 "primary": by_node_id.get(row.primary_id, row.primary_id) if row.primary_id else None,
                 "status": "failed" if row.failed else "connected",
-                **({"slots": len(row.slots)} if row.slots is not None else {}),
+                **({"slots": row.slot_count} if row.slots is not None else {}),
             }
             for row in rows
         ]

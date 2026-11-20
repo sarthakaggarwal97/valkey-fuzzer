@@ -14,7 +14,7 @@ import valkey
 
 from ....deadlines import pause
 from ....protocols import RunContext
-from ..cluster_nodes import parse_cluster_nodes, parse_slot_tokens
+from ..cluster_nodes import merge_slot_ranges, parse_cluster_nodes, parse_slot_ranges
 from ..models import DeploymentMode, InstanceInfo, LocalDeploymentError
 from ..queries import Replication, query_cluster_info, query_replication, response_text, valkey_client
 from ..topology import DeploymentConnection, TopologyNode
@@ -57,20 +57,19 @@ class Snapshot:
         addresses = (row.address for row in self.live_rows)
         return {address: self.cluster_nodes[address] for address in addresses if address in self.cluster_nodes}
 
-    def slot_claims(self) -> dict[int, set[str]]:
-        """Every slot some live node's view assigns, and the primaries the views give it.
+    def slot_claims(self) -> dict[str, list[tuple[int, int]]]:
+        """Each primary the live nodes' views name, and the slot ranges the views give it (merged).
 
         Views can disagree for a gossip round: one that has not yet heard of a
-        failover still gives the slot to the old, failed primary. That is no
+        failover still gives the slots to the old, failed primary. That is no
         split brain (see :func:`~..cluster_nodes.split_slots`).
         """
-        claims: dict[int, set[str]] = {}
+        claims: dict[str, list[tuple[int, int]]] = {}
         for view in self.views().values():
             for node in view:
                 if node["is_primary"]:
-                    for slot in parse_slot_tokens(node["slots"]):
-                        claims.setdefault(slot, set()).add(node["node_id"])
-        return claims
+                    claims.setdefault(node["node_id"], []).extend(parse_slot_ranges(node["slots"]))
+        return {node_id: merge_slot_ranges(ranges) for node_id, ranges in claims.items()}
 
     def primary_of(self, replica: TopologyNode) -> Optional[str]:
         """The node ID of the primary a replica follows in its own view (its ``myself`` row)."""

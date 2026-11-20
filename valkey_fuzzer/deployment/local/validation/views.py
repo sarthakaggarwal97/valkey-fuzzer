@@ -6,7 +6,7 @@ from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from typing import Optional
 
-from ..cluster_nodes import group_slots_into_ranges, parse_slot_tokens, split_slots
+from ..cluster_nodes import format_slot_ranges, parse_slot_ranges, split_slots
 from ..topology import TopologyNode
 from .config import ViewConsistencyValidationConfig
 from .results import RoleMismatch, RoleValidation, ViewConsistencyValidation, ViewDiscrepancy
@@ -165,7 +165,7 @@ def _view(parsed_nodes: list[dict]) -> dict[str, dict]:
             "primary_id": node.get("primary_id"),
             # A replica reports its primary's epoch; only a primary's is its own.
             "config_epoch": node["config_epoch"] if node["is_primary"] else None,
-            "slots": parse_slot_tokens(node["slots"]) if node["is_primary"] else [],
+            "slots": parse_slot_ranges(node["slots"]) if node["is_primary"] else [],
         }
     return view
 
@@ -273,7 +273,7 @@ def _compare_views(node_views: dict[str, dict[str, dict]]) -> list[ViewDiscrepan
             ):
                 expected, actual = reference[node_id].get(field), view[node_id].get(field)
                 if expected != actual:
-                    shown = group_slots_into_ranges if field == "slots" else str
+                    shown = format_slot_ranges if field == "slots" else str
                     discrepancies.append(ViewDiscrepancy(kind, node_address, node_id, shown(expected), shown(actual)))
     return discrepancies
 

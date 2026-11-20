@@ -90,7 +90,7 @@ def _validate_once(config, connection, instances=(), stopped=()):
 
 
 def _row(port, slots=1, status="connected"):
-    return node_row(f"p{port}", port, shard_id=port, status=status, slots=tuple(range(slots)))
+    return node_row(f"p{port}", port, shard_id=port, status=status, slots=((0, slots - 1),) if slots else ())
 
 
 _OK, _FAIL = "cluster_state:ok\r\n", "cluster_state:fail\r\n"
@@ -351,6 +351,76 @@ def test_the_exported_split_slots_finds_both_kinds_of_split_and_ignores_a_failed
     assert split_slots({"valkey-0": suspected}) == {5: {"a", "c"}}, "a suspected primary still serves"
 
 
+def test_a_split_slot_range_and_a_migrating_slot_marker_are_judged_as_ranges():
+    # Slot 5461 moved from a to b, splitting a's range around it. While it was in flight a's own line carried the
+    # migrating marker and b's the importing one: a marker is no slot its node owns, and no two views disagree.
+    def view(me):
+        flag = {node: "myself," if node == me else "" for node in "ab"}
+        return (
+            f"a 127.0.0.1:7000@17000 {flag['a']}master - 0 0 1 connected 0-5460 5462-10922"
+            f"{' [5461->-b]' if me == 'a' else ''}\n"
+            f"b 127.0.0.1:7001@17001 {flag['b']}master - 0 0 2 connected 5461 10923-16383"
+            f"{' [5461-<-a]' if me == 'b' else ''}"
+        )
+
+    views = {7000: view("a"), 7001: view("b")}
+    planned = [
+        instance("valkey-0", "primary", 7000, slot_start=0, slot_end=8191),
+        instance("valkey-1", "primary", 7001, shard_id=1, slot_start=8192, slot_end=16383),
+    ]
+    with patch(f"{LOCAL}topology.query_cluster_nodes", return_value=parse_cluster_nodes(views[7000])):
+        a, b = DeploymentConnection(planned, "split").get_current_nodes()
+    assert (a.slots, a.slot_count, a.owns(5461), a.owns(5462)) == (((0, 5460), (5462, 10922)), 10922, False, True)
+    assert (b.slots, b.slot_count) == (((5461, 5461), (10923, 16383)), 5462)
+    # Most of a's slots lie in planned shard 0's range, most of b's in shard 1's.
+    assert (a.shard_id, b.shard_id) == (0, 1)
+
+    snapshot = snapshot_of(a, b, cluster_nodes=views)
+    coverage = check_slot_coverage(snapshot, SlotCoverageValidationConfig())
+    assert (coverage.success, coverage.total_slots_assigned, coverage.unassigned_slots) == (True, 16384, [])
+    assert coverage.conflicting_slots == []
+    assert coverage.slot_distribution == {"a": [*range(5461), *range(5462, 10923)], "b": [5461, *range(10923, 16384)]}
+    agreement = check_views(snapshot, ViewConsistencyValidationConfig())
+    assert (agreement.success, agreement.split_brain_detected, agreement.view_discrepancies) == (True, False, [])
+
+    # A view that still gives a the whole range disagrees on a's slots, shown as ranges; b's 5461 is then split.
+    views[7001] = views[7001].replace("0-5460 5462-10922", "0-10922")
+    snapshot = snapshot_of(a, b, cluster_nodes=views)
+    disagreement = check_views(snapshot, ViewConsistencyValidationConfig())
+    [discrepancy] = disagreement.view_discrepancies
+    assert (discrepancy.discrepancy_type, discrepancy.subject_node, discrepancy.node_reporting) == (
+        "slots",
+        "a",
+        "127.0.0.1:7001",
+    )
+    assert (discrepancy.expected_value, discrepancy.actual_value) == ("0-5460, 5462-10922", "0-10922")
+    assert disagreement.split_brain_detected is True
+    coverage = check_slot_coverage(snapshot, SlotCoverageValidationConfig())
+    assert [(conflict.slot, conflict.conflicting_nodes) for conflict in coverage.conflicting_slots] == [
+        (5461, ["a", "b"])
+    ]
+    assert coverage.slot_distribution["b"] == [*range(10923, 16384)]
+    assert coverage.error_message == "1 slots are served by two primaries at once"
+
+
+def test_the_test_keys_are_read_back_in_one_pipeline_through_the_cluster_client():
+    # 100 keys, one pipeline (ValkeyCluster routes each key to its primary), not one GET round trip each.
+    slots = tuple((key_slot(key.encode()),) * 2 for key in sorted(_KEYS))
+    snapshot = snapshot_of(node_row("p", 7000, slots=slots), node_row("r", 7001, "replica", primary_id="p"))
+    cluster_client = fake_client(read=_KEYS.get)
+    replica = fake_client(read=_KEYS.get)
+    with (
+        patch("valkey.ValkeyCluster", return_value=cluster_client),
+        patch(f"{LOCAL}validation.data.valkey_client", return_value=client_context(replica)),
+    ):
+        result = check_data(snapshot, _KEYS, DataConsistencyValidationConfig())
+
+    assert (result.success, result.test_keys_checked) == (True, 100)
+    assert cluster_client.pipeline.return_value.execute.call_count == 1
+    assert cluster_client.get.call_count == 0
+    assert cluster_client.pipeline.return_value.get.call_count == 100
+
+
 @pytest.mark.parametrize(
     ("master_port", "status", "primary", "offset", "message"),
     [
@@ -555,7 +625,7 @@ def _cross_replica(mode, connect, slots=None, connection=None):
     found, unreachable = [], []
     if connection is None:
         slots = [key_slot(key.encode()) for key in _KEYS] if slots is None else slots
-        primary = node_row("p", 7000, slots=tuple(slots))
+        primary = node_row("p", 7000, slots=tuple((slot, slot) for slot in slots))
         snapshot = snapshot_of(primary, node_row("r", 7001, "replica", primary_id="p"), mode=mode)
     else:
         snapshot = Snapshot(mode, connection.instances, connection.get_current_nodes(include_failed=True))
@@ -594,8 +664,8 @@ def test_a_migrated_and_promoted_replica_is_checked_against_its_live_shard(broke
 def test_cluster_test_keys_cover_every_primary_and_each_replica_needs_one():
     slot_map = {key_slot(b"fuzzer:test:0"): "127.0.0.1:7000", key_slot(b"fuzzer:test:1"): "127.0.0.1:7002"}
     primaries = deployment_view(
-        node_row("p0", 7000, slots=(key_slot(b"fuzzer:test:0"),)),
-        node_row("p1", 7002, shard_id=1, slots=(key_slot(b"fuzzer:test:1"),)),
+        node_row("p0", 7000, slots=((key_slot(b"fuzzer:test:0"),) * 2,)),
+        node_row("p1", 7002, shard_id=1, slots=((key_slot(b"fuzzer:test:1"),) * 2,)),
     )
     # Too few keys for the primaries, or a write that fails, leaves the seeding incomplete.
     acks = Mock(**{"set.side_effect": [True, True, True, RuntimeError("SET failed")]})
@@ -1093,7 +1163,10 @@ class FakeDeployment:
             if not self.cluster_client:
                 raise ConnectionError("no cluster client")
             primary_of = lambda key: self.primary[self.shard_of(key)]  # noqa: E731
-            return Mock(set=self.set, get=lambda key: self.get(primary_of(key), key))
+            # Its pipeline routes each key to its primary, as ValkeyCluster's does.
+            client = fake_client(read=lambda key: self.get(primary_of(key), key))
+            client.set = self.set
+            return client
 
         stack = ExitStack()
         stack.enter_context(
@@ -1194,19 +1267,22 @@ def test_every_check_runs_against_the_deployment_and_names_what_broke(tmp_path, 
 
 
 @pytest.mark.parametrize(
-    ("unread", "lost", "success", "inconclusive"), [(0, 0, True, False), (1, 0, False, True), (1, 1, False, False)]
+    ("unread", "lost", "success", "inconclusive"),
+    [(0, 0, True, False), (1, 0, False, True), (1, 1, False, False), (100, 0, False, True)],
 )
 def test_a_key_that_could_not_be_read_was_not_checked(unread, lost, success, inconclusive):
     keys = sorted(_KEYS)
 
-    def get(key):
-        if key in keys[:unread]:
+    def get(key):  # a key's error comes back in its place in the pipeline's reply; a lost connection fails it whole
+        if unread == len(keys):
             raise ConnectionError("reset")
+        if key in keys[:unread]:
+            return ConnectionError("reset")
         return None if key in keys[unread : unread + lost] else _KEYS[key]
 
     snapshot = snapshot_of(node_row("p", 7000), mode=DeploymentMode.STANDALONE)
     config = DataConsistencyValidationConfig()
-    with patch(f"{LOCAL}validation.data.valkey_client", return_value=client_context(Mock(get=get))):
+    with patch(f"{LOCAL}validation.data.valkey_client", return_value=client_context(fake_client(read=get))):
         result = check_data(snapshot, _KEYS, config)
 
     # One unread key in a hundred is not a pass; a key seen missing is data loss whatever else could not be read.

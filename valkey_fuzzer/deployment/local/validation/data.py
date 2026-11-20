@@ -27,7 +27,13 @@ def _find_primary(live_instances: list[TopologyNode]) -> Optional[TopologyNode]:
 
 def _slot_owners(rows: list[TopologyNode]) -> dict[int, str]:
     """Each assigned slot's primary, by address, from the topology's parsed CLUSTER NODES."""
-    return {slot: row.address for row in rows if row.role == "primary" for slot in row.slots or ()}
+    return {
+        slot: row.address
+        for row in rows
+        if row.role == "primary"
+        for start, end in row.slots or ()
+        for slot in range(start, end + 1)
+    }
 
 
 def _cluster_test_keys(
@@ -161,29 +167,35 @@ def _await_replicas(
 
 def _check_test_keys(
     test_keys: Mapping[str, str],
-    read: Callable[[str], tuple[Optional[str], str]],
+    client,
+    source: Callable[[str], str],
     missing_keys: list[str],
     inconsistent_keys: list[DataInconsistency],
     unreachable_keys: list[str],
 ) -> None:
-    """Read back every test key; ``read(key)`` returns its value and where the value was read."""
-    for key, expected_value in test_keys.items():
-        try:
-            actual_value, source = read(key)
-        except Exception as e:
-            logger.warning("Error validating key %s: %s", key, e)
+    """Read back every test key over one pipeline of ``client`` (a cluster client's pipeline routes each key by its
+    slot); ``source(key)`` names where its value was read."""
+    keys = list(test_keys)
+    try:
+        values = _read_keys(client, keys)
+    except Exception as e:
+        values = [e] * len(keys)
+    for key, actual_value in zip(keys, values):
+        expected_value = test_keys[key]
+        if isinstance(actual_value, Exception):
+            logger.warning("Error validating key %s: %s", key, actual_value)
             unreachable_keys.append(key)
             continue
         if actual_value is None:
             missing_keys.append(key)
-            logger.warning("Test key %s is missing from %s", key, source)
+            logger.warning("Test key %s is missing from %s", key, source(key))
         elif actual_value != expected_value:
             inconsistent_keys.append(
                 DataInconsistency(
                     key=key,
                     inconsistency_type="value_mismatch",
                     expected_value=expected_value,
-                    actual_values={source: actual_value},
+                    actual_values={source(key): actual_value},
                 )
             )
             logger.warning(
@@ -230,7 +242,8 @@ def check_data(
             try:
                 _check_test_keys(
                     test_keys,
-                    lambda key: (cluster_client.get(key), f"slot_{key_slot(key.encode())}"),
+                    cluster_client,
+                    lambda key: f"slot_{key_slot(key.encode())}",
                     missing_keys,
                     inconsistent_keys,
                     unreachable_keys,
@@ -254,7 +267,8 @@ def check_data(
             with valkey_client(primary.host, primary.port, config.timeout) as direct_client:
                 _check_test_keys(
                     test_keys,
-                    lambda key: (direct_client.get(key), primary_address),
+                    direct_client,
+                    lambda key: primary_address,
                     missing_keys,
                     inconsistent_keys,
                     unreachable_keys,
@@ -337,8 +351,7 @@ def _check_replicas(
             )
             if primary is None:
                 raise RuntimeError(f"No live primary found for cluster replica {replica_address}")
-            owned = set(primary.slots or ())
-            replica_keys = [key for key in sorted_keys if key_slot(key.encode()) in owned]
+            replica_keys = [key for key in sorted_keys if primary.owns(key_slot(key.encode()))]
         else:
             # Non-cluster replication has one keyspace: every key belongs on every replica.
             replica_keys = sorted_keys

@@ -2,8 +2,16 @@
 
 import logging
 from collections.abc import Collection
+from itertools import chain
 
-from ..cluster_nodes import HASH_SLOTS, group_slots_into_ranges, parse_slot_tokens, split_slots
+from ..cluster_nodes import (
+    HASH_SLOTS,
+    group_slots_into_ranges,
+    merge_slot_ranges,
+    parse_slot_ranges,
+    shared_slots,
+    split_slots,
+)
 from .config import ClusterStatusValidationConfig, SlotCoverageValidationConfig
 from .results import ClusterStatusValidation, SlotConflict, SlotCoverageValidation
 from .snapshot import Snapshot
@@ -164,26 +172,24 @@ def check_slot_coverage(
     if not primary_nodes:
         return SlotCoverageValidation(success=False, error_message="No primary nodes available in cluster")
 
-    # Each live node's view: slot -> the primary that owns it.
-    node_perspectives = {
-        address: {
-            slot: node["node_id"] for node in view if node["is_primary"] for slot in parse_slot_tokens(node["slots"])
-        }
-        for address, view in snapshot.views().items()
-    }
-    if not node_perspectives:
+    views = snapshot.views()
+    if not views:
         return SlotCoverageValidation(success=False, error_message="Unable to query slot assignments from any node")
 
     # A slot the views give to different primaries has no one owner, but is a conflict only when it is split.
-    slot_assignments = {slot: sorted(owners) for slot, owners in snapshot.slot_claims().items()}
+    claims = snapshot.slot_claims()
+    contested = shared_slots(claims).keys()
     slot_distribution: dict[str, list[int]] = {}
-    for slot, owners in sorted(slot_assignments.items()):
-        if len(owners) == 1:
-            slot_distribution.setdefault(owners[0], []).append(slot)
-    unassigned_slots = [slot for slot in range(HASH_SLOTS) if slot not in slot_assignments]
+    for node_id, ranges in claims.items():
+        owned = [slot for start, end in ranges for slot in range(start, end + 1) if slot not in contested]
+        if owned:
+            slot_distribution[node_id] = owned
+    slot_distribution = dict(sorted(slot_distribution.items(), key=lambda item: item[1][0]))
+    assigned = merge_slot_ranges(chain.from_iterable(claims.values()))
+    total_assigned = sum(end - start + 1 for start, end in assigned)
+    unassigned_slots = _unassigned(assigned)
     conflicting_slots = [
-        SlotConflict(slot=slot, conflicting_nodes=sorted(owners))
-        for slot, owners in sorted(split_slots(snapshot.views()).items())
+        SlotConflict(slot=slot, conflicting_nodes=sorted(owners)) for slot, owners in sorted(split_slots(views).items())
     ]
     for conflict in conflicting_slots:
         logger.warning("Slot %s has conflicting assignments: %s", conflict.slot, conflict.conflicting_nodes)
@@ -199,14 +205,11 @@ def check_slot_coverage(
     # gives one of their nodes.
     stopped_shard_nodes = {node.node_id for node in all_nodes if node.shard_id in set(stopped_shards)}
     slots_on_stopped_shards = {
-        slot for view in node_perspectives.values() for slot, owner in view.items() if owner in stopped_shard_nodes
-    }
-    slots_on_stopped_shards.update(
         slot
-        for node in all_nodes
-        if node.role == "primary" and node.node_id in stopped_shard_nodes
-        for slot in slot_distribution.get(node.node_id, [])
-    )
+        for node_id in stopped_shard_nodes
+        for start, end in claims.get(node_id, ())
+        for slot in range(start, end + 1)
+    }
     if slots_on_stopped_shards:
         logger.info(
             "Excluding %s slots of shard(s) %s, whose every member was stopped on purpose: %s",
@@ -242,10 +245,11 @@ def check_slot_coverage(
 
     if success:
         # The union of the views can cover every slot while one node still misses some.
-        for node_address, slot_view in sorted(node_perspectives.items()):
-            node_missing = [
-                slot for slot in range(HASH_SLOTS) if slot not in slot_view and slot not in slots_on_stopped_shards
-            ]
+        for node_address, view in sorted(views.items()):
+            covered = merge_slot_ranges(
+                slot_range for node in view if node["is_primary"] for slot_range in parse_slot_ranges(node["slots"])
+            )
+            node_missing = [slot for slot in _unassigned(covered) if slot not in slots_on_stopped_shards]
             if node_missing:
                 success = False
                 error_message = (
@@ -264,16 +268,27 @@ def check_slot_coverage(
         logging.INFO if success else logging.ERROR,
         "Slot coverage validation %s: %s/%s slots assigned, %s unassigned, %s conflicts",
         "passed" if success else "failed",
-        len(slot_assignments),
+        total_assigned,
         HASH_SLOTS,
         len(unassigned_slots),
         len(conflicting_slots),
     )
     return SlotCoverageValidation(
         success=success,
-        total_slots_assigned=len(slot_assignments),
+        total_slots_assigned=total_assigned,
         unassigned_slots=unassigned_slots,
         conflicting_slots=conflicting_slots,
         slot_distribution=slot_distribution,
         error_message=error_message,
     )
+
+
+def _unassigned(covered: list[tuple[int, int]]) -> list[int]:
+    """The hash slots outside ``covered`` (merged ranges), in order."""
+    unassigned: list[int] = []
+    next_slot = 0
+    for start, end in covered:
+        unassigned.extend(range(next_slot, start))
+        next_slot = end + 1
+    unassigned.extend(range(next_slot, HASH_SLOTS))
+    return unassigned

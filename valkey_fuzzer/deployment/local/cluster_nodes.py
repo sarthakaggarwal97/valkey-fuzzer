@@ -2,7 +2,7 @@
 
 import logging
 import string
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from functools import cache
 from itertools import product
 from typing import Any, Optional
@@ -108,9 +108,30 @@ def parse_slots_in_flight(tokens: list[str]) -> set[int]:
     return slots
 
 
-def parse_slot_tokens(tokens: list[str]) -> list[int]:
-    """The hash slots in a node's CLUSTER NODES slot tokens (see :func:`parse_slot_ranges`), one by one."""
-    return [slot for start, end in parse_slot_ranges(tokens) for slot in range(start, end + 1)]
+def merge_slot_ranges(ranges: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:
+    """``ranges`` sorted, with those that overlap or touch joined: ``[(5, 9), (0, 4), (0, 2)]`` is ``[(0, 9)]``."""
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def shared_slots(claims: Mapping[str, Iterable[tuple[int, int]]]) -> dict[int, set[str]]:
+    """Every slot in the ranges of two of ``claims``' primaries (node ID -> slot ranges), and those primaries."""
+    ranges = sorted((start, end, node_id) for node_id, owned in claims.items() for start, end in owned)
+    shared: dict[int, set[str]] = {}
+    for index, (_start, end, node_id) in enumerate(ranges):
+        # Sorted by start, so the ranges that can overlap this one follow it until one starts after its end.
+        for other_start, other_end, other in ranges[index + 1 :]:
+            if other_start > end:
+                break
+            if other != node_id:
+                for slot in range(other_start, min(end, other_end) + 1):
+                    shared.setdefault(slot, set()).update((node_id, other))
+    return shared
 
 
 def split_slots(views: Mapping[Any, Sequence[Mapping[str, Any]]]) -> dict[int, set[str]]:
@@ -123,55 +144,33 @@ def split_slots(views: Mapping[Any, Sequence[Mapping[str, Any]]]) -> dict[int, s
     suspected there (``fail?``) still serves its slots, so it counts.
     """
     split: dict[int, set[str]] = {}
-    own_claims: dict[int, set[str]] = {}
+    own_claims: dict[str, list[tuple[int, int]]] = {}
     for view in views.values():
-        owners: dict[int, set[str]] = {}
+        owners: dict[str, list[tuple[int, int]]] = {}
         for node in view:
-            if node["is_primary"] and "fail" not in node["flags"].split(","):
-                for slot in parse_slot_tokens(node["slots"]):
-                    owners.setdefault(slot, set()).add(node["node_id"])
-            if node["is_primary"] and node["is_myself"]:
-                for slot in parse_slot_tokens(node["slots"]):
-                    own_claims.setdefault(slot, set()).add(node["node_id"])
-        for slot, nodes in owners.items():
-            if len(nodes) > 1:
-                split.setdefault(slot, set()).update(nodes)
-    for slot, nodes in own_claims.items():
-        if len(nodes) > 1:
+            if not node["is_primary"]:
+                continue
+            ranges = parse_slot_ranges(node["slots"])
+            if "fail" not in node["flags"].split(","):
+                owners.setdefault(node["node_id"], []).extend(ranges)
+            if node["is_myself"]:
+                own_claims.setdefault(node["node_id"], []).extend(ranges)
+        for slot, nodes in shared_slots(owners).items():
             split.setdefault(slot, set()).update(nodes)
+    for slot, nodes in shared_slots(own_claims).items():
+        split.setdefault(slot, set()).update(nodes)
     return split
 
 
-def group_slots_into_ranges(slots: list[int]) -> str:
-    if not slots:
-        return ""
+def format_slot_ranges(ranges: Sequence[tuple[int, int]]) -> str:
+    """Slot ranges written as CLUSTER NODES writes each, comma-separated ("0-5460, 5462"); the first ten when
+    there are more."""
+    shown = [str(start) if start == end else f"{start}-{end}" for start, end in ranges]
+    if len(shown) > 10:
+        return f"{', '.join(shown[:10])}... ({len(shown)} ranges total)"
+    return ", ".join(shown)
 
-    sorted_slots = sorted(slots)
-    ranges = []
-    start = sorted_slots[0]
-    end = sorted_slots[0]
 
-    for slot in sorted_slots[1:]:
-        if slot == end + 1:
-            # Consecutive slot, extend range
-            end = slot
-        else:
-            # Gap found, save current range and start new one
-            if start == end:
-                ranges.append(str(start))
-            else:
-                ranges.append(f"{start}-{end}")
-            start = slot
-            end = slot
-
-    # Add the last range
-    if start == end:
-        ranges.append(str(start))
-    else:
-        ranges.append(f"{start}-{end}")
-
-    # Limit output length for very long lists
-    if len(ranges) > 10:
-        return f"{', '.join(ranges[:10])}... ({len(ranges)} ranges total)"
-    else:
-        return ", ".join(ranges)
+def group_slots_into_ranges(slots: Iterable[int]) -> str:
+    """Slots as ranges (see :func:`format_slot_ranges`): ``[0, 1, 2, 5]`` is ``"0-2, 5"``."""
+    return format_slot_ranges(merge_slot_ranges((slot, slot) for slot in slots))

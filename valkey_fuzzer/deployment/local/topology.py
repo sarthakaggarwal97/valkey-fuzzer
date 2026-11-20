@@ -1,11 +1,10 @@
 """The deployment's current topology, read from its instances: :class:`DeploymentConnection` and its rows."""
 
-from bisect import bisect_left, bisect_right
 from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from .cluster_nodes import parse_slot_tokens
+from .cluster_nodes import parse_slot_ranges
 from .models import DeploymentMode, InstanceInfo, LocalDeploymentError
 from .queries import Replication, query_cluster_nodes, query_or_none, query_replication
 
@@ -29,14 +28,24 @@ class TopologyNode:
     failed: bool
     marked_fail: bool = False
     primary_id: Optional[str] = None  # a cluster replica's primary's node ID
-    # The hash slots a cluster primary owns; None outside cluster mode.
-    slots: Optional[tuple[int, ...]] = None
+    # The hash slots a cluster primary owns, as the (first, last) ranges of its CLUSTER NODES line; None outside
+    # cluster mode.
+    slots: Optional[tuple[tuple[int, int], ...]] = None
     # Standalone mode: the INFO replication the role came from, so a state check need not ask again.
     replication: Optional[Replication] = None
 
     @property
     def address(self) -> str:
         return f"{self.host}:{self.port}"
+
+    @property
+    def slot_count(self) -> int:
+        """How many hash slots the node owns."""
+        return sum(end - start + 1 for start, end in self.slots or ())
+
+    def owns(self, slot: int) -> bool:
+        """Whether ``slot`` is one of the node's hash slots."""
+        return any(start <= slot <= end for start, end in self.slots or ())
 
 
 @dataclass
@@ -90,8 +99,9 @@ class DeploymentConnection:
         if len(read["agreed"]) != len(read["answered"]) and len(self._disputed_view_reads) < 20:
             self._disputed_view_reads.append(read)
 
-    def _planned_shard_of(self, slots: list[int], port: int) -> Optional[int]:
-        """The planned shard whose slot range holds most of ``slots``; by planned port when the plan has no ranges.
+    def _planned_shard_of(self, slots: list[tuple[int, int]], port: int) -> Optional[int]:
+        """The planned shard whose slot range holds most of the ``slots`` ranges; by planned port when the plan has
+        no ranges.
 
         Only the plan's slot ranges and the live slot ownership decide it, never
         an instance's current role: a planned primary that was demoted still
@@ -99,10 +109,10 @@ class DeploymentConnection:
         """
         if not self._planned_slot_ranges:
             return self._planned_port_shards.get(port)
-        slots = sorted(slots)
         votes: dict[int, int] = {}
         for shard_id, start, end in self._planned_slot_ranges:
-            votes[shard_id] = votes.get(shard_id, 0) + bisect_right(slots, end) - bisect_left(slots, start)
+            held = sum(max(0, min(end, last) - max(start, first) + 1) for first, last in slots)
+            votes[shard_id] = votes.get(shard_id, 0) + held
         # Most slots wins; a tie goes to the lowest shard.
         return min(votes, key=lambda shard: (-votes[shard], shard))
 
@@ -169,7 +179,7 @@ class DeploymentConnection:
         by_address = {(info.host, info.port): info.instance_id for info in self.instances}
         parsed_nodes = self._majority_view(timeout, skip_ports)
         if parsed_nodes:
-            slots_of = {node["node_id"]: parse_slot_tokens(node["slots"]) for node in parsed_nodes}
+            slots_of = {node["node_id"]: parse_slot_ranges(node["slots"]) for node in parsed_nodes}
             node_id_to_shard = {
                 node["node_id"]: self._planned_shard_of(slots_of[node["node_id"]], node["port"])
                 for node in parsed_nodes
