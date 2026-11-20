@@ -18,21 +18,53 @@ The experiment is the bundle's own (``experiments/``, see
 :func:`bundle_service`) or an installed one. Every scenario is compiled by the
 fuzzer's compiler before it is written, and each mapped fault must be a fault
 component of the compiled plan.
+
+:func:`search_model` finds counterexamples itself instead of taking one: a
+path of each safe config to a target of ``claims.yaml`` (TLC checks
+``~Target`` as an invariant, so its counterexample is a shortest path that
+reaches it), and the violations of the safe configs with their boolean
+constants flipped, one at a time and in pairs when the single flips were
+cheap. Traces with the same action sequence are translated once. Each TLC
+run has a time budget, the search a cap on scenarios, and the report says
+which targets were unreachable and which mutations held.
 """
 
 import itertools
 import os
+import posixpath
 import re
+import time
 from collections.abc import Mapping, Sequence
 from typing import Any, Callable, Optional
 
 from ..protocols import ComponentRole
 from ..schema import plain_config
 from ..service import RunService
-from .bundle import Bundle, Evidence, tla_text
-from .tla import TlaSet, TraceState, changed_keys, parse_config, parse_value, render
+from .bundle import CLAIMS_FILE, MODEL_FILE, Bundle, Evidence, SpecBundleError, tla_text
+from .tla import (
+    TlaSet,
+    TlaTools,
+    TlcResult,
+    TraceState,
+    changed_keys,
+    normalize,
+    parse_config,
+    parse_value,
+    render,
+    strip_comments,
+    symbols,
+    tlc,
+)
 
 Compile = Callable[[Mapping[str, Any]], Any]
+Progress = Callable[[str], None]
+
+# The module and config of a reach run: the model extended with the invariant that the target is not reached.
+REACH_MODULE = "reach.tla"
+REACH_CONFIG = "reach.cfg"
+# The config of a mutation run: a safe config with some boolean constants flipped.
+MUTANT_CONFIG = "mutant.cfg"
+_BOOLEANS = ("TRUE", "FALSE")
 
 
 class TranslateError(ValueError):
@@ -287,4 +319,364 @@ def _scenario_id(protocol: str, name: str, index: int) -> str:
     return base if index == 0 else f"{base}-v{index}"
 
 
-__all__ = ["NoFaultStepError", "TranslateError", "bundle_service", "evidence_steps", "translate_trace"]
+# ---------------------------------------------------------------------------
+# Searching the model
+# ---------------------------------------------------------------------------
+
+
+def reach_files(bundle: Bundle, config: str, target: str) -> dict[str, str]:
+    """The files of a TLC run that finds a path of the safe config ``config`` to ``target``.
+
+    The module extends the model with ``Not<target> == ~<target>``, which the
+    config checks along with its own invariants (a safe config's never fire),
+    so the counterexample TLC reports is a shortest path to the target.
+    """
+
+    invariant = f"Not{target}"
+    if invariant in symbols(bundle.model_text).definitions:
+        raise TranslateError(f"{MODEL_FILE} defines {invariant}, the name the search needs for ~{target}")
+    return {
+        MODEL_FILE: bundle.model_text,
+        REACH_MODULE: f"---- MODULE reach ----\nEXTENDS model\n{invariant} == ~{target}\n====\n",
+        REACH_CONFIG: bundle.files[config].rstrip("\n") + f"\nINVARIANT {invariant}\n",
+    }
+
+
+def flipped_config(config_text: str, flips: Mapping[str, str]) -> str:
+    """``config_text`` with each boolean constant of ``flips`` set to its value (comments removed)."""
+
+    body = strip_comments(config_text)
+    for name, value in flips.items():
+        body, count = re.subn(rf"(\b{name}\s*=\s*)(?:TRUE|FALSE)\b", rf"\g<1>{value}", body)
+        if count != 1:
+            raise TranslateError(f"{name} is assigned a boolean {count} times in the config; the search flips one")
+    return body
+
+
+def without_check(config_text: str, name: str) -> str:
+    """``config_text`` with the property ``name`` removed from what TLC checks (its INVARIANT and PROPERTY lists).
+
+    shortcut: the name is removed wherever it stands as a word, so a model value or constant named like a
+    property would go too; split the config into its sections if a bundle ever does that.
+    """
+
+    return re.sub(rf"(?<!\w){re.escape(name)}(?!\w)", "", config_text)
+
+
+def mutations(constants: Mapping[str, str], *, pairs: bool = False) -> list[dict[str, str]]:
+    """Each boolean constant of ``constants`` (TLA+ text) flipped on its own, or with ``pairs`` each pair of them
+    flipped together: the constants to set, in the config's order."""
+
+    booleans = {name: "FALSE" if value == "TRUE" else "TRUE" for name, value in constants.items() if value in _BOOLEANS}
+    if pairs:
+        return [{a: booleans[a], b: booleans[b]} for a, b in itertools.combinations(booleans, 2)]
+    return [{name: value} for name, value in booleans.items()]
+
+
+def _label(flips: Mapping[str, str]) -> str:
+    return ",".join(f"{name}={value}" for name, value in flips.items())
+
+
+class _Search:
+    """One search's state: the traces kept so far (by action sequence), the scenarios produced, and why it stopped."""
+
+    def __init__(
+        self,
+        bundle: Bundle,
+        tools: TlaTools,
+        *,
+        tlc_timeout_s: float,
+        max_scenarios: int,
+        variants: int,
+        seed: int,
+        compile_scenario: Optional[Compile],
+        say: Progress,
+    ):
+        self.bundle = bundle
+        self.tools = tools
+        self.tlc_timeout_s = tlc_timeout_s
+        self.max_scenarios = max_scenarios
+        self.variants = variants
+        self.seed = seed
+        self.compile_scenario = compile_scenario
+        self.say = say
+        self.seen: dict[tuple[str, ...], str] = {}
+        self.translations: list[dict[str, Any]] = []
+        self.scenarios: list[str] = []
+        self.stopped: Optional[str] = None
+
+    def budget(self) -> Optional[float]:
+        """Seconds the next TLC run may take: the per-run limit, within the command's own; None when none is left."""
+
+        remaining = None if self.tools.deadline is None else self.tools.deadline - time.monotonic()
+        seconds = self.tlc_timeout_s if remaining is None else min(self.tlc_timeout_s, remaining)
+        return seconds if seconds > 0 else None
+
+    def check(
+        self, label: str, module: str, config: str, files: Mapping[str, str]
+    ) -> tuple[Optional[TlcResult], dict[str, Any]]:
+        """One TLC run of the search and its entry; the result is None when the run gave no verdict (the entry says why)."""
+
+        if len(self.scenarios) >= self.max_scenarios:
+            self.stopped = f"the scenario cap ({self.max_scenarios}) was reached"
+        budget = self.budget()
+        if budget is None and self.stopped is None:
+            self.stopped = "the command's time limit ran out"
+        if self.stopped is not None:
+            return None, {"status": "not-run", "reason": self.stopped}
+        self.say(f"TLC: {label}")
+        result, run = tlc(self.tools.within(budget), module, config, files)
+        # The caller sets the status; it is first here so the report reads status, then the run's figures.
+        entry: dict[str, Any] = {"status": None}
+        entry.update(seconds=run.seconds, distinct_states=result.distinct_states, depth=result.depth)
+        if run.timed_out:
+            entry.update(status="timed_out", error=run.timeout_error)
+        elif run.harness_error:
+            entry.update(status="error", error=run.harness_error)
+        elif result.errors:
+            entry.update(status="error", error="; ".join(result.errors), output=run.tail())
+        return (None if entry["status"] else result), entry
+
+    def keep(
+        self,
+        entry: dict[str, Any],
+        result: TlcResult,
+        *,
+        name: str,
+        config: str,
+        config_text: str,
+        source: Mapping[str, Any],
+        status: str,
+    ) -> None:
+        """Translate the counterexample unless one with the same action sequence came before; record it in ``entry``."""
+
+        actions = tuple(state.action for state in result.trace)
+        entry["actions"] = list(actions)
+        if actions in self.seen:
+            entry.update(status="duplicate", same_as=self.seen[actions])
+            return
+        self.seen[actions] = name
+        room = self.max_scenarios - len(self.scenarios)
+        try:
+            translation = translate_trace(
+                self.bundle,
+                result.trace,
+                config_text,
+                name=name,
+                violated=result.violated or result.violation,
+                config=config,
+                variants=min(self.variants, room - 1),
+                seed=self.seed + len(self.scenarios),
+                compile_scenario=self.compile_scenario,
+            )
+        except NoFaultStepError as exc:
+            # The experiment has nothing to inject for a counterexample that takes no mapped fault.
+            entry.update(status="no-fault", error=str(exc))
+            return
+        except (TranslateError, SpecBundleError) as exc:
+            entry.update(status="untranslatable", error=str(exc))
+            return
+        translation["source"] = dict(source)
+        self.translations.append(translation)
+        entry["status"] = status
+        entry["scenarios"] = [item["scenario_id"] for item in translation["scenarios"]]
+        self.scenarios.extend(entry["scenarios"])
+
+
+def search_model(
+    bundle: Bundle,
+    tools: TlaTools,
+    *,
+    tlc_timeout_s: float,
+    max_scenarios: int,
+    reach: Sequence[str] = (),
+    mutate: bool = False,
+    variants: int = 4,
+    seed: int = 1,
+    compile_scenario: Optional[Compile] = None,
+    progress: Optional[Progress] = None,
+) -> dict[str, Any]:
+    """Search the model for counterexamples and translate each distinct one (by action sequence) into scenarios.
+
+    ``reach`` names targets of ``claims.yaml``: for each, TLC looks in every
+    safe config for a path that reaches it. With ``mutate``, every safe
+    config runs with each boolean constant flipped, and with each pair
+    flipped when the single flips all finished and together took no longer
+    than one run's budget; a violation is a counterexample. Each TLC run may
+    take ``tlc_timeout_s`` (within the time limit of ``tools``); a run that
+    times out is recorded and the search goes on. The search stops once
+    ``max_scenarios`` scenarios are written. The report lists each target's
+    and mutation's outcome, the targets ``unreachable`` in every safe config,
+    the mutations that ``held``, the ``translations``, and the ``scenarios``.
+    """
+
+    say = progress or (lambda message: None)
+    targets = [item.name for item in bundle.claims.targets]
+    unknown = [name for name in reach if name not in targets]
+    if unknown:
+        raise TranslateError(
+            f"{CLAIMS_FILE} names no target {', '.join(unknown)}; its targets are {', '.join(targets) or 'none'}"
+        )
+    search = _Search(
+        bundle,
+        tools,
+        tlc_timeout_s=tlc_timeout_s,
+        max_scenarios=max_scenarios,
+        variants=variants,
+        seed=seed,
+        compile_scenario=compile_scenario,
+        say=say,
+    )
+    report: dict[str, Any] = {
+        "kind": "spec-search",
+        "bundle": bundle.protocol,
+        "mapping_sha256": bundle.mapping.sha256,
+        "tlc_timeout_s": tlc_timeout_s,
+        "max_scenarios": max_scenarios,
+        "targets": {},
+        "mutations": {},
+    }
+    for target in reach:
+        report["targets"][target] = per_config = {}
+        for config in bundle.safe_configs:
+            files = reach_files(bundle, config, target)
+            result, entry = search.check(f"{config} reaching {target}", REACH_MODULE, REACH_CONFIG, files)
+            per_config[config] = entry
+            if result is None:
+                continue
+            if result.violation is None:
+                entry["status"] = "unreachable"
+            elif result.violated != f"Not{target}":
+                entry.update(
+                    status="error",
+                    error=f"TLC reported {result.violation} {result.violated or ''} violated".rstrip()
+                    + f" before any path reached {target}: the safe config is not safe",
+                )
+            else:
+                search.keep(
+                    entry,
+                    result,
+                    name=f"{posixpath.splitext(config)[0]}-reach-{target}",
+                    config=config,
+                    config_text=bundle.files[config],
+                    source={"kind": "reach", "target": target, "config": config},
+                    status="reached",
+                )
+    if mutate:
+        safe = {name: _constants(bundle.files[name]) for name in bundle.safe_configs}
+        for config in bundle.safe_configs:
+            constants = parse_config(bundle.files[config]).constants
+            entries: dict[str, Any] = {}
+            report["mutations"][config] = entries
+            _mutate(search, config, safe, mutations(constants), entries)
+            # Pairs when the single flips were cheap: every run finished, and together they fit one run's budget.
+            seconds = sum(entry.get("seconds", 0.0) for entry in entries.values())
+            cheap = all(entry["status"] != "timed_out" for entry in entries.values()) and seconds <= tlc_timeout_s
+            pairs = mutations(constants, pairs=True)
+            if cheap:
+                _mutate(search, config, safe, pairs, entries)
+            else:
+                reason = f"the single flips took {seconds:.1f}s together, more than one run's {tlc_timeout_s:g}s"
+                for flip in pairs:
+                    entries[_label(flip)] = {"status": "not-run", "flipped": dict(flip), "reason": reason}
+    report["unreachable"] = [
+        target
+        for target, per_config in report["targets"].items()
+        if per_config and all(entry["status"] == "unreachable" for entry in per_config.values())
+    ]
+    report["held"] = [
+        f"{config}: {label}"
+        for config, entries in report["mutations"].items()
+        for label, entry in entries.items()
+        if entry["status"] == "held"
+    ]
+    report["stopped"] = search.stopped
+    report["translations"] = search.translations
+    report["scenarios"] = search.scenarios
+    return report
+
+
+def _constants(config_text: str) -> dict[str, str]:
+    return {name: normalize(value) for name, value in parse_config(config_text).constants.items()}
+
+
+def _mutate(
+    search: _Search,
+    config: str,
+    safe: Mapping[str, Mapping[str, str]],
+    flips: Sequence[Mapping[str, str]],
+    entries: dict[str, Any],
+) -> None:
+    """Run TLC on ``config`` with each of ``flips`` applied and record each run under its label.
+
+    TLC reports the shallowest violation, which may take none of the mapped
+    fault actions (a vote sent before its save needs no crash): the
+    experiment has nothing to inject for it. Such a violation is set aside
+    (``without_fault``) and the mutation runs again without that property,
+    until a violation with a fault, or none, is found.
+    """
+
+    faults = {fault["action"] for fault in (search.bundle.mapping.scenario or {}).get("faults") or []}
+    claimed = {item.name for item in search.bundle.claims.properties}
+    for flip in flips:
+        label = _label(flip)
+        mutated = {**safe[config], **flip}
+        same = next((name for name, values in safe.items() if values == mutated), None)
+        if same is not None:
+            # Another safe config already has these constants: TLC found no error there, so nothing to translate.
+            entries[label] = {"status": "skipped", "flipped": dict(flip), "reason": f"these are {same}'s constants"}
+            continue
+        text = flipped_config(search.bundle.files[config], flip)
+        with_flips = " and ".join(f"{name} = {value}" for name, value in flip.items())
+        without_fault: list[dict[str, Any]] = []
+        spent = 0.0
+        while True:
+            files = {MODEL_FILE: search.bundle.model_text, MUTANT_CONFIG: text}
+            set_aside = f" without {', '.join(item['violated'] for item in without_fault)}" if without_fault else ""
+            result, entry = search.check(f"{config} with {with_flips}{set_aside}", MODEL_FILE, MUTANT_CONFIG, files)
+            entry["flipped"] = dict(flip)
+            if without_fault:
+                entry["without_fault"] = without_fault
+                if "seconds" in entry:
+                    entry["seconds"] = round(entry["seconds"] + spent, 2)
+            entries[label] = entry
+            if result is None:
+                break
+            if result.violation is None:
+                entry["status"] = "no-fault" if without_fault else "held"
+                break
+            violated = result.violated or result.violation
+            if faults and not any(state.action in faults for state in result.trace):
+                without_fault.append({"violated": violated, "actions": [state.action for state in result.trace]})
+                entry["without_fault"] = without_fault
+                text = without_check(text, violated) if result.violated else text
+                # Look again while a claimed property is still checked (TypeOK alone is no claim to violate).
+                if not result.violated or not claimed & set(parse_config(text).checked):
+                    entry["status"] = "no-fault"
+                    break
+                spent += entry["seconds"]
+                continue
+            entry["violated"] = violated
+            search.keep(
+                entry,
+                result,
+                name=f"{posixpath.splitext(config)[0]}-{'-'.join(f'{n}-{v}' for n, v in flip.items())}",
+                config=config,
+                config_text=text,
+                source={"kind": "mutation", "config": config, "flipped": dict(flip)},
+                status="violated",
+            )
+            break
+
+
+__all__ = [
+    "NoFaultStepError",
+    "TranslateError",
+    "bundle_service",
+    "evidence_steps",
+    "flipped_config",
+    "mutations",
+    "reach_files",
+    "search_model",
+    "translate_trace",
+]

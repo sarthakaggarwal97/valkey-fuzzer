@@ -29,6 +29,7 @@ from valkey_fuzzer.spec import (
     conform_runs,
     load_bundle,
     tla,
+    translate,
     translate_trace,
 )
 from valkey_fuzzer.spec.bundle import load_spec_mapping
@@ -416,6 +417,443 @@ def test_translate_refuses_what_the_experiment_cannot_run(tmp_path, monkeypatch)
         _edit(bundle / "mapping.yaml", f", component: {old}}}", f", component: {component}}}")
         with pytest.raises(TranslateError, match=rf"toy\.register has no fault component {component}"):
             _translate(bundle)
+
+
+# ---------------------------------------------------------------------------
+# translate: searching the model
+# ---------------------------------------------------------------------------
+
+
+def _searchable(tmp_path, monkeypatch):
+    """A register copy the search has more to find in: a target (a crash after an acknowledged write), a second
+    boolean constant the model does not read (SaveOnAck), and a second safe config that sets it FALSE."""
+
+    bundle = _copy(tmp_path, monkeypatch)
+    _edit(
+        bundle / "model.tla",
+        "    SyncBeforeAck,  \\*",
+        "    SaveOnAck,  \\* unread: a second boolean to flip\n    SyncBeforeAck,  \\*",
+    )
+    _edit(
+        bundle / "model.tla",
+        "AckedDurable == acked <= mem\n",
+        "AckedDurable == acked <= mem\n\nAckedThenCrashed == acked > 0 /\\ crashes > 0\n",
+    )
+    _edit(
+        bundle / "claims.yaml",
+        "assumptions:",
+        "targets:\n  - {name: AckedThenCrashed, meaning: A crash after an acknowledged write.}\nassumptions:",
+    )
+    _edit(bundle / "mapping.yaml", "constants:\n", 'constants:\n  SaveOnAck: {value: "TRUE"}\n')
+    for config in ("model.cfg", "negative-controls/ack-before-save.cfg"):
+        _edit(bundle / config, "    MaxValue = 3\n", "    SaveOnAck = TRUE\n    MaxValue = 3\n")
+    (bundle / "other.cfg").write_text(
+        (bundle / "model.cfg").read_text().replace("SaveOnAck = TRUE", "SaveOnAck = FALSE")
+    )
+    return bundle
+
+
+def _tlc_output(violated, steps):
+    """TLC's text output for an invariant violation whose trace is ``steps`` (``(action, {var: value})`` pairs)."""
+
+    lines = [
+        "TLC2 Version 2.19",
+        f"Error: Invariant {violated} is violated.",
+        "Error: The behavior up to this point is:",
+    ]
+    for index, (action, values) in enumerate(steps, 1):
+        label = "Initial predicate" if action == "Init" else f"{action} line 1, col 1 to line 1, col 9 of module model"
+        lines += [f"State {index}: <{label}>", *(f"/\\ {name} = {value}" for name, value in values.items()), ""]
+    lines.append(f"{3 * len(steps)} states generated, {2 * len(steps)} distinct states found, 0 states left on queue.")
+    return "\n".join(lines) + "\n"
+
+
+def _states(*steps):
+    return [
+        (action, {"mem": mem, "acked": acked, "disk": disk, "crashes": crashes})
+        for action, mem, acked, disk, crashes in steps
+    ]
+
+
+REACHED = _tlc_output(
+    "NotAckedThenCrashed",
+    _states(
+        ("Init", 0, 0, 0, 0), ("Write", 1, 0, 0, 0), ("Save", 1, 0, 1, 0), ("Ack", 1, 1, 1, 0), ("Crash", 1, 1, 1, 1)
+    ),
+)
+LOST = _tlc_output(
+    "AckedDurable", _states(("Init", 0, 0, 0, 0), ("Write", 1, 0, 0, 0), ("Ack", 1, 1, 0, 0), ("Crash", 0, 1, 0, 1))
+)
+HELD = (
+    "TLC2 Version 2.19\nModel checking completed. No error has been found.\n"
+    "40 states generated, 20 distinct states found, 0 states left on queue.\n"
+    "The depth of the complete state graph search is 5.\nFinished in 01s at (2026-01-01 00:00:00)\n"
+)
+TLC_FAILED = (
+    "TLC2 Version 2.19\nError: Parsing or semantic analysis failed.\nFinished in 00s at (2026-01-01 00:00:00)\n"
+)
+
+
+class _FakeTlc:
+    """A TLC that answers from the config it is given, without running: a reach run reaches the target, a config
+    with ``SyncBeforeAck = FALSE`` violates AckedDurable, any other holds (or ``default``). ``answers`` override
+    that by a text of the config, the first that matches (``Name_VALUE`` for ``Name = VALUE``; ``"timeout"`` for a
+    run that runs out of time, else TLC output); every call is recorded."""
+
+    def __init__(self, monkeypatch, default=None, **answers):
+        self.default = default
+        self.answers = {key.replace("_", " = "): value for key, value in answers.items()}
+        self.calls = []
+        monkeypatch.setattr(translate, "tlc", self)
+
+    def __call__(self, tools, module, config, files):
+        text = files[config]
+        self.calls.append((tools, module, text))
+        output = next((answer for key, answer in self.answers.items() if key in text), self.default)
+        if output is None:
+            output = REACHED if module == "reach.tla" else LOST if "SyncBeforeAck = FALSE" in text else HELD
+        run = tla.ToolRun(command=["java", "tlc2.TLC"], exit_code=0, output=output, seconds=0.5)
+        if output == "timeout":
+            run = tla.ToolRun(
+                command=["java", "tlc2.TLC"], exit_code=-1, output="", seconds=tools.timeout_s, timed_out=True
+            )
+        result = tla.read_tlc_output(run.output, run.exit_code)
+        if run.timed_out:
+            result.errors.append(run.timeout_error)
+        return result, run
+
+
+def _search(bundle, **kwargs):
+    options = {
+        "tlc_timeout_s": 300.0,
+        "max_scenarios": 50,
+        "compile_scenario": bundle_service(bundle).compile,
+        **kwargs,
+    }
+    return translate.search_model(bundle, TlaTools(jar="unused"), **options)
+
+
+def test_mutations_flip_each_boolean_constant_alone_and_in_pairs():
+    constants = {"A": "TRUE", "N": "3", "B": "FALSE", "S": "{p1, p2}"}
+    assert translate.mutations(constants) == [{"A": "FALSE"}, {"B": "TRUE"}]
+    assert translate.mutations(constants, pairs=True) == [{"A": "FALSE", "B": "TRUE"}]
+    config = "\\* A is on\nCONSTANTS\n    A = TRUE\n    N = 3\n    B = FALSE\nINVARIANT Safe\n"
+    assert (
+        translate.flipped_config(config, {"A": "FALSE", "B": "TRUE"})
+        == "\nCONSTANTS\n    A = FALSE\n    N = 3\n    B = TRUE\nINVARIANT Safe\n"
+    )
+    with pytest.raises(TranslateError, match="N is assigned a boolean 0 times"):
+        translate.flipped_config(config, {"N": "TRUE"})
+    # A reach run extends the model with the invariant that the target is not reached, checked by the safe config.
+    files = translate.reach_files(load_bundle(str(BUNDLE)), "model.cfg", "AckedDurable")
+    assert files["reach.tla"] == "---- MODULE reach ----\nEXTENDS model\nNotAckedDurable == ~AckedDurable\n====\n"
+    assert files["reach.cfg"].endswith("CHECK_DEADLOCK FALSE\nINVARIANT NotAckedDurable\n") and "model.tla" in files
+
+
+def test_reach_translates_the_path_to_each_target_and_reports_the_unreachable_ones(tmp_path, monkeypatch):
+    bundle = load_bundle(str(_searchable(tmp_path, monkeypatch)))
+    fake = _FakeTlc(monkeypatch)
+    report = _search(bundle, reach=["AckedThenCrashed"])
+    assert [(module, "INVARIANT NotAckedThenCrashed" in text) for _, module, text in fake.calls] == [
+        ("reach.tla", True)
+    ] * 2
+    reached, again = report["targets"]["AckedThenCrashed"].values()
+    assert (reached["status"], reached["actions"]) == ("reached", ["Init", "Write", "Save", "Ack", "Crash"])
+    assert reached["scenarios"] == [
+        "spec-register-model-reach-AckedThenCrashed",
+        "spec-register-model-reach-AckedThenCrashed-v1",
+    ]
+    # The second safe config finds the same path: translated once.
+    assert (again["status"], again["same_as"]) == ("duplicate", "model-reach-AckedThenCrashed")
+    (translation,) = report["translations"]
+    assert translation["source"] == {"kind": "reach", "target": "AckedThenCrashed", "config": "model.cfg"}
+    assert translation["scenarios"][0]["experiment"]["inputs"] == {"appendonly": "yes"}  # the safe config's constants
+    assert (report["unreachable"], report["held"], report["stopped"]) == ([], [], None)
+    assert report["scenarios"] == reached["scenarios"] and report["kind"] == "spec-search"
+    # Known-bad: a target no safe config reaches, and a target the claims do not name.
+    _FakeTlc(monkeypatch, SaveOnAck_TRUE=HELD, SaveOnAck_FALSE=HELD)
+    report = _search(bundle, reach=["AckedThenCrashed"])
+    assert {entry["status"] for entry in report["targets"]["AckedThenCrashed"].values()} == {"unreachable"}
+    assert report["unreachable"] == ["AckedThenCrashed"] and report["translations"] == []
+    with pytest.raises(TranslateError, match="names no target Lost; its targets are AckedThenCrashed"):
+        _search(bundle, reach=["Lost"])
+
+
+def test_mutate_flips_the_safe_configs_booleans_and_translates_each_distinct_violation(tmp_path, monkeypatch):
+    bundle = load_bundle(str(_searchable(tmp_path, monkeypatch)))
+    fake = _FakeTlc(monkeypatch)
+    report = _search(bundle, mutate=True)
+    model, other = report["mutations"]["model.cfg"], report["mutations"]["other.cfg"]
+    assert list(model) == ["SyncBeforeAck=FALSE", "SaveOnAck=FALSE", "SyncBeforeAck=FALSE,SaveOnAck=FALSE"]
+    # Flipping SaveOnAck alone gives the other safe config's constants, which TLC already found no error in.
+    assert model["SaveOnAck=FALSE"] == {
+        "status": "skipped",
+        "flipped": {"SaveOnAck": "FALSE"},
+        "reason": "these are other.cfg's constants",
+    }
+    violated = model["SyncBeforeAck=FALSE"]
+    assert (violated["status"], violated["violated"], violated["flipped"]) == (
+        "violated",
+        "AckedDurable",
+        {"SyncBeforeAck": "FALSE"},
+    )
+    assert violated["scenarios"] == [
+        "spec-register-model-SyncBeforeAck-FALSE",
+        "spec-register-model-SyncBeforeAck-FALSE-v1",
+    ]
+    # The pair was cheap (the singles took 0.5 s each) and finds the same trace, as does the other config's flip.
+    pair = model["SyncBeforeAck=FALSE,SaveOnAck=FALSE"]
+    assert (pair["status"], pair["same_as"], pair["actions"]) == (
+        "duplicate",
+        "model-SyncBeforeAck-FALSE",
+        ["Init", "Write", "Ack", "Crash"],
+    )
+    assert other["SyncBeforeAck=FALSE"]["status"] == "duplicate" and other["SaveOnAck=TRUE"]["status"] == "skipped"
+    # TLC ran the model itself on each config with the flips applied, in the order of the flips.
+    flipped = [("SyncBeforeAck = FALSE" in text, "SaveOnAck = FALSE" in text) for _, _, text in fake.calls]
+    assert flipped == [(True, False), (True, True), (True, True), (True, False)]
+    assert {module for _, module, _ in fake.calls} == {"model.tla"}
+    (translation,) = report["translations"]
+    assert translation["source"] == {"kind": "mutation", "config": "model.cfg", "flipped": {"SyncBeforeAck": "FALSE"}}
+    assert translation["counterexample"]["constants"]["SyncBeforeAck"] == "FALSE"
+    assert translation["scenarios"][0]["experiment"]["inputs"] == {"appendonly": "no"}
+    assert report["held"] == [] and report["scenarios"] == violated["scenarios"]
+    # A mutation under which every check holds is reported as such, and is no counterexample.
+    _FakeTlc(monkeypatch, SyncBeforeAck_FALSE=HELD)
+    report = _search(bundle, mutate=True)
+    assert report["held"] == [
+        "model.cfg: SyncBeforeAck=FALSE",
+        "model.cfg: SyncBeforeAck=FALSE,SaveOnAck=FALSE",
+        "other.cfg: SyncBeforeAck=FALSE",
+        "other.cfg: SyncBeforeAck=FALSE,SaveOnAck=TRUE",
+    ]
+    assert report["translations"] == [] and report["scenarios"] == []
+
+
+def test_mutate_sets_aside_a_violation_that_takes_no_fault_and_looks_again(tmp_path, monkeypatch):
+    # Under best-effort saves TLC first finds a vote sent before its save (VotesSavedBeforeSent, four states, no
+    # crash): the experiment has nothing to inject. Without that property the same mutation finds the lost vote.
+    bundle = load_bundle("cluster-election")
+    shallow = _tlc_output("VotesSavedBeforeSent", [(a, {"msgs": "{}"}) for a in ("Init", "StartElection", "HandleRequest", "ReceiveVote")])  # fmt: skip
+    deep = (FIXTURES / "cluster-election-vote-before-save.out").read_text()
+    fake = _FakeTlc(monkeypatch, default=deep, VotesSavedBeforeSent=shallow)
+    report = translate.search_model(
+        bundle, TlaTools(jar="unused"), tlc_timeout_s=300.0, max_scenarios=50, mutate=True, compile_scenario=valkey_service().compile
+    )  # fmt: skip
+    first = report["mutations"]["model.cfg"]["PersistBeforeAck=FALSE"]
+    assert (first["status"], first["violated"], first["seconds"]) == ("violated", "OneWinnerPerEpoch", 1.0)
+    assert first["without_fault"] == [{"violated": "VotesSavedBeforeSent", "actions": ["Init", "StartElection", "HandleRequest", "ReceiveVote"]}]  # fmt: skip
+    assert first["scenarios"][0] == "spec-cluster-election-model-PersistBeforeAck-FALSE"
+    # The second run checked the config without the property set aside, and with the others.
+    checks = [tla.parse_config(text).checked for _, _, text in fake.calls[:2]]
+    assert checks[0] == ("TypeOK", "OneWinnerPerEpoch", "VoteOncePerEpoch", "VotesSavedBeforeSent", "NoVoteLostInCrash")
+    assert checks[1] == ("TypeOK", "OneWinnerPerEpoch", "VoteOncePerEpoch", "NoVoteLostInCrash")
+    # The other flips find the same deep trace: duplicates, each after the same set-aside.
+    others = [entry for label, entry in report["mutations"]["model.cfg"].items() if label != "PersistBeforeAck=FALSE"]
+    assert [(entry["status"], entry["same_as"]) for entry in others] == [
+        ("duplicate", "model-PersistBeforeAck-FALSE")
+    ] * 2
+    assert len(fake.calls) == 6 and len(report["scenarios"]) == 5
+    # When no claimed property is left to check, the mutation is no-fault without another TLC run.
+    register = load_bundle(str(_searchable(tmp_path, monkeypatch)))
+    no_crash = _tlc_output("AckedDurable", _states(("Init", 0, 0, 0, 0), ("Write", 1, 0, 0, 0), ("Ack", 1, 1, 0, 0)))
+    fake = _FakeTlc(monkeypatch, SyncBeforeAck_FALSE=no_crash)
+    report = _search(register, mutate=True)
+    entry = report["mutations"]["model.cfg"]["SyncBeforeAck=FALSE"]
+    assert entry["status"] == "no-fault" and [item["violated"] for item in entry["without_fault"]] == ["AckedDurable"]
+    assert "violated" not in entry and "scenarios" not in entry
+    # One TLC run per flip that ran (two configs, a single and a pair each): nothing was left to look for.
+    assert len(fake.calls) == 4 and [e["status"] for e in report["mutations"]["other.cfg"].values()] == ["no-fault", "skipped", "no-fault"]  # fmt: skip
+    assert report["held"] == [] and report["translations"] == []
+
+
+def test_the_search_translates_one_counterexample_per_action_sequence(tmp_path, monkeypatch):
+    # The reach path and the mutation's trace differ (Save before the Ack, or not), so both are kept; a second
+    # mutation with the mutation's trace is a duplicate of it, whatever its constants.
+    bundle = load_bundle(str(_searchable(tmp_path, monkeypatch)))
+    _FakeTlc(monkeypatch, SaveOnAck_FALSE=LOST)
+    report = _search(bundle, reach=["AckedThenCrashed"], mutate=True)
+    assert [item["counterexample"]["actions"] for item in report["translations"]] == [
+        ["Init", "Write", "Save", "Ack", "Crash"],
+        ["Init", "Write", "Ack", "Crash"],
+    ]
+    assert [item["counterexample"]["name"] for item in report["translations"]] == [
+        "model-reach-AckedThenCrashed",
+        "model-SyncBeforeAck-FALSE",
+    ]
+    statuses = {label: entry["status"] for label, entry in report["mutations"]["model.cfg"].items()}
+    assert statuses == {
+        "SaveOnAck=FALSE": "skipped",
+        "SyncBeforeAck=FALSE": "violated",
+        "SyncBeforeAck=FALSE,SaveOnAck=FALSE": "duplicate",
+    }
+    # other.cfg already sets SaveOnAck = FALSE, so TLC answers its SyncBeforeAck flip with the same lost write.
+    assert report["mutations"]["other.cfg"]["SyncBeforeAck=FALSE"]["same_as"] == "model-SyncBeforeAck-FALSE"
+    # Seeds never repeat across the search's scenarios.
+    seeds = [scenario["seed"] for item in report["translations"] for scenario in item["scenarios"]]
+    assert seeds == [1, 2, 3, 4]
+
+
+def test_each_tlc_run_of_the_search_has_its_own_time_budget(tmp_path, monkeypatch):
+    bundle = load_bundle(str(_searchable(tmp_path, monkeypatch)))
+    fake = _FakeTlc(monkeypatch, SyncBeforeAck_FALSE="timeout")
+    before = time.monotonic()
+    report = _search(bundle, mutate=True, tlc_timeout_s=7.5)
+    # Every run got the per-run budget, as a deadline from when it started.
+    assert all(
+        tools.timeout_s == 7.5 and before + 7.5 <= tools.deadline <= time.monotonic() + 7.5
+        for tools, _, _ in fake.calls
+    )
+    model = report["mutations"]["model.cfg"]
+    timed_out = model["SyncBeforeAck=FALSE"]
+    assert (
+        timed_out["status"] == "timed_out"
+        and timed_out["error"] == "TLC was stopped after 7.5s: the time limit ran out before it finished"
+    )
+    # The search went on to the other config, but the pairs did not run: the single flips were not cheap.
+    assert report["mutations"]["other.cfg"]["SyncBeforeAck=FALSE"]["status"] == "timed_out"
+    pair = model["SyncBeforeAck=FALSE,SaveOnAck=FALSE"]
+    assert (
+        pair["status"] == "not-run"
+        and pair["reason"] == "the single flips took 7.5s together, more than one run's 7.5s"
+    )
+    assert report["tlc_timeout_s"] == 7.5 and report["translations"] == [] and report["stopped"] is None
+    # The command's own limit bounds each run too, and once it has passed no run starts.
+    fake = _FakeTlc(monkeypatch)
+    tools = TlaTools(jar="unused").within(2.0)
+    report = translate.search_model(bundle, tools, tlc_timeout_s=300.0, max_scenarios=50, reach=["AckedThenCrashed"])
+    assert all(run_tools.timeout_s <= 2.0 for run_tools, _, _ in fake.calls) and report["translations"]
+    report = translate.search_model(
+        bundle, TlaTools(jar="unused").within(0.0), tlc_timeout_s=300.0, max_scenarios=50, mutate=True
+    )
+    assert report["stopped"] == "the command's time limit ran out"
+    assert {entry["status"] for entry in report["mutations"]["model.cfg"].values()} == {"skipped", "not-run"}
+
+
+def test_the_search_stops_at_its_scenario_cap(tmp_path, monkeypatch):
+    bundle = load_bundle(str(_searchable(tmp_path, monkeypatch)))
+    _FakeTlc(monkeypatch)
+    report = _search(bundle, reach=["AckedThenCrashed"], mutate=True, max_scenarios=3)
+    # The reach path takes two scenarios; the mutation has room for one, its direct translation; then nothing runs.
+    assert [len(item["scenarios"]) for item in report["translations"]] == [2, 1]
+    assert report["scenarios"] == [
+        "spec-register-model-reach-AckedThenCrashed",
+        "spec-register-model-reach-AckedThenCrashed-v1",
+        "spec-register-model-SyncBeforeAck-FALSE",
+    ]
+    assert report["stopped"] == "the scenario cap (3) was reached"
+    pair = report["mutations"]["model.cfg"]["SyncBeforeAck=FALSE,SaveOnAck=FALSE"]
+    assert pair == {
+        "status": "not-run",
+        "reason": "the scenario cap (3) was reached",
+        "flipped": {"SyncBeforeAck": "FALSE", "SaveOnAck": "FALSE"},
+    }
+    assert all(entry["status"] in ("skipped", "not-run") for entry in report["mutations"]["other.cfg"].values())
+    # A counterexample the mapping cannot express is reported, and the search goes on.
+    broken = _tlc_output("NotAckedThenCrashed", _states(("Init", 0, 0, 0, 0), ("Crash", 0, 0, 0, 1)))
+    _FakeTlc(monkeypatch, SaveOnAck_TRUE=broken)
+    report = _search(bundle, reach=["AckedThenCrashed"], mutate=True)
+    entry = report["targets"]["AckedThenCrashed"]["model.cfg"]
+    assert entry["status"] == "untranslatable" and "Crash at state 2 follows no acked step" in entry["error"]
+    assert report["targets"]["AckedThenCrashed"]["other.cfg"]["status"] == "reached"
+    assert len(report["translations"]) == 2
+
+
+def test_translate_searches_the_model_from_the_command_line(tmp_path, monkeypatch, capsys):
+    bundle = _searchable(tmp_path, monkeypatch)
+    monkeypatch.setattr(TlaTools, "locate", classmethod(lambda cls, jar, **kwargs: TlaTools(jar="unused")))
+    _FakeTlc(monkeypatch)
+    out = tmp_path / "scenarios"
+    assert (
+        _cli(
+            "translate", "register", "--reach", "all", "--mutate", "--out", out, "--variants", "1", "--tlc-timeout", "9"
+        )
+        == 0
+    )
+    printed = capsys.readouterr().out
+    assert (
+        "TLC: model.cfg reaching AckedThenCrashed" in printed and "TLC: model.cfg with SyncBeforeAck = FALSE" in printed
+    )
+    assert "[REACHED       ] AckedThenCrashed in model.cfg: 2 scenario(s)" in printed
+    assert (
+        "[DUPLICATE     ] AckedThenCrashed in other.cfg: same action sequence as model-reach-AckedThenCrashed"
+        in printed
+    )
+    assert "[SKIPPED       ] model.cfg with SaveOnAck=FALSE: these are other.cfg's constants" in printed
+    assert "4 scenario(s) from 2 counterexample(s)" in printed
+    names = sorted(path.name for path in out.iterdir())
+    assert names == [
+        "spec-register-model-SyncBeforeAck-FALSE-v1.yaml",
+        "spec-register-model-SyncBeforeAck-FALSE.yaml",
+        "spec-register-model-reach-AckedThenCrashed-v1.yaml",
+        "spec-register-model-reach-AckedThenCrashed.yaml",
+        "translation.json",
+    ]
+    header = (out / "spec-register-model-SyncBeforeAck-FALSE.yaml").read_text().splitlines()[:3]
+    assert header[1:] == [
+        "# register bundle (model.cfg: AckedDurable, 4 states).",
+        "# Found by --mutate (model.cfg with SyncBeforeAck = FALSE).",
+    ]
+    report = json.loads((out / "translation.json").read_text())
+    assert (report["kind"], report["tlc_timeout_s"], report["max_scenarios"]) == ("spec-search", 9.0, 50)
+    assert len(report["translations"]) == 2 and str(bundle) not in json.dumps(report)
+    # Known-bad: a search with a control, no source at all, a bundle without targets, and a TLC that fails.
+    assert _cli("translate", "register", "--control", "ack-before-save", "--mutate", "--out", out) == 2
+    assert "leave out --control" in capsys.readouterr().err
+    assert _cli("translate", "register", "--out", out) == 2
+    assert "one of --control, --trace, --reach, or --mutate" in capsys.readouterr().err
+    assert _cli("translate", str(BUNDLE), "--reach", "all", "--out", out) == 2
+    assert "names no targets to reach" in capsys.readouterr().err
+    _FakeTlc(monkeypatch, SyncBeforeAck_FALSE=TLC_FAILED)
+    assert _cli("translate", "register", "--mutate", "--out", out) == 2
+    assert (
+        "[ERROR         ] model.cfg with SyncBeforeAck=FALSE: Error: Parsing or semantic analysis failed."
+        in capsys.readouterr().out
+    )
+    # Translating one control is as it was: one translation, no search report.
+    _FakeTlc(monkeypatch)
+    out = tmp_path / "control"
+    assert (
+        _cli("translate", "register", "--trace", COUNTEREXAMPLE, "--config", CONTROL, "--out", out, "--variants", 1)
+        == 0
+    )
+    assert json.loads((out / "translation.json").read_text())["kind"] == "spec-translation"
+
+
+@needs_tlc
+@pytest.mark.slow
+def test_translate_searches_the_register_with_tlc(tmp_path, monkeypatch):
+    bundle = load_bundle(str(_searchable(tmp_path, monkeypatch)))
+    report = translate.search_model(
+        bundle,
+        _tools(),
+        tlc_timeout_s=120.0,
+        max_scenarios=50,
+        reach=["AckedThenCrashed"],
+        mutate=True,
+        compile_scenario=bundle_service(bundle).compile,
+    )
+    reached = report["targets"]["AckedThenCrashed"]["model.cfg"]
+    assert (reached["status"], reached["actions"]) == ("reached", ["Init", "Write", "Save", "Ack", "Crash"]), reached
+    assert report["targets"]["AckedThenCrashed"]["other.cfg"]["status"] == "duplicate"
+    lost = report["mutations"]["model.cfg"]["SyncBeforeAck=FALSE"]
+    assert (lost["status"], lost["violated"], lost["actions"]) == (
+        "violated",
+        "AckedDurable",
+        ["Init", "Write", "Ack", "Crash"],
+    ), lost
+    assert report["mutations"]["model.cfg"]["SyncBeforeAck=FALSE,SaveOnAck=FALSE"]["status"] == "duplicate"
+    assert report["mutations"]["other.cfg"]["SyncBeforeAck=FALSE"]["status"] == "duplicate"
+    assert [item["scenarios"][0]["experiment"]["inputs"] for item in report["translations"]] == [
+        {"appendonly": "yes"},
+        {"appendonly": "no"},
+    ]
+    assert len(report["scenarios"]) == 4 and report["unreachable"] == [] and report["held"] == []
+    # The election's target needs best-effort saves, which no safe config has: unreachable, in a few seconds.
+    election = translate.search_model(
+        load_bundle("cluster-election"), _tools(), tlc_timeout_s=120.0, max_scenarios=50, reach=["VoteLostInCrash"]
+    )
+    assert election["unreachable"] == ["VoteLostInCrash"] and election["translations"] == []
 
 
 # ---------------------------------------------------------------------------

@@ -19,10 +19,15 @@ from ..outcomes import EXIT_FAILURE, EXIT_HARNESS_ERROR, EXIT_SUCCESS
 from ..reports import write_document
 from ..spec.bundle import SPEC_PATH_VARIABLE, Bundle, SpecBundleError, load_bundle
 from ..spec.tla import TOOLS_HINT, TlaError, TlaTools, read_tlc_output
-from ._common import add_common_options, positive_seconds
+from ._common import add_common_options, positive_count, positive_seconds
 
 # How long one spec command may run SANY and TLC, unless --timeout says otherwise.
 DEFAULT_TIMEOUT_S = 3600.0
+# How long each TLC run of translate's model search may take, unless --tlc-timeout says otherwise: the limit a
+# batch's conform step gives TLC (conform_tlc_timeout_s).
+DEFAULT_TLC_TIMEOUT_S = 300.0
+# How many scenarios one model search writes at most, unless --max-scenarios says otherwise.
+DEFAULT_MAX_SCENARIOS = 50
 
 
 def register(subparsers: Any) -> None:
@@ -40,13 +45,47 @@ def register(subparsers: Any) -> None:
     check.add_argument("--require-approved", action="store_true", help="Fail unless the claims are approved")
     check.set_defaults(handler=check_command)
 
-    translate = tools.add_parser("translate", help="Turn a TLC counterexample into fuzzer scenarios")
+    translate = tools.add_parser(
+        "translate",
+        help="Turn TLC counterexamples into fuzzer scenarios",
+        description="Translate one counterexample (--control or --trace), or search the model for them (--reach, "
+        "--mutate): each distinct counterexample, by its action sequence, becomes a scenario and its variants.",
+    )
     add_common_options(translate)
     _bundle_options(translate)
-    source = translate.add_mutually_exclusive_group(required=True)
+    source = translate.add_mutually_exclusive_group()
     source.add_argument("--control", help="Run TLC on this negative control and translate its counterexample")
     source.add_argument("--trace", help="TLC text output holding a counterexample (needs --config)")
     translate.add_argument("--config", help="The .cfg TLC ran with --trace")
+    translate.add_argument(
+        "--reach",
+        action="append",
+        default=[],
+        metavar="TARGET",
+        help="Find a path of each safe config to this target of claims.yaml and translate it (TLC checks ~TARGET); "
+        "may be repeated, 'all' for every target",
+    )
+    translate.add_argument(
+        "--mutate",
+        action="store_true",
+        help="Run TLC on each safe config with each boolean constant flipped (and each pair, when the single flips "
+        "were cheap) and translate every violation found",
+    )
+    translate.add_argument(
+        "--tlc-timeout",
+        type=positive_seconds,
+        default=DEFAULT_TLC_TIMEOUT_S,
+        metavar="SECONDS",
+        help="How long each TLC run of --reach or --mutate may take; one that runs out is recorded and the search "
+        f"goes on (default {DEFAULT_TLC_TIMEOUT_S:g}, as a batch's conform_tlc_timeout_s)",
+    )
+    translate.add_argument(
+        "--max-scenarios",
+        type=positive_count,
+        default=DEFAULT_MAX_SCENARIOS,
+        metavar="N",
+        help=f"Stop the search once it has written this many scenarios (default {DEFAULT_MAX_SCENARIOS})",
+    )
     translate.add_argument("--variants", type=int, default=4, help="Nearby timing variants to add (default 4)")
     translate.add_argument("--seed", type=int, default=1, help="Seed of the first scenario (default 1)")
     translate.add_argument("--out", required=True, help="Directory to write the scenarios and translation.json to")
@@ -141,7 +180,21 @@ def translate_command(args: argparse.Namespace) -> int:
     from ..spec.check import run_control
     from ..spec.translate import TranslateError, bundle_service, translate_trace
 
+    searching = bool(args.reach or args.mutate)
+    if (args.control or args.trace) and searching:
+        print("Error: --reach and --mutate search the model on their own; leave out --control and --trace", file=sys.stderr)  # fmt: skip
+        return EXIT_HARNESS_ERROR
+    if not (args.control or args.trace or searching):
+        print("Error: one of --control, --trace, --reach, or --mutate is required", file=sys.stderr)
+        return EXIT_HARNESS_ERROR
     bundle = load_bundle(args.bundle)
+    try:
+        service = bundle_service(bundle, args.experiment_dirs)
+    except Exception as exc:
+        print(f"Error: the experiments do not load: {exc}", file=sys.stderr)
+        return EXIT_HARNESS_ERROR
+    if searching:
+        return _search(args, bundle, service.compile)
     if args.control:
         control = bundle.control(args.control)
         print(f"TLC: negative control {control.name} (must violate {control.violates})")
@@ -167,11 +220,6 @@ def translate_command(args: argparse.Namespace) -> int:
         print("Error: TLC produced no counterexample to translate", file=sys.stderr)
         return EXIT_HARNESS_ERROR
     try:
-        service = bundle_service(bundle, args.experiment_dirs)
-    except Exception as exc:
-        print(f"Error: the experiments do not load: {exc}", file=sys.stderr)
-        return EXIT_HARNESS_ERROR
-    try:
         translation = translate_trace(
             bundle,
             result.trace,
@@ -187,13 +235,23 @@ def translate_command(args: argparse.Namespace) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return EXIT_HARNESS_ERROR
     os.makedirs(args.out, exist_ok=True)
+    _write_translation(args.out, bundle, translation)
+    write_document(os.path.join(args.out, "translation.json"), translation)
+    _write(args, translation)
+    return EXIT_SUCCESS
+
+
+def _write_translation(out: str, bundle: Bundle, translation: Mapping[str, Any], found_by: str = "") -> None:
+    """Write one translation's scenarios to ``out`` and print them, the fault alignment, and the unmapped faults."""
+
+    counterexample = translation["counterexample"]
     for scenario in translation["scenarios"]:
-        path = os.path.join(args.out, f"{scenario['scenario_id']}.yaml")
+        path = os.path.join(out, f"{scenario['scenario_id']}.yaml")
         header = (
-            f"# Translated by `valkey-fuzzer spec translate` from the {name} counterexample of the\n"
-            f"# {bundle.protocol} bundle ({config}: {translation['counterexample']['violated']}, "
-            f"{translation['counterexample']['length']} states).\n"
-        )
+            f"# Translated by `valkey-fuzzer spec translate` from the {counterexample['name']} counterexample of the\n"
+            f"# {bundle.protocol} bundle ({counterexample['config']}: {counterexample['violated']}, "
+            f"{counterexample['length']} states).\n"
+        ) + (f"# Found by {found_by}.\n" if found_by else "")
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(header + yaml.safe_dump(scenario, sort_keys=False))
         scenario_inputs = json.dumps(scenario["experiment"]["inputs"], sort_keys=True)
@@ -207,9 +265,90 @@ def translate_command(args: argparse.Namespace) -> int:
         )
     for action, why in translation["unmapped"].items():
         print(f"{action}: not injected by the scenario; {why}")
-    write_document(os.path.join(args.out, "translation.json"), translation)
-    _write(args, translation)
-    return EXIT_SUCCESS
+
+
+def _found_by(source: Mapping[str, Any]) -> str:
+    """How the search found a counterexample, for a scenario's header and the console."""
+
+    if source["kind"] == "reach":
+        return f"--reach {source['target']} ({source['config']})"
+    flips = " and ".join(f"{name} = {value}" for name, value in source["flipped"].items())
+    return f"--mutate ({source['config']} with {flips})"
+
+
+def _search(args: argparse.Namespace, bundle: Bundle, compile_scenario: Any) -> int:
+    """``translate --reach``/``--mutate``: search the model, write every scenario, and report the search."""
+
+    from ..spec.translate import TranslateError, search_model
+
+    try:
+        tools = _tools(args)
+    except TlaError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_HARNESS_ERROR
+    reach = args.reach
+    if "all" in reach:
+        reach = [item.name for item in bundle.claims.targets]
+        if not reach and not args.mutate:
+            print(f"Error: {bundle.protocol}'s claims.yaml names no targets to reach", file=sys.stderr)
+            return EXIT_HARNESS_ERROR
+        if not reach:
+            print(f"{bundle.protocol}'s claims.yaml names no targets to reach; mutating only")
+    try:
+        report = search_model(
+            bundle,
+            tools,
+            tlc_timeout_s=args.tlc_timeout,
+            max_scenarios=args.max_scenarios,
+            reach=reach,
+            mutate=args.mutate,
+            variants=args.variants,
+            seed=args.seed,
+            compile_scenario=compile_scenario,
+            progress=print,
+        )
+    except (TranslateError, SpecBundleError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_HARNESS_ERROR
+    os.makedirs(args.out, exist_ok=True)
+    for translation in report["translations"]:
+        print(f"\n{translation['counterexample']['name']}: found by {_found_by(translation['source'])}")
+        _write_translation(args.out, bundle, translation, _found_by(translation["source"]))
+    entries = [
+        (f"{target} in {config}", entry)
+        for target, per_config in report["targets"].items()
+        for config, entry in per_config.items()
+    ] + [
+        (f"{config} with {label}", entry)
+        for config, per_config in report["mutations"].items()
+        for label, entry in per_config.items()
+    ]
+    print()
+    for what, entry in entries:
+        detail = entry.get("error") or entry.get("reason") or ""
+        set_aside = ", ".join(item["violated"] for item in entry.get("without_fault") or [])
+        if entry["status"] == "duplicate":
+            detail = f"same action sequence as {entry['same_as']}"
+        elif entry.get("scenarios"):
+            detail = f"{len(entry['scenarios'])} scenario(s)" + (
+                f", after setting aside {set_aside}" if set_aside else ""
+            )
+        elif entry["status"] == "held":
+            detail = "every check held"
+        elif entry["status"] == "no-fault" and set_aside:
+            detail = f"every violation found takes no mapped fault: {set_aside}"
+        print(f"[{entry['status'].upper():<14}] {what}" + (f": {detail}" if detail else ""))
+    if report["unreachable"]:
+        print(f"Unreachable in every safe config: {', '.join(report['unreachable'])}")
+    if report["held"]:
+        print(f"Mutations under which every check held: {', '.join(report['held'])}")
+    if report["stopped"]:
+        print(f"Search stopped: {report['stopped']}")
+    print(f"\n{len(report['scenarios'])} scenario(s) from {len(report['translations'])} counterexample(s)")
+    write_document(os.path.join(args.out, "translation.json"), report)
+    _write(args, report)
+    failed = any(entry["status"] == "error" for _, entry in entries)
+    return EXIT_HARNESS_ERROR if failed else EXIT_SUCCESS
 
 
 def conform_command(args: argparse.Namespace) -> int:
