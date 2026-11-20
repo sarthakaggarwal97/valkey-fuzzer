@@ -8,16 +8,16 @@ Components only talk to the generic run context
 import re
 import time
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import valkey
 
 from valkey_fuzzer._data import jsonable
-from valkey_fuzzer.deployment.local.queries import parse_replication
+from valkey_fuzzer.deployment.local.queries import close_quietly, parse_replication
 from valkey_fuzzer.plan import InstanceSelector
 from valkey_fuzzer.schema import ConfigError
 
-from .polling import poll_until, remaining
+from .polling import poll_each, poll_until, remaining
 
 DEPLOYMENT_SERVICE = "valkey.deployment"
 
@@ -97,6 +97,45 @@ def instance_at(handle: Any, host: Any, port: Any) -> Optional[str]:
         ),
         None,
     )
+
+
+def running_instances(handle: Any, ids: Optional[Iterable[str]] = None) -> list[str]:
+    """The instances of ``ids`` (every planned one by default) whose process runs: all a client can read;
+    ``valkey.oracle.liveness`` judges the others."""
+
+    if ids is None:
+        ids = [instance.instance_id for instance in handle.instances]
+    return [instance_id for instance_id in ids if handle.is_alive(instance_id)]
+
+
+def shard_primary(handle: Any, shard: int, roles: Mapping[str, str]) -> Optional[str]:
+    """The live primary among the instances planned in ``shard``, by ``roles`` (``handle.roles()``), or None."""
+
+    return next(
+        (
+            instance.instance_id
+            for instance in handle.instances
+            if instance.shard_id == shard and roles.get(instance.instance_id) == "primary"
+        ),
+        None,
+    )
+
+
+def read_each(
+    context: Any, handle: Any, read: Callable[[Any], Any], *, timeout_s: float
+) -> dict[str, tuple[bool, Any]]:
+    """``read(client)`` on a new client of each running instance, retried within one ``timeout_s``
+    (:func:`~.polling.poll_each`): ``{instance_id: (True, value)}``, or ``(False, "<error>")`` for one that never
+    answered."""
+
+    def check(instance_id: str) -> tuple[bool, Any]:
+        with handle.new_client(instance_id, timeout=5.0) as client:
+            try:
+                return True, read(client)
+            except Exception as exc:
+                return False, f"{type(exc).__name__}: {exc}"
+
+    return poll_each(context, running_instances(handle), check, timeout_s=timeout_s)
 
 
 def replication_info(handle: Any, instance_id: str, timeout: float) -> Optional[dict[str, Any]]:
@@ -247,17 +286,6 @@ def unreachable_instances(handle: Any, stopped: Iterable[str] = ()) -> list[str]
         for instance in handle.instances
         if instance.instance_id not in roles and instance.instance_id not in skip
     ]
-
-
-def close_quietly(*clients: Any) -> None:
-    """Close every client that is not None; a connection that is already gone is not an error."""
-
-    for client in clients:
-        if client is not None:
-            try:
-                client.close()
-            except Exception:
-                pass
 
 
 def _connect(client: Any) -> None:

@@ -17,7 +17,6 @@ import math
 import random
 import struct
 from collections.abc import Sequence
-from itertools import islice
 from typing import Any, Optional
 
 import valkey
@@ -28,6 +27,7 @@ from valkey_fuzzer.results import ComponentStatus, Evidence, make_evidence, make
 from valkey_fuzzer.schema import ConfigField
 
 from .instances import deployment, stopped_on_purpose, unreachable_instances
+from .keyspace import batches
 from .polling import poll_each
 from .registration import component_registration
 from .schemas import INTEGER, MAPPING, TEXT, declared, mapping_of
@@ -532,7 +532,7 @@ class SearchResultsOracle:
             hashes = {}
             keys = client.scan_iter(match=prefix.encode() + b"*", count=1000)
             # One HGETALL pipeline per batch of up to 1000 keys, not one round trip per hash.
-            while batch := list(islice(keys, 1000)):
+            for batch in batches(keys, 1000):
                 with client.pipeline(transaction=False) as pipe:
                     for key in batch:
                         pipe.hgetall(key)

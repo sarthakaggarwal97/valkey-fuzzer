@@ -20,20 +20,14 @@ from . import checks
 from .command_table import EVIDENCE as COMMAND_TABLE
 from .config_space import CHURN_EVIDENCE
 from .faults import FAULT_INJECTED
-from .instances import EXPECTED_DOWN, deployment, instance_at, is_cluster
+from .instances import EXPECTED_DOWN, deployment, instance_at, is_cluster, read_each, running_instances
 from .ledger import FAILOVER_RESULT
-from .polling import poll_each, remaining
+from .polling import remaining
 from .registration import component_registration
 from .schemas import MAPPING, declared, mapping_of
 
 # How long an oracle retries reading a running instance's INFO; valkey.oracle.liveness judges one that never answers.
 _READ_TIMEOUT_S = 30.0
-
-
-def _running(handle: Any) -> list[str]:
-    """The running instances, which is all an INFO oracle can read; valkey.oracle.liveness judges the others."""
-
-    return [instance.instance_id for instance in handle.instances if handle.is_alive(instance.instance_id)]
 
 
 # ---------------------------------------------------------------------------
@@ -220,14 +214,7 @@ class ErrorCountersOracle:
     def evaluate(self, context: Any, spec: ComponentSpec, evidence: Sequence[Evidence]):
         handle = deployment(context)
 
-        def read(instance_id: str) -> tuple[bool, Any]:
-            with handle.new_client(instance_id, timeout=5.0) as client:
-                try:
-                    return True, client.info("everything")
-                except Exception as exc:
-                    return False, f"{type(exc).__name__}: {exc}"
-
-        polled = poll_each(context, _running(handle), read, timeout_s=_READ_TIMEOUT_S)
+        polled = read_each(context, handle, lambda client: client.info("everything"), timeout_s=_READ_TIMEOUT_S)
         causes = scenario_causes(context, evidence)
         shards = [instance.shard_id for instance in handle.instances if instance.role == "replica"]
         instances: dict[str, Any] = {}
@@ -381,7 +368,7 @@ class QuietEndOracle:
     def evaluate(self, context: Any, spec: ComponentSpec, evidence: Sequence[Evidence]):
         config = spec.config
         handle = deployment(context)
-        ids = _running(handle)
+        ids = running_instances(handle)
         cluster = is_cluster(handle)
         threads = {instance_id: _spinning_threads(context.plan, instance_id) for instance_id in ids}
         deadline = time.monotonic() + remaining(context, config["timeout_s"])

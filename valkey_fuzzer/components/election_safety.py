@@ -34,7 +34,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from valkey_fuzzer.declarations import Declarations
-from valkey_fuzzer.deployment.local.cluster_nodes import split_slots
+from valkey_fuzzer.deployment.local.cluster_nodes import merge_slot_ranges, split_slots
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.results import ComponentStatus, Evidence, evidence_of, make_evidence, make_result
 from valkey_fuzzer.schema import ConfigError, ConfigField, plain_config
@@ -264,16 +264,13 @@ def split_primaries(views: Mapping[str, Mapping[str, Any]]) -> list[dict[str, An
     split = split_slots({instance_id: view["nodes"] for instance_id, view in views.items()})
     for slot, primaries in sorted(split.items()):
         slots_of.setdefault(tuple(sorted(primaries)), []).append(slot)
-    found = []
-    for primaries, slots in sorted(slots_of.items()):
-        ranges: list[list[int]] = []
-        for slot in slots:
-            if ranges and ranges[-1][1] == slot - 1:
-                ranges[-1][1] = slot
-            else:
-                ranges.append([slot, slot])
-        found.append({"primaries": list(primaries), "slots": ranges})
-    return found
+    return [
+        {
+            "primaries": list(primaries),
+            "slots": [list(span) for span in merge_slot_ranges((slot, slot) for slot in slots)],
+        }
+        for primaries, slots in sorted(slots_of.items())
+    ]
 
 
 def trace_collisions(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:

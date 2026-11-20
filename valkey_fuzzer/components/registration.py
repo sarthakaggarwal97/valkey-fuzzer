@@ -1,6 +1,7 @@
 """How a component registers: its config, the selector and trigger checks it gets, and spec-bundle pinning."""
 
 import functools
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Callable, Optional
 
@@ -106,6 +107,15 @@ def _check_trigger(check: Optional[Check], config: Mapping[str, Any], spec: Comp
 def validate_command(command: Any, name: str = "command") -> None:
     if not command or not all(isinstance(item, (str, int, float)) and not isinstance(item, bool) for item in command):
         raise ConfigError(f"{name} must be a non-empty list of strings or numbers")
+
+
+def validate_regex(pattern: str, where: str) -> Any:
+    """``pattern`` compiled; one that is not a regular expression is a config error at ``where``."""
+
+    try:
+        return re.compile(pattern)
+    except re.error as exc:
+        raise ConfigError(f"{where} is not a valid regex: {exc}") from exc
 
 
 def spec_mapping(name: str) -> Any:

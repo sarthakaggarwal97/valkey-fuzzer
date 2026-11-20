@@ -20,7 +20,7 @@ from typing import Any, Optional
 import valkey
 
 from valkey_fuzzer.declarations import Declarations
-from valkey_fuzzer.deployment.local.queries import parse_cluster_info
+from valkey_fuzzer.deployment.local.queries import close_quietly, parse_info_text
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.protocols import component_artifact_dir
 from valkey_fuzzer.reports import FORMAT_VERSION
@@ -30,7 +30,7 @@ from valkey_fuzzer.spec.bundle import TRACE_FILE, SampleSpec
 
 from .cluster import parse_cluster_view, read_view
 from .files import nodes_conf_path, read_cluster_vars, write_jsonl
-from .instances import close_quietly, deployment, select_instances
+from .instances import deployment, select_instances
 from .polling import StoppableThread
 from .registration import SPEC_SHA256_FIELD, component_registration, pinned_spec_mapping
 from .schemas import INTEGER, TEXT, declared, mapping_of
@@ -271,7 +271,7 @@ class TraceObserver:
                     record.update(view)
                 for command, reply in zip(commands, replies):
                     if command[0] == "INFO":
-                        record.setdefault("info", {}).update(parse_cluster_info(reply))
+                        record.setdefault("info", {}).update(parse_info_text(reply))
                     elif command[1] == "DIGEST":
                         record["digest"] = reply
                     elif command[1] == "DIGEST-VALUE":

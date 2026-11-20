@@ -27,6 +27,7 @@ from tests.deployment_support import (
 from tests.support import VirtualClock
 from valkey_fuzzer import deadlines
 from valkey_fuzzer.commands.run import cleanup_logs
+from valkey_fuzzer.components.capabilities import resolve_binary
 from valkey_fuzzer.components.server import PrivateServer
 from valkey_fuzzer.deadlines import WaitInterruptedError
 from valkey_fuzzer.deployment.local import cluster_nodes, processes
@@ -35,7 +36,7 @@ from valkey_fuzzer.deployment.local.models import DeploymentMode, LocalDeploymen
 from valkey_fuzzer.deployment.local.planner import plan_deployment
 from valkey_fuzzer.deployment.local.ports import PortUnavailableError
 from valkey_fuzzer.deployment.local.processes import VALKEY_SOURCE_SHA, InstanceIdentityError, installed_valkey_binary
-from valkey_fuzzer.deployment.local.queries import valkey_client
+from valkey_fuzzer.deployment.local.queries import parse_info_text, valkey_client
 from valkey_fuzzer.deployment.local.server_config import DEFAULT_MAXMEMORY, arguments_for_build
 
 
@@ -195,11 +196,25 @@ def test_components_find_valkey_server_and_read_slot_ranges_as_the_deployment_do
     assert processes.cached_valkey_binary(VALKEY_SOURCE_SHA) == str(built)
     with patch(f"{PROCESSES}.shutil.which", return_value=None):
         assert installed_valkey_binary() is None
+        with pytest.raises(FileNotFoundError, match="not on PATH"):
+            resolve_binary("")
         built.parent.mkdir(parents=True)
         built.write_text("#!/bin/sh\n")
         assert installed_valkey_binary() == str(built), "the source build the deployment falls back to"
+        assert resolve_binary("") == str(built), "a capability probe of the default binary finds the same build"
     assert cluster_nodes.parse_slot_ranges(["0-5", "7", "[8->-abc]"]) == [(0, 5), (7, 7)]
     assert cluster_nodes.parse_slots_in_flight(["0-5", "[8->-abc]", "[9-<-def]", "[x->-abc]"]) == {8, 9}
+
+
+def test_the_one_info_parser_reads_a_value_with_a_space_whole():
+    text = "# Server\r\nexecutable:/opt/valkey server/valkey-server\r\nrole:master\r\n\r\n"
+    fields = {"executable": "/opt/valkey server/valkey-server", "role": "master"}
+    assert parse_info_text(text) == fields
+    assert parse_info_text(text.encode()) == fields and parse_info_text("") == {}
+    assert parse_info_text({"cluster_state": "ok", "cluster_known_nodes": 6}) == {
+        "cluster_state": "ok",
+        "cluster_known_nodes": "6",
+    }
 
 
 def test_slot_ranges_merge_overlap_and_format_as_cluster_nodes_shows_them():

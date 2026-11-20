@@ -25,6 +25,7 @@ from valkey.crc import key_slot
 from valkey_fuzzer.declarations import Declarations
 from valkey_fuzzer.deployment.local.cluster_nodes import parse_cluster_nodes, parse_slots_in_flight
 from valkey_fuzzer.deployment.local.queries import parse_replication, response_text
+from valkey_fuzzer.deployment.local.server_config import build_server_config_arguments
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.protocols import component_artifact_dir
 from valkey_fuzzer.results import ComponentStatus, Evidence, evidence_of, make_evidence, make_result
@@ -37,9 +38,9 @@ from .ledger import LedgerModel, load_ledger, target_slot_ranges
 from .observers import read_log
 from .oracles import CRASH_PATTERNS
 from .polling import poll_each, poll_until, read_retrying
-from .registration import component_registration
+from .registration import component_registration, validate_regex
 from .schemas import INTEGER, LIST, MAPPING, TEXT, declared, mapping_of
-from .server import PrivateServer, server_arguments
+from .server import PrivateServer
 from .workloads import is_stable_key, list_digest
 
 
@@ -135,10 +136,7 @@ def _validate_rdb(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -> Non
     if config["refused_log"] is not None:
         if config["expect"] != "refused":
             raise ConfigError("refused_log applies only with expect: refused")
-        try:
-            re.compile(config["refused_log"])
-        except re.error as exc:
-            raise ConfigError(f"refused_log is not a valid regex: {exc}") from exc
+        validate_regex(config["refused_log"], "refused_log")
 
 
 class RdbLoadTimeoutError(Exception):
@@ -366,7 +364,7 @@ class RdbSnapshotOracle:
             binary = config["load_binary"] or handle.binary(instance_id)
             # The saving instance's modules, unless load_config loads its own.
             load_config = {**instance_modules(context, instance_id), **config["load_config"]}
-            load_options = {"arguments": server_arguments(load_config)} if load_config else {}
+            load_options = {"arguments": build_server_config_arguments(load_config)} if load_config else {}
             try:
                 content, error = load_rdb(
                     context, spec, binary, result["rdb_artifact"], config["timeout_s"], **load_options
@@ -489,7 +487,9 @@ def serialization_problem(
 
     bodies = []
     for _ in range(2):
-        server = PrivateServer(binary, server_arguments(server_config), timeout_s=_PROBE_START_TIMEOUT_S, prefix="vfd-")
+        server = PrivateServer(
+            binary, build_server_config_arguments(server_config), timeout_s=_PROBE_START_TIMEOUT_S, prefix="vfd-"
+        )
         owned = context.obligations.open(spec, "process.private-server", server.workdir, server.stop)
         try:
             exit_output = server.start(context)

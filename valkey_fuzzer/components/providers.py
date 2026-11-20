@@ -37,13 +37,11 @@ from collections.abc import Mapping
 from typing import Any, Optional
 
 from valkey_fuzzer._data import file_sha256
-from valkey_fuzzer.deployment.local.processes import resolve_binary_path
+from valkey_fuzzer.deployment.local.processes import parse_version_output, resolve_binary_path, version_output
 from valkey_fuzzer.environment import EnvironmentProviderRegistration, EnvironmentResult, SupportDecision
 from valkey_fuzzer.hoststate import mount_parent, release_mount_parent, run_bounded, tag_directory, untag_directory
 from valkey_fuzzer.references import EnvironmentKind
 from valkey_fuzzer.schema import ConfigError, ConfigField, ConfigSchema
-
-from .server import parse_version_output, version_output
 
 LOCAL_BINARY_PROVIDER = "valkey.artifact.local-binary"
 LOCAL_MODULE_PROVIDER = "valkey.artifact.local-module"
@@ -61,12 +59,6 @@ _BINARY_CONFIG = ConfigSchema(
         "expected_sha": ConfigField(str, allow_none=True, default=None),
     }
 )
-
-
-def resolve_binary(path: str) -> str:
-    """Return an absolute executable path for a binary path or command name, as the deployment finds it."""
-
-    return resolve_binary_path(path, "valkey-server binary")
 
 
 def describe_binary(path: str) -> dict[str, Any]:
@@ -92,7 +84,7 @@ class LocalBinaryProvider:
         return SupportDecision.allow()
 
     def acquire(self, context: Any, spec: Any, resolved_config: Mapping[str, Any]) -> EnvironmentResult:
-        path = resolve_binary(resolved_config["path"])
+        path = resolve_binary_path(resolved_config["path"], "valkey-server binary")
         record = describe_binary(path)
         expected_version = resolved_config["expected_version"]
         if expected_version and record["version"] != expected_version:

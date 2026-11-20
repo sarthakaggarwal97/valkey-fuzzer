@@ -19,11 +19,12 @@ from typing import Any, Optional
 
 from valkey_fuzzer.clock import now
 from valkey_fuzzer.deployment.local import clock_faults
+from valkey_fuzzer.deployment.local.queries import close_quietly
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.schema import ConfigError, ConfigField, plain_config
 
 from .faults import EVENT_TARGET, RELEASED_EVENT, RELEASED_FIELDS, HeldFault, fault_declares
-from .instances import close_quietly, deployment
+from .instances import deployment
 from .registration import component_registration
 from .schemas import NUMBER, TEXT, nullable, optional
 

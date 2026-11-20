@@ -20,6 +20,7 @@ from typing import Any, Optional
 
 from valkey_fuzzer.clock import now
 from valkey_fuzzer.declarations import Declarations
+from valkey_fuzzer.deployment.local.queries import close_quietly
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.protocols import component_artifact_dir
 from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
@@ -27,10 +28,10 @@ from valkey_fuzzer.schema import ConfigError, ConfigField, ConfigSchema, plain_c
 from valkey_fuzzer.spec.bundle import LOGGED_BY
 
 from .files import log_line_time, logged_by_child, write_jsonl
-from .instances import close_quietly, deployment, select_instances
+from .instances import deployment, select_instances
 from .polling import StoppableThread
 from .predicates import PREDICATE_FIELDS, compare, validate_predicate
-from .registration import SPEC_SHA256_FIELD, component_registration, pinned_spec_mapping
+from .registration import SPEC_SHA256_FIELD, component_registration, pinned_spec_mapping, validate_regex
 from .schemas import ANY, INTEGER, MAPPING, NUMBER, TEXT, declared, mapping_of, optional
 
 # ---------------------------------------------------------------------------
@@ -87,13 +88,6 @@ def field_values(fields: dict[str, Any], path: str) -> list[Any]:
 def _namespaced(evidence_id: str, where: str) -> None:
     if "." not in evidence_id:
         raise ConfigError(f"{where}.evidence_id must be namespaced, such as tests.saved; got {evidence_id!r}")
-
-
-def _regex(pattern: str, where: str) -> Any:
-    try:
-        return re.compile(pattern)
-    except re.error as exc:
-        raise ConfigError(f"{where} is not a valid regex: {exc}") from exc
 
 
 def _validate_info(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -> None:
@@ -376,7 +370,7 @@ _LOG_FIELDS = {
 def _validate_log(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -> None:
     for group in ("expect", "forbidden"):
         for index, rule in enumerate(config[group]):
-            _regex(rule["pattern"], f"{group}[{index}].pattern")
+            validate_regex(rule["pattern"], f"{group}[{index}].pattern")
             if group == "expect":
                 _namespaced(rule["evidence_id"], f"{group}[{index}]")
 
@@ -591,7 +585,7 @@ def _validate_log_trigger(config: dict, spec: ComponentSpec, plan: ExecutionPlan
     rules, _ = spec_rules(config)
     for index, rule in enumerate(rules):
         where = f"rules[{index}]"
-        compiled = _regex(rule["pattern"], f"{where}.pattern")
+        compiled = validate_regex(rule["pattern"], f"{where}.pattern")
         if set(compiled.groupindex) & _RESERVED_GROUPS:
             raise ConfigError(f"{where}.pattern must not define the reserved groups {sorted(_RESERVED_GROUPS)}")
         if not _EVENT_NAME.fullmatch(rule["publish"]):

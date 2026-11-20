@@ -22,12 +22,13 @@ from valkey.cluster import key_slot
 from valkey_fuzzer._data import jsonable
 from valkey_fuzzer.clock import now
 from valkey_fuzzer.declarations import Declarations
+from valkey_fuzzer.deployment.local.queries import close_quietly
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
 from valkey_fuzzer.schema import ConfigField, ConfigSchema
 
 from .cluster import read_view
-from .instances import check_shard, close_quietly, deployment, send_command, send_to
+from .instances import check_shard, deployment, send_command, send_to, shard_primary
 from .polling import poll_until
 from .registration import component_registration
 from .schemas import ANY, FLAG, INTEGER, NUMBER, TEXT, declared, mapping_of, nullable
@@ -77,7 +78,7 @@ def read_jobs(
 
     A follow reads both endpoints every few milliseconds, so each keeps one
     client for as long as it is followed; the caller closes them
-    (:func:`.instances.close_quietly` on ``clients.values()``). A client whose
+    (:func:`~valkey_fuzzer.deployment.local.queries.close_quietly` on ``clients.values()``). A client whose
     connection failed or was lost is closed and dropped, so the next read opens
     a new one: the instance may have been killed and restarted meanwhile.
     """
@@ -103,19 +104,6 @@ def hash_tag(key: str) -> str:
     start = key.find("{")
     end = key.find("}", start + 1)
     return key[start + 1 : end] if start >= 0 and end > start + 1 else key
-
-
-def _primary_of(handle: Any, shard: int, roles: Mapping[str, str]) -> Optional[str]:
-    """The live primary among the instances planned in ``shard``, or None."""
-
-    return next(
-        (
-            item.instance_id
-            for item in handle.instances
-            if item.shard_id == shard and roles.get(item.instance_id) == "primary"
-        ),
-        None,
-    )
 
 
 def _owner(handle: Any, view: Mapping[str, Any], slot: int) -> tuple[Optional[str], Optional[str]]:
@@ -144,7 +132,7 @@ def migration_endpoints(handle: Any, key: str, shard: Optional[int]) -> dict[str
     if shard is None:
         # Any primary's view names the owner; the owner's own view, when it answers, is read for the owner too.
         shards = sorted({item.shard_id for item in handle.instances})
-        for candidate in (_primary_of(handle, item, roles) for item in shards):
+        for candidate in (shard_primary(handle, item, roles) for item in shards):
             view = read_view(handle, candidate) if candidate is not None else None
             if view is not None:
                 break
@@ -155,7 +143,7 @@ def migration_endpoints(handle: Any, key: str, shard: Optional[int]) -> dict[str
             raise LookupError(f"no instance owns slot {slot} (the slot of {key}) in {candidate}'s view")
         planned = handle.instance(source).shard_id
         shard = shards[(shards.index(planned) + 1) % len(shards)]
-    target = _primary_of(handle, shard, roles)
+    target = shard_primary(handle, shard, roles)
     # The target's own view names the slot's owner; the deployment names the instance with that node ID.
     view = read_view(handle, target) if target is not None else None
     if target is None or view is None or view["role"] != "primary":

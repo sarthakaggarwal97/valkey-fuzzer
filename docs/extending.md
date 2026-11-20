@@ -400,7 +400,7 @@ they read it the way the deployment does. In
 `(start, end)` ranges, migration markers skipped), `split_slots(views)` (each node's parsed
 `CLUSTER NODES` in, the slots two primaries serve at once out, with their
 node IDs: a split brain as the state check judges it). In
-`valkey_fuzzer.deployment.local.queries`: `parse_cluster_info(reply)`,
+`valkey_fuzzer.deployment.local.queries`: `parse_info_text(reply)` (an `INFO` or `CLUSTER INFO` reply's `name:value` lines as a mapping),
 `parse_replication(info)` (an `INFO replication` reply as a record: `role`,
 `primary_host`, `primary_port`, `link_up`, `sync_in_progress`,
 `last_io_seconds_ago`, `replica_offset`, `offset`, `connected_replicas`,

@@ -23,11 +23,12 @@ from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
 from valkey_fuzzer.schema import BASE64_KEY, ConfigError, ConfigField, plain_config
 
 from .capabilities import resolve_binary
-from .command_sequence import PRIVATE_SERVER_DEFAULTS, free_ports, is_binary, port_block, text
+from .command_sequence import PRIVATE_SERVER_DEFAULTS, free_ports, is_binary, port_block
 from .command_sequence import Side as _ServerSide
+from .keyspace import exact
 from .oracles import CRASH_PATTERNS, crash_cause
 from .predicates import PREDICATE_FIELDS, compare, validate_predicate
-from .registration import component_registration
+from .registration import component_registration, validate_regex
 from .schemas import FLAG, INTEGER, TEXT, declared, mapping_of, optional
 
 TOOLS = ("valkey-cli", "valkey-benchmark", "valkey-check-rdb", "valkey-check-aof")
@@ -101,10 +102,7 @@ def _validate_tools(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -> N
         if not (isinstance(content, str) or is_binary(content)):
             raise ConfigError(f"files.{name} must be text or a !!binary value")
     for index, pattern in enumerate(config["ignore"]):
-        try:
-            re.compile(pattern)
-        except re.error as exc:
-            raise ConfigError(f"ignore[{index}] is not a regular expression: {exc}") from exc
+        validate_regex(pattern, f"ignore[{index}]")
     if not config["runs"]:
         raise ConfigError("runs must list at least one run")
     for index, run in enumerate(config["runs"]):
@@ -224,7 +222,7 @@ class _Side:
                     pattern = rf"\b(?:{re.escape(node.id)}\b|{re.escape(node.id[:8])}\.\.\.)"
                     data = re.sub(pattern.encode(), f"<node.{index}.id>".encode(), data)
             streams.append(data)
-        record["stdout"], record["stderr"] = text(streams[0]), text(streams[1])
+        record["stdout"], record["stderr"] = exact(streams[0]), exact(streams[1])
         self.runs.append(record)
         self.output.append((streams[0], streams[1]))
         lines = [line for data in streams for line in data.decode("utf-8", "replace").splitlines()]
@@ -250,7 +248,7 @@ def _compared(side: _Side, index: int, mode: str, ignore: Sequence["re.Pattern[b
             data = pattern.sub(b"", data)
         if mode == "unordered":
             data = b"\n".join(sorted(data.splitlines()))
-        compared[name] = text(data)
+        compared[name] = exact(data)
     return compared
 
 

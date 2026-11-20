@@ -41,11 +41,12 @@ from typing import Any, Optional
 from valkey.cluster import key_slot
 
 from valkey_fuzzer.clock import now
+from valkey_fuzzer.deployment.local.queries import close_quietly
 from valkey_fuzzer.hoststate import chain_name
 from valkey_fuzzer.schema import ConfigField, ConfigSchema, plain_config
 
 from .cluster_chaos import ClusterWaves
-from .instances import close_quietly, send_to
+from .instances import send_to
 from .network import instance_addresses, partition
 from .replication_chaos import excusing_operations
 from .schemas import INTEGER, LIST, MAPPING, TEXT, nullable

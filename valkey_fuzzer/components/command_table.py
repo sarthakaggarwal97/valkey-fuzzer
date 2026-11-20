@@ -148,6 +148,13 @@ def _arguments(doc: Mapping[str, Any]) -> list[dict[str, Any]]:
     return arguments
 
 
+def command_entries(info: Sequence[Any]) -> Iterator[Sequence[Any]]:
+    """The commands of a ``COMMAND`` reply (RESP2), last first, a container's subcommands (``entry[9]``) in its place."""
+
+    for entry in reversed(info):
+        yield from command_entries(entry[9]) if len(entry) > 9 and entry[9] else (entry,)
+
+
 def read_command_table(info: Sequence[Any], docs: Sequence[Any]) -> tuple[list[tuple[str, str, list]], list[str]]:
     """The commands to send, as ``(name, group, arguments)`` sorted by name, and the names of those skipped, from
     the replies to ``COMMAND`` and ``COMMAND DOCS`` (RESP2). A name is upper case, a subcommand's after its
@@ -160,12 +167,7 @@ def read_command_table(info: Sequence[Any], docs: Sequence[Any]) -> tuple[list[t
         for subname, subflat in pairs(doc.get("subcommands") or ()).items():
             documented[subname] = pairs(subflat)
     table, skipped = [], []
-    entries = list(info)
-    while entries:
-        entry = entries.pop()
-        if len(entry) > 9 and entry[9]:
-            entries.extend(entry[9])
-            continue
+    for entry in command_entries(info):
         name = entry[0].upper().replace("|", " ")
         if ("admin" in entry[2] and name not in ADMIN_READS) or name in EXCLUDED:
             skipped.append(name)

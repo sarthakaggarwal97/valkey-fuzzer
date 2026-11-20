@@ -109,7 +109,9 @@ def canonical_value(client: Any, key: Any) -> Optional[list]:
     return _canonical(kind, _read(client, kind, key))
 
 
-def _batches(items: Iterable[Any], size: int) -> Iterator[list]:
+def batches(items: Iterable[Any], size: int) -> Iterator[list]:
+    """``items`` in lists of up to ``size``, the last one shorter."""
+
     iterator = iter(items)
     while batch := list(islice(iterator, size)):
         yield batch
@@ -131,7 +133,7 @@ def keyspace_snapshot(client: Any, match: Optional[str] = None, count: int = 100
             if value is not None:
                 snapshot[_key(key)] = value
         return snapshot
-    for batch in _batches(keys, count):
+    for batch in batches(keys, count):
         with client.pipeline(transaction=False) as pipe:
             for key in batch:
                 pipe.type(key)

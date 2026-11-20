@@ -41,7 +41,6 @@ an undecided one makes it ERROR (or SKIP_UNSUPPORTED).
 
 import os
 import re
-import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -50,6 +49,7 @@ from typing import Any, Optional
 
 from .catalog import Catalog
 from .compiler import with_valkey_binary
+from .deployment.local.processes import parse_version_output, version_output
 from .documents import merge
 from .schema import ConfigError, ConfigField, ConfigSchema, load_yaml_mapping
 
@@ -74,7 +74,6 @@ _CASE = ConfigSchema(
     }
 )
 _CASE_ID = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
-_VERSION_SHA = re.compile(r"\bsha=([0-9a-f]+):")
 
 
 class ZooError(ValueError):
@@ -222,9 +221,9 @@ def binary(builds: Path, case: Optional[ZooCase] = None) -> str:
 def check_build(path: str, commit: str) -> None:
     """Refuse a build whose ``valkey-server --version`` names another commit than the pinned one."""
 
-    version = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=30).stdout
-    match = _VERSION_SHA.search(version)
-    if not match or not commit.startswith(match.group(1)):
+    version = version_output(path)
+    sha = parse_version_output(version)["git_sha"]
+    if sha is None or not commit.startswith(sha):
         raise ZooError(f"{path} is not built from the pinned commit {commit[:12]}: {version.strip()!r}")
 
 

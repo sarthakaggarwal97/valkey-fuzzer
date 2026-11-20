@@ -34,7 +34,6 @@ own, or no per-instance loopback addresses.
 
 import contextlib
 import functools
-import os
 import platform
 import shutil
 import socket
@@ -48,7 +47,8 @@ from valkey_fuzzer import cgroups
 from valkey_fuzzer.declarations import Declarations
 from valkey_fuzzer.deployment.local import clock_faults
 from valkey_fuzzer.deployment.local.models import LocalDeploymentError
-from valkey_fuzzer.deployment.local.processes import VALKEY_SOURCE_SHA, cached_valkey_binary
+from valkey_fuzzer.deployment.local.processes import installed_valkey_binary, resolve_binary_path
+from valkey_fuzzer.deployment.local.server_config import build_server_config_arguments
 from valkey_fuzzer.hoststate import run_iptables, run_tc
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
@@ -58,7 +58,7 @@ from . import providers
 from .oracles import CRASH_PATTERNS, crash_cause, crash_reports
 from .registration import component_registration
 from .schemas import ANY, LIST, TEXT, declared, mapping_of
-from .server import PrivateServer, server_arguments, server_identity, version_tuple
+from .server import PrivateServer, server_identity, version_tuple
 
 _UNSUPPORTED_PATTERNS = (
     "Bad directive or wrong number of arguments",
@@ -180,23 +180,20 @@ def planned_server_configs(plan: ExecutionPlan) -> dict[str, list[tuple[list[str
 
 
 def resolve_binary(binary: str) -> str:
-    """The executable to probe for a deployment's ``binary``; an empty one is the deployment's own default.
+    """The executable to probe for a deployment's ``binary``; an empty one is the deployment's own default
+    (:func:`~valkey_fuzzer.deployment.local.processes.installed_valkey_binary`, without building it).
 
     Raises ``OSError`` naming the binary when it is missing or not executable.
     """
 
     if binary:
-        return providers.resolve_binary(binary)
-    try:
-        return providers.resolve_binary("valkey-server")
-    except FileNotFoundError:
-        # The cached build of the pinned commit, which the local deployment makes when PATH has no valkey-server.
-        cached = cached_valkey_binary(VALKEY_SOURCE_SHA)
-        if os.path.isfile(cached):
-            return cached
+        return resolve_binary_path(binary, "valkey-server binary")
+    installed = installed_valkey_binary()
+    if installed is None:
         raise FileNotFoundError(
             "valkey-server is not on PATH; set deployment.valkey_binary or put valkey-server on PATH"
-        ) from None
+        )
+    return installed
 
 
 Probed = tuple[ComponentStatus, str, dict[str, Any]]
@@ -238,7 +235,9 @@ def _run_private_server(
         resolved = resolve_binary(binary)
     except OSError as exc:
         return ComponentStatus.ERROR, str(exc), {}
-    server = PrivateServer(resolved, server_arguments(startup_config), timeout_s=timeout_s, prefix="vfp-", files=files)
+    server = PrivateServer(
+        resolved, build_server_config_arguments(startup_config), timeout_s=timeout_s, prefix="vfp-", files=files
+    )
     owned = context.obligations.open(spec, "process.private-server", server.workdir, server.stop)
     facts: dict[str, Any] = {"binary": resolved}
     try:
@@ -366,7 +365,7 @@ def _check_capabilities(config: Mapping[str, Any], client: Any, facts: dict[str,
     for name, values in config["config_set"].items():
         for value in values:
             try:
-                client.config_set(name, server_arguments({name: value})[1])
+                client.config_set(name, build_server_config_arguments({name: value})[1])
             except valkey.exceptions.ResponseError as exc:
                 return ComponentStatus.SKIP, f"build rejects CONFIG SET {name} {value}: {exc}", facts
     for name in config["lacks_configs"]:

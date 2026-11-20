@@ -16,6 +16,7 @@ import glob
 import os
 
 from .models import LocalDeploymentError
+from .syscall_faults import preload
 
 LIBRARY_ENV = "VALKEY_FUZZER_LIBFAKETIME"
 TIMESTAMP_FILE_ENV = "FAKETIME_TIMESTAMP_FILE"
@@ -66,17 +67,9 @@ def write_timestamp(path: str, spec: str) -> None:
 
 
 def server_environment(env: dict[str, str], library: str, timestamp: str) -> dict[str, str]:
-    """``env`` with ``library`` appended to its preload list, reading ``timestamp`` on every call.
+    """``env`` with ``library`` appended to its preload list (:func:`~.syscall_faults.preload`), reading
+    ``timestamp`` on every call."""
 
-    As for the syscall fault library, a gcc AddressSanitizer build must not refuse the preload order.
-    """
-
-    env = dict(env)
-    env["LD_PRELOAD"] = " ".join(part for part in (env.get("LD_PRELOAD", ""), library) if part)
-    env[TIMESTAMP_FILE_ENV] = timestamp
-    env["FAKETIME_NO_CACHE"] = "1"
-    env["DONT_FAKE_MONOTONIC"] = "1"
-    options = env.get("ASAN_OPTIONS", "")
-    if "verify_asan_link_order=0" not in options:
-        env["ASAN_OPTIONS"] = ":".join(part for part in (options, "verify_asan_link_order=0") if part)
+    env = preload(env, library)
+    env.update({TIMESTAMP_FILE_ENV: timestamp, "FAKETIME_NO_CACHE": "1", "DONT_FAKE_MONOTONIC": "1"})
     return env

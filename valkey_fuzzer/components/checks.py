@@ -36,13 +36,13 @@ from typing import Any, Optional
 import valkey
 
 from valkey_fuzzer._data import canonical_json
+from valkey_fuzzer.deployment.local.queries import parse_info_text
 from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import component_artifact_dir
 
 from . import command_sequence
 from .oracles import CRASH_PATTERNS, crash_cause, scan_for_crashes
 from .polling import poll_until
-from .server import info_fields
 
 _ORDER = ("variants", "replica", "acl", "concurrency", "compat", "faults")
 # What the faults check does to a node between two commands: restart it from its own directory, or make it save
@@ -610,7 +610,7 @@ def _volatile(side: Any, index: int) -> bool:
         return True
     databases = (
         dict(item.split("=", 1) for item in value.split(",") if "=" in item)
-        for value in info_fields(record["reply"]).values()
+        for value in parse_info_text(record["reply"]).values()
     )
     return any(int(db.get("expires", 0)) or int(db.get("keys_with_volatile_items", 0)) for db in databases)
 
@@ -627,7 +627,7 @@ def _owned_slots(side: Any, index: int) -> Optional[tuple[str, ...]]:
 def _is_replica(side: Any, index: int) -> bool:
     """Whether node ``index`` of ``side`` is a replica, by its INFO replication."""
 
-    return info_fields(ask(side, index, "INFO", "replication").get("reply", "")).get("role") == "slave"
+    return parse_info_text(ask(side, index, "INFO", "replication").get("reply", "")).get("role") == "slave"
 
 
 def _ping(side: Any, index: int) -> dict[str, Any]:
@@ -833,7 +833,7 @@ class _Checks:
         def attempt() -> tuple[bool, dict[str, Any]]:
             state: dict[str, Any] = {}
             for role, (side, index) in (("primary", primary), ("replica", replica)):
-                info = info_fields(ask(side, index, "INFO", "replication").get("reply", ""))
+                info = parse_info_text(ask(side, index, "INFO", "replication").get("reply", ""))
                 state[role] = {"offset": info.get("master_repl_offset"), "digest": ask(side, index, "DEBUG", "DIGEST")}
             state["link"] = info.get("master_link_status")
             if not digests:
@@ -1245,7 +1245,7 @@ class _Checks:
 
         def attempt() -> tuple[bool, None]:
             record = ask(side, node, "INFO", "persistence")
-            return "reply" in record and info_fields(record["reply"]).get("loading") != "1", None
+            return "reply" in record and parse_info_text(record["reply"]).get("loading") != "1", None
 
         return poll_until(attempt, timeout_s=SYNC_TIMEOUT_S, interval_s=0.05, context=self.context)[0]
 
