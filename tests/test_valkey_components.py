@@ -96,6 +96,9 @@ _FORCED = {"extra": (_component("valkey.action.failover", "failover", force=True
         # a pause (SIGSTOP), a disk fill, or a graceful failover loses none.
         ("valkey.oracle.rdb-snapshot", {"bgsave": "bgsave", "workload": "writes"}, {"extra": (*_BGSAVE["extra"], *_KILL["extra"])}, r"'kill' \(valkey\.fault\.process-signal\) may lose writes"),
         ("valkey.oracle.rdb-snapshot", {"bgsave": "bgsave", "workload": "writes"}, {"extra": (*_BGSAVE["extra"], _component("valkey.workload.key-value", "writes"), *_FORCED["extra"]), "mode": "cluster"}, r"'failover' \(valkey\.action\.failover\) may lose writes"),
+        # Decided by what the component declares (it stops a process), not by a list of ids: an election that
+        # kills the primary loses the writes it acknowledged and did not replicate.
+        ("valkey.oracle.rdb-snapshot", {"bgsave": "bgsave", "workload": "writes"}, {"extra": (*_BGSAVE["extra"], _component("valkey.workload.key-value", "writes"), _component("valkey.action.cluster-election", "election", trigger="kill_primary")), "mode": "cluster"}, r"'election' \(valkey\.action\.cluster-election\) may lose writes"),
         ("valkey.oracle.ledger", {"workload": "missing"}, {}, "not a component"),
         # appendfsync always cannot lose an acknowledged write to a process fault (appendonly yes is the local
         # deployment's default); everysec may lose two seconds of writes; a forced failover can lose writes.

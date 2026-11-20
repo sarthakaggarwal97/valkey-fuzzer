@@ -73,13 +73,17 @@ _RDB_FIELDS = {
 # The loading server's verdict on an RDB it could not load at startup.
 _LOAD_REFUSED = "Fatal error loading the DB"
 _EXIT_STATUS = re.compile(r"^exit status (-?\d+)\n")
-# Actions that kill or fail over nodes as they go: each publishes the loss windows valkey.oracle.ledger reads.
-_LOSSY_ACTIONS = ("valkey.action.cluster-chaos", "valkey.action.replication-chaos", "valkey.action.rolling-upgrade")
+# What a component declares when it can lose writes Valkey acknowledged: a change that stops a server (a kill, or
+# a syscall fault that ends in one), or the evidence of a failover or of chaos that kills and fails over nodes as
+# it goes. Each publishes the loss windows valkey.oracle.ledger reads.
+_LOSSY_CHANGES = ("process.stopped",)
+_LOSSY_EVIDENCE = ("valkey.failover.result", "valkey.chaos.schedule")
 
 
 def _may_lose_writes(component: ComponentSpec) -> bool:
-    """Whether ``component`` can lose writes Valkey acknowledged: it stops a server (a kill, or a syscall fault
-    that ends in one), forces a failover, or runs chaos that does. A pause (SIGSTOP) loses nothing by itself."""
+    """Whether ``component`` can lose writes Valkey acknowledged, by what its registration declares
+    (:data:`_LOSSY_CHANGES`, :data:`_LOSSY_EVIDENCE`). Three configs lose nothing by themselves: a pause
+    (SIGSTOP), a syscall fault that does not kill, and a failover that is not forced."""
 
     config = plain_config(component.config)
     if component.use == "valkey.action.failover":
@@ -88,7 +92,16 @@ def _may_lose_writes(component: ComponentSpec) -> bool:
         return config.get("signal", "SIGKILL") != "SIGSTOP"
     if component.use == "valkey.fault.syscall":
         return config.get("action", "kill") == "kill"
-    return component.use in _LOSSY_ACTIONS
+    # The pack's own registrations (a component of another pack is not among them); the package imports this
+    # module, so it is imported where it is used.
+    from valkey_fuzzer.components import component_registrations
+
+    declares = next((item.declares for item in component_registrations() if item.component_id == component.use), None)
+    if declares is None:
+        return False
+    return any(kind in _LOSSY_CHANGES for kind in declares.changes) or any(
+        evidence_id in declares.evidence for evidence_id in _LOSSY_EVIDENCE
+    )
 
 
 def _validate_rdb(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -> None:
