@@ -484,14 +484,15 @@ of the drawn deployment mode.
   by `op` with every kind's timing and fields and their bounds, so the
   compiler rejects a malformed operation with the path to its field. The implementation
   is a `_<name>` method: `kill` is the engine's; `failover` is the
-  cluster's; `restart`, `promote`, `repoint`, `partition`, `stall`, and
+  cluster's; `restart`, `promote`, `repoint`, `partition`, `degrade`, `stall`, and
   `backlog_pressure` are standalone's.
 - **Ownership**: `WaveRun.own` opens an
   [undo obligation](contracts.md#fault-ownership) for every change the
   engine applies and will undo, recorded with the operation that owns it: a
   stall (undone by `resume_if_alive`), a partition (its own chain, through
   the same `create_chain`, `drop_between`, and `remove_partition` as
-  `valkey.fault.network-partition`), a setting, the validation's
+  `valkey.fault.network-partition`), a degradation (its own netem device,
+  through the same `Degradation` as `valkey.fault.network-degrade`), a setting, the validation's
   `CLIENT PAUSE`, and a kill the mode restarts (through `restart_once`;
   `kill_undo` is None in cluster mode, where a killed node stays down). The
   operation discharges its own at the end of `duration_s` (or at once when

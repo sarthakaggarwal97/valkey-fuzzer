@@ -8,6 +8,7 @@ from typing import Any, Optional
 from valkey_fuzzer.schema import ConfigError, ConfigField, ConfigSchema
 
 from .instances import INSTANCE_ID, check_shard
+from .network import DEGRADE_FIELDS, check_degrade
 
 SIGNALS = {"SIGKILL": signal.SIGKILL, "SIGTERM": signal.SIGTERM}
 CLUSTER, STANDALONE = "cluster", "standalone"
@@ -106,6 +107,14 @@ OPERATIONS = {
         topology=True,
     ),
     "partition": Operation((STANDALONE,), ROLE_TARGETS, {**_TARGET, "duration_s": _DURATION}, disrupts=True, held=True),
+    # Loss, delay, reordering, duplication, or a rate limit on the links between the instance and every other.
+    "degrade": Operation(
+        (STANDALONE,),
+        ROLE_TARGETS,
+        {**_TARGET, "duration_s": _DURATION, **DEGRADE_FIELDS},
+        disrupts=True,
+        held=True,
+    ),
     "stall": Operation(
         (STANDALONE,),
         ROLE_TARGETS,
@@ -236,5 +245,7 @@ def check_waves(waves: Sequence[Sequence[Mapping[str, Any]]], mode: str, documen
                     raise ConfigError(f"{where}: a replica cannot replicate itself")
                 if operation["to"] == "replica" and replicas < 2:
                     raise ConfigError(f"{where}: repointing to another replica needs replicas_per_primary >= 2")
-            elif kind == "partition" and document.get("addressing") != "per_instance_loopback":
-                raise ConfigError(f"{where}: a partition needs deployment.addressing: per_instance_loopback")
+            elif kind in ("partition", "degrade") and document.get("addressing") != "per_instance_loopback":
+                raise ConfigError(f"{where}: a {kind} needs deployment.addressing: per_instance_loopback")
+            if kind == "degrade":
+                check_degrade(operation, where)

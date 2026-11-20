@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### Added: degraded links with tc netem (PR-C3)
+
+- `valkey.fault.network-degrade`: packet loss, delay with jitter, reordering, duplication, and a rate limit on the
+  links between selected `instances` and their `peers`, for `duration_s` or until `heal_event`, then healed. The
+  netem qdisc is the root of an `ifb` device of the fault's own, named after the fuzzer process
+  (`vf<pid><start><n>`), and flower filters on `lo`'s ingress redirect to it only the TCP packets whose source and
+  destination are both the exact addresses of an instance pair; nothing else on the host matches (the fault refuses
+  127.0.0.1, a non-IPv4 or non-loopback address, or two instances on one address before any call). The filters of a
+  fault sit at one claimed `pref`; `lo`'s ingress qdisc is added only when missing, marked as the fuzzer's, and
+  removed by whichever fuzzer process removes the last filter, under a lock in `/tmp/valkey-fuzzer`. Healing removes
+  the filters, then the qdisc when the fuzzer added it and it is empty, then the device. The host probe's new
+  `netem` requirement needs `tc` and `ip` with `CAP_NET_ADMIN`; the fuzzer never asks for `sudo`, and a kernel
+  that lacks a module (`ifb`, `sch_netem`, `cls_flower`, `act_mirred`) is named in the error. The partition and the degradation share one heal
+  implementation (`_HealingFault`); the partition's behaviour and record are unchanged.
+- `valkey.action.replication-chaos` gains the `degrade` wave operation (`target`, `duration_s`, and the same
+  effects), undone with the partitions; `valkey.generator.waves` draws it with per-instance loopback addresses, lossy
+  or slow, never both. `valkey.oracle.error-counters` counts a `network.degrade` change as a link cause.
+- Experiments `valkey.replication-degraded-link` (loss, delay, reordering on the replication links under writes; no
+  full resync, links up again, replicas converge, ledger and linearizable history, no loss window) and
+  `valkey.cluster-gossip-delay` (one primary's links delayed below `cluster-node-timeout`; no node marked failing,
+  no FAIL message, no election won, `cluster_state ok` and agreeing views after the heal); examples
+  `replication_degraded_link.yaml` and `cluster_gossip_delay.yaml`.
+- `valkey-fuzzer sweep` removes a dead owner's netem device (kind `netem`) with the `lo` filters that redirect to
+  it, and the ingress qdisc when the fuzzer added it and nothing is left on it. `tests/test_live_network_degrade.py`
+  checks the rules against the real kernel where `tc` and `CAP_NET_ADMIN` are available (skipped otherwise); the
+  daily live workflow runs the two experiments as root.
+
 ### Changed: the spec bridge's TLC layer: bounds under a budget, a checked jar, JSON traces, the election quorum (PR-P2-c)
 
 - `formal/cluster-election/model.cfg` checks two crashes (`MaxCrashes = 2`; 330,207 distinct states, 15 s on four

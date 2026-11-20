@@ -18,7 +18,7 @@ experiment, cluster chaos (failovers with process kills) included.
 | Linux (macOS for most experiments) | `valkey-server` processes, `SIGKILL` and `SIGSTOP`. Root and Linux only for the experiments that change the host (see [Safety](#safety)). | Those experiments report `SKIP_UNSUPPORTED`. |
 | Python 3.10 or later, git | the fuzzer and its install | n/a |
 | A `valkey-server` build | every experiment starts real servers | Build one (below), or pass `--valkey-binary PATH`. |
-| Go 1.21 or later | builds the `porcupine` linearizability checker. These experiments need it: `valkey.aof-durability`, `valkey.cluster-partition`, `valkey.mixed-version-cluster`, `valkey.replication-chaos`, `valkey.replication-full-resync`, `valkey.rolling-upgrade`. | `validate` exits `2`, and a run ends `ERROR` before it starts anything, with `porcupine is not on PATH` and the build command. |
+| Go 1.21 or later | builds the `porcupine` linearizability checker. These experiments need it: `valkey.aof-durability`, `valkey.cluster-partition`, `valkey.mixed-version-cluster`, `valkey.replication-chaos`, `valkey.replication-degraded-link`, `valkey.replication-full-resync`, `valkey.rolling-upgrade`. | `validate` exits `2`, and a run ends `ERROR` before it starts anything, with `porcupine is not on PATH` and the build command. |
 | Free ports | the quickstart uses 7430 and 7431; generated scenarios use ports from 7000 | The run ends `ERROR` and names the port. |
 | Java 11 or later and `tla2tools.jar` (optional) | only the `spec` commands of the [spec bridge](docs/spec-bridge.md), and a batch's check of its runs against a spec bundle that needs TLC. `pip install` needs neither. | A `spec` command exits `2` and prints the jar's download command. A batch skips a draft bundle's check; a run checked against an approved one ends `ERROR`. |
 
@@ -159,13 +159,17 @@ container, not a server that runs anything you care about.
   the temporary directory, and may build Valkey under `/tmp/valkey-build`.
 - On Linux as root, `valkey.bgsave-disk-full` mounts a tmpfs and fills it,
   and `valkey.cluster-partition` and the partitions of
-  `valkey.replication-chaos` add iptables rules. Both remove what they added
+  `valkey.replication-chaos` add iptables rules. `valkey.replication-degraded-link`,
+  `valkey.cluster-gossip-delay`, and the degradations of
+  `valkey.replication-chaos` add `tc` netem rules that match only the run's
+  own instance addresses (they need `CAP_NET_ADMIN`; the fuzzer never asks
+  for `sudo`). All remove what they added
   when the run ends, but a fuzzer process that is killed can leave a mount or
   a rule behind.
-- Every server, data directory, iptables chain, and tmpfs mount the fuzzer
+- Every server, data directory, iptables chain, netem device, and tmpfs mount the fuzzer
   creates is tagged with the fuzzer process that owns it. After a fuzzer was
   killed (`SIGKILL`, a power loss), `valkey-fuzzer sweep` kills its servers
-  and removes its chains, mounts, and data directories; it never touches
+  and removes its chains, netem devices, mounts, and data directories; it never touches
   anything untagged or anything a running fuzzer owns (see
   [sweep](docs/cli.md#sweep)).
 

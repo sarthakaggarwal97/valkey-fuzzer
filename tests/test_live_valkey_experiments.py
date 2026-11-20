@@ -26,6 +26,7 @@ if not BINARY:
 PARTITIONS = capabilities.iptables_supported()[0] and capabilities.per_instance_loopback_supported()[0]
 LIBFAKETIME_SUPPORTED, LIBFAKETIME_REASON = capabilities.libfaketime_supported()
 CGROUP_V2_SUPPORTED, CGROUP_V2_REASON = capabilities.cgroup_v2_supported(("cpu", "memory"))
+DEGRADATIONS = capabilities.netem_supported()[0] and capabilities.per_instance_loopback_supported()[0]
 ELECTION = "valkey.cluster-election-durability"
 
 
@@ -150,11 +151,23 @@ def _partition():
     return scenario("valkey.cluster-partition", "cluster", addressing="per_instance_loopback")
 
 
+def _degraded_link():
+    return scenario("valkey.replication-degraded-link", replicas=2, addressing="per_instance_loopback")
+
+
+def _gossip_delay():
+    return scenario(
+        "valkey.cluster-gossip-delay", "cluster", primaries=3, replicas=1, addressing="per_instance_loopback"
+    )
+
+
 @pytest.mark.parametrize(
     ("build", "patch"),
     [
         pytest.param(_disk_full, (providers, "tmpfs_supported", lambda: (False, "requires Linux")), id="disk-full"),
         pytest.param(_partition, (capabilities, "iptables_supported", lambda: (False, "requires iptables")), id="cluster-partition"),
+        pytest.param(_degraded_link, (capabilities, "netem_supported", lambda: (False, "tc not installed")), id="replication-degraded-link"),
+        pytest.param(_gossip_delay, (capabilities, "netem_supported", lambda: (False, "tc not installed")), id="cluster-gossip-delay"),
     ],
 )  # fmt: skip
 def test_an_experiment_is_unsupported_without_its_prerequisites(runtime, monkeypatch, build, patch):
@@ -207,6 +220,20 @@ def test_resource_pressure_throttles_the_primary_and_the_replica_links_survive(r
     injected = evidence(outcome, "valkey.fault.injected")
     assert injected["applied"] and injected["target"] == "valkey-0"
     assert injected["stats"]["cpu.stat.nr_throttled"] > 0 and injected["release_reason"] == "event"
+
+
+@pytest.mark.skipif(not DEGRADATIONS, reason="needs Linux with tc, CAP_NET_ADMIN, and 127.0.0.x addresses")
+@pytest.mark.parametrize(
+    "build", [_degraded_link, _gossip_delay], ids=["replication-degraded-link", "cluster-gossip-delay"]
+)
+def test_a_degraded_link_experiment_passes_and_leaves_no_netem_rule(runtime, build):
+    outcome = run_scenario(runtime, build())
+    check(outcome)
+    injected = evidence(outcome, "valkey.fault.injected")
+    assert injected["healed_at"] and injected["rules"] and injected["device"].startswith("vf")
+    devices = subprocess.run(["ip", "-o", "link", "show", "type", "ifb"], capture_output=True, text=True).stdout
+    filters = subprocess.run(["tc", "filter", "show", "dev", "lo", "ingress"], capture_output=True, text=True).stdout
+    assert injected["device"] not in devices and injected["device"] not in filters, "netem rules removed"
 
 
 def test_a_kill_in_the_save_of_a_granted_vote_lands_before_the_vote_is_on_disk(runtime):

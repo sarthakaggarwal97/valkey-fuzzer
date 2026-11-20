@@ -62,7 +62,7 @@ def test_the_experiments_the_pages_say_need_porcupine_are_the_ones_that_do():
         document = yaml.safe_load(path.read_text(encoding="utf-8"))
         if "valkey.history" in (document.get("extends") or []):
             needing.add(f"valkey.{path.stem.removeprefix('valkey.')}")
-    assert len(needing) == 6
+    assert len(needing) == 7
     for page in (ROOT / "README.md", ROOT / "docs" / "getting-started.md"):
         text = page.read_text(encoding="utf-8")
         assert all(f"`{name}`" in text for name in needing), (page.name, needing)

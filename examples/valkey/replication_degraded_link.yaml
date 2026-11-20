@@ -1,0 +1,11 @@
+# Lossy, slow, reordering replication links under writes (Linux, tc netem with CAP_NET_ADMIN).
+scenario_id: replication-degraded-link
+seed: 41
+experiment:
+  id: valkey.replication-degraded-link
+  inputs: {loss_pct: 5, delay_ms: 50, jitter_ms: 10, reorder_pct: 25, degrade_s: 3}
+deployment:
+  mode: standalone
+  replicas_per_primary: 2
+  base_port: 7520
+  addressing: per_instance_loopback

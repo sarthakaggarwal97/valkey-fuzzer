@@ -178,7 +178,7 @@ produced. It makes the run `ERROR`, naming the component, when one:
 ## Fault ownership
 
 Every change a component makes to host or server state and will undo (a
-stopped or paused process, a partition, a filled disk, a setting it
+stopped or paused process, a partition, a degraded link, a filled disk, a setting it
 restores, a private server) is owned by an **undo obligation** from the
 moment it is applied until it is undone. The undo is idempotent; a failed
 undo leaves the obligation open and is tried again.
@@ -302,7 +302,7 @@ operations that way.
 
 ## Host state
 
-Every server, data directory, iptables chain, and tmpfs mount the fuzzer
+Every server, data directory, iptables chain, netem device, and tmpfs mount the fuzzer
 creates is tagged with the fuzzer process that owns it. `valkey-fuzzer sweep`
 removes what a fuzzer that is gone left behind, and never touches anything
 untagged or owned by a running fuzzer (see [sweep](cli.md#sweep)). A batch

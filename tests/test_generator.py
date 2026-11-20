@@ -463,16 +463,24 @@ def test_every_shipped_experiment_draws_the_same_valid_bounded_scenario_from_one
 @pytest.mark.parametrize("mode", ["standalone", "cluster"])
 def test_generated_waves_use_only_their_modes_operations(mode):
     from valkey_fuzzer.components.generators import waves
+    from valkey_fuzzer.components.network import DEGRADE_FIELDS, check_degrade
     from valkey_fuzzer.components.wave_operations import operations_for
 
     deployment = {"mode": mode, "primaries": 3, "replicas_per_primary": 2, "addressing": "per_instance_loopback"}
-    drawn = {
-        op["op"]
-        for seed in range(300)
-        for wave in waves(random.Random(seed), {"deployment": deployment})
-        for op in wave
-    }
+    operations = [
+        op for seed in range(300) for wave in waves(random.Random(seed), {"deployment": deployment}) for op in wave
+    ]
+    drawn = {op["op"] for op in operations}
     assert drawn <= set(operations_for(mode))
+    if mode == "standalone":
+        # Every drawn degradation is one netem can do, and never both lossy and slow.
+        degrades = [op for op in operations if op["op"] == "degrade"]
+        assert degrades and all(
+            bool(op.get("loss_pct")) != bool(op.get("delay_ms")) and (op.get("reorder_pct") is None or op["delay_ms"])
+            for op in degrades
+        )
+        for op in degrades:
+            check_degrade({**{name: field.default for name, field in DEGRADE_FIELDS.items()}, **op})
 
 
 def test_a_base_mapping_replaces_a_drawn_reference_instead_of_merging_into_it():

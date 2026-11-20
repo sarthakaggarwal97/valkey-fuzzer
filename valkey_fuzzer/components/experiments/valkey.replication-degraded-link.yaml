@@ -1,0 +1,118 @@
+# Degrade the links between the primary and every replica under writes: packet
+# loss, delay with jitter, and reordering (tc netem, matched to the instances'
+# own addresses and nothing else on the host), for `degrade_s`, then heal. The
+# replication links must ride out the degradation on TCP's retransmissions: no
+# full resync (no node logs "Full resync from primary", and sync_full stays
+# where it was on every instance), every replica's link is up again after the
+# heal, every replica converges byte-for-byte with the primary, no acknowledged
+# write is lost (there is no loss window: a degraded link loses nothing), and
+# the client history is linearizable (`history`). A reconnect that Valkey
+# resumes with a partial resync passes; one it answers with a full resync fails.
+#
+# Needs Linux, tc and ip with CAP_NET_ADMIN (the fuzzer never asks for sudo),
+# and deployment.addressing: per_instance_loopback.
+extends: [valkey.base, valkey.history]
+id: valkey.replication-degraded-link
+deployment:
+  modes: [standalone]
+  replicas_per_primary: {minimum: 1}
+  # The degradation matches the instances' own addresses.
+  addressing: {type: string, enum: [per_instance_loopback]}
+metadata:
+  description: Loss, delay, and reordering on the replication links under writes; PSYNC survives, replicas converge, the history is linearizable
+  generator:
+    deployment:
+      mode: [standalone]
+      addressing: per_instance_loopback
+      replicas_per_primary: {minimum: 1, maximum: 3}
+      base_port: {minimum: 7000, maximum: 8000}
+    inputs:
+      loss_pct: {values: [1, 5, 10]}
+      delay_ms: {values: [10, 50, 100]}
+      jitter_ms: {values: [0, 5, 20]}
+      reorder_pct: {values: [0, 10, 25]}
+      degrade_s: {minimum: 1, maximum: 4}
+inputs:
+  properties:
+    mutable_keys: {default: 300}
+    mutation_rate: {minimum: 1, default: 300}
+    loss_pct: {type: number, minimum: 0, maximum: 50, default: 5, description: "packets dropped on the degraded links"}
+    delay_ms: {type: number, minimum: 0, maximum: 2000, default: 50, description: "added to each packet, each way"}
+    jitter_ms: {type: number, minimum: 0, maximum: 2000, default: 10, description: "random variation of delay_ms; needs delay_ms"}
+    reorder_pct: {type: number, minimum: 0, maximum: 100, default: 25, description: "packets sent at once instead of delayed, so they overtake; needs delay_ms"}
+    degrade_s: {type: number, minimum: 0.1, maximum: 600, default: 3, description: "how long the links stay degraded"}
+components:
+  - use: valkey.capability.host-probe
+    id: host
+    config: {requires: [linux, netem, per_instance_loopback]}
+
+  - use: valkey.observer.info
+    id: info
+    config:
+      instances: all
+      sections: [stats, replication]
+      interval_s: 0.1
+      expectations:
+        - {evidence_id: valkey.replication.no-full-resync, field: sync_full, delta_max: 0, instances: all}
+
+  - use: valkey.observer.log
+    id: logs
+    config:
+      instances: all
+      forbidden:
+        - {pattern: "Full resync from primary"}
+
+  - use: valkey.workload.key-value
+    id: writes
+    config:
+      op_timeout_s: 2.0
+
+  - use: valkey.fault.network-degrade
+    id: degrade
+    config:
+      when_event: run-then-degrade.completed
+      instances: primary
+      loss_pct: {$ref: inputs.loss_pct}
+      delay_ms: {$ref: inputs.delay_ms}
+      jitter_ms: {$ref: inputs.jitter_ms}
+      reorder_pct: {$ref: inputs.reorder_pct}
+      duration_s: {$ref: inputs.degrade_s}
+
+  - use: valkey.action.sleep
+    id: run-then-degrade
+    depends_on: [writes, info, logs, degrade]
+    config: {seconds: 1}
+
+  - use: valkey.action.wait-event
+    id: healed
+    depends_on: [run-then-degrade]
+    config: {event: degrade.healed, timeout_s: 660}
+
+  - use: valkey.action.poll
+    id: links-up
+    depends_on: [healed]
+    config:
+      instances: replicas
+      section: replication
+      field: master_link_status
+      predicate: {equals: up}
+      timeout_s: 120
+
+  - use: valkey.oracle.ledger
+    id: data
+    config:
+      # A degraded link loses nothing: no fault opens a loss window.
+      loss_window_faults: []
+      converge_timeout_s: 60
+
+  - use: valkey.oracle.evidence
+    id: psync-survived
+    depends_on: [info]
+    config:
+      require:
+        - {evidence_id: valkey.replication.no-full-resync, source: info}
+required_events: [run-then-degrade.completed, degrade.degraded, degrade.healed]
+required_evidence:
+  - {evidence_id: valkey.fault.injected, source: degrade}
+  - {evidence_id: valkey.poll.satisfied, source: links-up}
+  - {evidence_id: valkey.deployment.validated, source: deployment-state}

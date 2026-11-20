@@ -84,12 +84,12 @@ Some experiments need features that only some builds have (such as
 
 ## Build porcupine
 
-Six experiments check that the history of reads and writes is linearizable
+Seven experiments check that the history of reads and writes is linearizable
 with [Porcupine](https://github.com/anishathalye/porcupine), through the
 `valkey.history` fragment: `valkey.aof-durability` (the quickstart),
 `valkey.cluster-partition`, `valkey.mixed-version-cluster`,
-`valkey.replication-chaos`, `valkey.replication-full-resync`, and
-`valkey.rolling-upgrade`. The checker is a small Go program in `porcupine/`
+`valkey.replication-chaos`, `valkey.replication-degraded-link`,
+`valkey.replication-full-resync`, and `valkey.rolling-upgrade`. The checker is a small Go program in `porcupine/`
 that pip does not build, so install Go 1.21 or later and build it once per
 host, from the checkout:
 

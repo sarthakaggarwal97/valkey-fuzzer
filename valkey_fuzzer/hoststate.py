@@ -19,6 +19,9 @@ data directory       a ``.valkey-fuzzer-owner`` file (JSON: ``owner``, ``pid``,
 valkey-server        ``valkey-fuzzer-owner=<owner>`` in its process title, set with
                      ``--proc-title-template`` (and so also in its arguments)
 iptables chain       the name ``VF-<owner>-<8 hex digits>``
+netem device         the ``ifb`` device name ``vf<pid in hex><start><suffix>``
+                     (``valkey.fault.network-degrade``); the ``lo`` ingress
+                     filters that redirect to it are found by its name
 tmpfs mount          the mount point ``<tmp>/valkey-fuzzer-mounts/<owner>/<name>``
                      (an empty mount point, made before its mount, too)
 cgroup leaf          the name ``vf-<owner>-<8 hex digits>``, in the sweeping process's
@@ -26,16 +29,18 @@ cgroup leaf          the name ``vf-<owner>-<8 hex digits>``, in the sweeping pro
 ===================  ===============================================================
 
 :func:`sweep` lists every tagged item whose owner process is gone and, unless
-``dry_run``, removes it: it kills the servers, deletes the chains, releases the
-cgroup leaves, unmounts the mounts, and removes the directories, in that order. Anything untagged, and
+``dry_run``, removes it: it kills the servers, deletes the chains, removes the
+netem devices with their filters, releases the cgroup leaves, unmounts the
+mounts, and removes the directories, in that order. Anything untagged, and
 anything whose owner is alive (or whose liveness cannot be decided), is never
 touched; nor is a directory that, with its tag file, belongs to another user,
 nor a shared one (:func:`shared_directory`), whatever tag it holds.
 Tagged directories are found in the immediate children of the
 roots it scans (``/tmp/valkey-fuzzer``, ``/tmp``, and the temporary directory
-by default); servers, chains, and mounts are found host-wide, servers only
-among the sweeping user's processes in its PID namespace. Chains and
-mounts need root; without it the sweep reports them as failed.
+by default); servers, chains, netem devices, and mounts are found host-wide,
+servers only among the sweeping user's processes in its PID namespace. Chains,
+netem devices, and mounts need root; without it the sweep reports them as
+failed.
 
 It also makes the run folders under the shared artifact root
 (:func:`new_run_folder`) and turns SIGTERM into an interrupt
@@ -56,7 +61,7 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Collection, Iterable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Optional
 
@@ -67,6 +72,10 @@ OWNER_FILE = ".valkey-fuzzer-owner"
 TITLE_TAG = "valkey-fuzzer-owner="
 CHAIN_PREFIX = "VF-"
 CGROUP_PREFIX = "vf-"
+# An interface name holds 15 characters: the prefix, the PID in 6 hex digits (Linux gives at most 0x400000), the 6
+# of the start, and one suffix.
+NETEM_PREFIX = "vf"
+NETEM_SUFFIXES = "0123456789abcdefghijklmnopqrstuvwxyz"
 MOUNT_ROOT_NAME = "valkey-fuzzer-mounts"
 # Sticky and world-writable, like /tmp: see shared_directory.
 SHARED_MODE = 0o1777
@@ -80,6 +89,10 @@ _OWNER_RE = re.compile(rf"^{_OWNER}$")
 _TITLE_RE = re.compile(rf"{re.escape(TITLE_TAG)}{_OWNER}(?!\S)")
 _CHAIN_RE = re.compile(rf"^-N ({re.escape(CHAIN_PREFIX)}{_OWNER}-[0-9a-f]{{8}})$")
 _CGROUP_RE = re.compile(rf"^{re.escape(CGROUP_PREFIX)}{_OWNER}-[0-9a-f]{{8}}$")
+_NETEM_RE = re.compile(rf"^{NETEM_PREFIX}([0-9a-f]{{6}})([0-9a-f]{{6}})([{NETEM_SUFFIXES}])$")
+# One filter of ``tc filter show``, and the device a mirred action in it redirects to.
+_FILTER_RE = re.compile(r"^filter .*\bpref (\d+)\b")
+_REDIRECT_RE = re.compile(r"Redirect to device (\S+)\)")
 # The server, and the children it forks (valkey-rdb-bgsave, valkey-aof-rewrite, valkey-rdb-to-replicas,
 # valkey-module-fork, ...), which carry its title, tag included, and outlive a SIGKILLed server; and the benchmark
 # a workload runs beside it, tagged in its argv[0] (:class:`~valkey_fuzzer.components.workloads.BenchmarkWorkload`).
@@ -408,6 +421,21 @@ def cgroup_owner(name: str) -> Optional[Owner]:
     return Owner(int(match.group(1)), match.group(2)) if match else None
 
 
+def netem_device_name(suffix: int) -> str:
+    """``vf<pid in 6 hex digits><start><suffix>``: the name of this process's ``suffix``-th (0 to 35) netem
+    device, the 15 characters an interface name holds."""
+
+    owner = current_owner()
+    return f"{NETEM_PREFIX}{owner.pid:06x}{owner.start}{NETEM_SUFFIXES[suffix]}"
+
+
+def netem_device_owner(name: str) -> Optional[Owner]:
+    """The owner a netem device name carries, or None (not a fuzzer's device)."""
+
+    match = _NETEM_RE.match(name)
+    return Owner(int(match.group(1), 16), match.group(2)) if match else None
+
+
 def mount_parent() -> str:
     """The directory this process creates its tmpfs mount points in: ``<tmp>/valkey-fuzzer-mounts/<owner>``.
 
@@ -488,6 +516,156 @@ def tagged_chains(iptables: Iptables = run_iptables) -> Optional[list[tuple[str,
     return chains
 
 
+def run_tc(*args: str) -> Any:
+    """``tc <args>``, bounded."""
+
+    return run_bounded(["tc", *args])
+
+
+def run_ip(*args: str) -> Any:
+    """``ip <args>``, bounded."""
+
+    return run_bounded(["ip", *args])
+
+
+Command = Callable[..., Any]
+
+
+def tc_absent(stderr: str) -> bool:
+    """Whether a failed ``tc`` or ``ip`` call failed because what it was to remove is not there."""
+
+    text = stderr.lower()
+    return any(
+        phrase in text
+        for phrase in ("not found", "doesn't exist", "does not exist", "cannot find", "no such", "not exist")
+    )
+
+
+def tagged_netem_devices(ip: Command = run_ip) -> Optional[list[tuple[str, Owner]]]:
+    """Every ``ifb`` device with a fuzzer name and its owner; None when the devices cannot be listed."""
+
+    listing = ip("-o", "link", "show", "type", "ifb")
+    if listing.returncode != 0:
+        return None
+    devices = []
+    for line in listing.stdout.splitlines():
+        # "7: vf3e9c0a1b2c3: <BROADCAST,NOARP,UP,LOWER_UP> mtu 1500 ..."
+        parts = line.split(":", 2)
+        if len(parts) < 3:
+            continue
+        name = parts[1].strip().split("@", 1)[0]
+        owner = netem_device_owner(name)
+        if owner is not None:
+            devices.append((name, owner))
+    return devices
+
+
+def redirect_prefs(device: str, tc: Command = run_tc) -> Optional[list[int]]:
+    """The ``pref`` of every ``lo`` ingress filter that redirects to ``device``; None when the filters cannot be
+    listed."""
+
+    listing = tc("filter", "show", "dev", "lo", "ingress")
+    if listing.returncode != 0:
+        return None
+    prefs: list[int] = []
+    pref = None
+    for line in listing.stdout.splitlines():
+        header = _FILTER_RE.match(line)
+        if header:
+            pref = int(header.group(1))
+            continue
+        redirect = _REDIRECT_RE.search(line)
+        if redirect and redirect.group(1) == device and pref is not None and pref not in prefs:
+            prefs.append(pref)
+    return prefs
+
+
+def lo_has_filters(tc: Command = run_tc) -> Optional[bool]:
+    """Whether any filter is attached to ``lo``'s ingress; None when they cannot be listed."""
+
+    listing = tc("filter", "show", "dev", "lo", "ingress")
+    if listing.returncode != 0:
+        return None
+    return any(_FILTER_RE.match(line) for line in listing.stdout.splitlines())
+
+
+def remove_lo_filters(prefs: Iterable[int], tc: Command = run_tc) -> list[str]:
+    """Delete the ``lo`` ingress filters at ``prefs``; the errors, empty once they are gone (idempotent)."""
+
+    errors = []
+    for pref in prefs:
+        removed = tc("filter", "del", "dev", "lo", "ingress", "protocol", "ip", "pref", str(pref))
+        if removed.returncode != 0 and not tc_absent(removed.stderr):
+            errors.append(removed.stderr.strip())
+    return errors
+
+
+def remove_netem_device(device: str, ip: Command = run_ip) -> list[str]:
+    """Delete ``device`` and with it its netem qdisc; the errors, empty once it is gone (idempotent)."""
+
+    deleted = ip("link", "del", "dev", device)
+    if deleted.returncode != 0 and not tc_absent(deleted.stderr):
+        return [deleted.stderr.strip()]
+    return []
+
+
+@contextmanager
+def lo_ingress_lock() -> Iterator[None]:
+    """Within, this process alone (among fuzzer processes) adds ``lo``'s ingress qdisc and filters to it, or
+    removes filters and the qdisc once it is empty: a run that removed its filters and found none left would
+    otherwise delete the qdisc under another run that had just added its first filter."""
+
+    import fcntl
+
+    handle = open_shared_lock(os.path.join(shared_directory(default_root()), "lo-ingress.lock"))
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(handle)
+
+
+def _lo_ingress_marker() -> str:
+    """The file that says the fuzzer added ``lo``'s ingress qdisc (the qdisc itself cannot carry a tag)."""
+
+    return os.path.join(shared_directory(default_root()), "lo-ingress.added")
+
+
+def ensure_lo_ingress(tc: Command = run_tc) -> Optional[str]:
+    """Under :func:`lo_ingress_lock`: give ``lo`` an ingress qdisc for filters to attach to, marked as the
+    fuzzer's when this call added it; one that is already there, whoever added it, is used as is. The error, or
+    None."""
+
+    added = tc("qdisc", "add", "dev", "lo", "ingress")
+    if added.returncode == 0:
+        with open(_lo_ingress_marker(), "a", encoding="utf-8"):
+            pass
+        return None
+    if "File exists" in added.stderr or "Exclusivity flag" in added.stderr:
+        return None
+    return added.stderr.strip()
+
+
+def release_lo_ingress(tc: Command = run_tc) -> list[str]:
+    """Under :func:`lo_ingress_lock`: remove ``lo``'s ingress qdisc once the fuzzer added it (the marker) and no
+    filter is left on it, so ``lo`` is as it was found; the errors (idempotent)."""
+
+    marker = _lo_ingress_marker()
+    if not os.path.exists(marker):
+        return []
+    held = lo_has_filters(tc)
+    if held is None:
+        return ["cannot list lo's ingress filters"]
+    if held:
+        return []
+    removed = tc("qdisc", "del", "dev", "lo", "ingress")
+    if removed.returncode != 0 and not tc_absent(removed.stderr):
+        return [removed.stderr.strip()]
+    with suppress(FileNotFoundError):
+        os.remove(marker)
+    return []
+
+
 # ---------------------------------------------------------------------------
 # Finding leftovers
 # ---------------------------------------------------------------------------
@@ -497,7 +675,8 @@ def tagged_chains(iptables: Iptables = run_iptables) -> Optional[list[tuple[str,
 class Leftover:
     """One tagged host change: what it is, who made it, and what the sweep did with it.
 
-    ``kind`` is ``server`` (``target`` is the PID), ``chain``, ``cgroup``, ``mount``,
+    ``kind`` is ``server`` (``target`` is the PID), ``chain``, ``netem`` (``target`` is the device),
+    ``cgroup``, ``mount``,
     ``mount point`` (an empty one), or ``directory`` (``target`` is the path). ``action`` is ``removed``,
     ``would remove`` (a dry run), ``failed`` (``reason`` says why), or
     ``skipped`` (``--older-than`` excluded it, or it changed hands since it
@@ -784,6 +963,23 @@ def _remove_chain(item: Leftover) -> Optional[str]:
 def _remove_cgroup(item: Leftover) -> Optional[str]:
     # The servers in it were killed first; whatever is left moves to the unlimited harness leaf beside it.
     cgroups.remove_leaf(item.target, os.path.join(os.path.dirname(item.target), cgroups.HARNESS))
+
+
+def _remove_netem(item: Leftover) -> Optional[str]:
+    # The filters first, so no packet is redirected to a device that is gone; then lo's ingress qdisc, if the
+    # fuzzer added it and nothing is left on it; then the device.
+    with lo_ingress_lock():
+        prefs = redirect_prefs(item.target, run_tc)
+        if prefs is None:
+            raise RuntimeError("cannot list lo's ingress filters" + ("" if _is_root() else " (needs root)"))
+        errors = remove_lo_filters(prefs, run_tc)
+        if not errors:
+            errors += release_lo_ingress(run_tc)
+    if not errors:
+        # Only once no filter redirects to it: a filter whose device is gone drops what it matches.
+        errors += remove_netem_device(item.target, run_ip)
+    if errors:
+        raise RuntimeError("; ".join(errors) + ("" if _is_root() else " (needs root)"))
     return None
 
 
@@ -853,6 +1049,7 @@ _REMOVERS: dict[str, Callable[[Leftover], Optional[str]]] = {
     "server": _kill_server,
     "chain": _remove_chain,
     "cgroup": _remove_cgroup,
+    "netem": _remove_netem,
     "mount": _unmount,
     "mount point": _remove_mount_point,
     "directory": _remove_directory,
@@ -874,7 +1071,7 @@ def sweep(
     (a chain, a cgroup leaf), alone. ``owners`` (owner tokens) limits the sweep to what those
     processes left: the batch runner sweeps each worker after its run. An owner recorded in another PID
     namespace is kept as alive (its PID means nothing here).
-    Iptables chains carry no namespace: they are judged by PID alone.
+    Iptables chains and netem devices carry no namespace: they are judged by PID alone.
     """
 
     def gone(owner: Owner) -> bool:
@@ -892,6 +1089,13 @@ def sweep(
             report.unchecked.append("iptables chains: listing them needs root")
         else:
             found += [Leftover("chain", chain, owner.token, None) for chain, owner in chains if gone(owner)]
+    if platform.system() == "Linux" and shutil.which("ip") and shutil.which("tc"):
+        # Listing devices needs no privilege; removing one does.
+        devices = tagged_netem_devices(run_ip)
+        if devices is None:
+            report.unchecked.append("netem devices: listing them failed")
+        else:
+            found += [Leftover("netem", device, owner.token, None) for device, owner in devices if gone(owner)]
     found += _find_cgroups(gone)
     roots = default_roots() if roots is None else roots
     found += _find_mounts(now, gone)
