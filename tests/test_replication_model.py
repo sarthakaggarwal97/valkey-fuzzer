@@ -20,7 +20,7 @@ def test_every_guard_the_model_relies_on_has_a_control_that_breaks_it():
     bundle = load_bundle("replication")
 
     # Approved on 2026-11-12 under AdoptOnLoad = TRUE, which Valkey does not do; a draft again since the claims say
-    # what Valkey does, and no property can be checked on a run.
+    # what Valkey does, and SameOffsetSameData is new.
     assert (bundle.claims.status, bundle.claims.approved_by) == ("draft", None)
     assert bundle.safe_configs == ("dual-channel.cfg", "model.cfg")
     assert {control.name: control.violates for control in bundle.controls} == {
@@ -30,31 +30,85 @@ def test_every_guard_the_model_relies_on_has_a_control_that_breaks_it():
         "no_shift_on_promotion": "OneHistoryPerId",
         "save_info_without_primary": "OneHistoryPerId",
         "no_second_offset_check": "ReplicaIsPrefix",
+        "write_without_offset": "SameOffsetSameData",
     }
     assert {control.name for control in bundle.controls if control.module is None} == {"keep_old_id_on_load"}
-    # Both properties compare data sets, which a run does not observe: conform reports coverage only.
-    assert all(not item.conform and item.conform_note for item in bundle.claims.properties)
+    # The two properties over data sets as sequences are model only; the one over sampled IDs, offsets and
+    # digests is checked on runs.
+    conformed = {item.name: item.conform for item in bundle.claims.properties}
+    assert conformed == {"OneHistoryPerId": False, "ReplicaIsPrefix": False, "SameOffsetSameData": True}
+    assert all(item.conform or item.conform_note for item in bundle.claims.properties)
 
 
-def test_the_claims_hold_for_valkey_as_it_is_which_conform_pins():
-    # Single channel, and a load before +CONTINUE keeps the old ID (fuzzer issue #133): what Valkey does, what
-    # model.cfg checks, and what mapping.yaml pins for a run, so a run is checked as claimed.
+def test_the_claims_hold_for_valkey_as_it_is_which_conform_reads_from_the_run():
+    # Single channel, and a load before +CONTINUE keeps the old ID (fuzzer issue #133): what Valkey does and what
+    # model.cfg checks. A run's channel comes from the trace header's dual-channel-replication-enabled, so a
+    # dual-channel run is outside the claim; AdoptOnLoad is pinned to what Valkey does.
     bundle = load_bundle("replication")
-    pinned = {name: str(spec["value"]) for name, spec in bundle.mapping.constants.items() if "value" in spec}
+    constants = bundle.mapping.constants
 
     for item in bundle.claims.properties:
         assert item.holds_when == {"DualChannel": "FALSE", "AdoptOnLoad": "FALSE"}, item.name
-        assert {name: pinned[name] for name in item.holds_when} == item.holds_when, item.name
+    assert constants["DualChannel"] == {"config": "dual-channel-replication-enabled", "equals": "yes"}
+    assert str(constants["AdoptOnLoad"]["value"]) == "FALSE"
     assert parse_config(bundle.files["model.cfg"]).constants["AdoptOnLoad"] == "FALSE"
 
 
-def _run(tmp_path, events):
-    records = [{"kind": "header", "scenario_id": "unit", "seed": 1, "nodes": {}}]
-    for index, (name, payload) in enumerate(events):
-        records.append({"kind": "event", "t": 1 + index / 10, "sequence": index, "name": name, "payload": payload})
+NO_ID = "0" * 40
+
+
+def _info(role, replid, offset, *, link="up", syncing=False, replid2=NO_ID, second_offset=-1, backlog=1):
+    """INFO replication as the trace records it: every field as text."""
+
+    fields = {
+        "role": role,
+        "master_replid": replid,
+        "master_replid2": replid2,
+        "master_repl_offset": str(offset),
+        "second_repl_offset": str(second_offset),
+        "repl_backlog_active": "1" if backlog else "0",
+        "repl_backlog_first_byte_offset": str(backlog),
+    }
+    if role == "slave":
+        fields.update(master_link_status=link, master_sync_in_progress="1" if syncing else "0")
+    return fields
+
+
+def _sample(node, t, info, digest):
+    return {
+        "kind": "observation",
+        "round": 1,
+        "reason": "periodic",
+        "node": node,
+        "t": t,
+        "info": info,
+        "digest": digest,
+    }
+
+
+def _trace(tmp_path, records, dual_channel="no"):
+    """A trace of ``records`` (``(t, name, payload)`` events, or observation records), with every node's channel."""
+
+    nodes = {f"valkey-{n}": {"config": {"dual-channel-replication-enabled": dual_channel}} for n in range(3)}
+    tmp_path.mkdir(parents=True, exist_ok=True)
     path = tmp_path / "trace.jsonl"
-    path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
-    observed = ObservedRun(load_bundle("replication").mapping, collect_runs([str(path)])[0])
+    lines = [{"kind": "header", "scenario_id": "unit", "seed": 1, "nodes": nodes}]
+    for index, record in enumerate(records):
+        if isinstance(record, tuple):
+            t, name, payload = record
+            record = {"kind": "event", "t": t, "sequence": index, "name": name, "payload": payload}
+        lines.append(record)
+    path.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+    return str(path)
+
+
+def _run(tmp_path, events):
+    observed = ObservedRun(
+        load_bundle("replication").mapping,
+        collect_runs(
+            [_trace(tmp_path, [(1 + index / 10, name, payload) for index, (name, payload) in enumerate(events)])]
+        )[0],
+    )
     observed.replay()
     return observed
 
@@ -124,9 +178,95 @@ def test_the_replication_experiments_publish_the_models_steps_before_they_act(ex
     assert actions and all(order.index("replication-steps") < order.index(action) for action in actions)
 
 
+def test_samples_observe_each_nodes_ids_offsets_and_digest(tmp_path):
+    # valkey-0 is the primary; valkey-1 streams from it, valkey-2 is in a full sync (its link down) and still
+    # reports its old ID over data being replaced, so its sample is left out until it streams.
+    records = [
+        _sample("valkey-0", 1.0, _info("master", ID_A, 120), "d120"),
+        _sample("valkey-1", 1.1, _info("slave", ID_A, 120), "d120"),
+        _sample("valkey-2", 1.2, _info("slave", ID_B, 40, link="down", syncing=True), "half"),
+        (1.3, "replication.promoted", {"instance_id": "valkey-1", "old": ID_A, "offset": 121, "new": ID_B}),
+        _sample("valkey-1", 1.4, _info("master", ID_B, 120, replid2=ID_A, second_offset=121), "d120"),
+    ]
+    observed = ObservedRun(load_bundle("replication").mapping, collect_runs([_trace(tmp_path, records)])[0])
+    observed.replay()
+
+    # The syncing replica's sample matches no evidence, so nothing it reports enters a state.
+    assert not observed.unapplied and observed.members == {"Nodes": ["valkey-0", "valkey-1"]}
+    final = observed.states[-1]
+    assert final["role"] == {"node_valkey_0": "primary", "node_valkey_1": "primary"}
+    assert final["replid"] == {"node_valkey_0": ID_A, "node_valkey_1": ID_B}
+    assert final["off"] == {"node_valkey_0": 120, "node_valkey_1": 120}
+    assert final["data"] == {"node_valkey_0": "d120", "node_valkey_1": "d120"}
+    # Forty zeros and -1 are Valkey's "none"; the model's is 0.
+    assert final["replid2"] == {"node_valkey_0": 0, "node_valkey_1": ID_A}
+    assert final["secondOff"] == {"node_valkey_0": 0, "node_valkey_1": 121}
+    # A sample is an observed state, not a step: the steps are the events' alone.
+    assert dict(observed.actions) == {"Promote": 1}
+    assert [step["why"] for step in observed.steps[1:]] == [
+        "sample-primary sample", "sample-replica sample", "Promote", "sample-primary sample"
+    ]  # fmt: skip
+    # The sample after the promotion agrees with it: no disagreement to report.
+    assert observed.sample_mismatches == []
+    assert observed.constants()["DualChannel"] == "FALSE"
+
+
+def test_a_sample_that_disagrees_with_the_events_is_reported_not_overwritten_in_silence(tmp_path):
+    # The log says valkey-1 was promoted, and the sample after it still shows a replica: the sample is taken as
+    # the observed state, and the disagreement is reported by variable and node.
+    records = [
+        (1.0, "replication.promoted", {"instance_id": "valkey-1", "old": ID_A, "offset": 121, "new": ID_B}),
+        _sample("valkey-1", 1.1, _info("slave", ID_A, 120), "d120"),
+        _sample("valkey-1", 1.2, _info("slave", ID_A, 130), "d130"),
+    ]
+    observed = ObservedRun(load_bundle("replication").mapping, collect_runs([_trace(tmp_path, records)])[0])
+    observed.replay()
+
+    assert observed.states[-1]["role"]["node_valkey_1"] == "replica"
+    assert observed.sample_mismatches == [
+        {"evidence": "sample-replica", "var": "role", "key": "node_valkey_1", "inferred": '"primary"',
+         "sampled": '"replica"', "t": 1.1}
+    ]  # fmt: skip
+    # A sample that supersedes a sample is what samples do: not a disagreement.
+    assert len(observed.sample_mismatches) == 1
+
+
 def _tla_jar():
     path = os.environ.get("TLA2TOOLS_JAR")
     return path if path and os.path.exists(path) else None
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not _tla_jar() or not shutil.which("java"), reason="needs java and TLA2TOOLS_JAR")
+def test_conform_checks_same_offset_same_data_on_sampled_runs(tmp_path):
+    from valkey_fuzzer.spec import TlaTools, conform_runs
+
+    tools = TlaTools.locate(_tla_jar(), workers="1")
+    bundle = load_bundle("replication")
+    partial = (1.3, "replication.partial.continued", {"instance_id": "valkey-1"})
+    agree = [
+        _sample("valkey-0", 1.0, _info("master", ID_A, 120), "d120"),
+        _sample("valkey-1", 1.1, _info("slave", ID_A, 100), "d100"),
+        partial,
+        _sample("valkey-1", 1.4, _info("slave", ID_A, 120), "d120"),
+    ]
+    # Known-bad: the replica stands at the primary's offset of the primary's ID with other data.
+    disagree = [*agree[:3], _sample("valkey-1", 1.4, _info("slave", ID_A, 120), "other")]
+    runs = collect_runs(
+        [_trace(tmp_path / "agree", agree), _trace(tmp_path / "disagree", disagree), _trace(tmp_path / "dual", disagree, "yes")]
+    )  # fmt: skip
+    report = conform_runs(bundle, runs, tools)
+
+    holds, violated, outside = report["runs"]
+    assert holds["status"] == "pass" and holds["properties"]["SameOffsetSameData"] == {
+        "status": "holds",
+        "claimed": True,
+    }
+    assert violated["status"] == "fail" and violated["properties"]["SameOffsetSameData"]["states"] == [5]
+    assert violated["properties"]["SameOffsetSameData"]["first"]["evidence"] == "sample-replica"
+    # Over two channels the claim is not made: the violation is reported, not held against the run.
+    assert outside["status"] == "pass" and outside["properties"]["SameOffsetSameData"]["claimed"] is False
+    assert outside["constants"]["DualChannel"] == "TRUE"
 
 
 @pytest.mark.slow

@@ -449,10 +449,12 @@ Spec == Init /\ [][Next]_vars
 \* replica's ID while it streams or holds a cached primary, a secondary ID with
 \* a backlog to serve it, and an RDB file's ID. Each names a data set up to an
 \* offset.
+Continues(n) ==
+    \/ role[n] = "primary" /\ backlog[n] # 0
+    \/ role[n] = "replica" /\ (link[n] = "up" \/ cached[n])
 Claims ==
     {[id |-> replid[n], upto |-> off[n], data |-> data[n], gap |-> Gap(n)] :
-        n \in {m \in Nodes : \/ role[m] = "primary" /\ backlog[m] # 0
-                             \/ role[m] = "replica" /\ (link[m] = "up" \/ cached[m])}}
+        n \in {m \in Nodes : Continues(m)}}
     \cup {[id |-> replid2[n], upto |-> secondOff[n] - 1, data |-> data[n], gap |-> Gap(n)] :
             n \in {m \in Nodes : replid2[m] # None /\ backlog[m] # 0}}
     \cup {[id |-> rdb[n].id, upto |-> rdb[n].off, data |-> rdb[n].data,
@@ -469,6 +471,16 @@ OneHistoryPerId ==
         c1.id = c2.id =>
             /\ c1.gap = c2.gap
             /\ Named(c1, Min(c1.upto, c2.upto)) = Named(c2, Min(c1.upto, c2.upto))
+
+\* OneHistoryPerId at equal offsets, as a run's samples show it: two nodes that
+\* would continue the same replication ID and stand at the same offset hold
+\* the same data set. A sample of INFO replication gives a node's role, ID and
+\* offset, and DEBUG DIGEST a digest of its data set, so spec conform checks
+\* this on live runs with the digest standing for data (formal/replication/mapping.yaml).
+SameOffsetSameData ==
+    \A a, b \in Nodes :
+        (Continues(a) /\ Continues(b) /\ replid[a] = replid[b] /\ off[a] = off[b])
+            => data[a] = data[b]
 
 \* What an operator sees: a streaming replica holds a prefix of its primary's
 \* history, at the same offsets.

@@ -101,7 +101,7 @@ components:
         - {publish: cluster.election.started}
         - {publish: cluster.election.won, evidence_id: valkey.cluster.election-won-logged, required: true}
 
-  - use: valkey.observer.cluster-trace
+  - use: valkey.observer.trace
     id: trace
     config: {interval_s: 0.25, spec: cluster-election}
 
@@ -166,6 +166,6 @@ required_evidence:
   - {evidence_id: valkey.fault.injected, source: kill-voter}
   - {evidence_id: valkey.cluster.election.result, source: first-election}
   - {evidence_id: valkey.cluster.election.result, source: second-election}
-  - {evidence_id: valkey.cluster.trace.recorded, source: trace}
+  - {evidence_id: valkey.trace.recorded, source: trace}
   - {evidence_id: valkey.cluster.election-safety.verified, source: election-safety}
   - {evidence_id: valkey.deployment.validated, source: deployment-state}

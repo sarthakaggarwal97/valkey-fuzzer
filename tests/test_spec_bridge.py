@@ -535,31 +535,33 @@ def _run_folder(folder, status, specs, events=()):
     return str(folder)
 
 
+PERSISTENCE_EVENTS = [
+    ("kill.injected", {"signal": "SIGKILL", "applied": True, "target": "valkey-0"}),
+    ("persistence.save.done", {"instance_id": "valkey-0"}),
+]
+
+
 def test_conform_folder_checks_a_run_against_each_bundle_its_plan_names(tmp_path):
-    events = [
-        ("replication.link.lost", {"instance_id": "valkey-1"}),
-        ("replication.partial.continued", {"instance_id": "valkey-1"}),
-    ]
-    run = _run_folder(tmp_path / "run", "FAIL", ["replication", "register", "replication"], events)
+    run = _run_folder(tmp_path / "run", "FAIL", ["persistence", "register", "persistence"], PERSISTENCE_EVENTS)
     checked = conform_folder(run, None, "tla2tools.jar not found")
-    assert list(checked) == ["replication", "register"]
-    # Every replication property is excluded and it has no target: TLC has nothing to evaluate, so no tools.
-    replication = checked["replication"]
-    assert (replication["status"], replication["approved"]) == ("pass", False)
-    assert replication["actions"] == {"Disconnect": 1, "PartialSync": 1} and replication["properties"] == {}
+    assert list(checked) == ["persistence", "register"]
+    # Every persistence property is excluded and it has no target: TLC has nothing to evaluate, so no tools.
+    persistence = checked["persistence"]
+    assert (persistence["status"], persistence["approved"]) == ("pass", False)
+    assert persistence["actions"] == {"Crash": 1, "SaveDone": 1} and persistence["properties"] == {}
     assert checked["register"] == {"approved": False, "status": "skipped", "reason": "tla2tools.jar not found"}
     # Known-bad: a run that never reached its verdict, a bundle that is gone, and a run of no bundle.
-    errored = conform_folder(_run_folder(tmp_path / "errored", "ERROR", ["replication"], events), None)
-    assert errored["replication"]["status"] == "not_run" and "ended ERROR" in errored["replication"]["reason"]
+    errored = conform_folder(_run_folder(tmp_path / "errored", "ERROR", ["persistence"], PERSISTENCE_EVENTS), None)
+    assert errored["persistence"]["status"] == "not_run" and "ended ERROR" in errored["persistence"]["reason"]
     gone = conform_folder(_run_folder(tmp_path / "gone", "PASS", ["no-such-bundle"]), None)
     assert gone["no-such-bundle"]["status"] == "error" and "no-such-bundle" in gone["no-such-bundle"]["error"]
     # A bundle that does not load is held against the run: nothing says its claims are a draft.
     assert gone["no-such-bundle"]["approved"] is True
     assert conform_folder(_run_folder(tmp_path / "none", "PASS", []), None) == {}
     # A run that took no mapped step is unexercised: never a pass, and no error of the check either.
-    empty = conform_folder(_run_folder(tmp_path / "empty", "PASS", ["replication"]), None)
-    assert empty["replication"]["status"] == "unexercised" and "no mapped evidence" in empty["replication"]["reason"]
-    assert "error" not in empty["replication"]
+    empty = conform_folder(_run_folder(tmp_path / "empty", "PASS", ["persistence"]), None)
+    assert empty["persistence"]["status"] == "unexercised" and "no mapped evidence" in empty["persistence"]["reason"]
+    assert "error" not in empty["persistence"]
 
 
 def test_conform_folder_without_tlc_is_an_error_for_an_approved_bundle_and_a_skip_for_a_draft(tmp_path, monkeypatch):
@@ -586,8 +588,8 @@ def test_the_tools_name_what_is_missing_and_how_to_get_it(monkeypatch, tmp_path)
 
 def test_conform_needs_no_tools_for_a_bundle_tlc_has_nothing_to_evaluate(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("TLA2TOOLS_JAR", raising=False)
-    run = _run_folder(tmp_path / "run", "PASS", ["replication"], [("replication.link.lost", {"instance_id": "v"})])
-    assert _cli("conform", "replication", run) == 0 and "Disconnect 1/1" in capsys.readouterr().out
+    run = _run_folder(tmp_path / "run", "PASS", ["persistence"], PERSISTENCE_EVENTS)
+    assert _cli("conform", "persistence", run) == 0 and "Crash 1/1" in capsys.readouterr().out
     assert _cli("conform", str(BUNDLE), run) == 2 and "tla2tools.jar not found" in capsys.readouterr().err
 
 
@@ -697,7 +699,7 @@ def test_conform_reports_a_trace_that_is_missing_or_unreadable_instead_of_checki
     run = _run_folder(tmp_path / "gone", "PASS", ["cluster-election"], ELECTION_EVENTS)
     report = json.loads(Path(run, "report.json").read_text())
     trace = Path(run, "components", "trace", "trace.jsonl")
-    report["outcome"]["evidence"] = [{"evidence_id": "valkey.cluster.trace.recorded", "artifacts": [str(trace)]}]
+    report["outcome"]["evidence"] = [{"evidence_id": "valkey.trace.recorded", "artifacts": [str(trace)]}]
     Path(run, "report.json").write_text(json.dumps(report))
     # The run recorded a trace (its samples carry what the events do not) that is not there: not the events alone.
     missing = conform_folder(run, tools)["cluster-election"]

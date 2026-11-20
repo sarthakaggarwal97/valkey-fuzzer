@@ -20,12 +20,12 @@ from valkey_fuzzer import deadlines
 from valkey_fuzzer.components import cluster_election, instances, polling, processes
 from valkey_fuzzer.components.cluster import parse_slots, read_view
 from valkey_fuzzer.components.cluster_election import ElectionAction
-from valkey_fuzzer.components.cluster_trace import TRACE_EVIDENCE, ClusterTraceObserver
 from valkey_fuzzer.components.election_safety import ElectionSafetyOracle, split_primaries
 from valkey_fuzzer.components.faults import FAULT_INJECTED, EventFault
 from valkey_fuzzer.components.files import log_line_time
 from valkey_fuzzer.components.instances import deployment
 from valkey_fuzzer.components.observers import LogTriggerObserver, spec_rules
+from valkey_fuzzer.components.trace import TRACE_EVIDENCE, TraceObserver
 from valkey_fuzzer.deployment.local.cluster_nodes import parse_cluster_nodes
 from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import ComponentRole
@@ -234,11 +234,11 @@ def test_the_trace_header_says_why_a_nodes_config_is_missing(tmp_path):
     )
     handle.data_dir = lambda node_id: str(tmp_path / node_id)
     spec = resolved(
-        ComponentSpec(role=ComponentRole.OBSERVER, use="valkey.observer.cluster-trace", id="trace",
+        ComponentSpec(role=ComponentRole.OBSERVER, use="valkey.observer.trace", id="trace",
                       config={"config_keys": ["appendfsync"], "interval_s": 0})
     )  # fmt: skip
-    context = fake_context(handle, artifact_dir=str(tmp_path / "artifacts"))
-    observer = ClusterTraceObserver()
+    context = fake_context(handle, artifact_dir=str(tmp_path / "artifacts"), deployment_mode="cluster")
+    observer = TraceObserver()
     observer.start(context, spec)
     started = time.monotonic()
     result = observer.stop(context, spec)

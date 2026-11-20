@@ -725,20 +725,19 @@ def test_a_worker_checks_its_run_against_the_bundles_its_plan_names(tmp_path, wo
     summary = runner.run()
     results = {result["experiment"] + str(result["seed"]): result for result in _results(runner).values()}
 
-    # A canned run logs no replication step: it did not exercise the protocol, which is no verdict on it.
+    # Both models need TLC, which this host does not have; their claims are drafts either way.
     replication = results[f"{REPLICATION}0"]
     assert replication["status"] == "PASS"
-    assert replication["conformance"]["replication"]["status"] == "unexercised"
+    assert replication["conformance"]["replication"]["status"] == "skipped"
     assert results[f"{REPLICATION}1"]["conformance"]["replication"]["status"] == "not_run"
     assert results[f"{REPLICATION}1"]["status"] == "SKIP_UNSUPPORTED"
-    # The election model needs TLC, which this host does not have; its claims are a draft either way.
     election = results["valkey.cluster-election-durability0"]
     assert election["conformance"]["cluster-election"]["status"] == "skipped" and election["status"] == "PASS"
     (reason,) = summary["conformance"]["cluster-election"]["skipped"]
     assert reason.startswith("tla2tools.jar not found") and reason.endswith(TOOLS_HINT)
     assert summary["conformance"]["cluster-election"]["status"] == "skipped"
-    assert summary["conformance"]["replication"]["counts"] == {"unexercised": 1, "not_run": 1}
-    assert summary["conformance"]["replication"]["status"] == "unexercised"
+    assert summary["conformance"]["replication"]["counts"] == {"skipped": 1, "not_run": 1}
+    assert summary["conformance"]["replication"]["status"] == "skipped"
 
 
 def test_a_run_whose_plan_names_a_bundle_but_whose_worker_wrote_no_conformance_is_an_error(tmp_path, monkeypatch):

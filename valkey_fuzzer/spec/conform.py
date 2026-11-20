@@ -7,6 +7,14 @@ property marked ``conform: true`` and every target on each observed state,
 through ``INSTANCE model WITH <var> <- Trace[k].<var>``, so the properties are
 the model's own definitions.
 
+An event is a step: it counts for its model action and applies its updates.
+A sample is an observed state, not a step: a trace observer read it from the
+node (``valkey.observer.trace``, as the mapping's ``sample:`` section asks),
+and its updates set the variables to what the node reported. When a sample
+sets a variable to another value than the events had it at, the sample is
+taken (the node said so) and the disagreement is reported in
+``sample_mismatches``, by variable and key, never overwritten in silence.
+
 This is an observed-state check plus action coverage, not refinement: it does
 not check that consecutive observed states are related by the model's Next
 (with stuttering and hidden steps). Observations are partial and coarser than
@@ -235,6 +243,11 @@ class ObservedRun:
         self.notes: list[str] = []
         # Mapped records (or their updates) that could not be applied: the states may miss what they show.
         self.unapplied: list[str] = []
+        # A sample that set a variable to another value than the events had it at: the sample is taken as the
+        # observed state, and the disagreement is reported, by field, rather than overwritten in silence.
+        self.sample_mismatches: list[dict[str, Any]] = []
+        # Which kind of evidence last set each variable (and key): "event" or "sample"; unset means its init.
+        self._set_by: dict[tuple[str, Any], str] = {}
         self.actions: Counter = Counter()
         self.members = self._members()
         self.states: list[dict[str, Any]] = []
@@ -255,7 +268,8 @@ class ObservedRun:
                 if not spec.optional:
                     raise _SkipError(f"{evidence.name}: no {spec.path}")
                 value = spec.default
-            values[spec.name] = None if value is None else self._typed(evidence, spec.name, spec.type, value)
+            value = None if value is None else self._typed(evidence, spec.name, spec.type, value)
+            values[spec.name] = spec.map.get(value, value) if spec.map else value
         return values
 
     def _typed(self, evidence: Evidence, name: str, kind: str, value: Any) -> Any:
@@ -434,7 +448,7 @@ class ObservedRun:
             # Each update stands alone: a node outside the process set one update ranges over still
             # gets the updates whose variables it is in.
             try:
-                self._apply(state, update, fields)
+                self._apply(state, update, fields, evidence, record)
             except _OutsideProcessError as exc:
                 self._note(f"{evidence.name}: {update.op} {update.var} skipped: {exc}")
             except _SkipError as exc:
@@ -457,7 +471,14 @@ class ObservedRun:
         if text not in self.notes and len(self.notes) < 100:
             self.notes.append(text)
 
-    def _apply(self, state: dict[str, Any], update: Any, fields: Mapping[str, Any]) -> None:
+    def _apply(
+        self,
+        state: dict[str, Any],
+        update: Any,
+        fields: Mapping[str, Any],
+        evidence: Evidence,
+        record: Mapping[str, Any],
+    ) -> None:
         var = self.mapping.state[update.var]
         if var.hidden is not None:
             raise _SkipError(f"{var.name} is hidden; it cannot be updated")
@@ -467,6 +488,8 @@ class ObservedRun:
             current = state[var.name] if key is None else state[var.name][key]
             if update.op == "set":
                 new = value
+                if evidence.sample and self._set_by.get((var.name, key)) == "event" and current != new:
+                    self._mismatch(evidence, record, var.name, key, current, new)
             elif update.op == "max":
                 new = max(current, value)
             elif update.op == "incr":
@@ -483,6 +506,22 @@ class ObservedRun:
                 state[var.name] = new
             else:
                 state[var.name][key] = new
+            self._set_by[(var.name, key)] = "sample" if evidence.sample else "event"
+
+    def _mismatch(
+        self, evidence: Evidence, record: Mapping[str, Any], var: str, key: Any, inferred: Any, sampled: Any
+    ) -> None:
+        if len(self.sample_mismatches) < 100:
+            self.sample_mismatches.append(
+                {
+                    "evidence": evidence.name,
+                    "var": var,
+                    "key": None if key is None else str(key),
+                    "inferred": render(inferred),
+                    "sampled": render(sampled),
+                    "t": record.get("t"),
+                }
+            )
 
     # -- constants ------------------------------------------------------------
 
@@ -595,6 +634,10 @@ def check_run(bundle: Bundle, run: RunEvidence, tools: Optional[TlaTools]) -> di
     observed.replay()
     if recorded and recorded != bundle.mapping.sha256:
         observed.notes.append("the run recorded a different mapping.yaml (sha256 differs): check for mapping drift")
+    if observed.sample_mismatches:
+        observed.notes.append(
+            f"{len(observed.sample_mismatches)} sample(s) disagree with the state the events gave (sample_mismatches)"
+        )
     result.update(
         {
             "processes": {
@@ -603,6 +646,7 @@ def check_run(bundle: Bundle, run: RunEvidence, tools: Optional[TlaTools]) -> di
             },
             "states": len(observed.states),
             "actions": dict(sorted(observed.actions.items())),
+            "sample_mismatches": observed.sample_mismatches,
             "notes": observed.notes,
         }
     )

@@ -73,7 +73,7 @@ its bounds, not that Valkey does; the negative controls are the part that descri
 | `negative-controls/drop_unpauses_after_grant.tla` | a lost connection after the grant unpauses: must violate `OneWriter` |
 | `negative-controls/feed_after_fork.tla` | writes fed only from the pause on: must violate `NoAckedWriteLost` |
 | `claims.yaml` | the properties, scope, assumptions, bounds and exclusions (status `draft`) |
-| `mapping.yaml` | the log lines that show each step, and the `scenario` `spec translate` writes |
+| `mapping.yaml` | the log lines that show each step, the `CLUSTER GETSLOTMIGRATIONS` samples that show the jobs' states, and the `scenario` `spec translate` writes |
 
 ## Results (3 writes, 3 faults)
 
@@ -104,12 +104,15 @@ delay, S's pause ran to its timeout ("Write loss risk!", `PauseExpires`) since T
 ## Checking runs
 
 `spec conform slot-migration RUN` replays a run's mapped log lines (published by `valkey.observer.log-trigger` with
-`spec: slot-migration`) and reports which steps it took. `valkey.slot-migration-spec` publishes them, and a batch
-checks each of its runs this way (see [In a batch](../../docs/spec-bridge.md#in-a-batch)). Both properties need
-each node's view of the owner and the writes it holds, which a run does not show in the model's terms, so conform
-checks neither (`conform: excluded`) and needs no TLC. `mapping.yaml` pins the three constants to the claims'
-`holds_when` (the fixes, not Valkey as it is), so a run is checked as claimed once a property can be: a run in which
-Valkey as it is lets two nodes write would fail, as it should.
+`spec: slot-migration`) and the samples of `valkey.observer.trace` (the mapping's `sample:` section: each node's
+cluster view and `CLUSTER GETSLOTMIGRATIONS`), reports which steps it took, and sets `exp`, `imp` and `track` from
+the export, import and tracking jobs' states ([Samples](../../docs/spec-bridge.md#samples)).
+`valkey.slot-migration-spec` publishes the lines, and a batch checks each of its runs this way (see
+[In a batch](../../docs/spec-bridge.md#in-a-batch)). Both properties need each node's view of the owner and the
+writes it holds, which a run does not show in the model's terms (the model names its nodes `S`, `T` and `R`; the
+samples name run nodes), so conform checks neither (`conform: excluded`) and needs no TLC. `mapping.yaml` pins the
+three constants to the claims' `holds_when` (the fixes, not Valkey as it is), so a run is checked as claimed once a
+property can be: a run in which Valkey as it is lets two nodes write would fail, as it should.
 
 ## Run
 

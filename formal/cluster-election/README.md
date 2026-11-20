@@ -132,7 +132,7 @@ pattern Valkey never logs cannot silently blind both readers.
 | `ReceiveVote(c)` | `acked`: `Failover auth ACK from … (ACKs N, quorum Q)`, logged by the candidate: the vote left the voter |
 | `Win(c)`, `winners` | `won`: `Failover election won: I'm the new primary.`, at the epoch of the winner's latest `started` (`after: ... take: [epoch]`); Valkey logs `configEpoch set to N after successful failover` only when the winner's `configEpoch` was below `N`, so that line would miss a win |
 | `Crash(p)` | `crash`: the `*.injected` event of `valkey.fault.process-signal` (`kill-voter`) or of the `kill_primary` trigger of `valkey.action.cluster-election`, with the `nodes.conf` vars read at the kill |
-| `currentEpoch`, `diskEpoch`, `diskVote` | `sample`: `valkey.observer.cluster-trace` (`trace`) samples of `CLUSTER INFO` and the `vars` line of `nodes.conf` |
+| `currentEpoch`, `diskEpoch`, `diskVote` | `sample`: `valkey.observer.trace` (`trace`) samples of `CLUSTER INFO` and the `vars` line of `nodes.conf`, read from the file (the mapping's `sample:` section asks for `cluster` and `nodes_conf`) |
 | `SaveConfig`, `BioWrite`, `FlushEarly`, `LearnEpoch` | unobservable (not logged) |
 | `bio` | hidden: queued background saves are not observable |
 

@@ -25,7 +25,6 @@ from . import (
     capabilities,
     cluster_chaos,
     cluster_election,
-    cluster_trace,
     command_metadata,
     command_table,
     config_space,
@@ -44,6 +43,7 @@ from . import (
     storage,
     syscall_faults,
     tools,
+    trace,
     workloads,
 )
 from .generators import GENERATORS
@@ -73,7 +73,7 @@ _MODULES = (
     snapshots,
     search,
     cluster_election,
-    cluster_trace,
+    trace,
     election_safety,
     replication_chaos,
     slot_migration,

@@ -22,7 +22,11 @@ RUNTIME = {
         "VotesSavedBeforeSent": f"yes: `{ELECTION}` (exact, from the `nodes.conf` read at each crash)",
         "NoVoteLostInCrash": "yes: `spec conform`",
     },
-    "replication": {"OneHistoryPerId": MODEL_ONLY, "ReplicaIsPrefix": MODEL_ONLY},
+    "replication": {
+        "OneHistoryPerId": MODEL_ONLY,
+        "ReplicaIsPrefix": MODEL_ONLY,
+        "SameOffsetSameData": "yes: `spec conform` (from the trace's INFO replication and `DEBUG DIGEST` samples)",
+    },
     "persistence": {"ManifestFilesExist": MODEL_ONLY, "AofIsPrefix": MODEL_ONLY, "AckedRestored": MODEL_ONLY},
     "slot-migration": {"OneWriter": MODEL_ONLY, "NoAckedWriteLost": MODEL_ONLY},
 }

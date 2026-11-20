@@ -1,6 +1,8 @@
 # What formal/replication/model.tla claims about Valkey's primary-replica
 # replication, under which assumptions and bounds, and what it leaves out.
-# Model only: no property below is evaluated against a live run. A `spec check` PASS says the model
+# SameOffsetSameData is evaluated against live runs (`spec conform`, from the
+# trace's INFO replication and DEBUG DIGEST samples); the two properties about
+# data sets as sequences are model only. A `spec check` PASS says the model
 # holds within its bounds, not that Valkey does.
 protocol: replication
 summary: >-
@@ -18,10 +20,8 @@ summary: >-
   the fix (AdoptOnLoad = TRUE) restores it.
 # Written by hand. Approved by the maintainer on 2026-11-12 as a claim under
 # AdoptOnLoad = TRUE, which Valkey does not do; back to draft on 2026-11-19:
-# the claims now say what Valkey does, and no property can be checked on a
-# run (every variable both read is hidden in mapping.yaml, so conform would
-# evaluate them on placeholders and they could never fail), so an approval
-# would enforce nothing. A maintainer re-approves the claims as they stand.
+# the claims now say what Valkey does, and SameOffsetSameData, added for the
+# trace's samples, is new. A maintainer re-approves the claims as they stand.
 status: draft
 scope:
   - file: src/replication.c
@@ -63,12 +63,14 @@ properties:
     negative_controls: [keep_old_id_on_load, keep_id_without_backlog, no_shift_on_promotion, save_info_without_primary]
     conform:
       excluded: >-
-        It is a statement about data sets, and a run's events and INFO samples
-        show replication IDs and offsets, not which writes a node holds: every
-        variable it reads (data, off, replid, replid2, secondOff, backlog, rdb)
-        is hidden in mapping.yaml, so conform would evaluate it on the
-        mapping's placeholders and it could never fail. The ledger and
-        data-consistency oracles compare data after a run.
+        It compares data sets as sequences of writes at every offset both
+        claims reach (Named, through Gap: the data set's length less the
+        offset). A run's samples give each node's ID, offset and a DEBUG
+        DIGEST of its data set, which has no length in writes, so Gap cannot
+        be evaluated and two claims at different offsets could never be
+        compared. SameOffsetSameData is this property at equal offsets, and
+        is checked on runs; the ledger and data-consistency oracles compare
+        data after a run.
   - name: ReplicaIsPrefix
     kind: invariant
     statement: >-
@@ -78,10 +80,24 @@ properties:
     negative_controls: [no_second_offset_check]
     conform:
       excluded: >-
-        Like OneHistoryPerId, it compares data sets (data, off, primaryOf,
-        all hidden in mapping.yaml), which a run does not observe in the
-        model's terms; the data-consistency and ledger oracles compare a
-        replica's data with its primary's after the run.
+        It compares a replica's data set with a prefix of its primary's, and
+        their offsets (off[r] <= off[p]), at one instant. A run samples the
+        two nodes one after the other, so a replica's sample can be newer
+        than its primary's and show a larger offset, and a digest has no
+        prefixes; primaryOf is not in the mapped lines either. The
+        data-consistency and ledger oracles compare a replica's data with its
+        primary's after the run.
+  - name: SameOffsetSameData
+    kind: invariant
+    statement: >-
+      Two nodes that could continue the same replication ID (a primary with a
+      backlog, a replica streaming or holding a cached primary) and stand at
+      the same offset hold the same data set: OneHistoryPerId at equal
+      offsets, which is what a run's samples show (each node's master_replid,
+      master_repl_offset and DEBUG DIGEST, read in one transaction).
+    holds_when: {DualChannel: false, AdoptOnLoad: false}
+    negative_controls: [write_without_offset]
+    conform: true
 assumptions:
   - >-
     Dual-channel replication is off (DualChannel = FALSE,

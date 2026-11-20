@@ -3,6 +3,13 @@
 # each `log` line as its `event` (valkey.observer.log-trigger with
 # spec: cluster-election), the election-safety oracle reads those events, and
 # `valkey-fuzzer spec conform` rebuilds the model's state from a run's trace.
+sample:
+  # valkey.observer.trace (spec: cluster-election) reads these from every node
+  # in each round: CLUSTER INFO and CLUSTER NODES (the view: current_epoch,
+  # role, slots), and the vars line of nodes.conf from the file, which a killed
+  # node cannot answer for.
+  cluster: true
+  nodes_conf: true
 evidence:
   started:
     event: cluster.election.started
@@ -91,7 +98,7 @@ evidence:
       - {clear: held, key: $target@Primaries}
       - {incr: crashes}
   sample:
-    # valkey.observer.cluster-trace: CLUSTER INFO cluster_current_epoch, the
+    # valkey.observer.trace: CLUSTER INFO cluster_current_epoch, the
     # node's role and slots from CLUSTER NODES, and the vars line of nodes.conf.
     # nodes.conf samples lag behind the file, so they only raise the disk vars.
     sample: true

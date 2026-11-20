@@ -1,10 +1,17 @@
-# The replication model's steps (formal/replication), as the instances log
-# them: the `replication-steps` observer publishes every line that
-# formal/replication/mapping.yaml maps to a step, with the mapping's patterns
-# (spec: replication), so a batch checks each run against the bundle (`spec
-# conform`: which steps the run took; the claims compare data sets, which a
-# run does not observe). An experiment lists `- id: replication-steps` before
-# its actions, so the observer tails the logs before they act.
+# The replication model's steps and states (formal/replication), as the
+# instances show them: the `replication-steps` observer publishes every line
+# that formal/replication/mapping.yaml maps to a step, with the mapping's
+# patterns (spec: replication), and the `replication-trace` observer records
+# the events with a sample of every node's INFO replication and DEBUG DIGEST
+# (the mapping's `sample:` section) as trace.jsonl, so a batch checks each run
+# against the bundle (`spec conform`: the steps the run took, and
+# SameOffsetSameData on the sampled IDs, offsets and digests). An experiment
+# lists `- id: replication-steps` and `- id: replication-trace` before its
+# actions, so the observers see the whole run.
+startup_overlays:
+  - overlay_id: replication-trace
+    # DEBUG DIGEST is refused without it.
+    server_config: {enable-debug-command: "yes"}
 components:
   - use: valkey.observer.log-trigger
     id: replication-steps
@@ -23,3 +30,13 @@ components:
         - {publish: replication.replicaof}
         - {publish: replication.backlog.freed}
         - {publish: replication.rdb.saved}
+
+  - use: valkey.observer.trace
+    id: replication-trace
+    config:
+      spec: replication
+      # DEBUG DIGEST costs each node about 3 us a key per sample (docs/spec-bridge.md, Samples): once a second,
+      # a run with the default 1,200 keys spends 0.4% of each node's time on it, and one with 5,000 keys 1.5%.
+      interval_s: 1.0
+      # The claims hold over one channel: the header records which channel each node runs.
+      config_keys: [dual-channel-replication-enabled]

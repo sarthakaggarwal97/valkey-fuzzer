@@ -229,10 +229,12 @@ def conform_command(args: argparse.Namespace) -> int:
             for name, entry in (run.get("properties") or {}).items()
         )
         reached = [name for name, entry in (run.get("targets") or {}).items() if entry["reached"]]
+        mismatches = run.get("sample_mismatches") or []
         print(
             f"[{run['status'].upper():<5}] {run.get('scenario_id') or run['source']}: {run['states']} observed states; "
             + (run.get("error") or checks)
             + (f"; reached {', '.join(reached)}" if reached else "")
+            + (f"; {len(mismatches)} sample mismatch(es): {mismatches[0]['var']} ..." if mismatches else "")
         )
     coverage = report["action_coverage"]
     observed = ", ".join(f"{action} {count}/{coverage['runs']}" for action, count in coverage["observed"].items())

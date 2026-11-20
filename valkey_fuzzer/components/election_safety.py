@@ -42,13 +42,13 @@ from valkey_fuzzer.spec.bundle import Property, SpecBundleError, load_spec_claim
 from valkey_fuzzer.spec.tla import render
 
 from .cluster import ranges_overlap, read_view, view_summary
-from .cluster_trace import TRACE_EVIDENCE
 from .faults import FAULT_INJECTED
 from .files import read_jsonl
 from .instances import deployment
 from .polling import poll_each, poll_until
 from .registration import SPEC_SHA256_FIELD, component_registration, pinned_spec_mapping
 from .schemas import FLAG, INTEGER, LIST, MAPPING, TEXT, declared, mapping_of, nullable
+from .trace import TRACE_EVIDENCE
 
 _SAFETY_FIELDS = {
     "trace": ConfigField(str, allow_none=True, default=None),
