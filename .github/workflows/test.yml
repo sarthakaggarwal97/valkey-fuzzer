@@ -52,21 +52,9 @@ jobs:
         cache: true
         cache-dependency-path: porcupine/go.sum
 
+    # tests/test_packaging.py builds the sdist and the wheel and checks what they ship (the spec bundles among it).
     - name: Run unit tests
       run: python -m pytest -m "not slow"
-
-    # The tests run from the checkout, where formal/ is on disk; an installed
-    # wheel finds the spec bundles only if packaging mapped them in.
-    - name: Check the wheel ships every spec bundle file
-      if: matrix.python-version == '3.12'
-      run: |
-        python -m pip wheel --no-deps --wheel-dir dist .
-        python -m zipfile -l dist/valkey_fuzzer-*.whl > wheel-files.txt
-        missing=0
-        for path in $(cd formal && find . -type f ! -name '.*' | sed 's|^\./||'); do
-          grep -qF "valkey_fuzzer/formal/$path " wheel-files.txt || { echo "the wheel lacks formal/$path"; missing=1; }
-        done
-        exit "$missing"
 
   server-tests:
     # Tests that start real valkey-server processes, plus a live subset of the

@@ -37,6 +37,7 @@ first group.
 | --- | --- | --- |
 | [Adding tests](extending.md) | experiment and component authors | writing experiments, components, and providers, registering them, shipping a pack, testing |
 | [Architecture](architecture.md) | framework contributors | code layout, the compiler and runner, the local deployment provider, the wave engine |
+| [Releasing](releasing.md) | maintainers | the version, the release steps, what the sdist and the wheel hold, the release workflow, the one-time PyPI setup |
 | [Spec bridge](spec-bridge.md) | model and experiment authors | TLA+ bundles: `spec check`, `spec translate`, `spec conform`, the assurance report |
 | [Cluster failover election](../formal/cluster-election/README.md) | Valkey cluster maintainers | the TLA+ model of the failover vote and its live counterpart |
 | [Atomic slot migration](../formal/slot-migration/README.md) | Valkey cluster maintainers | the TLA+ model of atomic slot migration |

@@ -1,0 +1,13 @@
+# What the sdist carries beyond the package: the checkout a user needs to run the tests (which read the workflows
+# under .github), the bug zoo and the examples, build the porcupine checker, and read the docs. formal/ ships
+# already, as the package data of valkey_fuzzer.formal (pyproject.toml maps it), in the wheel too; the wheel's
+# other data is tool.setuptools.package-data there. tests/test_packaging.py checks both archives.
+include CHANGELOG.md
+graft .github
+graft docs
+graft examples
+graft porcupine
+graft tests
+graft zoo
+# A checkout the tests ran in has __pycache__ under tests/ and .github/scripts/.
+global-exclude *.py[cod]

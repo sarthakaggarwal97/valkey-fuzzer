@@ -1,14 +1,18 @@
 [build-system]
-requires = ["setuptools>=64", "wheel"]
+# 77 reads the SPDX `license` string and `license-files` below (PEP 639).
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "valkey-fuzzer"
+# The one source of the version is valkey_fuzzer.__version__ (tool.setuptools.dynamic below); `valkey-fuzzer
+# --version` prints it, and docs/releasing.md bumps it.
 dynamic = ["version"]
 description = "Seeded fault-injection tests for Valkey standalone and cluster deployments"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "BSD-3-Clause"}
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
 authors = [
     {name = "valkey-io"}
 ]
@@ -35,8 +39,10 @@ dev = [
     "pytest>=7.0.0",
     # lint.yml installs the same version.
     "ruff==0.14.3",
-    # tests/test_packaging.py checks the package list with setuptools.
-    "setuptools>=64",
+    # tests/test_packaging.py checks the package list with setuptools and builds the sdist and the wheel with
+    # `python -m build --no-isolation`, so the backend is this setuptools (the version the build-system pins).
+    "setuptools>=77",
+    "build>=1.0",
 ]
 
 [project.urls]
