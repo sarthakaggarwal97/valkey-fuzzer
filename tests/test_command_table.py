@@ -488,7 +488,9 @@ def test_a_command_that_leaves_its_connection_unpaired_closes_it_and_ends_its_tr
     gets = [(index, number) for index, (_, number, command) in enumerate(server.log) if command[0] == "GET"]
     # Nothing follows an answered GET on its connection, not the EXEC of its transaction either.
     assert gets and all(last[number] == index for index, number in gets)
-    assert len(server.closed) == len(server.opened) > len(gets)
+    # Every connection opened was closed; one was opened per GET (the next command reopens), less the GET that was
+    # the last command on a stream when the workload stopped, plus the first connection of each stream.
+    assert len(server.closed) == len(server.opened) >= len(gets)
 
 
 def test_a_reply_valkey_is_known_to_send_against_its_schema_is_no_mismatch(monkeypatch):
