@@ -8,11 +8,16 @@ Election facts come from node log lines published by a
 ``valkey.observer.log-trigger`` observer (see the
 ``valkey.cluster-election-durability`` experiment): votes granted (``Failover
 auth granted to``), votes counted (``Failover auth ACK from ... (ACKs N,
-quorum Q)``, logged since Valkey 9.2), elections started (``Starting a
+quorum Q)``), elections started (``Starting a
 failover election for epoch N``), and elections won (``Failover election
 won``, whose epoch is the one its winner last started). The patterns and
 event names live in ``formal/cluster-election/mapping.yaml``; the observer
 and the oracle read them from there (``spec: cluster-election``).
+
+Minimum Valkey version: 9.2, the first to log each counted vote with its
+count and quorum. On an older build no ACK line exists, so every run that
+elected is ERROR (the quorum check cannot run), never a false PASS or FAIL;
+the shipped experiments pin ``min_version: "9.2.0"`` in their build probe.
 
 The model's ``VoteOncePerEpoch`` and ``OneWinnerPerEpoch`` are claimed
 (``claims.yaml``, ``holds_when``) only under the constants ``spec conform``
@@ -24,6 +29,7 @@ it, not as a failure; the checks the model does not claim (a win's quorum,
 a split primary) always fail the run.
 """
 
+from collections import deque
 from collections.abc import Mapping, Sequence
 from typing import Any, Optional
 
@@ -357,7 +363,7 @@ class ElectionSafetyOracle:
             )
         unsaved, delivered = unsaved_votes(crashes, votes, acks, node_ids)
 
-        views, converged, unanswered = self._converge(context, handle, config["converge_timeout_s"])
+        views, converged, unanswered, changing = self._converge(context, handle, config["converge_timeout_s"])
         config_keys = sorted(
             {_SAVE_BEHAVIOR} | {item["config"] for item in mapping.constants.values() if "config" in item}
         )
@@ -480,6 +486,15 @@ class ElectionSafetyOracle:
                 f"{', '.join(unanswered) or 'all'} within {config['converge_timeout_s']:g}s",
                 diagnostics={**record, "unanswered": unanswered},
             )
+        if not converged and changing:
+            # Convergence is bounded by converge_timeout_s, a liveness bound: views still settling at the deadline
+            # were not read in a final state, so nothing says they disagree.
+            return make_result(
+                spec,
+                ComponentStatus.ERROR,
+                f"cluster views were still changing at the converge_timeout_s deadline ({config['converge_timeout_s']:g}s)",
+                diagnostics=record,
+            )
         if not converged:
             return make_result(
                 spec,
@@ -536,7 +551,8 @@ class ElectionSafetyOracle:
                 spec,
                 ComponentStatus.ERROR,
                 f"cannot check that {len(wins)} election winner(s) reached quorum: no 'Failover auth ACK' line "
-                f"was published as {events['acked']!r} (Valkey logs them since 9.2)",
+                f"was published as {events['acked']!r}; the oracle needs Valkey 9.2 or later, which logs each "
+                "counted vote with its count and quorum",
                 diagnostics=record,
             )
         evidence_out = [make_evidence(spec, "valkey.cluster.election-safety.verified", "oracle.completed", record)]
@@ -585,9 +601,13 @@ class ElectionSafetyOracle:
         known = {instance_id: value for instance_id, (answered, value) in polled.items() if answered}
         return known, [instance_id for instance_id in ids if instance_id not in known]
 
-    def _converge(self, context: Any, handle: Any, timeout: float) -> tuple[dict[str, dict], bool, list[str]]:
+    def _converge(self, context: Any, handle: Any, timeout: float) -> tuple[dict[str, dict], bool, list[str], bool]:
         """Poll until every running node answers and agrees on slot owners and their configEpochs: the last
-        views, whether they agreed, and the running nodes that did not answer."""
+        views, whether they agreed, the running nodes that did not answer, and whether the views were still
+        changing between the last two polls (a liveness bound reached, not a disagreement)."""
+
+        # The last two polls' owner maps and cluster states, to tell a view still settling from one that disagrees.
+        pictures: deque = deque(maxlen=2)
 
         def check() -> tuple[bool, tuple[dict[str, dict], list[str]]]:
             running = [node.instance_id for node in handle.instances if handle.is_alive(node.instance_id)]
@@ -604,6 +624,7 @@ class ElectionSafetyOracle:
                     )
                 )
                 maps.add(owners)
+            pictures.append((frozenset(maps), tuple(sorted((name, view["state"]) for name, view in views.items()))))
             agreed = (
                 not unanswered
                 and len(maps) == 1
@@ -613,7 +634,8 @@ class ElectionSafetyOracle:
             return agreed, (views, unanswered)
 
         agreed, (views, unanswered) = poll_until(check, timeout_s=timeout, interval_s=0.2, context=context)
-        return views, agreed, unanswered
+        changing = len(pictures) == 2 and pictures[0] != pictures[1]
+        return views, agreed, unanswered, changing
 
 
 _SAFETY_DECLARES = Declarations(

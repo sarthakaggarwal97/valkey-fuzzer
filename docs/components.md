@@ -648,11 +648,12 @@ The outcome, with `compare_with`:
   command: `crashes` names the side, `candidate` or `parent`.
   Nothing else: a difference between builds is never, by itself, a Valkey
   failure.
-- `ERROR` with `diagnostics: {reason: expect-disputed, commands: [...]}`: an
-  `expect` the candidate violates but the parent replied the same to. The
-  expectation is about behaviour the change did not touch, nearly always the
-  test's own mistake; each command is given with its `expect` and both
-  replies.
+- `ERROR` with `diagnostics: {reason: expect-disputed, pre_existing: true,
+  commands: [...]}`: an `expect` the candidate violates but the parent
+  replied the same to. The expectation is about behaviour the change did not
+  touch, nearly always the test's own mistake, or else a bug both builds
+  share (`pre_existing`: not the change's, filed once); each command is given
+  with its `expect` and both replies.
 - `ERROR` with `diagnostics: {reason: unreached-change}`: a marked command
   whose parent reply equals the candidate's, the parent alive. The sequence
   did not reach the change; for a bug fix, the parent is a build with the
@@ -817,8 +818,9 @@ The outcome, as for [`valkey.action.commands`](#valkeyactioncommands):
   has a crash or sanitizer report) or a candidate private server that exits;
   their causes are `crashes` in the diagnostics. Also a candidate run that
   violates its `expect` where the parent ran otherwise.
-- `ERROR` with `diagnostics: {reason: expect-disputed, runs: [...]}`: an
-  `expect` the candidate violates but the parent ran the same.
+- `ERROR` with `diagnostics: {reason: expect-disputed, pre_existing: true,
+  runs: [...]}`: an `expect` the candidate violates but the parent ran the
+  same.
 - `ERROR` with `diagnostics: {reason: unreached-change}`: a marked run the
   same on both builds.
 - `ERROR` with `diagnostics: {reason: unexplained-difference, runs: [...]}`:
@@ -1725,8 +1727,13 @@ have produced an RDB.
 With `workload`, each RDB must hold only keys the workload wrote, every stable
 key must hold its value, the RDB must be a consistent cut of the write
 history taken while `BGSAVE` ran, and each of the workload's lists it holds
-must have the length and elements the workload wrote (`lists.jsonl`). A
-bgsave with `capture_rdb: false` is rejected.
+must have the length and elements the workload wrote (`lists.jsonl`). The cut
+allows no lost write, so `workload` does not compile next to a component that
+can lose writes Valkey acknowledged: a `valkey.fault.process-signal` other
+than `SIGSTOP`, a `valkey.fault.syscall` whose `action` is `kill`, a
+`valkey.action.failover` with `force: true`, or a chaos or rolling-upgrade
+action; judge such a run with [`valkey.oracle.ledger`](#valkeyoracleledger)
+and its loss windows. A bgsave with `capture_rdb: false` is rejected.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -1776,7 +1783,10 @@ with the oracle's `notes`.
 
 ### `valkey.oracle.cluster-election-safety`
 
-Cluster mode. Checks the invariants of the
+Cluster mode, Valkey 9.2 or later (the first release that logs each counted
+vote, `Failover auth ACK from ... (ACKs N, quorum Q)`; on an older build the
+quorum check cannot run, so every run that elected is `ERROR`). Checks the
+invariants of the
 [TLA+ election model](../formal/cluster-election/README.md) on the live run, from vote and
 win events published by a log-trigger observer, the crash faults' records,
 the trace, and the final cluster views:
@@ -1814,12 +1824,16 @@ its winner last started (the `Failover election won` line names none).
 | `converge_timeout_s` | number, 0 to 600 | 60 | |
 
 `ERROR` when elections were won but no ACK line was published as the
-mapping's `acked` event, so the quorum check cannot run; when a win follows
-no `started` event of its winner, so its epoch is unknown; when a double
-vote or two winners were found but a node's setting the claim depends on
-could not be read; when the views
-did not converge while a running node's view could not be read; and when
-`trace` names an observer whose trace is missing or unreadable.
+mapping's `acked` event, so the quorum check cannot run (the oracle needs
+Valkey 9.2 or later, which logs `Failover auth ACK from ... (ACKs N, quorum
+Q)`; an older build gives this `ERROR` on every run that elected); when a win
+follows no `started` event of its winner, so its epoch is unknown; when a
+double vote or two winners were found but a node's setting the claim depends
+on could not be read; when the views did not converge while a running node's
+view could not be read, or while the views were still changing at the
+`converge_timeout_s` deadline (a liveness bound reached, not a disagreement:
+views that hold still and disagree are the `FAIL`); and when `trace` names an
+observer whose trace is missing or unreadable.
 
 Evidence: `valkey.cluster.election-safety.verified`; also
 `valkey.cluster.vote.unsaved-at-crash` when a crash caught a vote its
@@ -1845,7 +1859,10 @@ Evidence: `valkey.binary.verified`.
 Records a canonical digest of every primary's dataset (all keys, with values
 compared by type), for comparing builds, and writes a key listing as
 `keyspace.jsonl`. The digest itself never fails a run. The oracle fails only
-when no instance is a primary, in cluster mode a key is held by two primaries, or, with
+when no instance is a primary, in cluster mode a key is held by two primaries
+(a key of a slot that `CLUSTER NODES` shows migrating or importing is on both
+sides until the handoff: it is listed in the evidence's `migrating_keys`, not
+failed), or, with
 `include_replicas`, a replica does not converge on its primary's digest.
 Reads are retried within `converge_timeout_s`; an instance that stays
 unreachable or unreadable makes it `ERROR`, since a digest that left it out

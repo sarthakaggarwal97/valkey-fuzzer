@@ -508,8 +508,10 @@ def test_an_expect_both_builds_violate_alike_is_disputed_not_fail(builds):
     result, _ = run(builds, commands)
 
     assert result.status.value == "ERROR"
+    # pre_existing: the batch files what both builds do alike once, not against the change.
     assert to_plain_data(result.diagnostics) == {
         "reason": "expect-disputed",
+        "pre_existing": True,
         "commands": [
             {
                 "index": 0,

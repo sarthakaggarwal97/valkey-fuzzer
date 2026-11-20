@@ -92,6 +92,10 @@ _FORCED = {"extra": (_component("valkey.action.failover", "failover", force=True
         ("valkey.oracle.rdb-snapshot", {"bgsave": "pause"}, {"extra": (_component("valkey.action.sleep", "pause", seconds=1),)}, r"'pause' is a valkey\.action\.sleep, not a valkey\.action\.bgsave"),
         # A snapshot is a cut of one client's write order.
         ("valkey.oracle.rdb-snapshot", {"bgsave": "bgsave", "workload": "writes"}, {"extra": (_component("valkey.action.bgsave", "bgsave"), _component("valkey.workload.key-value", "writes", clients=3))}, "several clients"),
+        # The cut check allows no loss, so a component that can lose acknowledged writes is refused with it;
+        # a pause (SIGSTOP), a disk fill, or a graceful failover loses none.
+        ("valkey.oracle.rdb-snapshot", {"bgsave": "bgsave", "workload": "writes"}, {"extra": (*_BGSAVE["extra"], *_KILL["extra"])}, r"'kill' \(valkey\.fault\.process-signal\) may lose writes"),
+        ("valkey.oracle.rdb-snapshot", {"bgsave": "bgsave", "workload": "writes"}, {"extra": (*_BGSAVE["extra"], _component("valkey.workload.key-value", "writes"), *_FORCED["extra"]), "mode": "cluster"}, r"'failover' \(valkey\.action\.failover\) may lose writes"),
         ("valkey.oracle.ledger", {"workload": "missing"}, {}, "not a component"),
         # appendfsync always cannot lose an acknowledged write to a process fault (appendonly yes is the local
         # deployment's default); everysec may lose two seconds of writes; a forced failover can lose writes.
@@ -119,6 +123,21 @@ def test_a_bad_component_config_fails_to_compile(component_id, config, options, 
     )
     with pytest.raises(ConfigError, match=error):
         registration_for(component_id).resolve_config(spec, plan)
+
+
+@pytest.mark.parametrize(
+    ("component", "mode"),
+    [
+        (_component("valkey.fault.process-signal", "pause", when_event="x", signal="SIGSTOP"), "standalone"),
+        (_component("valkey.fault.syscall", "slow", calls=["fsync"], action="delay"), "standalone"),
+        (_component("valkey.action.failover", "failover"), "cluster"),
+    ],
+    ids=["pause", "delayed-syscall", "graceful-failover"],
+)
+def test_the_rdb_cut_check_accepts_components_that_lose_no_acknowledged_write(component, mode):
+    spec = _component("valkey.oracle.rdb-snapshot", "snapshot", bgsave="bgsave", workload="writes")
+    plan = unit_plan((spec, *_BGSAVE["extra"], _component("valkey.workload.key-value", "writes"), component), mode)
+    assert registration_for(spec.use).resolve_config(spec, plan)["workload"] == "writes"
 
 
 class FakeClient(fakes.FakeClient):
@@ -949,6 +968,58 @@ class _KeyspaceClient(FakeClient):
             self.failures -= 1
             raise TimeoutError("Timeout reading from socket")
         return iter(())
+
+
+class _StringsClient(FakeClient):
+    """A keyspace of string ``keys`` on a cluster node whose own CLUSTER NODES line ends with ``slot_tokens``."""
+
+    def __init__(self, keys, slot_tokens):
+        super().__init__()
+        self.keys, self.slot_tokens = dict(keys), slot_tokens
+
+    def scan_iter(self, match=None, count=1000):
+        return iter(sorted(self.keys))
+
+    def type(self, key):
+        return "string" if key in self.keys else "none"
+
+    def get(self, key):
+        return self.keys[key]
+
+    def execute_command(self, *args):
+        assert args == ("CLUSTER", "NODES")
+        return f"{'a' * 40} 127.0.0.1:7000@17000 myself,master - 0 0 1 connected {self.slot_tokens}\n".encode()
+
+
+@pytest.mark.parametrize(
+    ("source_tokens", "target_tokens", "status"),
+    [
+        # Slot 15495 (key "a") is on both primaries while the source hands it over, whichever side marks it.
+        ("0-16383 [15495->-bbbb]", "", "PASS"),
+        ("0-16383", "[15495-<-aaaa]", "PASS"),
+        # Nothing migrates: two primaries hold one key.
+        ("0-16383", "", "FAIL"),
+    ],
+    ids=["source-migrating", "target-importing", "no-migration"],
+)
+def test_the_digest_oracle_does_not_fail_a_key_held_by_both_sides_of_an_unfinished_slot_migration(
+    tmp_path, source_tokens, target_tokens, status
+):
+    handle = FakeHandle(("valkey-0", "valkey-1"))
+    handle.mode = SimpleNamespace(value="cluster")
+    handle.instances = tuple(SimpleNamespace(**{**vars(node), "role": "primary"}) for node in handle.instances)
+    handle.clients = {
+        "valkey-0": _StringsClient({"a": "1", "b": "2"}, source_tokens),
+        "valkey-1": _StringsClient({"a": "1"}, target_tokens),
+    }
+    spec = _spec("valkey.oracle.dataset-digest", "dataset", converge_timeout_s=0)
+    result = DatasetDigestOracle().evaluate(fake_context(handle, artifact_dir=str(tmp_path)), spec, ())
+    assert result.status.value == status, result.summary
+    if status == "PASS":
+        [record] = evidence_values(result.evidence, "valkey.dataset.digest")
+        assert record["migrating_keys"] == ["a"] and record["keys"] == 2
+    else:
+        assert result.summary == "1 key(s) are held by more than one primary"
 
 
 @pytest.mark.parametrize(

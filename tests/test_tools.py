@@ -220,6 +220,7 @@ def test_an_expect_both_builds_violate_alike_is_disputed(builds):
     result, value, _ = run(builds, [cli("exit:1", expect={"exit": {"equals": 0}})])
 
     assert result.status.value == "ERROR" and result.diagnostics["reason"] == "expect-disputed"
+    assert result.diagnostics["pre_existing"] is True
     assert to_plain_data(result.diagnostics["runs"])[0]["expect"] == {"exit": {"equals": 0}}
     assert value["violating"] == [0]
 

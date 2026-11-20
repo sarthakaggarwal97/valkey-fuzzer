@@ -419,6 +419,7 @@ class ToolsAction:
                 evidence=evidence,
                 diagnostics={
                     "reason": "expect-disputed",
+                    "pre_existing": True,
                     "runs": [both(index, expect=plain_config(runs[index]["expect"])) for index in disputed],
                 },
             )

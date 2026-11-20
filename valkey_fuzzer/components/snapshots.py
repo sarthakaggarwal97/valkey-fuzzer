@@ -23,7 +23,8 @@ import valkey
 from valkey.crc import key_slot
 
 from valkey_fuzzer.declarations import Declarations
-from valkey_fuzzer.deployment.local.queries import parse_replication
+from valkey_fuzzer.deployment.local.cluster_nodes import parse_cluster_nodes, parse_slots_in_flight
+from valkey_fuzzer.deployment.local.queries import parse_replication, response_text
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.protocols import component_artifact_dir
 from valkey_fuzzer.results import ComponentStatus, Evidence, evidence_of, make_evidence, make_result
@@ -72,6 +73,22 @@ _RDB_FIELDS = {
 # The loading server's verdict on an RDB it could not load at startup.
 _LOAD_REFUSED = "Fatal error loading the DB"
 _EXIT_STATUS = re.compile(r"^exit status (-?\d+)\n")
+# Actions that kill or fail over nodes as they go: each publishes the loss windows valkey.oracle.ledger reads.
+_LOSSY_ACTIONS = ("valkey.action.cluster-chaos", "valkey.action.replication-chaos", "valkey.action.rolling-upgrade")
+
+
+def _may_lose_writes(component: ComponentSpec) -> bool:
+    """Whether ``component`` can lose writes Valkey acknowledged: it stops a server (a kill, or a syscall fault
+    that ends in one), forces a failover, or runs chaos that does. A pause (SIGSTOP) loses nothing by itself."""
+
+    config = plain_config(component.config)
+    if component.use == "valkey.action.failover":
+        return config.get("force") is True
+    if component.use == "valkey.fault.process-signal":
+        return config.get("signal", "SIGKILL") != "SIGSTOP"
+    if component.use == "valkey.fault.syscall":
+        return config.get("action", "kill") == "kill"
+    return component.use in _LOSSY_ACTIONS
 
 
 def _validate_rdb(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -> None:
@@ -84,6 +101,17 @@ def _validate_rdb(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -> Non
             f"workload {config['workload']!r} has several clients: a snapshot is checked as a cut of one "
             "client's write order, which concurrent clients do not have"
         )
+    if config["workload"] is not None:
+        # The cut check allows no loss: every acknowledged write up to the cut must be in the RDB. A component
+        # that can lose acknowledged writes (valkey.oracle.ledger judges those with loss windows) makes a
+        # legitimate snapshot a FAIL, so the pair is refused here, not at the end of a run.
+        for component in plan.components:
+            if _may_lose_writes(component):
+                raise ConfigError(
+                    f"workload {config['workload']!r} checks each RDB as a cut of every acknowledged write, and "
+                    f"{component.id!r} ({component.use}) may lose writes Valkey acknowledged; judge such a run with "
+                    "valkey.oracle.ledger and its loss windows instead"
+                )
     bgsave = components[config["bgsave"]]
     if bgsave.use != "valkey.action.bgsave":
         raise ConfigError(
@@ -477,7 +505,9 @@ class DatasetDigestOracle:
     The digest itself never fails a run; it is evidence for comparison
     across builds. The oracle fails when no instance is a primary, when in
     cluster mode a key is held by more than one primary (in standalone mode
-    every primary may hold every key), or when ``include_replicas`` is set and a
+    every primary may hold every key; a key of a slot that CLUSTER NODES
+    shows still migrating or importing is on both sides until the handoff,
+    so it is listed, not failed), or when ``include_replicas`` is set and a
     replica's digest differs from its view of the primaries' data. Reads are
     retried within ``converge_timeout_s``; an instance that stays unreachable
     or unreadable makes it ERROR, since a digest that silently left it out
@@ -508,24 +538,37 @@ class DatasetDigestOracle:
             # Every instance answered as a replica: no primary holds the dataset.
             problems.append("no instance is a primary, so no dataset was read")
 
-        def read_primary(instance_id: str) -> dict[str, list]:
+        def read_primary(instance_id: str) -> tuple[dict[str, list], set[int]]:
             with handle.new_client(instance_id, timeout=10.0, decode_responses=False) as client:
-                return keyspace_snapshot(client, config["match"])
+                in_flight: set[int] = set()
+                if cluster:
+                    # The slots this node is handing over or taking on: a key in one is on both nodes meanwhile.
+                    nodes = parse_cluster_nodes(response_text(client.execute_command("CLUSTER", "NODES")))
+                    myself = next((node for node in nodes if node["is_myself"]), None)
+                    in_flight = parse_slots_in_flight(myself["slots"]) if myself else set()
+                return keyspace_snapshot(client, config["match"]), in_flight
 
         # One key of each module type, and the primary holding it: the determinism probe's sample.
         samples: dict[str, tuple[str, str]] = {}
+        in_flight: set[int] = set()
+        migrating: list[str] = []
         for instance_id in primaries:
-            snapshot, error = read_retrying(context, functools.partial(read_primary, instance_id), timeout_s=timeout_s)
+            read, error = read_retrying(context, functools.partial(read_primary, instance_id), timeout_s=timeout_s)
             if error is not None:
                 errors.append(f"{instance_id}: {error}")
                 continue
+            snapshot, slots = read
+            in_flight |= slots
             for key, (kind, _) in sorted(snapshot.items()):
                 if kind not in BUILTIN_TYPES:
                     samples.setdefault(kind, (instance_id, key))
             per_instance[instance_id] = {"keys": len(snapshot), "digest": keyspace_digest(snapshot)}
             duplicate = set(snapshot) & set(combined)
-            if duplicate and cluster:
-                problems.append(f"{len(duplicate)} key(s) are held by more than one primary")
+            # A key of a slot still migrating (seen from either side) is held by both primaries until the handoff.
+            moving = {key for key in duplicate if key_slot(key.encode("utf-8", errors="surrogatepass")) in in_flight}
+            migrating.extend(sorted(moving))
+            if duplicate - moving and cluster:
+                problems.append(f"{len(duplicate - moving)} key(s) are held by more than one primary")
             combined.update(snapshot)
         if not problems and not errors:
             # Before any digest of a module type is judged: its values compare by digest only if every process
@@ -585,6 +628,9 @@ class DatasetDigestOracle:
             "listing": listing_path,
             # The module types digested by their DUMP payloads, each probed deterministic.
             "module_types": sorted(samples),
+            # Keys held by two primaries while their slot migrates: not a failure, and listed so a digest that
+            # differs from a run without a migration explains itself.
+            "migrating_keys": migrating,
         }
         if problems:
             return make_result(
@@ -648,6 +694,7 @@ _DIGEST_DECLARES = Declarations(
                     "replicas": MAPPING,
                     "listing": TEXT,
                     "module_types": LIST,
+                    "migrating_keys": LIST,
                 }
             )
         )
