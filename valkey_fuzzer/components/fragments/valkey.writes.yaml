@@ -18,10 +18,10 @@ inputs:
   type: object
   additionalProperties: false
   properties:
-    stable_keys: {type: integer, minimum: 0, maximum: 1000000, default: 1000}
-    mutable_keys: {type: integer, minimum: 1, maximum: 100000, default: 200}
-    mutation_rate: {type: number, minimum: 0, maximum: 20000, default: 200}
-    value_size: {type: integer, minimum: 1, maximum: 65536, default: 64}
+    stable_keys: {type: integer, minimum: 0, maximum: 1000000, default: 1000, shrinkable: true}
+    mutable_keys: {type: integer, minimum: 1, maximum: 100000, default: 200, shrinkable: true}
+    mutation_rate: {type: number, minimum: 0, maximum: 20000, default: 200, shrinkable: true}
+    value_size: {type: integer, minimum: 1, maximum: 65536, default: 64, shrinkable: true}
 components:
   - use: valkey.workload.key-value
     id: writes

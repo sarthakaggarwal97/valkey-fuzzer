@@ -13,7 +13,7 @@ metadata:
       mutation_rate: {minimum: 500, maximum: 5000}
 inputs:
   properties:
-    operations: {type: integer, minimum: 1, maximum: 1000000, default: 2000}
+    operations: {type: integer, minimum: 1, maximum: 1000000, default: 2000, shrinkable: true}
 components:
   - use: valkey.workload.key-value
     id: writes

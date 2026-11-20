@@ -623,10 +623,12 @@ valkey-fuzzer minimize report.json --output minimized.yaml --max-attempts 30
 ```
 
 Needs a run report that contains the scenario (any command's `report.json`,
-or a `--output` copy) and a `FAIL` or `ERROR` outcome. It tries one reduction
-at a time, most aggressive first. Steps 1 and 2 are the local deployment's
-(its provider's `reductions` hook); a deployment provider without the hook
-leaves the deployment as it is:
+or a `--output` copy) and a `FAIL` or `ERROR` outcome. It first runs the
+scenario as recorded: when that run does not fail the same way, nothing is
+minimized and the command exits `2`. Then it tries one reduction at a time,
+most aggressive first. Steps 1 and 2 are the local deployment's (its
+provider's `reductions` hook); a deployment provider without the hook leaves
+the deployment as it is:
 
 1. fewer replicas, then fewer primaries: the experiment's minimum
    `replicas_per_primary` or `primaries` (0 without one), then half; a size
@@ -634,8 +636,10 @@ leaves the deployment as it is:
    does not compile;
 2. dropping each `deployment.server_config` key and each
    `deployment.instance_configs` entry;
-3. each positive numeric input the scenario sets, lowered to the input's
-   minimum, then halved.
+3. each positive numeric input the scenario sets whose experiment marks it
+   `shrinkable` (a count, rate, or size, where smaller means less of the same
+   work; never a shard index, a delay, or a loss window), lowered to the
+   input's minimum, then halved.
 
 A reduction is kept when the failure signature still matches: the same
 outcome, the same failing components with the same status and verdict each
@@ -646,17 +650,26 @@ type and phase. A run whose failing components report crashes of the system
 under test (`crashes` in their diagnostics; `valkey.oracle.liveness` reports
 each server crash by its assertion, panic, sanitizer finding, signal, or
 fatal exit log line) has
-those causes, numbers and hex IDs masked, as its whole signature: what failed
+those causes, numbers and hex IDs masked, and its outcome as its whole
+signature: what failed
 after the crash is left out, so the same crash in another experiment, or
 with other components failing after it, is the same failure, and a run that
-fails without crashing is another.
-After a kept reduction the search starts over from the first candidate.
-`--max-attempts` (default 30, at least 1) bounds the runs; a candidate that
-does not compile does not count. Before anything runs, minimize compares this
+fails without crashing, or that reports the crash as an `ERROR` where the
+original was a `FAIL`, is another.
+After a kept reduction the search starts over from the first candidate,
+skipping the reductions it already rejected.
+`--max-attempts` (default 30, at least 1) bounds the candidate runs; a
+candidate that does not compile does not count, and neither does the first
+run of the recorded scenario nor the last run, which runs the minimized
+scenario once more to confirm it. The command exits `0` only when a smaller
+scenario was written and that confirmation failed the same way; it exits `2`
+when the recorded failure did not reproduce, when no reduction kept it, or
+when the result did not fail again. Before anything runs, minimize compares this
 environment with the report's `reproducer` as [replay](#replay) does, and
 warns on stderr when anything differs: a reduction that fails the
 same way on other code proves less. It still runs. The minimized scenario goes to `--output`, or to
-stdout. Each candidate run gets a report folder under `<root>/minimize/`.
+stdout. Each candidate run gets a report folder under `<root>/minimize/`
+(`attempt-1` is the recorded scenario's run).
 
 ## cleanup-logs
 

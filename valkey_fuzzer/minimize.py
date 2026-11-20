@@ -13,8 +13,10 @@ minimizer keeps a reduction only when the signature holds; the batch runner
 groups its non-PASS runs by it.
 
 The **minimizer** greedily shrinks a failing scenario (its deployment, as the
-deployment provider's ``reductions`` hook shrinks it, and its numeric inputs),
-one reduction at a time, most aggressive first.
+deployment provider's ``reductions`` hook shrinks it, and its ``shrinkable``
+numeric inputs), one reduction at a time, most aggressive first. It runs the
+unreduced scenario first, so a failure that does not reproduce is not
+"minimized", and runs its result once more to confirm it.
 """
 
 import copy
@@ -114,15 +116,17 @@ def failure_signature(outcome: RunOutcome, required_evidence: Iterable[str] = ()
 
 
 def same_failure(reference: Mapping[str, Any], candidate: Mapping[str, Any]) -> bool:
-    """Whether ``candidate`` fails the way ``reference`` did: the same crashes, if the reference crashed;
-    otherwise every signature field but the path evidence matches, and the candidate still observed the
-    reference's path evidence."""
+    """Whether ``candidate`` fails the way ``reference`` did: the same status and, if the reference crashed, the
+    same crashes; otherwise every signature field but the path evidence matches, and the candidate still observed
+    the reference's path evidence."""
 
+    if candidate.get("status") != reference.get("status"):
+        # An ERROR that reports the reference's crash is not the FAIL it was, and the other way round.
+        return False
     if reference.get("crashes"):
         return candidate.get("crashes") == reference["crashes"]
     keys = (
         "crashes",
-        "status",
         "failing_components",
         "failures",
         "missing_events",
@@ -158,8 +162,8 @@ def reduction_candidates(
     ``deployment_reductions`` is the deployment provider's ``reductions``
     hook, given the experiment's ``deployment_requirements``; without one
     the deployment is left as it is. ``experiment_inputs`` is the
-    experiment's input schema; its minimums bound the reductions of numeric
-    inputs.
+    experiment's input schema; only its ``shrinkable`` numeric inputs are
+    lowered, and their minimums bound the reductions.
     """
 
     candidates: list[tuple[str, dict]] = []
@@ -171,7 +175,12 @@ def reduction_candidates(
     properties = (experiment_inputs or {}).get("properties", {})
     inputs = (scenario.get("experiment") or {}).get("inputs") or {}
     for name in sorted(inputs):
-        for proposal in smaller(inputs[name], properties.get(name, {}).get("minimum", 0)):
+        rule = properties.get(name, {})
+        # Only an input the experiment marks shrinkable: smaller means less of the same work. Lowering a shard
+        # index, a delay, or a loss window changes the scenario instead.
+        if not rule.get("shrinkable"):
+            continue
+        for proposal in smaller(inputs[name], rule.get("minimum", 0)):
             reduced = copy.deepcopy(dict(scenario))
             reduced["experiment"]["inputs"][name] = proposal
             candidates.append((f"experiment.inputs.{name}={proposal}", reduced))
@@ -193,13 +202,31 @@ def minimize(
 ) -> dict[str, Any]:
     """Greedy one-step-at-a-time reduction preserving ``reference``, running at most ``max_attempts`` candidates.
 
+    The unreduced scenario runs first: when it does not fail the way ``reference`` says (``reproduced`` false),
+    nothing is reduced. A reduction rejected once is not tried again on a smaller scenario. The result runs once
+    more when anything was reduced: ``confirmed`` says whether it still failed the same way. Neither run counts
+    against ``max_attempts``.
+
     A candidate ``compile_fn`` rejects (a ``ValueError``, as every compile or
     config error is) is recorded as invalid; any other exception raises.
     """
 
+    def run(step: str, candidate: dict, plan: ExecutionPlan, held: str = "kept", lost: str = "rejected"):
+        outcome = execute_fn(candidate, plan)
+        signature = failure_signature(outcome, required_evidence)
+        same = same_failure(reference, signature)
+        if log is not None:
+            log(f"  {step}: {held if same else lost} ({signature['status']})")
+        return same, {"step": step, "result": held if same else lost, "status": signature["status"]}
+
     current = copy.deepcopy(dict(scenario))
-    attempts = []
-    accepted = []
+    reproduced, attempt = run("original", current, compile_fn(current), "reproduced", "not reproduced")
+    attempts = [attempt]
+    accepted: list[str] = []
+    result = {"accepted": accepted, "attempts": attempts, "signature": dict(reference)}
+    if not reproduced:
+        return {"scenario": current, **result, "reproduced": False, "confirmed": None}
+    rejected: set[str] = set()
     budget = max_attempts
     progress = True
     while progress and budget > 0:
@@ -209,23 +236,25 @@ def minimize(
         ):
             if budget <= 0:
                 break
+            if description in rejected:
+                continue
             try:
                 plan = compile_fn(candidate)
             except ValueError as exc:
                 attempts.append({"step": description, "result": f"invalid: {exc}"})
+                rejected.add(description)
                 continue
             budget -= 1
-            outcome = execute_fn(candidate, plan)
-            signature = failure_signature(outcome, required_evidence)
-            kept = same_failure(reference, signature)
-            attempts.append(
-                {"step": description, "result": "kept" if kept else "rejected", "status": signature["status"]}
-            )
-            if log is not None:
-                log(f"  {description}: {'kept' if kept else 'rejected'} ({signature['status']})")
+            kept, attempt = run(description, candidate, plan)
+            attempts.append(attempt)
             if kept:
                 current = candidate
                 accepted.append(description)
                 progress = True
                 break
-    return {"scenario": current, "accepted": accepted, "attempts": attempts, "signature": dict(reference)}
+            rejected.add(description)
+    confirmed = True
+    if accepted:
+        confirmed, attempt = run("confirm", current, compile_fn(current), "reproduced", "not reproduced")
+        attempts.append(attempt)
+    return {"scenario": current, **result, "reproduced": True, "confirmed": confirmed}

@@ -471,7 +471,8 @@ class ConfigSchema:
         The document is ``{type: object, properties: {<name>: <rule>},
         required: [...], additionalProperties: <bool>}``. A rule holds
         ``type`` (a JSON type or ``environment_reference``), ``enum``,
-        ``minimum``, ``maximum``, ``default``, ``reference_kinds``, and the
+        ``minimum``, ``maximum``, ``default``, ``reference_kinds``,
+        ``shrinkable`` (a number ``minimize`` may lower), and the
         annotations ``title`` and ``description``; an input without a
         ``type``, or an undeclared one, may be any value without environment
         references. An empty document accepts any such inputs.
@@ -530,7 +531,17 @@ class ConfigSchema:
 _ANY_VALUE = ConfigField(object, required=False)
 
 _DOCUMENT_FIELDS = ("$schema", "additionalProperties", "description", "properties", "required", "title", "type")
-_RULE_FIELDS = ("default", "description", "enum", "maximum", "minimum", "reference_kinds", "title", "type")
+_RULE_FIELDS = (
+    "default",
+    "description",
+    "enum",
+    "maximum",
+    "minimum",
+    "reference_kinds",
+    "shrinkable",
+    "title",
+    "type",
+)
 _DEPLOYMENT_RULE_FIELDS = ("description", "enum", "maximum", "minimum", "type")
 _REFERENCE_TYPE = "environment_reference"
 _JSON_TYPES = {
@@ -586,6 +597,11 @@ def _rule_field(name: Any, rule: Any, where: str, allowed: Sequence[str], *, req
     for key in ("enum", "reference_kinds"):
         if key in rule and (isinstance(rule[key], (str, bytes, Mapping)) or not isinstance(rule[key], Sequence)):
             raise ConfigError(f"{where}.{key} must be a sequence")
+    # shrinkable: minimize may lower the input (smaller means less of the same work); only a number has a size.
+    if "shrinkable" in rule and (
+        not isinstance(rule["shrinkable"], bool) or (rule["shrinkable"] and type_name not in ("integer", "number"))
+    ):
+        raise ConfigError(f"{where}.shrinkable must be a boolean, and true only on an integer or number")
     try:
         return ConfigField(
             tuple(_DOCUMENT_TYPES[name] for name in type_names)

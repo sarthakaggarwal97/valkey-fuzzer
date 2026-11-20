@@ -41,6 +41,7 @@ inputs:
       minimum: 1
       maximum: 1000
       default: 32
+      shrinkable: true
       description: valkey-benchmark clients running DEBUG SLEEP 0.001 on the voter
     restart_delay_s: {type: number, minimum: 0, maximum: 60, default: 0}
     second_election_delay_s:

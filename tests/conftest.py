@@ -11,21 +11,24 @@ from valkey_fuzzer.results import ComponentResult, ComponentStatus, OutcomeStatu
 class CannedRuns:
     """Stands in for ``Runner.run``: records each plan and returns an outcome of ``status`` (a FAIL
     carries a failing ``data`` component) whose ``evidence`` and ``diagnostics`` are functions of the plan;
-    with ``error`` set, the run raises it instead."""
+    with ``error`` set, the run raises it instead. ``statuses`` are consumed first, one per run, before
+    ``status`` applies."""
 
     def __init__(self, catalog: Any):
         self.catalog, self.plans, self.status, self.error = catalog, [], OutcomeStatus.PASS, None
+        self.statuses: list[OutcomeStatus] = []
         self.evidence, self.diagnostics = (lambda plan: ()), (lambda plan: {})
 
     def __call__(self, plan, *, deadline=None, run_dir=None):
         self.plans.append(plan)
         if self.error is not None:
             raise self.error
-        failing = (ComponentResult("data", ComponentStatus.FAIL, "lost"),) if self.status is OutcomeStatus.FAIL else ()
+        status = self.statuses.pop(0) if self.statuses else self.status
+        failing = (ComponentResult("data", ComponentStatus.FAIL, "lost"),) if status is OutcomeStatus.FAIL else ()
         return RunOutcome(
             plan,
-            self.status,
-            self.status.value,
+            status,
+            status.value,
             component_results=failing,
             evidence=tuple(self.evidence(plan)),
             diagnostics=self.diagnostics(plan),

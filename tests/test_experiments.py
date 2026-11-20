@@ -196,11 +196,14 @@ def test_a_reference_outside_inputs_names_the_ref_field_as_its_path():
         (lambda: parse_experiment_document(_document(inputs=_inputs(x={"type": "string", "reference_kinds": ["artifacts"]}))), "reference_kinds needs a field that accepts environment references"),
         (lambda: parse_experiment_document(_document(inputs=_inputs(x={"type": "environment_reference", "reference_kinds": ["machines"]}))), "reference_kinds must be 'artifacts' or 'resources'"),
         (lambda: parse_experiment_document(_document(inputs=_inputs(x={"type": "integer", "default": "one"}))), "default must be an integer"),
+        # Only a number has a size minimize can lower.
+        (lambda: parse_experiment_document(_document(inputs=_inputs(x={"type": "string", "shrinkable": True}))), "shrinkable must be a boolean, and true only on an integer or number"),
+        (lambda: parse_experiment_document(_document(inputs=_inputs(x={"type": "integer", "shrinkable": "yes"}))), "shrinkable must be a boolean"),
         (lambda: parse_experiment_document(_document(inputs=_inputs(**{"a.b": {"type": "string"}}))), "'a.b'"),
         (lambda: parse_experiment_document(_document(required_evidence=[{"source": "activate"}])), r"required_evidence\[0\] is missing required field 'evidence_id'"),
     ],
     ids=["duplicate-key", "unsafe-yaml", "unknown-field", "unordered", "component-id", "deployment-rule", "requirement-range", "selector", "fragment-cycle", "unknown-fragment",
-         "fragment-duplicate", "input-type", "input-range", "input-reference-field", "input-reference-kinds", "input-default", "input-name", "requirement-field"],
+         "fragment-duplicate", "input-type", "input-range", "input-reference-field", "input-reference-kinds", "input-default", "input-shrinkable-type", "input-shrinkable-value", "input-name", "requirement-field"],
 )  # fmt: skip
 def test_a_bad_experiment_document_is_rejected(load, match):
     with pytest.raises(ExperimentDocumentError, match=match):

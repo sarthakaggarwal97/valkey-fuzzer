@@ -326,9 +326,30 @@ def test_a_run_writes_a_reproducer_beside_its_plan_so_replaying_the_plan_is_veri
 def test_minimize_exits_non_zero_when_no_reduction_kept_the_failure(tmp_path, canned_runs, capsys):
     canned_runs.status = OutcomeStatus.FAIL
     report = _run_report(tmp_path)
-    canned_runs.status = OutcomeStatus.PASS
+    # The original reproduces (attempt 1); every reduction passes.
+    canned_runs.statuses, canned_runs.status = [OutcomeStatus.FAIL], OutcomeStatus.PASS
     assert _cli("minimize", report, "--max-attempts", 3, "--artifact-dir", tmp_path) == EXIT_HARNESS_ERROR
     assert "no reduction kept the failure" in capsys.readouterr().err
+    assert len(canned_runs.plans) == 1 + 1 + 3, "the original run, then max-attempts candidates, and no confirmation"
+
+
+def test_minimize_runs_the_original_first_and_exits_non_zero_when_it_does_not_reproduce(tmp_path, canned_runs, capsys):
+    canned_runs.status = OutcomeStatus.FAIL
+    report = _run_report(tmp_path)
+    canned_runs.status = OutcomeStatus.PASS
+    assert _cli("minimize", report, "--max-attempts", 3, "--artifact-dir", tmp_path) == EXIT_HARNESS_ERROR
+    assert "the failure did not reproduce, so nothing was minimized" in capsys.readouterr().err
+    assert len(canned_runs.plans) == 2, "the recorded run and the original's re-run: no candidate ran"
+
+
+def test_minimize_confirms_its_result_and_exits_non_zero_when_it_does_not_fail_again(tmp_path, canned_runs, capsys):
+    canned_runs.status = OutcomeStatus.FAIL
+    report = _run_report(tmp_path)
+    # The original and the one candidate fail; the confirmation run passes.
+    canned_runs.statuses, canned_runs.status = [OutcomeStatus.FAIL, OutcomeStatus.FAIL], OutcomeStatus.PASS
+    assert _cli("minimize", report, "--max-attempts", 1, "--artifact-dir", tmp_path) == EXIT_HARNESS_ERROR
+    assert "did not fail the same way when run again" in capsys.readouterr().err
+    assert len(canned_runs.plans) == 1 + 1 + 1 + 1
 
 
 def test_usage_errors_exit_64_apart_from_harness_errors(tmp_path, canned_runs):
@@ -472,7 +493,10 @@ def test_minimize_shrinks_a_failing_run_and_leaves_a_passing_one_alone(tmp_path,
     assert _cli("minimize", report, "--output", output, "--max-attempts", 8, "--artifact-dir", tmp_path) == 0
     minimized = yaml.safe_load(output.read_text())["experiment"]["inputs"]
     assert minimized["stable_keys"] < yaml.safe_load(Path(EXAMPLE).read_text())["experiment"]["inputs"]["stable_keys"]
+    # attempt-1 is the original run; the two shrinkable inputs the example sets were each lowered once to their
+    # minimum, then the result's confirmation ran.
     assert list((tmp_path / "minimize").glob("*-snapshot-equivalence-*/attempt-1/report.json"))
+    assert len(canned_runs.plans) == 2 + 1 + 2 + 1
 
 
 @pytest.mark.parametrize(

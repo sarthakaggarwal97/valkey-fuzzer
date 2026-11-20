@@ -20,6 +20,7 @@ inputs:
       minimum: 0
       maximum: 20
       default: 0
+      shrinkable: true
       description: how many configs valkey.workload.config-churn changes during the run (0 none)
     config_churn_keys:
       type: object

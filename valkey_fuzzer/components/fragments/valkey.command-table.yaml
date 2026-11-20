@@ -25,6 +25,7 @@ inputs:
       minimum: 0
       maximum: 20000
       default: 0
+      shrinkable: true
       description: commands per second drawn from the whole command table (0 sends none)
 components:
   - use: valkey.workload.command-table
