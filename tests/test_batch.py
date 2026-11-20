@@ -198,6 +198,7 @@ def test_a_run_that_leaks_crashes_or_hangs_is_an_error_and_the_sweep_removes_wha
     tmp_path, workers, stub, monkeypatch
 ):
     monkeypatch.setattr(pool, "DEADLINE_GRACE_S", 0.0)
+    monkeypatch.setattr(conform_plugin.ConformancePlugin, "after_run_timeout_s", lambda self, options: 0.0)
     behaviors = {
         "0": "leak-server",
         "1": "leak-dir",
@@ -840,6 +841,7 @@ def test_a_check_that_does_not_finish_still_writes_why_for_each_bundle(tmp_path,
 @pytest.mark.slow
 def test_real_workers_run_in_parallel_in_isolation_and_a_leaked_or_hung_one_is_cleaned_up(tmp_path, stub, monkeypatch):
     monkeypatch.setattr(pool, "DEADLINE_GRACE_S", 0.0)
+    monkeypatch.setattr(conform_plugin.ConformancePlugin, "after_run_timeout_s", lambda self, options: 0.0)
     monkeypatch.setattr(pool, "STOP_GRACE_S", (0.5, 0.5))
     stub.behave(**{"0": "sleep:0.6", "1": "sleep:0.6", "2": "sleep:0.6", "3": "leak-server", "4": "hang"})
     started = time.monotonic()
@@ -1022,3 +1024,26 @@ def test_a_plug_in_takes_part_at_every_point_of_the_batch_and_its_jobs_are_its_o
     assert summary["status"] == "SKIP_UNSUPPORTED" and summary["exit_code"] == 3
     with pytest.raises(ValueError, match="already registered"):
         hooks.register(Toy())
+
+
+def test_a_workers_deadline_covers_the_plug_ins_after_run_steps(tmp_path, workers, stub, monkeypatch):
+    # A run that used its whole budget then conforms (TLC, up to CONFORM_TIMEOUT_S) must not be killed in that
+    # step and recorded ERROR: each plug-in's after_run_timeout_s is on top of the run's deadline and grace.
+    class Slow(hooks.BatchPlugin):
+        name = "slow"
+
+        def after_run_timeout_s(self, options):
+            return 1234.0
+
+    monkeypatch.setattr(hooks, "PLUGINS", list(hooks.PLUGINS))
+    hooks.register(Slow())
+    runner = _batch(tmp_path, [_random(1)], timeout_s=100, conform_tlc_timeout_s=77)
+    started = []
+    finish = runner._finish
+    monkeypatch.setattr(runner, "_finish", lambda item, code: started.append(item) or finish(item, code))
+    runner.run()
+
+    (item,) = started
+    # The conformance plug-in's budget is the batch's conform_tlc_timeout_s, the bound it gives TLC.
+    expected = 100 + 1234 + 77 + max(pool.DEADLINE_GRACE_S, 25)
+    assert item.deadline - item.started == pytest.approx(expected)

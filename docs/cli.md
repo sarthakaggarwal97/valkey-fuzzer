@@ -345,7 +345,9 @@ so a batch started while another runs is refused before it starts a job
 A run's deadline is cooperative (see
 [Deadlines and cancellation](contracts.md#deadlines-and-cancellation)); a
 worker still running 60 seconds after it (or a quarter of the deadline, if
-that is longer) gets `SIGINT`, then `SIGTERM` 60 seconds later (both to the
+that is longer), plus the time the worker's after-run steps may take (spec
+conform's `conform_tlc_timeout_s`, 300 seconds by default, so a run that used
+its whole budget is not killed while it conforms), gets `SIGINT`, then `SIGTERM` 60 seconds later (both to the
 worker alone: its run stops its servers), then `SIGKILL` to its process group
 30 seconds later, and the job is an `ERROR` (`Deadline`). A second Ctrl-C
 skips to the next signal. A worker
