@@ -48,12 +48,16 @@ class BatchPlugin:
 
     ``name`` keys the plug-in's record in ``batch.json`` (a plug-in with a ``source``), its field of a job's
     result, and its entry of the summary. ``kept_when_pruned`` names the files of a run folder it writes that a
-    pruned PASS run keeps.
+    pruned PASS run keeps. ``after_run_timeout_s`` is how long ``after_run`` may take under the batch's options:
+    the batch adds it to each worker's deadline, so a run that used its whole budget is not killed in this step.
     """
 
     name = ""
     source: Optional[BatchSource] = None
     kept_when_pruned: tuple[str, ...] = ()
+
+    def after_run_timeout_s(self, options: "BatchOptions") -> float:
+        return 0.0
 
     def after_run(self, report_dir: str, task: Mapping[str, Any]) -> None:
         """In the worker, after its run, in the run's report folder; ``task`` is the worker's task (the job and

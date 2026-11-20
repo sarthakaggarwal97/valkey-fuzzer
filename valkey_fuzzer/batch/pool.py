@@ -26,8 +26,9 @@ from .spec import BatchError, BatchOptions
 from .summary import summarize
 
 # A run's own deadline is cooperative; the batch stops its worker this much later
-# (or a quarter of the deadline later, if that is longer) with SIGINT, then
-# SIGTERM, then SIGKILL, STOP_GRACE_S apart. Stopping a batch skips the wait.
+# (or a quarter of the deadline later, if that is longer), plus what the plug-ins'
+# after-run steps may take, with SIGINT, then SIGTERM, then SIGKILL, STOP_GRACE_S
+# apart. Stopping a batch skips the wait.
 DEADLINE_GRACE_S = 60.0
 STOP_GRACE_S = (60.0, 30.0)
 POLL_S = 0.2
@@ -50,6 +51,12 @@ class _Running:
     signals_sent: int = 0
     last_signal: float = 0.0
     timed_out: bool = False
+
+
+def _after_run_timeout_s(options: BatchOptions) -> float:
+    """How long a worker's after-run steps (spec conform, say) may take after its run, all plug-ins together."""
+
+    return sum(plugin.after_run_timeout_s(options) for plugin in hooks.PLUGINS)
 
 
 def _copy_experiments(folder: str, directories: Sequence[str]) -> None:
@@ -394,7 +401,10 @@ class BatchRunner:
             process=process,
             owner=owner_of(process.pid).token,
             started=now,
-            deadline=now + self.timeout_s + max(DEADLINE_GRACE_S, 0.25 * self.timeout_s),
+            deadline=now
+            + self.timeout_s
+            + _after_run_timeout_s(self.options)
+            + max(DEADLINE_GRACE_S, 0.25 * self.timeout_s),
             load_start=os.getloadavg()[0],
         )
         self._save_workers()

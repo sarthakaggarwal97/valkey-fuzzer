@@ -23,7 +23,7 @@ from ..spec.bundle import SpecBundleError, load_bundle
 from ..spec.tla import TlaError, TlaTools
 from .hooks import BatchPlugin
 from .results import Verdict, read_json
-from .spec import worst
+from .spec import BatchOptions, worst
 
 if TYPE_CHECKING:
     from .pool import BatchRunner
@@ -109,6 +109,9 @@ class ConformancePlugin(BatchPlugin):
 
     name = "conformance"
     kept_when_pruned = (CONFORMANCE_FILE,)
+
+    def after_run_timeout_s(self, options: BatchOptions) -> float:
+        return options.conform_tlc_timeout_s
 
     def after_run(self, report_dir: str, task: Mapping[str, Any]) -> None:
         _conform(report_dir, task[CONFORM_TIMEOUT_OPTION])
