@@ -1486,7 +1486,8 @@ class CommandsAction:
                 "expectations both builds violate alike, so they are not about the change: "
                 + ", ".join(f"{item['index']} ({item['command']})" for item in commands_disputed),
                 evidence=evidence,
-                diagnostics={"reason": "expect-disputed", "commands": commands_disputed},
+                # pre_existing: whatever is wrong here is in the parent too, so the batch can file it once.
+                diagnostics={"reason": "expect-disputed", "pre_existing": True, "commands": commands_disputed},
             )
         if unexplained:
             differences = [

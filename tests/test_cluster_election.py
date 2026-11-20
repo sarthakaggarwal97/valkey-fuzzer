@@ -263,11 +263,11 @@ _NODES = (
 
 def _safety_handle(save_behavior, views=None):
     """Two converged shards: valkey-0 owns 0-8191 at epoch 3, valkey-2 owns the rest at epoch 4; ``views`` maps
-    a node to the CLUSTER NODES it answers instead (or the error it raises)."""
+    a node to the CLUSTER NODES it answers instead (or the error it raises), or is a function of the node."""
 
     def replies(node_id):
         address = f"{ID[node_id]} 127.0.0.1:700{node_id[-1]}@1700{node_id[-1]} "
-        nodes = (views or {}).get(node_id, _NODES)
+        nodes = views(node_id) if callable(views) else (views or {}).get(node_id, _NODES)
         return {
             ("CLUSTER", "MYID"): ID[node_id],
             ("CLUSTER", "INFO"): "cluster_state:ok\r\ncluster_current_epoch:6\r\n",
@@ -432,7 +432,8 @@ def test_election_safety_does_not_pass_a_win_without_one_durable_majority(tmp_pa
     result = _safety(evidence=evidence, **case)
     assert result.status is status, result.summary
     if violations is None:
-        assert "Failover auth ACK" in result.summary
+        # The ERROR names the oracle's minimum Valkey version: 9.2 is the first to log counted votes.
+        assert "Failover auth ACK" in result.summary and "needs Valkey 9.2 or later" in result.summary
     elif isinstance(violations, str):
         assert violations in result.summary
     else:
@@ -475,6 +476,40 @@ def test_election_safety_claims_vote_once_and_one_winner_only_where_the_model_do
     # The checks the model does not claim fail the run under any setting.
     short = _safety("best-effort", extra=_SECOND_WINNER[:2] + _SECOND_WINNER[-1:])
     assert short.status is ComponentStatus.FAIL and set(short.diagnostics["violations"]) == {"win_without_quorum"}
+
+
+def test_views_still_changing_at_the_converge_deadline_are_unread_not_a_disagreement(monkeypatch):
+    clock = VirtualClock().install(monkeypatch, polling, deadlines)
+    reads = []
+
+    def settling(node_id):
+        # valkey-3 reports shard 1 at a new config epoch on every read: its view never settles within the deadline.
+        reads.append(node_id)
+        epoch = 4 + reads.count("valkey-3") if node_id == "valkey-3" else 4
+        return _NODES.replace("0 0 4 connected 8192", f"0 0 {epoch} connected 8192")
+
+    def safety(views):
+        handle = _safety_handle("sync", views)
+        context = clock.drive(fake_context(handle))
+        for payload in (_vote("valkey-2", "valkey-1", 6, at=9.0), _vote("valkey-0", "valkey-1", 6, at=9.5)):
+            context.event_bus.publish("cluster.vote.granted", source="log", payload=payload)
+        for ack in _MAJORITY:
+            context.event_bus.publish("cluster.vote.acked", source="log", payload=ack)
+        context.event_bus.publish("cluster.election.won", source="log", payload={"instance_id": "valkey-1", "epoch": 6, "logged_at": 9.7})  # fmt: skip
+        spec = resolved(
+            ComponentSpec(role=ComponentRole.ORACLE, use="valkey.oracle.cluster-election-safety", id="safety",
+                          config={"crash_faults": ["kill"], "converge_timeout_s": 2, "require_durable_votes": "never"})
+        )  # fmt: skip
+        return ElectionSafetyOracle().evaluate(context, spec, ())
+
+    result = safety(settling)
+    assert result.status is ComponentStatus.ERROR, result.summary
+    assert result.summary == "cluster views were still changing at the converge_timeout_s deadline (2s)"
+    assert clock.elapsed >= 2 - 1e-6
+    # The same disagreement held still for the whole window: the views are final, and they disagree.
+    stable = _NODES.replace("0 0 4 connected 8192", "0 0 5 connected 8192")
+    result = safety({"valkey-3": stable})
+    assert result.status is ComponentStatus.FAIL and "did not converge" in result.summary
 
 
 # ---------------------------------------------------------------------------

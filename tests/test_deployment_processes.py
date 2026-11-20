@@ -217,6 +217,7 @@ def test_components_find_valkey_server_and_read_slot_ranges_as_the_deployment_do
     with patch(f"{PROCESSES}.shutil.which", return_value=None), patch(f"{PROCESSES}.os.path.exists", return_value=True):
         assert installed_valkey_binary() == built, "the source build the deployment falls back to"
     assert cluster_nodes.parse_slot_ranges(["0-5", "7", "[8->-abc]"]) == [(0, 5), (7, 7)]
+    assert cluster_nodes.parse_slots_in_flight(["0-5", "[8->-abc]", "[9-<-def]", "[x->-abc]"]) == {8, 9}
 
 
 def test_the_source_build_is_pinned_parallel_and_built_aside_under_a_lock(tmp_path):

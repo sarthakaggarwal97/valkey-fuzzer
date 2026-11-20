@@ -95,6 +95,19 @@ def parse_slot_ranges(tokens: list[str]) -> list[tuple[int, int]]:
     return ranges
 
 
+def parse_slots_in_flight(tokens: list[str]) -> set[int]:
+    """The slots a node's own CLUSTER NODES line marks as migrating out (``[5461->-<node-id>]``) or importing
+    (``[5461-<-<node-id>]``): a key in one legitimately exists on both nodes until the handoff."""
+    slots = set()
+    for token in tokens:
+        if token.startswith("[") and ("->-" in token or "-<-" in token):
+            try:
+                slots.add(int(token[1:].split("-", 1)[0]))
+            except ValueError:
+                continue
+    return slots
+
+
 def parse_slot_tokens(tokens: list[str]) -> list[int]:
     """The hash slots in a node's CLUSTER NODES slot tokens (see :func:`parse_slot_ranges`), one by one."""
     return [slot for start, end in parse_slot_ranges(tokens) for slot in range(start, end + 1)]
