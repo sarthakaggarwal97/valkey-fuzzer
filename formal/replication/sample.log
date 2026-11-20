@@ -1,0 +1,13 @@
+8201:S 19 Nov 2026 22:41:10.001 * Connecting to PRIMARY 127.0.0.1:7800
+8201:S 19 Nov 2026 22:41:10.002 * Trying a partial resynchronization (request 5f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c:1025).
+8201:S 19 Nov 2026 22:41:10.003 * Successful partial resynchronization with primary.
+8201:S 19 Nov 2026 22:41:12.000 * Full resync from primary: 5f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c:1024
+8201:S 19 Nov 2026 22:41:12.001 * Dual channel replication: PSYNC is not possible, initialize RDB channel.
+8201:S 19 Nov 2026 22:41:13.000 * PRIMARY <-> REPLICA sync: Discarding the half-loaded data
+8201:S 19 Nov 2026 22:41:14.000 * Connection with primary lost.
+8201:M 19 Nov 2026 22:41:15.000 * Setting secondary replication ID to 5f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c, valid up to offset: 2049. New replication ID is 0a9b8c7d6e5f40312233445566778899aabbccdd
+8201:S 19 Nov 2026 22:41:16.000 * REPLICAOF 127.0.0.1:7800 enabled (user request from 'id=5 addr=127.0.0.1:41000 laddr=127.0.0.1:7801 fd=9 name= age=0 idle=0 flags=N db=0 sub=0 psub=0 ssub=0 multi=-1 watch=0 qbuf=26 qbuf-free=20448 argv-mem=14 multi-mem=0 rbs=1024 rbp=0 obl=0 oll=0 omem=0 tot-mem=22400 events=r cmd=replicaof user=default redir=-1 resp=2 lib-name= lib-ver=')
+8200:M 19 Nov 2026 22:41:40.000 * Replication backlog freed after 3600 seconds without connected replicas.
+8200:M 19 Nov 2026 22:41:41.000 * Background saving started by pid 8210
+8210:C 19 Nov 2026 22:41:41.050 * DB saved on disk
+8200:M 19 Nov 2026 22:41:41.060 * Background saving terminated with success

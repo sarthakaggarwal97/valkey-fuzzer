@@ -53,11 +53,20 @@ def read_cluster_vars(path: str) -> Optional[dict[str, int]]:
     return None
 
 
-# A Valkey log line in the legacy format: ``pid:role dd Mon yyyy hh:mm:ss.mmm level message``, where the level is
-# ``.`` (debug), ``-`` (verbose), ``*`` (notice), or ``#`` (warning).
+# A Valkey log line in the legacy format: ``pid:role dd Mon yyyy hh:mm:ss.mmm level message``, where the role is
+# ``M`` (primary), ``S`` (replica), ``C`` (a fork child: an RDB or AOF child, whose pid is not the server's), or
+# ``X`` (sentinel), and the level is ``.`` (debug), ``-`` (verbose), ``*`` (notice), or ``#`` (warning).
 LOG_LINE = re.compile(
-    r"^\d+:[A-Za-z] (?P<time>\d{1,2} \w{3} \d{4} \d{2}:\d{2}:\d{2})\.(?P<ms>\d{3}) (?P<level>[#*.-]) (?P<message>.*)$"
+    r"^(?P<pid>\d+):(?P<role>[A-Za-z]) (?P<time>\d{1,2} \w{3} \d{4} \d{2}:\d{2}:\d{2})\.(?P<ms>\d{3}) "
+    r"(?P<level>[#*.-]) (?P<message>.*)$"
 )
+
+
+def logged_by_child(line: str) -> bool:
+    """Whether a Valkey log line was written by a fork child (role ``C``), not by the server process."""
+
+    match = LOG_LINE.match(line)
+    return match is not None and match["role"] == "C"
 
 
 def log_line_time(line: str) -> Optional[float]:

@@ -1,11 +1,11 @@
 """Spec conformance as a batch plug-in: each run checked against the spec bundles its plan names, as
 ``valkey-fuzzer spec conform`` would, and a conform report per bundle over the batch's runs.
 
-The worker writes ``conform.json`` into its run folder (TLC from ``$TLA2TOOLS_JAR``; without it a bundle that
-needs TLC is skipped, or an error if its claims are approved). For a bundle whose claims are approved, a
-claimed property violated on the run's observed states fails the run, and a check that could not decide is an
-ERROR; a draft's findings are only reported. The summary writes ``conformance/<bundle>.json`` and a digest of
-it, claimed violations first.
+The worker writes ``conform.json`` into its run folder (TLC from ``$TLA2TOOLS_JAR``, bounded by the batch's
+``conform_tlc_timeout_s``; without TLC a bundle that needs it is skipped, or an error if its claims are approved).
+For a bundle whose claims are approved, a claimed property violated on the run's observed states fails the run,
+and a check that could not decide is an ERROR; a draft's findings are only reported. The summary writes
+``conformance/<bundle>.json`` and a digest of it, claimed violations first.
 
 :mod:`~valkey_fuzzer.spec.conform` is imported where it is used, never when this module loads: registering the
 plug-in leaves the spec bridge's tools unloaded for a batch whose runs name no bundle.
@@ -16,6 +16,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Optional
 
+from .._data import error_record
 from ..minimize import verdict_clauses
 from ..reports import write_document
 from ..spec.bundle import SpecBundleError, load_bundle
@@ -29,24 +30,40 @@ if TYPE_CHECKING:
 
 # What a worker writes in its run folder: the run checked against the spec bundles its plan names.
 CONFORMANCE_FILE = "conform.json"
-# How long a worker's spec conform may run TLC on its run's observed states.
-CONFORM_TIMEOUT_S = 300.0
+# The batch option that bounds a worker's TLC run on its run's observed states (BatchOptions).
+CONFORM_TIMEOUT_OPTION = "conform_tlc_timeout_s"
 CONFORMANCE_DIRECTORY = "conformance"
 
 
-def _conform(report_dir: str) -> None:
+def _conform(report_dir: str, timeout_s: float) -> None:
     """Write ``conform.json``: the run checked against every spec bundle its plan names, with TLC from
-    ``$TLA2TOOLS_JAR`` (without it, a bundle that needs TLC is skipped, or an error if its claims are approved)."""
+    ``$TLA2TOOLS_JAR`` for at most ``timeout_s`` (without TLC, a bundle that needs it is skipped, or an error if
+    its claims are approved). A check that fails outright still writes the file, with why, for each bundle."""
 
-    from ..spec.conform import conform_folder
+    from ..spec.conform import conform_folder, plan_bundles
 
     try:
-        tools, unavailable = TlaTools.locate(None, workers="1").within(CONFORM_TIMEOUT_S), ""
-    except TlaError as exc:
-        tools, unavailable = None, str(exc)
-    results = conform_folder(report_dir, tools, unavailable)
+        try:
+            tools, unavailable = TlaTools.locate(None, workers="1").within(timeout_s), ""
+        except TlaError as exc:
+            tools, unavailable = None, str(exc)
+        results = conform_folder(report_dir, tools, unavailable)
+    except Exception as exc:
+        # The batch would otherwise see only that conform.json is missing, not why.
+        error = error_record(exc, "conform")
+        problem = f"spec conform did not finish: {error['type']}: {error.get('message', '')}"
+        try:
+            plan = (read_json(os.path.join(report_dir, "report.json")).get("outcome") or {}).get("plan") or {}
+        except (OSError, ValueError):
+            plan = {}
+        results = {
+            name: {"status": "error", "error": problem, "approved": _approved(name)} for name in plan_bundles(plan)
+        }
     if not results:
         return
+    for entry in results.values():
+        if entry.get("timed_out"):
+            entry["error"] = f"{entry['error']} ({CONFORM_TIMEOUT_OPTION} = {timeout_s:g}, a batch option)"
     write_document(os.path.join(report_dir, CONFORMANCE_FILE), results)
     for name, entry in results.items():
         print(
@@ -93,8 +110,8 @@ class ConformancePlugin(BatchPlugin):
     name = "conformance"
     kept_when_pruned = (CONFORMANCE_FILE,)
 
-    def after_run(self, report_dir: str) -> None:
-        _conform(report_dir)
+    def after_run(self, report_dir: str, task: Mapping[str, Any]) -> None:
+        _conform(report_dir, task[CONFORM_TIMEOUT_OPTION])
 
     def judge(self, job: Mapping[str, Any], run_dir: str, report: Optional[Mapping[str, Any]], verdict: Verdict) -> Any:
         conformance = _conformance(run_dir, report)
@@ -102,8 +119,9 @@ class ConformancePlugin(BatchPlugin):
             # A draft's findings are reported, not held against the run. Every entry says whether its claims are
             # approved: the worker's (conform_folder), and the ones made here for a run whose worker wrote no
             # conform.json (_conformance); a bundle that does not load is held against the run, since nothing
-            # says its claims are a draft.
-            if entry["status"] not in ("fail", "error") or not entry["approved"]:
+            # says its claims are a draft. An entry that does not say is read as a draft: only an explicit
+            # approval decides a run.
+            if entry["status"] not in ("fail", "error") or not entry.get("approved", False):
                 continue
             if entry["status"] == "fail":
                 violated = sorted(

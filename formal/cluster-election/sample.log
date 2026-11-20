@@ -1,0 +1,8 @@
+7102:S 19 Nov 2026 22:40:01.123 * Starting a failover election for epoch 7, node config epoch is 3
+7100:M 19 Nov 2026 22:40:01.125 * Failover auth granted to 3f9c0d6a1e5b8c2f4a7d9e0b1c3d5e7f9a1b3c5d (127.0.0.1:7703) for epoch 7
+7101:M 19 Nov 2026 22:40:01.125 # Failover auth denied to 3f9c0d6a1e5b8c2f4a7d9e0b1c3d5e7f9a1b3c5d (127.0.0.1:7703): already voted for epoch 7
+7102:S 19 Nov 2026 22:40:01.126 * Failover auth ACK from 8a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b (127.0.0.1:7700) for epoch 7 (ACKs 1, quorum 2)
+7102:S 19 Nov 2026 22:40:01.127 * Failover auth ACK from 9b3c5d7e9f1a2b4c6d8e0f2a3b5c7d9e1f3a5b7c (127.0.0.1:7701) for epoch 7 (ACKs 2, quorum 2)
+7102:S 19 Nov 2026 22:40:01.128 * Failover election won: I'm the new primary.
+7102:S 19 Nov 2026 22:40:01.128 * configEpoch set to 7 after successful failover
+7102:S 19 Nov 2026 22:40:01.128 * Setting myself to primary in shard 2c4d6e8f0a1b3c5d7e9f1a2b4c6d8e0f2a4b6c8d after failover; my old primary is 5e7f9a1b3c5d7e9f1a2b4c6d8e0f2a4b6c8d0e2f (127.0.0.1:7702)

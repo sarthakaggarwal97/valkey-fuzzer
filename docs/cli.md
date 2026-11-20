@@ -267,6 +267,7 @@ port_base: 11000
 valkey_binary: /opt/valkey/src/valkey-server   # for scenarios that name no binary
 prune_pass: true
 serial_reruns: 2
+conform_tlc_timeout_s: 300           # TLC's limit per run in the worker's spec conform
 sources:
   - random:
       experiments: all               # or a list of experiment IDs
@@ -307,6 +308,7 @@ run names its build.
 | `valkey_binary` | `--valkey-binary PATH` | See above. |
 | `prune_pass` | `--prune-pass` | Keep only `report.json` and `scenario.yaml` of a run that passed and left nothing behind. |
 | `serial_reruns` | `--serial-reruns N` | After the parallel runs, run `N` jobs of each `FAIL` or `ERROR` signature again, one at a time (load can explain those, not an unsupported run). |
+| `conform_tlc_timeout_s` | (spec only) | How long the worker's [`spec conform`](spec-bridge.md#in-a-batch) may run TLC on one run's observed states; default 300. A check it stops is a conform `error` whose reason names this option (an `ERROR` for the run if the bundle's claims are approved). |
 | | `--out DIR` | The batch folder; default `<root>/batches/<time>-<batch id>-<suffix>`. |
 | | `--resume DIR` | Finish the batch in `DIR`. Takes only `--workers` and `--allow-unsupported`: the folder holds the sources and every other option. |
 | | `--dry-run` | List the jobs, the invalid matrix cases, and the skipped zoo cases; run nothing. |
@@ -395,11 +397,13 @@ A run whose plan names a [spec bundle](spec-bridge.md#bundles) (a
 component's `spec`, as the election and replication experiments' observers
 do) is checked against it by its worker as soon as it ends, before the
 folder is pruned: [`spec conform`](spec-bridge.md#in-a-batch), on the
-run's report and trace, with TLC from `$TLA2TOOLS_JAR`. The result is the
+run's report and trace, with TLC from `$TLA2TOOLS_JAR` for at most
+`conform_tlc_timeout_s` per run. The result is the
 run's `conform.json` (kept when a passing run is pruned) and its result's
 `conformance`. For a bundle whose claims are approved, a claimed property
 violated on the run's observed states makes the run a `FAIL`, and a check
-that could not decide (TLC missing, too, for a bundle that needs it) makes
+that could not decide (TLC missing, too, for a bundle that needs it; TLC
+stopped at `conform_tlc_timeout_s`; the trace the run recorded missing) makes
 it an `ERROR`; either is in the run's summary
 (`spec conform replication: ...`) and failure signature (the failing
 component `spec-conform:<bundle>`). A draft bundle's findings are reported

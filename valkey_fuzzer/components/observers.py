@@ -24,8 +24,9 @@ from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.protocols import component_artifact_dir
 from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
 from valkey_fuzzer.schema import ConfigError, ConfigField, ConfigSchema, plain_config
+from valkey_fuzzer.spec.bundle import LOGGED_BY
 
-from .files import log_line_time, write_jsonl
+from .files import log_line_time, logged_by_child, write_jsonl
 from .instances import close_quietly, deployment, select_instances
 from .polling import StoppableThread
 from .predicates import PREDICATE_FIELDS, compare, validate_predicate
@@ -508,7 +509,8 @@ class LogObserver:
 _LOG_TRIGGER_FIELDS = {
     "instances": ConfigField((str, list), default="all"),
     # Each line a rule matches publishes ``publish``; ``evidence_id`` is met by ``min_count`` lines on one
-    # instance; ``max_publishes`` (null: no limit) caps the events.
+    # instance; ``max_publishes`` (null: no limit) caps the events. ``logged_by: server`` skips the lines of a
+    # fork child (an RDB or AOF child, role C in the line's pid:role prefix), so a line both log is one event.
     "rules": ConfigField(
         list,
         items=mapping_of(
@@ -519,11 +521,12 @@ _LOG_TRIGGER_FIELDS = {
                 "min_count": _MIN_COUNT,
                 "max_publishes": ConfigField(int, allow_none=True, default=None, minimum=1),
                 "required": ConfigField(bool, default=False),
+                "logged_by": ConfigField(str, default="any", choices=LOGGED_BY),
             }
         ),
     ),
     # A spec bundle (formal/<protocol>/): a rule without a pattern takes the
-    # log pattern its mapping.yaml gives for the rule's publish event.
+    # log pattern, and who logs it, its mapping.yaml gives for the rule's publish event.
     "spec": ConfigField(str, allow_none=True, default=None),
     "spec_sha256": SPEC_SHA256_FIELD,
     "poll_interval_s": ConfigField(float, default=0.002, minimum=0.0005, maximum=10),
@@ -563,7 +566,8 @@ _RESERVED_GROUPS = {"instance_id", "line", "logged_at", "detected_at", "rule"}
 
 
 def spec_rules(config: dict) -> tuple[list[dict[str, Any]], Optional[dict[str, str]]]:
-    """``config["rules"]`` with every missing pattern taken from the spec mapping, and the mapping's identity."""
+    """``config["rules"]`` with every missing pattern (and who logs it) taken from the spec mapping, and the
+    mapping's identity."""
 
     rules = plain_config(config["rules"])
     if all("pattern" in rule for rule in rules):
@@ -571,12 +575,13 @@ def spec_rules(config: dict) -> tuple[list[dict[str, Any]], Optional[dict[str, s
     if not config["spec"]:
         raise ConfigError("a rule without a pattern needs spec: the bundle whose mapping.yaml holds its pattern")
     mapping = pinned_spec_mapping(config)
-    patterns = mapping.log_patterns()
+    logged = {item.event: item for item in mapping.evidence.values() if item.log and item.event}
     for index, rule in enumerate(rules):
         if "pattern" not in rule:
-            if rule["publish"] not in patterns:
+            if rule["publish"] not in logged:
                 raise ConfigError(f"rules[{index}]: {mapping.path} has no log pattern for event {rule['publish']!r}")
-            rule["pattern"] = patterns[rule["publish"]]
+            rule["pattern"] = logged[rule["publish"]].log
+            rule["logged_by"] = logged[rule["publish"]].logged_by
     return rules, {"bundle": config["spec"], "mapping": mapping.path, "mapping_sha256": mapping.sha256}
 
 
@@ -699,7 +704,10 @@ class LogTriggerObserver:
                 continue
             detected_at = now()
             for line in lines:
-                for index, (_, pattern) in enumerate(self._rules):
+                child = logged_by_child(line)
+                for index, (rule, pattern) in enumerate(self._rules):
+                    if child and rule["logged_by"] == "server":
+                        continue
                     match = pattern.search(line)
                     if match is not None:
                         published += self._publish(instance_id, index, line, match, detected_at)

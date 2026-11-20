@@ -29,6 +29,7 @@ from valkey_fuzzer.spec import (
     translate_trace,
 )
 from valkey_fuzzer.spec.bundle import load_spec_mapping
+from valkey_fuzzer.spec.check import log_patterns_gate
 from valkey_fuzzer.spec.conform import ObservedRun, check_run, conform_folder
 from valkey_fuzzer.spec.tla import (
     ModelValue,
@@ -182,6 +183,20 @@ def test_tlc_output_and_printed_values_are_read():
             "    action: Ack\n    after: {evidence: wrote, match: {keys: $count}}\n",
             "match.keys must be $field",
         ),
+        # A taken field comes from the record this one follows: both must declare it, and it cannot be matched on.
+        (
+            "mapping.yaml",
+            "    action: Ack\n",
+            "    action: Ack\n    after: {evidence: wrote, match: {keys: $keys}, take: [count]}\n",
+            "take: 'count' must be a field of both wrote and acked",
+        ),
+        (
+            "mapping.yaml",
+            "    action: Ack\n",
+            "    action: Ack\n    after: {evidence: wrote, match: {keys: $keys}, take: [keys]}\n",
+            "match.keys must be $field, one of acked's own fields",
+        ),
+        ("mapping.yaml", "    action: Ack\n", "    action: Ack\n    logged_by: server\n", "logged_by says who logs"),
         ("model.tla", "MODULE model", "MODULE register", "must declare MODULE model"),
     ],
 )
@@ -510,7 +525,7 @@ ELECTION_EVENTS = [
     ("cluster.vote.acked", {"instance_id": "valkey-1", "voter": ID["valkey-0"], "epoch": 9}),
     ("fault.injected", {"applied": True, "signal": "SIGKILL", "target": "valkey-3", "disk_vars_at_kill": {"currentEpoch": 8, "lastVoteEpoch": 0}}),
     ("cluster.vote.acked", {"instance_id": "valkey-1", "voter": ID["valkey-3"], "epoch": 9}),
-    ("cluster.election.won", {"instance_id": "valkey-1", "epoch": 9}),
+    ("cluster.election.won", {"instance_id": "valkey-1"}),
     ("node.recovered", {"instance_id": "valkey-3"}),
 ]  # fmt: skip
 
@@ -577,6 +592,47 @@ def test_conform_applies_a_vote_ack_only_after_the_grant_it_acknowledges(tmp_pat
     assert "acked: no granted" in " ".join(observed.unapplied) and "ReceiveVote" not in observed.actions
 
 
+def test_conform_takes_a_wins_epoch_from_the_election_its_winner_started(tmp_path):
+    # "Failover election won" names no epoch, and the line that does ("configEpoch set to N after successful
+    # failover") is logged only when the winner's configEpoch was below N: the won record takes the epoch of the
+    # winner's latest started record (after: ... take: [epoch]).
+    won = ("cluster.election.won", {"instance_id": "valkey-1"})
+    retried = ("cluster.election.started", {"instance_id": "valkey-1", "epoch": 10})
+    observed = _election_run(tmp_path, [*ELECTION_EVENTS[:7], retried, won])
+    assert observed.unapplied == [] and observed.actions["Win"] == 1
+    assert render(observed.states[-1]["winners"]) == "{<<cand_valkey_1, 10>>}"
+    assert observed.steps[-1]["fields"] == {"instance_id": "valkey-1", "epoch": 10}
+    # A win line that no started line of the winner precedes has no epoch: a record conform cannot apply, never a
+    # win at a made-up epoch.
+    observed = _election_run(tmp_path, [*ELECTION_EVENTS[2:7], won])
+    assert observed.unapplied == ["won: no started record (instance_id valkey-1) before or after it"]
+    assert "Win" not in observed.actions
+    # No won line, no Win: the model's state is what the run logged, and a missing Win is no violation.
+    observed = _election_run(tmp_path, ELECTION_EVENTS[:7])
+    assert "Win" not in observed.actions and render(observed.states[-1]["winners"]) == "{}"
+    assert observed.unapplied == []
+
+
+def test_conform_reports_a_trace_that_is_missing_or_unreadable_instead_of_checking_without_it(tmp_path):
+    tools = TlaTools(jar="unused")  # check_run returns before TLC: the run has a problem
+    run = _run_folder(tmp_path / "gone", "PASS", ["cluster-election"], ELECTION_EVENTS)
+    report = json.loads(Path(run, "report.json").read_text())
+    trace = Path(run, "components", "trace", "trace.jsonl")
+    report["outcome"]["evidence"] = [{"evidence_id": "valkey.cluster.trace.recorded", "artifacts": [str(trace)]}]
+    Path(run, "report.json").write_text(json.dumps(report))
+    # The run recorded a trace (its samples carry what the events do not) that is not there: not the events alone.
+    missing = conform_folder(run, tools)["cluster-election"]
+    assert missing["status"] == "error" and missing["error"].endswith(
+        f"is missing (a pruned run keeps its conform.json): {trace}"
+    )
+    # A trace that is there but is not one: the same, with what is wrong, and the batch's worker does not crash.
+    trace.parent.mkdir(parents=True)
+    trace.write_text('{"kind": "event"}\n')
+    broken = conform_folder(run, tools)["cluster-election"]
+    assert broken["status"] == "error" and broken["error"] == f"{trace}: {trace} does not start with a trace header"
+    assert (missing["approved"], broken["approved"]) == (False, False)
+
+
 @needs_tlc
 @pytest.mark.slow
 def test_conform_fails_a_lost_acknowledged_write_only_inside_the_claim(tmp_path):
@@ -610,7 +666,11 @@ def test_check_rejects_a_module_outside_the_standard_ones_before_running_sany(tm
     jar.write_bytes(b"not a jar: these checks fail before any tool runs")
     report = check_bundle(str(bundle), TlaTools(jar=str(jar)))
     parsed = report["gates"]["parsed"]
-    assert report["status"] == parsed["status"] == "fail" and set(report["gates"]) == {"bundle", "parsed"}
+    assert report["status"] == parsed["status"] == "fail" and set(report["gates"]) == {
+        "bundle",
+        "log_patterns",
+        "parsed",
+    }
     assert "a bundle's modules may use only the standard modules" in parsed["modules"]["model.tla"]["error"]
     monkeypatch.setattr(
         TlaTools, "locate", classmethod(lambda cls, jar, **kwargs: TlaTools(jar=str(tmp_path / "tla2tools.jar")))
@@ -757,6 +817,34 @@ def test_check_fails_a_broken_bundle(tmp_path, monkeypatch, path, old, new, gate
         assert "vacuous" in report["gates"][gate]["controls"]["ack-before-save"]["error"]
     if gate == "mapping_complete":
         assert report["gates"][gate]["unmapped_actions"] == ["Save"]
+
+
+SHIPPED_BUNDLES = ["cluster-election", "replication", "slot-migration", "persistence", "register"]
+
+
+@pytest.mark.parametrize("name", SHIPPED_BUNDLES)
+def test_every_mapped_log_pattern_matches_a_line_valkey_logged(name):
+    # The oracle, the log-trigger rules that publish the lines, and conform all take their patterns from one
+    # mapping.yaml: a pattern Valkey never logs blinds them all at once, so each must match the bundle's sample.log.
+    gate = log_patterns_gate(load_bundle(name))
+    assert gate["status"] == "pass", gate
+    assert gate["matched"] and all(gate["matched"].values()), gate["matched"]
+
+
+def test_check_fails_a_log_pattern_that_matches_no_line_of_the_sample_log(tmp_path):
+    bundle = _copy(tmp_path)
+    # Deliberately broken: a wording Valkey does not log. Without this gate the rule would simply never fire.
+    _edit(bundle / "mapping.yaml", "keys loaded:", "keys loaded now:")
+    gate = log_patterns_gate(load_bundle(str(bundle)))
+    assert gate["status"] == "fail" and gate["matched"] == {"loaded": 0}
+    assert gate["error"].startswith("1 log pattern(s) match no line of sample.log: loaded;")
+    # No lines to match against is no evidence that the patterns are right.
+    (bundle / "sample.log").unlink()
+    gate = log_patterns_gate(load_bundle(str(bundle)))
+    assert gate["status"] == "fail" and "cannot read sample.log" in gate["error"] and "loaded" in gate["error"]
+    # A mapping with no log pattern has nothing to check.
+    _edit(bundle / "mapping.yaml", "    log: 'Done loading RDB, keys loaded now: (?P<keys>\\d+)'\n", "")
+    assert log_patterns_gate(load_bundle(str(bundle))) == {"status": "pass", "note": "mapping.yaml maps no log pattern"}
 
 
 def test_a_plan_pins_the_mapping_its_spec_components_read(tmp_path, monkeypatch):

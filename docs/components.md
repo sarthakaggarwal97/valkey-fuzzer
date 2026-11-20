@@ -1351,7 +1351,7 @@ the second failover vote the moment it logs it.
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `instances` | selector | `all` | |
-| `rules` | list | | At least one `{pattern, publish, evidence_id, min_count, max_publishes, required}`: a regular expression, the event name to publish, optional evidence to record once an instance matched `min_count` times (default 1), the most events to publish (default `null`: no limit), and `required` (needs `evidence_id`). Named groups may not be called `instance_id`, `line`, `logged_at`, `detected_at`, or `rule`. A rule without `pattern` takes the `log` pattern `spec`'s mapping gives for its `publish` event. |
+| `rules` | list | | At least one `{pattern, publish, evidence_id, min_count, max_publishes, required, logged_by}`: a regular expression, the event name to publish, optional evidence to record once an instance matched `min_count` times (default 1), the most events to publish (default `null`: no limit), `required` (needs `evidence_id`), and `logged_by` (`any`, the default, or `server`: the lines of a fork child, an RDB or AOF child with role `C` in the line's `pid:role` prefix, are skipped, so a line both log, `DB saved on disk`, is one event). Named groups may not be called `instance_id`, `line`, `logged_at`, `detected_at`, or `rule`. A rule without `pattern` takes the `log` pattern, and its `logged_by`, that `spec`'s mapping gives for its `publish` event. |
 | `spec` | string or null | `null` | A [spec bundle](spec-bridge.md) (`formal/<protocol>/`) whose `mapping.yaml` holds the patterns of rules that have none. |
 | `spec_sha256` | string or null | `null` | Filled in when the scenario compiles: the SHA-256 of `spec`'s `mapping.yaml`, so the plan pins the mapping it was compiled against. A run whose mapping has another digest stops with `ERROR`; compile the scenario again. |
 | `poll_interval_s` | number, 0.0005 to 10 | 0.002 | |
@@ -1762,18 +1762,31 @@ the trace, and the final cluster views:
   primaries with overlapping slots and the same `configEpoch`;
 - the views converge on one owner per slot.
 
+The first two are claimed by the bundle's `claims.yaml` only under its
+`holds_when` constants (`PersistBeforeAck`, from every node running
+`cluster-config-save-behavior sync`; `FlushBeforeSave`, pinned). The oracle
+derives the same constants from the nodes' settings and the plan's inputs,
+as [`spec conform`](spec-bridge.md#spec-conform) derives them from a run, so
+the two agree: a double vote or two winners under `best-effort` is recorded
+under `outside_claim` and in the summary, not held against the run. The
+other checks are not conditioned. A win's epoch is the one of the election
+its winner last started (the `Failover election won` line names none).
+
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `trace` | string or null | `null` | The trace observer's `id`. |
 | `crash_faults` | list | `[]` | Fault `id`s whose kills to check. |
-| `spec` | string | `cluster-election` | The [spec bundle](spec-bridge.md) whose `mapping.yaml` names the vote, ACK, and win events (its `granted`, `acked`, and `won` evidence) and their fields. |
+| `spec` | string | `cluster-election` | The [spec bundle](spec-bridge.md) whose `mapping.yaml` names the election, vote, ACK, and win events (its `started`, `granted`, `acked`, and `won` evidence) and their fields, and whose `claims.yaml` says when `VoteOncePerEpoch` and `OneWinnerPerEpoch` are claimed. |
 | `spec_sha256` | string or null | `null` | Filled in when the scenario compiles: the SHA-256 of `spec`'s `mapping.yaml`, so the plan pins the mapping it was compiled against. A run whose mapping has another digest stops with `ERROR`; compile the scenario again. |
 | `require_durable_votes` | `auto`, `always`, or `never` | `auto` | `auto` requires them when every node runs `cluster-config-save-behavior sync`; a node whose setting cannot be read then leaves a vote that left before it was saved unjudged (ERROR). |
 | `converge_timeout_s` | number, 0 to 600 | 60 | |
 
 `ERROR` when elections were won but no ACK line was published as the
-mapping's `acked` event, so the quorum check cannot run, when the views
-did not converge while a running node's view could not be read, and when
+mapping's `acked` event, so the quorum check cannot run; when a win follows
+no `started` event of its winner, so its epoch is unknown; when a double
+vote or two winners were found but a node's setting the claim depends on
+could not be read; when the views
+did not converge while a running node's view could not be read; and when
 `trace` names an observer whose trace is missing or unreadable.
 
 Evidence: `valkey.cluster.election-safety.verified`; also

@@ -75,7 +75,7 @@ def run_worker(task_path: str) -> int:
     )
     print_outcome(record.outcome, verbose=True)
     for plugin in hooks.PLUGINS:
-        plugin.after_run(report_dir)
+        plugin.after_run(report_dir, task)
     return exit_code(record.outcome.status)
 
 

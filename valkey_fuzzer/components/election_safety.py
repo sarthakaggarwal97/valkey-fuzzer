@@ -8,20 +8,32 @@ Election facts come from node log lines published by a
 ``valkey.observer.log-trigger`` observer (see the
 ``valkey.cluster-election-durability`` experiment): votes granted (``Failover
 auth granted to``), votes counted (``Failover auth ACK from ... (ACKs N,
-quorum Q)``, logged since Valkey 9.2), elections started, and elections won
-(``configEpoch set to N after successful failover``). The patterns and event
-names live in ``formal/cluster-election/mapping.yaml``; the observer and the
-oracle read them from there (``spec: cluster-election``).
+quorum Q)``, logged since Valkey 9.2), elections started (``Starting a
+failover election for epoch N``), and elections won (``Failover election
+won``, whose epoch is the one its winner last started). The patterns and
+event names live in ``formal/cluster-election/mapping.yaml``; the observer
+and the oracle read them from there (``spec: cluster-election``).
+
+The model's ``VoteOncePerEpoch`` and ``OneWinnerPerEpoch`` are claimed
+(``claims.yaml``, ``holds_when``) only under the constants ``spec conform``
+derives from the run, ``PersistBeforeAck`` from ``cluster-config-save-behavior
+sync`` among them. The oracle derives the same constants from the nodes'
+settings and the plan's inputs, so a double vote or two winners under
+``best-effort`` is reported as outside the claim, as ``spec conform`` reports
+it, not as a failure; the checks the model does not claim (a win's quorum,
+a split primary) always fail the run.
 """
 
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Optional
 
 from valkey_fuzzer.declarations import Declarations
 from valkey_fuzzer.deployment.local.cluster_nodes import split_slots
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.results import ComponentStatus, Evidence, evidence_of, make_evidence, make_result
-from valkey_fuzzer.schema import ConfigError, ConfigField
+from valkey_fuzzer.schema import ConfigError, ConfigField, plain_config
+from valkey_fuzzer.spec.bundle import Property, SpecBundleError, load_spec_claims
+from valkey_fuzzer.spec.tla import render
 
 from .cluster import ranges_overlap, read_view, view_summary
 from .cluster_trace import TRACE_EVIDENCE
@@ -51,14 +63,20 @@ _SAVE_BEHAVIOR = "cluster-config-save-behavior"
 
 # The mapping evidence the oracle reads, with the payload fields it uses.
 _SAFETY_EVIDENCE = {
+    "started": ("instance_id", "epoch"),
     "granted": ("instance_id", "candidate", "epoch"),
     "acked": ("instance_id", "voter", "epoch", "acks", "quorum"),
-    "won": ("instance_id", "epoch"),
+    # The won line names no epoch: a win is of the election its winner last started.
+    "won": ("instance_id",),
 }
+
+# The oracle's checks of properties the claims condition (holds_when): a finding where the claim does not hold
+# under the run's constants is reported, not held against the run, as spec conform reports it.
+_CLAIMED_CHECKS = {"vote_once_per_epoch": "VoteOncePerEpoch", "one_winner_per_epoch": "OneWinnerPerEpoch"}
 
 
 def safety_events(config: Mapping[str, Any]) -> dict[str, str]:
-    """``{granted|acked|won: event name}`` from the bundle's mapping, which must carry the fields the oracle reads."""
+    """``{started|granted|acked|won: event name}`` from the bundle's mapping, which must carry the fields the oracle reads."""
 
     name = config["spec"]
     mapping = pinned_spec_mapping(config)
@@ -74,8 +92,72 @@ def safety_events(config: Mapping[str, Any]) -> dict[str, str]:
     return events
 
 
+def _claims(config: Mapping[str, Any]) -> Any:
+    """The claims of the bundle ``config["spec"]`` names (its mapping is pinned by :func:`pinned_spec_mapping`)."""
+
+    try:
+        return load_spec_claims(config["spec"])
+    except SpecBundleError as exc:
+        raise ConfigError(f"spec {config['spec']!r}: {exc}") from exc
+
+
 def _validate_safety(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -> None:
     safety_events(config)
+    _claims(config)
+
+
+def win_epochs(
+    wins: Sequence[Mapping[str, Any]], starts: Sequence[Mapping[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Each win with the epoch of the election its winner last started at or before it, and the wins no
+    started line of the winner precedes (the won line names no epoch; Valkey wins the election it started)."""
+
+    placed, unplaced = [], []
+    for win in wins:
+        logged = win.get("logged_at", float("inf"))
+        before = [
+            start
+            for start in starts
+            if start["instance_id"] == win["instance_id"] and start.get("logged_at", 0) <= logged
+        ]
+        if before:
+            placed.append({**win, "epoch": int(max(before, key=lambda start: start.get("logged_at", 0))["epoch"])})
+        else:
+            unplaced.append(dict(win))
+    return placed, unplaced
+
+
+def claim_constants(
+    mapping: Any, configs: Mapping[str, Mapping[str, Any]], unread: Sequence[str], inputs: Mapping[str, Any]
+) -> dict[str, str]:
+    """The model constants as ``spec conform`` derives them from a run, as TLA+ text: a pinned ``value``; a
+    ``config`` every node must equal (FALSE once one known setting differs, TRUE when every node's is read
+    and equals, else unknown and left out); a scenario ``input``. ``max_of`` constants are left out."""
+
+    values: dict[str, str] = {}
+    for name, spec in mapping.constants.items():
+        if "value" in spec:
+            values[name] = str(spec["value"])
+        elif "config" in spec:
+            seen = [node[spec["config"]] for node in configs.values() if spec["config"] in node]
+            if any(item != spec["equals"] for item in seen):
+                values[name] = render(False)
+            elif seen and not unread:
+                values[name] = render(True)
+        elif "input" in spec and spec["input"] in inputs:
+            values[name] = render(inputs[spec["input"]] == spec["equals"])
+    return values
+
+
+def claimed_under(prop: Optional[Property], constants: Mapping[str, str]) -> Optional[bool]:
+    """Whether ``prop`` is claimed under ``constants`` (its ``holds_when``); None when one it needs is unknown,
+    and True for a property the claims do not list (nothing conditions it)."""
+
+    if prop is None:
+        return True
+    if any(key not in constants for key in prop.holds_when):
+        return None
+    return prop.holds_under(constants)
 
 
 def votes_by_epoch(votes: Sequence[Mapping[str, Any]]) -> dict[tuple[str, int], set[str]]:
@@ -254,22 +336,17 @@ class ElectionSafetyOracle:
         # Recorded when the cluster formed and checked on every restart, so a node that is down has one too.
         node_ids = {node.instance_id: node.cluster_node_id for node in handle.instances}
         events = safety_events(config)
+        mapping = pinned_spec_mapping(config)
+        claims = _claims(config)
         votes = _payloads(context, events["granted"])
         acks = _payloads(context, events["acked"])
-        wins = _payloads(context, events["won"])
+        wins, unplaced_wins = win_epochs(_payloads(context, events["won"]), _payloads(context, events["started"]))
         crashes = [
             item.value
             for fault in config["crash_faults"]
             for item in evidence_of(evidence, FAULT_INJECTED, fault)
             if isinstance(item.value, Mapping)
         ]
-        violations: dict[str, Any] = {}
-        double_votes = check_vote_once_per_epoch(votes)
-        if double_votes:
-            violations["vote_once_per_epoch"] = double_votes
-        double_wins = check_one_winner_per_epoch(wins)
-        if double_wins:
-            violations["one_winner_per_epoch"] = double_wins
         unknown_ids = sorted(instance_id for instance_id, node_id in node_ids.items() if not node_id)
         if crashes and unknown_ids:
             # Without them a counted vote of the crashed voter cannot be matched to the vote it granted.
@@ -281,7 +358,28 @@ class ElectionSafetyOracle:
         unsaved, delivered = unsaved_votes(crashes, votes, acks, node_ids)
 
         views, converged, unanswered = self._converge(context, handle, config["converge_timeout_s"])
-        save_behavior, unread_save = self._save_behavior(context, handle, config["converge_timeout_s"])
+        config_keys = sorted(
+            {_SAVE_BEHAVIOR} | {item["config"] for item in mapping.constants.values() if "config" in item}
+        )
+        configs, unread_save = self._configs(context, handle, config["converge_timeout_s"], config_keys)
+        save_behavior = {instance_id: values.get(_SAVE_BEHAVIOR) for instance_id, values in configs.items()}
+        # The constants spec conform derives for this run decide which claimed properties hold here.
+        constants = claim_constants(mapping, configs, unread_save, plain_config(context.plan.inputs))
+        violations: dict[str, Any] = {}
+        # Findings of a claimed property where the claim does not hold under the constants: reported, not failed.
+        outside_claim: dict[str, Any] = {}
+        # Findings whose claim cannot be decided: a constant they need is unknown.
+        unjudged: dict[str, Any] = {}
+        for check, found in (
+            ("vote_once_per_epoch", check_vote_once_per_epoch(votes)),
+            ("one_winner_per_epoch", check_one_winner_per_epoch(wins)),
+        ):
+            if not found:
+                continue
+            prop = next((item for item in claims.properties if item.name == _CLAIMED_CHECKS[check]), None)
+            claimed = claimed_under(prop, constants)
+            bucket = unjudged if claimed is None else violations if claimed else outside_claim
+            bucket[check] = found
         durable = config["require_durable_votes"]
         if durable == "auto":
             if any(value != "sync" for value in save_behavior.values()):
@@ -332,6 +430,8 @@ class ElectionSafetyOracle:
         record = {
             "save_behavior": save_behavior,
             "require_durable_votes": durable,
+            "claim_constants": constants,
+            "outside_claim": outside_claim,
             "votes": len(votes),
             "acks": len(acks),
             "elections_won": sorted({int(win["epoch"]) for win in wins}),
@@ -412,6 +512,24 @@ class ElectionSafetyOracle:
                 f"cluster-config-save-behavior sync: the setting of {', '.join(unread_save)} is unknown",
                 diagnostics={**record, "unread_save_behavior": unread_save},
             )
+        if unjudged:
+            # The claim holds under constants a setting nobody could read decides: the finding may be a violation.
+            return make_result(
+                spec,
+                ComponentStatus.ERROR,
+                f"cannot tell whether {', '.join(sorted(unjudged))} break the claim: the setting of "
+                f"{', '.join(unread_save)} is unknown",
+                diagnostics={**record, "unjudged": unjudged, "unread_save_behavior": unread_save},
+            )
+        if unplaced_wins:
+            # Without the started line of the winner, the win's epoch is unknown: neither check above saw it.
+            return make_result(
+                spec,
+                ComponentStatus.ERROR,
+                f"cannot tell the epoch of {len(unplaced_wins)} election win(s): no 'Starting a failover election' "
+                f"line of the winner was published as {events['started']!r} before them",
+                diagnostics={**record, "unplaced_wins": unplaced_wins},
+            )
         if wins and not acks:
             # Nothing says the winners had a majority: the check cannot run, so the run cannot pass.
             return make_result(
@@ -428,24 +546,35 @@ class ElectionSafetyOracle:
             evidence_out.append(
                 make_evidence(spec, "valkey.cluster.vote.unsaved-at-crash", "oracle.completed", {"votes": unsaved})
             )
+        claimed = (
+            "; outside the claim (not claimed under "
+            + ", ".join(f"{key} = {value}" for key, value in sorted(constants.items()))
+            + f"): {', '.join(sorted(outside_claim))}"
+            if outside_claim
+            else "; one winner per epoch, each with a quorum of votes"
+        )
         return make_result(
             spec,
             ComponentStatus.PASS,
             f"{len(votes)} vote(s), {len(record['elections_won'])} epoch(s) won, "
-            f"{len(unsaved)} unsaved at crash ({len(delivered)} delivered); one winner per epoch, "
-            "each with a quorum of votes",
+            f"{len(unsaved)} unsaved at crash ({len(delivered)} delivered){claimed}",
             evidence=evidence_out,
         )
 
     @staticmethod
-    def _save_behavior(context: Any, handle: Any, timeout: float) -> tuple[dict[str, Any], list[str]]:
-        """Every running node's ``cluster-config-save-behavior``, and the nodes whose setting is unknown: down,
-        or it did not answer within ``timeout``."""
+    def _configs(
+        context: Any, handle: Any, timeout: float, keys: Sequence[str]
+    ) -> tuple[dict[str, dict[str, Any]], list[str]]:
+        """Every running node's settings ``keys`` (``CONFIG GET``), and the nodes whose settings are unknown:
+        down, or it did not answer within ``timeout``."""
 
         def read(instance_id: str) -> tuple[bool, Any]:
             with handle.new_client(instance_id, timeout=2.0) as client:
                 try:
-                    return True, client.config_get(_SAVE_BEHAVIOR).get(_SAVE_BEHAVIOR)
+                    values: dict[str, Any] = {}
+                    for key in keys:
+                        values.update(client.config_get(key))
+                    return True, values
                 except Exception:
                     return False, None
 
@@ -494,6 +623,8 @@ _SAFETY_DECLARES = Declarations(
                 {
                     "save_behavior": MAPPING,
                     "require_durable_votes": TEXT,
+                    "claim_constants": MAPPING,
+                    "outside_claim": MAPPING,
                     "votes": INTEGER,
                     "acks": INTEGER,
                     "elections_won": LIST,

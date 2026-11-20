@@ -335,7 +335,7 @@ _FILE_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}"
 # An experiment file in experiments.
 _EXPERIMENT_FILE = r"[a-z0-9][a-z0-9_.-]{0,99}\.yaml"
 _BUNDLE_PATHS = (
-    rf"(?:claims|mapping)\.yaml|model\.tla|{_FILE_NAME}\.cfg"
+    rf"(?:claims|mapping)\.yaml|model\.tla|sample\.log|{_FILE_NAME}\.cfg"
     rf"|negative-controls/{_FILE_NAME}\.(?:cfg|tla)|experiments/{_FILE_NAME}\.ya?ml"
 )
 
@@ -553,8 +553,8 @@ def check_inputs(env):
         for path, text in files.items():
             if not isinstance(path, str) or not re.fullmatch(_BUNDLE_PATHS, path) or ".." in path:
                 raise SystemExit(
-                    f"spec bundle {bundle}: {path!r} must be claims.yaml, model.tla, mapping.yaml, <name>.cfg, "
-                    "negative-controls/<name>.cfg or .tla, or experiments/<name>.yaml"
+                    f"spec bundle {bundle}: {path!r} must be claims.yaml, model.tla, mapping.yaml, sample.log, "
+                    "<name>.cfg, negative-controls/<name>.cfg or .tla, or experiments/<name>.yaml"
                 )
             if not isinstance(text, str):
                 raise SystemExit(f"spec bundle {bundle}: {path} must be file text")

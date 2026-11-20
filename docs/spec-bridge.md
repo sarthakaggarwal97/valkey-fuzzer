@@ -80,6 +80,7 @@ A bundle describes one protocol:
   model.tla            MODULE model
   *.cfg                expected-safe TLC configs
   mapping.yaml         model actions and variables <-> implementation evidence
+  sample.log           lines Valkey logged, at least one per log pattern of mapping.yaml
   negative-controls/   <name>.cfg, plus <name>.tla for a mutated model
   experiments/         optional: data-only experiments the counterexamples run in
 ```
@@ -140,12 +141,20 @@ experiment and runs on Valkey (see
   `exclusions` (what the model leaves out).
 
 **`mapping.yaml`** is the only place the implementation patterns live.
-Experiments, observers, and oracles read them from here.
+Experiments, observers, and oracles read them from here. Because they all
+do, one wrong pattern would blind them all at once: `spec check`'s
+`log_patterns` gate matches every `log` pattern against the bundle's
+**`sample.log`**, lines Valkey logged (one or more per pattern), and fails
+on a pattern that matches none.
 
 - `evidence.<name>`: one kind of evidence. Each entry is either a fuzzer
   `event` (a name or a glob, with an optional `where` payload filter) or a
   `sample: true` state sample (INFO or CLUSTER fields from a trace
-  observation). `log` is the line pattern that is published as the event.
+  observation). `log` is the line pattern that is published as the event;
+  `logged_by: server` (default `any`) says only the server process logs it,
+  so the lines of a fork child (an RDB or AOF child, role `C` in the line's
+  `pid:role` prefix) are skipped, and a line both log (`DB saved on disk`)
+  is one event.
   `fields` lists the captured fields and their types: `int`, `str`, `bool`
   (a JSON boolean or the word `true` or `false`), `node` (a `str` that names
   a node), or `node_id` (a node ID, as the trace header's `nodes.<node>.node_id`
@@ -155,7 +164,10 @@ Experiments, observers, and oracles read them from here.
   (their `source`) are then this evidence. `after: {evidence: <name>, match:
   {<its field>: $field}}` says the record follows a record of that evidence
   whose fields match: conform holds it until that record is applied, and a
-  record whose match never appears is one it cannot apply.
+  record whose match never appears is one it cannot apply. `after` may also
+  `take: [<field>, ...]` fields from the latest such record, for a line that
+  does not carry them (the election's `won` line names no epoch; the win is
+  of the election its winner last `started`).
 - `action`: the model action this evidence shows. `step` says which model
   steps produce it (`changes` or `unchanged`, a variable) and which
   variables' changed key is the acting process (`process`). `translate`
@@ -211,6 +223,7 @@ about the model. A failed gate outranks an error.
 | Gate | Passes when |
 | --- | --- |
 | `bundle` | `claims.yaml` and `mapping.yaml` parse and agree with the model text. |
+| `log_patterns` | Every `log` pattern of `mapping.yaml` matches at least one line of the bundle's `sample.log`. The observers that publish the lines, the oracles, and `conform` all read their patterns from the mapping, so a pattern Valkey never logs would blind them all without a line to match. A mapping with no log pattern passes with a note. |
 | `parsed` | Every module extends or instantiates only the standard modules (`Bags`, `FiniteSets`, `Integers`, `Naturals`, `RealTime`, `Reals`, `Sequences`, `TLC`) and the bundle's own, and SANY accepts `model.tla` and every mutated control module. |
 | `claims_checked` | Every property is checked by a safe config whose constants meet its `holds_when`, and every bound equals the safe configs' value. |
 | `model_checked` | TLC finds no error in any safe config. |
@@ -278,10 +291,16 @@ so the definitions come from the model itself.
 The result for each property is `holds` or `violated`, with the first
 failing step. A property is `claimed` for a run only when the constants
 derived from the run meet its `holds_when`. A violation outside the claim is
-reported, but it does not fail the check. A run with no mapped evidence is an
+reported, but it does not fail the check. The live oracle of the same bundle
+(`valkey.oracle.cluster-election-safety`) derives the same constants from
+the nodes' settings and reports a finding of a claimed property the same
+way, so the two agree on what a run under `best-effort` shows. A run with no mapped evidence is an
 error, never a pass, and so is a run with a mapped record the mapping cannot
 apply (a field missing or of the wrong type, a `node_id` the trace header
 does not list), since the states that record would show are never checked.
+A run that recorded a trace (its report's evidence names a `trace.jsonl`)
+that is missing or unreadable is an error too: its events alone would miss
+what the trace's samples carry.
 An update keyed on a node outside the process set it ranges over (a sample of
 a replica updating a primary's variable) is skipped with a note. The report also gives live action coverage (how many
 runs observed each action, plus the unobservable actions), the targets
@@ -302,7 +321,9 @@ model is checked wherever its experiments run. The run's worker does it as
 soon as the run ends, before a passing run's folder is pruned, so the trace
 is still there: the same check as `spec conform BUNDLE RUN`, written to the
 run folder's `conform.json`. TLC comes from `$TLA2TOOLS_JAR` and `java` on
-`PATH`. Without them, a bundle that needs TLC is not checked, and the
+`PATH`, and runs for at most the batch option `conform_tlc_timeout_s`
+(default 300 seconds; [batch options](cli.md#batch)): a check it stops is an
+error whose reason names the option. Without TLC, a bundle that needs it is not checked, and the
 summary says why: a draft bundle is `skipped`, and an approved one is an
 error, so the run is an `ERROR` (its claims decide the run, and nothing
 checked them). A bundle that needs no TLC is still checked. A run that ended
@@ -315,14 +336,18 @@ run an error.
 | Conform result | Approved claims | Draft claims |
 | --- | --- | --- |
 | a claimed property violated | the run `FAIL`s | reported only |
-| an error (no mapped evidence, a record it cannot apply, TLC failed, or no TLC for a bundle that needs it) | the run is an `ERROR` | reported only (`skipped` without TLC) |
+| an error (no mapped evidence, a record it cannot apply, a trace the run recorded that is missing or unreadable, TLC failed or ran past `conform_tlc_timeout_s`, or no TLC for a bundle that needs it) | the run is an `ERROR` | reported only (`skipped` without TLC) |
 | no `conform.json` (the worker ended before it checked the run) | the run is an `ERROR` | reported only |
 | a violation outside the claim, a pass | reported only | reported only |
 
 Every entry says whether the bundle's claims are `approved`, the worker's
-and the batch's own for a missing `conform.json` alike. A bundle the batch
-cannot load counts as approved: the plan named it, and nothing says its
-claims are a draft.
+and the batch's own for a missing `conform.json` alike, and only an explicit
+`approved: true` decides a run: an entry without the flag is read as a
+draft's. A bundle the batch cannot load counts as approved: the plan named
+it, and nothing says its claims are a draft. A check that fails outright
+(an exception in the worker's `spec conform`) still writes `conform.json`,
+with the exception as each bundle's error, so the batch reports why rather
+than only that the file is missing.
 
 The batch's `summary.json` has a `conformance` entry per bundle, and
 `conformance/<protocol>.json` holds the full report over the runs checked
@@ -346,7 +371,9 @@ To draft a bundle, by hand or with an AI, follow these steps:
 4. Write `mapping.yaml`: map every variable and every constant, and every
    action to evidence or to `unobservable`. An experiment's
    `valkey.observer.log-trigger` rule without a `pattern` takes the mapping's
-   pattern for its `publish` event (`spec: <protocol>`).
+   pattern for its `publish` event (`spec: <protocol>`). Put one line Valkey
+   logged for each `log` pattern in `sample.log`, taken from a real log or
+   from the format string in the Valkey source.
 5. If no installed experiment can inject the faults the mapping names, add
    one under `experiments/` (see below).
 6. Run `valkey-fuzzer spec check` until every gate passes. Then run
