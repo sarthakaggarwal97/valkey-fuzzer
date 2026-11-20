@@ -11,8 +11,24 @@ from .instances import INSTANCE_ID, check_shard
 from .network import DEGRADE_FIELDS, check_degrade
 
 SIGNALS = {"SIGKILL": signal.SIGKILL, "SIGTERM": signal.SIGTERM}
-CLUSTER, STANDALONE = "cluster", "standalone"
+CLUSTER, STANDALONE, MIGRATION = "cluster", "standalone", "slot-migration"
 ROLE_TARGETS = ("primary", "replica", "any")
+# The slot-migration mode's targets besides the roles: the wave's migration endpoints, the primary that owns
+# the slot (``source``) and the one importing it (``target``), resolved once the wave's ``migrate`` picked them.
+MIGRATION_TARGETS = ("source", "target")
+# The phases of a wave's migration an operation of the slot-migration mode may wait for (``at``), in order,
+# read from CLUSTER GETSLOTMIGRATIONS on the source (its export job) and the target (its import job): ``started``
+# once the source accepted CLUSTER MIGRATESLOTS; ``snapshot`` while the export is snapshotting or streaming
+# (states snapshotting, replicating, waiting-to-pause; the import receiving-snapshot, waiting-for-paused);
+# ``handoff`` from the source's pause to the target's claim (failover-paused, failover-granted; the import
+# failover-requested, failover-granted); ``finished`` once either job ended (success, failed, cancelled, or
+# the import's cleaning-up).
+PHASES = ("started", "snapshot", "handoff", "finished")
+# The operations of the slot-migration mode that act on the wave's migration: they take ``at``, and ``source``
+# and ``target`` as targets.
+MIGRATION_OPERATIONS = ("kill", "partition", "cancel")
+# The deployment mode each wave mode runs on.
+DEPLOYMENT_MODES = {CLUSTER: "cluster", STANDALONE: "standalone", MIGRATION: "cluster"}
 _DURATION = ConfigField(float, default=1.0, minimum=0, maximum=600)
 _TARGET = {"target": ConfigField(str, default="replica")}
 # Every operation's fields: when it starts, after its delay_s, or after the operation at position
@@ -20,6 +36,13 @@ _TARGET = {"target": ConfigField(str, default="replica")}
 _COMMON = {
     "delay_s": ConfigField(float, default=0.0, minimum=0, maximum=600),
     "after": ConfigField(int, allow_none=True, default=None, minimum=0),
+}
+# The fields of MIGRATION_OPERATIONS in the slot-migration mode: the migration phase the operation waits
+# for (None: it starts at its delay_s), at most ``phase_timeout_s``; a phase the migration passed or never
+# reached before it ended lets the operation go ahead, recorded as missed.
+_PHASED = {
+    "at": ConfigField(str, allow_none=True, default=None, choices=PHASES),
+    "phase_timeout_s": ConfigField(float, default=60.0, minimum=0.1, maximum=3600),
 }
 
 
@@ -58,7 +81,7 @@ OPERATIONS = {
     # A killed primary's replacement may lack writes it acknowledged. Its target may also be a list of
     # instance IDs: one of them.
     "kill": Operation(
-        (CLUSTER, STANDALONE),
+        (CLUSTER, STANDALONE, MIGRATION),
         ROLE_TARGETS,
         {
             "target": ConfigField((str, list), default="replica"),
@@ -68,6 +91,21 @@ OPERATIONS = {
         disrupts=True,
         mutates=("process", "run-state", "shard"),
     ),
+    # Slot-migration mode: CLUSTER MIGRATESLOTS of key's slot from the primary that owns it to shard's primary
+    # (null: the shard after the owner's), waited for until the export ends; the wave's kills, partitions and
+    # cancels may name its endpoints and phases.
+    "migrate": Operation(
+        (MIGRATION,),
+        (),
+        {
+            "key": ConfigField(str),
+            "shard": ConfigField(int, allow_none=True, default=None, minimum=0, maximum=15),
+            "timeout_s": ConfigField(float, default=60.0, minimum=1, maximum=3600),
+        },
+        topology=True,
+    ),
+    # CLUSTER CANCELSLOTMIGRATIONS on the wave's migration source.
+    "cancel": Operation((MIGRATION,), (), {}, disrupts=True),
     # A FORCE failover does not wait for the replica to catch up.
     "failover": Operation(
         (CLUSTER,),
@@ -81,7 +119,7 @@ OPERATIONS = {
         mutates=("shard",),
     ),
     "restart": Operation(
-        (STANDALONE,),
+        (STANDALONE, MIGRATION),
         ("killed",),
         {"target": ConfigField(str, default="killed")},
         topology=True,
@@ -106,7 +144,15 @@ OPERATIONS = {
         role="replica",
         topology=True,
     ),
-    "partition": Operation((STANDALONE,), ROLE_TARGETS, {**_TARGET, "duration_s": _DURATION}, disrupts=True, held=True),
+    # Drops the traffic between the target and its peers: every other instance (``others``), or, in the
+    # slot-migration mode, the wave's migration endpoints or instance IDs.
+    "partition": Operation(
+        (STANDALONE, MIGRATION),
+        ROLE_TARGETS,
+        {**_TARGET, "peers": ConfigField((str, list), default="others"), "duration_s": _DURATION},
+        disrupts=True,
+        held=True,
+    ),
     # Loss, delay, reordering, duplication, or a rate limit on the links between the instance and every other.
     "degrade": Operation(
         (STANDALONE,),
@@ -144,16 +190,11 @@ def operations_for(mode: str) -> tuple[str, ...]:
 def operation_field(mode: str) -> ConfigField:
     """One wave operation of ``mode``: a union tagged by ``op``, each kind with its timing and own fields."""
 
-    return ConfigField(
-        dict,
-        variants=(
-            "op",
-            {
-                kind: ConfigSchema({"op": ConfigField(str, choices=(kind,)), **_COMMON, **OPERATIONS[kind].fields})
-                for kind in operations_for(mode)
-            },
-        ),
-    )
+    def fields(kind: str) -> dict[str, ConfigField]:
+        phased = _PHASED if mode == MIGRATION and kind in MIGRATION_OPERATIONS else {}
+        return {"op": ConfigField(str, choices=(kind,)), **_COMMON, **OPERATIONS[kind].fields, **phased}
+
+    return ConfigField(dict, variants=("op", {kind: ConfigSchema(fields(kind)) for kind in operations_for(mode)}))
 
 
 def waves_field(mode: str) -> ConfigField:
@@ -213,23 +254,47 @@ def check_waves(waves: Sequence[Sequence[Mapping[str, Any]]], mode: str, documen
 
     waves = resolve_waves(waves, mode)
     replicas = document["replicas_per_primary"]
-    primaries = document["primaries"] if mode == CLUSTER else 1
+    primaries = document["primaries"] if mode in (CLUSTER, MIGRATION) else 1
     if replicas < 1:
         raise ConfigError("wave chaos needs replicas_per_primary >= 1")
     instances = primaries * (1 + replicas)
     for number, wave in enumerate(waves):
         failovers: set[int] = set()
+        migrate = next((position for position, item in enumerate(wave) if item["op"] == "migrate"), None)
         for index, operation in enumerate(wave):
             where = f"waves[{number}][{index}]"
             kind = operation["op"]
+            # The wave's migration endpoints are targets only once its migrate operation started.
+            endpoints = MIGRATION_TARGETS if mode == MIGRATION and kind in MIGRATION_OPERATIONS else ()
             if OPERATIONS[kind].targets:
                 targets = operation["target"] if isinstance(operation["target"], list) else [operation["target"]]
                 if not targets:
                     raise ConfigError(f"{where}.target names no instance")
                 for target in targets:
-                    allowed = OPERATIONS[kind].targets if len(targets) == 1 else ()
+                    allowed = (*OPERATIONS[kind].targets, *endpoints) if len(targets) == 1 else ()
                     check_target(target, allowed, instances, f"{where}.target")
-            if kind == "failover":
+            if kind == "partition" and operation["peers"] != "others":
+                if mode != MIGRATION:
+                    raise ConfigError(
+                        f"{where}.peers: a {mode} partition isolates its target from every other instance"
+                    )
+                peers = operation["peers"] if isinstance(operation["peers"], list) else [operation["peers"]]
+                if not peers:
+                    raise ConfigError(f"{where}.peers names no instance")
+                for peer in peers:
+                    check_target(peer, endpoints if len(peers) == 1 else (), instances, f"{where}.peers")
+            if mode == MIGRATION and kind in MIGRATION_OPERATIONS:
+                # It waits for the migrate operation to start, so the two may start together.
+                needs = kind == "cancel" or operation["at"] is not None
+                needs = needs or operation.get("target") in endpoints or operation.get("peers") in endpoints
+                if needs and migrate is None:
+                    raise ConfigError(f"{where}: {kind} acts on the wave's migration, so the wave needs a migrate")
+            if kind == "migrate":
+                if operation["shard"] is not None:
+                    check_shard(operation["shard"], primaries, f"{where}.shard")
+                if index != migrate:
+                    raise ConfigError(f"{where}: a wave migrates one slot; put a second migration in its own wave")
+            elif kind == "failover":
                 check_shard(operation["shard"], primaries, f"{where}.shard")
                 if operation["shard"] in failovers:
                     raise ConfigError(f"{where}: shard {operation['shard']} already fails over in this wave")

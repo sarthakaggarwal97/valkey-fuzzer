@@ -142,7 +142,9 @@ slot migration (`CLUSTER MIGRATESLOTS`: the snapshot, the pause, the grant,
 the target's claim, and its replica); `conform` reports which steps a run
 took and the job states its `CLUSTER GETSLOTMIGRATIONS` samples showed.
 `valkey.slot-migration-spec` migrates a slot under writes and kills the
-target at its claim.
+target at its claim; `valkey.slot-migration-chaos` migrates in waves with
+kills, partitions and cancels on the migration's phases, and publishes the
+bundle's steps too.
 [`formal/persistence/`](../formal/persistence/README.md) is the order in
 which one server writes its AOF files, manifest and RDB file through a
 rewrite, `CONFIG SET appendonly` and a kill; `conform` reports only which
@@ -156,7 +158,7 @@ leaves to the experiment, is in the table below.
 | --- | --- | --- | --- |
 | `cluster-election` | `valkey.cluster-election-durability` | `Crash`: `kill-voter` after `granted`, at `vote_occurrence` | |
 | `replication` | `valkey.replication-full-resync` | none: no counterexample takes `Crash` | `Crash`, `Disconnect` (the experiment's own stall), `LoadFails` |
-| `slot-migration` | `valkey.slot-migration-spec` | `CrashT`: `kill-target` after `claimed`, `kill_delay_s` later | `Cancel`, `DropLink`, `PauseExpires`, `LoseBus` |
+| `slot-migration` | `valkey.slot-migration-spec` | `CrashT`: `kill-target` after `claimed`, `kill_delay_s` later | `Cancel`, `DropLink`, `LoseBus` (`valkey.slot-migration-chaos`'s cancel and partition operations inject them on a migration's phases, outside the spec experiment: a scenario injects every fault component of its plan, and no counterexample takes two of these), `PauseExpires` |
 | `persistence` | `valkey.save-crash-points` | none: every property is violated before any kill | `Crash` (the experiment's crash point, swept by `nth`), `RewriteFails` |
 `tests/fixtures/spec/register/` is a toy register that brings its own
 experiment and runs on Valkey (see

@@ -86,6 +86,7 @@ components:
         - {publish: slot-migration.owner.learned}
         - {publish: slot-migration.import.cleanup}
         - {publish: slot-migration.cancelled}
+        - {publish: slot-migration.finished}
         - {publish: slot-migration.pause.ended}
         - {publish: slot-migration.link.lost}
         - {publish: slot-migration.replica.promoted}
@@ -106,7 +107,11 @@ components:
 
   # kill-target (valkey.fault.process-signal) kills the node whose "completed
   # successfully. This node is now the owner of the slots" line appears: the
-  # target, at its claim.
+  # target, at its claim. The experiment carries this one fault component: a
+  # scenario injects every fault component of its plan, and no counterexample
+  # of the bundle takes two of CrashT, Cancel and DropLink, so the other faults
+  # on a migration are valkey.slot-migration-chaos's waves
+  # (formal/slot-migration/mapping.yaml, scenario.unmapped).
   - use: valkey.fault.process-signal
     id: kill-target
     config:

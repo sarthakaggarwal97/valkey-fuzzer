@@ -1,0 +1,109 @@
+# Slot-migration chaos: waves that move one hash slot between shards with
+# CLUSTER MIGRATESLOTS (atomic slot migration, Valkey 9.0 and later) and
+# disturb the migration: kill the source or the target at a phase of it
+# (started, snapshot, handoff, finished), cut the two apart (Linux, root,
+# iptables, deployment.addressing: per_instance_loopback), cancel it mid-way,
+# and restart what was killed. After every wave the action heals (partitions
+# removed, killed instances restarted) and validates: the cluster converges,
+# every slot has one owner in every view, roles and replication are back, and
+# every key the action wrote into the migrated slots still reads back with its
+# value. The default waves need no root: wave 1 kills the target at the
+# handoff, wave 2 kills the source once the snapshot streams and restarts it,
+# wave 3 cancels mid-way, wave 4 migrates the slot on undisturbed.
+#
+#   migration-log   the migration's steps in the node logs, published with the
+#                   patterns of formal/slot-migration/mapping.yaml (spec:
+#                   slot-migration), so `spec conform slot-migration RUN`
+#                   replays a run of this experiment too
+#   trace           the events and each node's CLUSTER GETSLOTMIGRATIONS
+#   chaos           the waves (valkey.action.slot-migration-chaos)
+#   cluster         the deployment's state once more at the end
+#
+# Three primaries with a replica each: {s} (slot 3828) starts in shard 0, so
+# the first migration moves it to shard 1's primary and each later one to the
+# next shard round, and a killed primary's shard fails over to its replica.
+# Liveness is added automatically.
+id: valkey.slot-migration-chaos
+deployment:
+  modes: [cluster]
+  primaries: {minimum: 3}
+  replicas_per_primary: {minimum: 1}
+metadata:
+  description: Atomic slot migrations in waves, each with a kill, partition or cancel on the migration, healed and validated after every wave
+  generator:
+    deployment:
+      primaries: {minimum: 3, maximum: 4}
+      replicas_per_primary: {minimum: 1, maximum: 2}
+      base_port: {minimum: 7000, maximum: 8000}
+    inputs:
+      waves: fixed
+      keys_per_slot: {minimum: 1, maximum: 100}
+inputs:
+  type: object
+  additionalProperties: false
+  properties:
+    waves:
+      type: array
+      description: "waves of operations that start together: migrate {key, shard, timeout_s}, kill {target, signal, at}, partition {target, peers, duration_s, at}, cancel {at}, restart {target}"
+      # Without a shard each migration moves the slot to the shard after its owner's, whatever the last wave left.
+      default:
+        - - {op: migrate, key: "{s}"}
+          - {op: kill, target: target, signal: SIGKILL, at: handoff}
+        - - {op: migrate, key: "{s}"}
+          - {op: kill, target: source, signal: SIGKILL, at: snapshot}
+          - {op: restart, target: killed, after: 1, delay_s: 2}
+        - - {op: migrate, key: "{s}"}
+          - {op: cancel, at: snapshot}
+        - - {op: migrate, key: "{s}"}
+    validation:
+      type: object
+      default: {}
+      description: state validation config (check_* flags, timeouts, retries, blocking_on_failure)
+    keys_per_slot: {type: integer, minimum: 0, maximum: 1000, default: 20, shrinkable: true}
+components:
+  - use: valkey.observer.log-trigger
+    id: migration-log
+    config:
+      instances: all
+      poll_interval_s: 0.001
+      spec: slot-migration
+      rules:
+        - {publish: slot-migration.started, evidence_id: valkey.slot-migration.started-logged, required: true}
+        - {publish: slot-migration.import.created}
+        - {publish: slot-migration.tracking.created}
+        - {publish: slot-migration.snapshot.started}
+        - {publish: slot-migration.snapshot.received}
+        - {publish: slot-migration.paused}
+        - {publish: slot-migration.failover.requested}
+        - {publish: slot-migration.failover.granted}
+        - {publish: slot-migration.claimed}
+        - {publish: slot-migration.owner.learned}
+        - {publish: slot-migration.import.cleanup}
+        - {publish: slot-migration.cancelled}
+        - {publish: slot-migration.finished}
+        - {publish: slot-migration.pause.ended}
+        - {publish: slot-migration.link.lost}
+        - {publish: slot-migration.replica.promoted}
+
+  - use: valkey.observer.trace
+    id: trace
+    config: {interval_s: 0.25, spec: slot-migration}
+
+  - use: valkey.action.slot-migration-chaos
+    id: chaos
+    depends_on: [migration-log, trace]
+    config:
+      waves: {$ref: inputs.waves}
+      validation: {$ref: inputs.validation}
+      keys_per_slot: {$ref: inputs.keys_per_slot}
+
+  - use: valkey.oracle.deployment-state
+    id: cluster
+    config:
+      validation: {$ref: inputs.validation}
+      chaos: chaos
+required_events: [chaos.migration-started, chaos.wave-validated]
+required_evidence:
+  - {evidence_id: valkey.chaos.schedule, source: chaos}
+  - {evidence_id: valkey.trace.recorded, source: trace}
+  - {evidence_id: valkey.deployment.validated, source: cluster}

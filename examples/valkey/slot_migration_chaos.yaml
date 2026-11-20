@@ -1,0 +1,33 @@
+# Atomic slot migrations under faults, on a 3-shard cluster with a replica per
+# shard. Each wave moves the slot of {s} (3828) to the next shard with CLUSTER
+# MIGRATESLOTS and disturbs the migration: wave 1 kills the target as the
+# handoff begins (the source paused writes, the target asked for the failover);
+# wave 2 kills the source while the snapshot streams and restarts it 2 s later,
+# once its replica took the shard over; wave 3 cancels the migration mid-way
+# (CLUSTER CANCELSLOTMIGRATIONS on the source); wave 4 migrates undisturbed.
+# After every wave the cluster must converge with every slot owned once, and
+# the 20 keys the action wrote into the slot must read back unchanged.
+#
+# A partition between the endpoints needs root, iptables and per-instance
+# addresses; add to a wave, with `addressing: per_instance_loopback` below:
+#   - {op: partition, target: source, peers: target, duration_s: 3, at: snapshot}
+scenario_id: slot-migration-chaos-example
+seed: 4243
+experiment:
+  id: valkey.slot-migration-chaos
+  inputs:
+    waves:
+      - - {op: migrate, key: "{s}"}
+        - {op: kill, target: target, signal: SIGKILL, at: handoff}
+      - - {op: migrate, key: "{s}"}
+        - {op: kill, target: source, signal: SIGKILL, at: snapshot}
+        - {op: restart, target: killed, after: 1, delay_s: 2}
+      - - {op: migrate, key: "{s}"}
+        - {op: cancel, at: snapshot}
+      - - {op: migrate, key: "{s}"}
+    keys_per_slot: 20
+deployment:
+  mode: cluster
+  primaries: 3
+  replicas_per_primary: 1
+  base_port: 7780

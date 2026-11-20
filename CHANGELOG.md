@@ -2,6 +2,50 @@
 
 ## Unreleased
 
+### Added: chaos during slot migration (PR-C1)
+
+- `valkey.action.slot-migration-chaos`, the slot-migration mode of the wave engine: each wave moves one hash slot
+  with `CLUSTER MIGRATESLOTS` (`migrate {key, shard, timeout_s}`; without a shard the slot goes to the shard
+  after its owner's, round and round) and disturbs the migration with `kill` of its `source` or `target` (or a
+  role or instance, under cluster chaos's kill safety), a `partition` between the endpoints
+  (`{target: source, peers: target}`; Linux, root, iptables, per-instance loopback), a `cancel` (`CLUSTER
+  CANCELSLOTMIGRATIONS` on the source), and `restart` of a killed instance. Each of the first three may wait for
+  a phase of the migration (`at`: `started`, `snapshot`, `handoff`, `finished`), which the migrate operation
+  reads from both endpoints' `CLUSTER GETSLOTMIGRATIONS` every 10 ms, and from the bundle's `slot-migration.*`
+  events when the experiment publishes them; its record says the phase it waited for, the one it saw, whether
+  it missed it, and for a kill the phase at the signal. After every wave the heal removes the partitions and
+  restarts the killed instances, and the validation runs the deployment's state checks (the cluster converges,
+  every slot has one owner in every view) and reads back every key the action wrote into the migrated slots
+  before the first wave (`keys_per_slot`, default 20) through a slot-routing client: a missing or changed key
+  fails the wave (`slot_keys` in its validation) and is written again for the next. A migration that did not
+  succeed is tolerated only when a kill, partition or cancel of its wave landed before it ended.
+- `valkey.slot-migration-chaos`, the experiment: the migration's steps published with the slot-migration
+  bundle's patterns (so `spec conform slot-migration` replays its runs), the trace, the action, and the final
+  deployment-state oracle. Its default waves need no root: the target killed at the handoff, the source killed
+  as it snapshots and restarted, a cancel mid-way, an undisturbed migration. `examples/valkey/slot_migration_chaos.yaml`
+  runs them; `--random` draws the deployment and `keys_per_slot` and keeps the waves. The live test
+  `slot-migration-chaos-cluster` runs them on a real cluster (`tests/test_live_valkey_experiments.py`).
+- `formal/slot-migration/mapping.yaml`: a `finished` evidence (event `slot-migration.finished`, the
+  `finished. State: <state>` line `finishSlotMigrationJob` logs on each endpoint, with the `operation` and
+  `state` captured), for faults to trigger on once a migration ended and for conform's record of how each side
+  ended; the `paused` pattern also matches 9.0.0's line (no `remaining_repl_size`); the comments name the lines
+  faults trigger on (start, handoff, end, cancel) and the Valkey versions they come from (9.0.0 to 9.1.3 and
+  unstable). `scenario.unmapped` names the chaos action's operations as the real components of `Cancel`,
+  `DropLink` and `LoseBus`, and says why the spec experiment carries only `CrashT`: a scenario injects every
+  fault component of its plan, and no counterexample takes two of these actions. `valkey.slot-migration-spec`
+  publishes the new event. A `crash-wave` evidence reads the chaos action's `<id>.endpoint-killed` event with
+  `endpoint: target` as the model's `CrashT`, so `spec conform slot-migration` replays a one-wave chaos run
+  (its transition check holds; the model has one migration, so a run of several waves is reported as a
+  violation at its second).
+- Wave operations: `partition` takes `peers` (`others`, the default and the only value outside the
+  slot-migration mode); `restart` runs in the slot-migration mode too. `WaveRun.resolves_later` lets a mode
+  pick an operation's target when it runs rather than before the wave.
+- Fixed: `valkey.action.migrate-slots` read the oldest export job of its slot from `CLUSTER GETSLOTMIGRATIONS`,
+  which lists the newest first, so a second migration of a slot its source had exported before was judged by
+  the old job. It reads the newest now (`job_of`), and `migration_endpoints` and `hash_tag` in
+  `slot_migration.py` are shared with the chaos action.
+
+
 ### Added: degraded links with tc netem (PR-C3)
 
 - `valkey.fault.network-degrade`: packet loss, delay with jitter, reordering, duplication, and a rate limit on the

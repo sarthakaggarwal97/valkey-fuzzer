@@ -101,6 +101,18 @@ Valkey 9.1.3 with `kill_delay_s` 1, the migration succeeded, T was killed, R was
 survived, and `spec conform` saw `Start` through `TClaim`, `Deliver`, `RApply`, `CrashT` and `Promote`; with no
 delay, S's pause ran to its timeout ("Write loss risk!", `PauseExpires`) since T died before S learned the claim.
 
+`Cancel`, `DropLink` and `LoseBus` have real components in `valkey.slot-migration-chaos`
+(`valkey.action.slot-migration-chaos`, [components](../../docs/components.md#valkeyactionslot-migration-chaos)): its
+waves kill the source or the target, cut the two apart, or cancel the migration at a phase read from `CLUSTER
+GETSLOTMIGRATIONS` (`started`, `snapshot`, `handoff`, `finished`), heal, and check that the cluster converged and the
+slot's keys survived. They stay `unmapped` for `spec translate` because a scenario injects every fault component of
+its experiment's plan and no counterexample takes two of `CrashT`, `Cancel` and `DropLink`, so
+`valkey.slot-migration-spec` carries `CrashT` alone. Both experiments publish the same lines, so `spec conform`
+replays a chaos run as well: its kill of the target is `CrashT` (the `crash-wave` evidence, from the action's
+`endpoint-killed` event), and a one-wave run's transitions hold; the model has one migration, so a run of several
+waves is reported as a violation at its second. The `finished` evidence records how each endpoint's job ended
+(`state`), and is the line a fault triggers on to land once a migration is over.
+
 ## Checking runs
 
 `spec conform slot-migration RUN` replays a run's mapped log lines (published by `valkey.observer.log-trigger` with

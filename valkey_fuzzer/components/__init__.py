@@ -41,6 +41,7 @@ from . import (
     search,
     server_stats,
     slot_migration,
+    slot_migration_chaos,
     snapshots,
     storage,
     syscall_faults,
@@ -81,6 +82,7 @@ _MODULES = (
     election_safety,
     replication_chaos,
     slot_migration,
+    slot_migration_chaos,
 )
 
 
