@@ -804,12 +804,14 @@ def _trace(tmp_path, save_behavior="sync", disk_vote=0, second_winner=False):
     def acked(t, voter, candidate):
         return event(t, "cluster.vote.acked", instance_id=candidate, voter=ID[voter], epoch=9)
 
-    killed = {"currentEpoch": 8, "lastVoteEpoch": disk_vote}
+    # The save that wrote the vote wrote the epoch it was cast in: nodes.conf holds both vars of one save.
+    killed = {"currentEpoch": 9 if disk_vote else 8, "lastVoteEpoch": disk_vote}
     records = [
         {"kind": "header", "scenario_id": "unit", "seed": 1, "nodes": nodes},
         observation("valkey-0", "primary", [[0, 8191]]),
         observation("valkey-3", "primary", [[8192, 16383]]),
         observation("valkey-1", "replica", []),
+        observation("valkey-2", "replica", []),
         event(1.0, "cluster.election.started", instance_id="valkey-1", epoch=9),
         event(1.1, "cluster.election.started", instance_id="valkey-2", epoch=9),
         granted(1.2, "valkey-0", "valkey-1"),
@@ -864,6 +866,10 @@ def test_conform_checks_the_election_claims_with_tlc(tmp_path):
     assert lost["properties"]["NoVoteLostInCrash"]["first"]["why"] == "ReceiveVote"
     saved = conform(save_behavior="sync", disk_vote=9)
     assert saved["status"] == "pass" and not saved["targets"]["VoteLostInCrash"]["reached"]
+    # The kill came after the save: every step is the model's. Known-bad: the kill that lost the vote under sync
+    # makes the ACK of that vote a step the model forbids (clean, under best-effort, allows it).
+    assert saved["transitions"]["holds"] and clean["transitions"]["holds"]
+    assert lost["transitions"]["first_violation"]["event"] == "acked"
     # Known-bad: two winners and a double vote in one epoch under sync.
     double = conform(save_behavior="sync", disk_vote=9, second_winner=True)
     assert double["status"] == "fail"

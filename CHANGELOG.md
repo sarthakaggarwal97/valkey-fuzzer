@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### Added: `spec conform` checks the run's steps against the model (PR-P1-a)
+
+- `spec conform` checked only that every observed state satisfies the claimed properties; a run that took a step
+  the model forbids but ended in a safe state passed. The same TLC run now also checks the transitions: from the
+  first observed state, with the hidden variables at the mapping's `hidden` value, each record that shows a model
+  action must be that action (any of its parameters, from the model's own `Next`) to a state that agrees with what
+  the record says (its `set`/`incr`/`clear` updates exactly, its `add`/`remove` as membership, its `step` rule as
+  `changes`/`unchanged`, and as many steps as it stands for with `step: {repeats: true}`), or no step when earlier
+  steps already account for it; a record without an action (a
+  sample) raises what it reports instead. Between two records the model may take up to `max_unobserved_steps`
+  (new in `claims.yaml`, default 1) steps of the actions the mapping lists as `unobservable`, and no other. A pass
+  is observed-projection refinement: the run's observed steps are steps of the model (`docs/spec-bridge.md`, "The
+  transition check", says what stays unchecked).
+- `conform.json` gains `transitions: {checked, max_unobserved_steps, holds, tlc_states}` per run, with
+  `first_violation: {index, from, to, event}` when some record has no model step; the run then `fail`s under the
+  same rule as a violated property (an approved bundle's run `FAIL`s in a batch, a draft's is reported). The
+  bundle's report counts `transitions.violated_in`; a batch's `conformance` digest lists `transition_violations`.
+  `--no-transitions` gives the observed-state check alone. Without TLC the check is reported as `skipped` for a
+  draft and is an error for an approved bundle; a bundle whose mapping cannot support it says so with
+  `transitions: {excluded: <why>}` in `claims.yaml`, as `formal/replication` does (its samples carry IDs as hex
+  and data sets as digests, which the model's steps cannot compute).
+- `formal/cluster-election/mapping.yaml`: a `granted` record now follows (`after`) the `started` record of the
+  election it answers, as an ACK follows its grant: two nodes' lines can be read in either order, and a vote the
+  model grants needs the request. A grant whose election start was never logged is a record conform cannot apply.
+  The transition check holds on the shipped experiments' runs with one election; with two, the second `Win` can
+  violate because the model's `IsMajority` counts `Primaries`, which the mapping fills with every node that ever
+  voted, while Valkey's quorum counts the slot-owning primaries at the time (the ACK line's `quorum`). The fix is
+  a quorum constant in the model, left for a follow-up.
+- `conform.json`'s `states` and the invariant results are unchanged; `transitions.checked` counts the records
+  that are steps or change the state, so a denied vote counts as a step there and not as a state.
+
+
 ### Added: the trace carries data samples, and `spec conform` checks a replication data claim on them
 
 - `valkey.observer.trace` (was `valkey.observer.cluster-trace`, cluster only; the evidence is

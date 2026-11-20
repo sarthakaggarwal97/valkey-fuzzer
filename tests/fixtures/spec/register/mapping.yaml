@@ -3,11 +3,13 @@
 # register is the number of keys written.
 evidence:
   wrote:
-    # Valkey acknowledged every write, so it applied them.
+    # Valkey acknowledged every write, so it applied them. One line reports
+    # every write at once: `keys` Write steps of the model.
     event: writes.seeded
     component: writes
     fields: {keys: int}
     action: Write
+    step: {repeats: true}
     updates:
       - {set: mem, value: $keys}
   acked:

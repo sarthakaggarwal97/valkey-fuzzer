@@ -85,8 +85,9 @@ These hold for `run` and `replay`. The other cases:
 - `cleanup-logs` exits `0`, or `2` when the prompt is declined or a file could
   not be deleted.
 - `sweep` exits `2` when it could not remove something it found.
-- `spec check` and `spec conform` exit `1` when a gate failed or a claimed
-  property was violated, else `2` on a harness error (a tool that did not run,
+- `spec check` and `spec conform` exit `1` when a gate failed, a claimed
+  property was violated, or a run took a step the model cannot, else `2` on a
+  harness error (a tool that did not run,
   a bundle that does not exist); see [spec](#spec).
 - `valkey-fuzzer` without a command prints its help and exits `64`.
 
@@ -403,7 +404,8 @@ run's report and trace, with TLC from `$TLA2TOOLS_JAR` for at most
 `conform_tlc_timeout_s` per run. The result is the
 run's `conform.json` (kept when a passing run is pruned) and its result's
 `conformance`. For a bundle whose claims are approved, a claimed property
-violated on the run's observed states makes the run a `FAIL`, and a check
+violated on the run's observed states, or a step the model cannot take, makes
+the run a `FAIL`, and a check
 that could not decide (TLC missing, too, for a bundle that needs it; TLC
 stopped at `conform_tlc_timeout_s`; the trace the run recorded missing) makes
 it an `ERROR`; either is in the run's summary
@@ -423,7 +425,7 @@ and change nothing.
 | `runs` | Every finished job: `id`, `source`, `status`, `summary`, `experiment`, `seed`, `attempt` (the draw that gave the seed's scenario, for a generated run), `mode`, `report` (its run report, relative to the folder; `null` when it left none), `signature_key`, `duration_s`, `worker`, `leaks` (a count), `origin` (the job a re-run repeats). |
 | `signatures` | The non-PASS runs grouped by the minimizer's [failure signature](#minimize) and experiment (a crash by its causes alone, across experiments), most runs first: `key`, `label`, `status`, `experiment`, `signature`, `count`, `runs`, and `serial_reruns`: `runs` (each re-run's `id`, `status`, `same_signature`, and its own `signature_key` and `signature_label`), `reproduced` (how many failed the same way), and `verdict`: `reproduced` (all did), `intermittent` (some did), `failed differently` (none did, but some failed another way; the summary printout gives their signatures), or `not reproduced` (all passed, which points at load). |
 | `zoo` | `valkey_commit`, `cases` (each case's controls, per-scenario detection rates, and whether it `holds`: true, false, or null for a case with an unobserved `ERROR` or `SKIP_UNSUPPORTED` run, which `undecided` then names), `skipped` (cases this host cannot run), `held`, `not_held`, and `undecided`. |
-| `conformance` | Per spec bundle the runs' plans name: `status` (`pass`, `fail`, or `error` over the checked runs; `skipped`, `unexercised`, or `not_run` when none was checked), `approved`, `counts` (runs by conform status: `pass`, `fail`, `error`, `skipped` without TLC, `unexercised` for a run that took no mapped step, `not_run` for a run that ended `ERROR` or `SKIP_UNSUPPORTED`), `skipped` (why), `violations` (each run, property, whether it was `claimed`, and the `first` failing step), `errors`, `action_coverage` (runs observing each mapped action), `never_observed`, `targets_reached`, and `report`, the bundle's full conform report under `conformance/`. |
+| `conformance` | Per spec bundle the runs' plans name: `status` (`pass`, `fail`, or `error` over the checked runs; `skipped`, `unexercised`, or `not_run` when none was checked), `approved`, `counts` (runs by conform status: `pass`, `fail`, `error`, `skipped` without TLC, `unexercised` for a run that took no mapped step, `not_run` for a run that ended `ERROR` or `SKIP_UNSUPPORTED`), `skipped` (why), `violations` (each run, property, whether it was `claimed`, and the `first` failing step), `transition_violations` (each run whose steps the model cannot take: the first such record, `index`, `from`, `to`, `event`), `errors`, `action_coverage` (runs observing each mapped action), `never_observed`, `targets_reached`, and `report`, the bundle's full conform report under `conformance/`. |
 | `leaks` | Every leftover the sweeps removed, with the run that left it. |
 | `invalid` | Matrix combinations that did not compile. |
 | `coverage` | Per experiment, the runs and the distinct coverage tuples they covered. |
@@ -742,15 +744,17 @@ evidence, not leftovers (`cleanup-logs` removes them).
 ```text
 valkey-fuzzer spec check BUNDLE [--tla2tools JAR] [--workers N] [--require-approved] [--output FILE]
 valkey-fuzzer spec translate BUNDLE (--control NAME | --trace TLC_OUTPUT --config CFG) --out DIR [--variants N] [--seed N]
-valkey-fuzzer spec conform BUNDLE RUN... [--tla2tools JAR] [--group-by INPUT,...] [--output FILE]
+valkey-fuzzer spec conform BUNDLE RUN... [--tla2tools JAR] [--group-by INPUT,...] [--no-transitions] [--output FILE]
 ```
 
 Checks a TLA+ spec bundle (`formal/<protocol>/`, or a bundle directory),
-translates its counterexamples into scenarios, and checks its claims on real
-runs. `--tla2tools` defaults to `$TLA2TOOLS_JAR`. `translate` takes the
+translates its counterexamples into scenarios, and checks real runs against it:
+its claims on the states a run shows, and (unless `--no-transitions`) that
+the steps a run shows are steps of the model. `--tla2tools` defaults to
+`$TLA2TOOLS_JAR`. `translate` takes the
 catalog option (`--experiment-dir`) to compile what it
-writes. Exit codes: 0 pass, 1 a gate failed or a claimed property was
-violated, 2 a harness error (no java or jar, which the command names with
+writes. Exit codes: 0 pass, 1 a gate failed, a claimed property was
+violated, or a step the model cannot take, 2 a harness error (no java or jar, which the command names with
 the jar's download command; a bundle that does not exist, a
 SANY or TLC run that never started or was cut short by `--timeout`, a run
 without mapped evidence or with a mapped record it cannot apply, or a

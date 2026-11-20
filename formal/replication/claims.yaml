@@ -128,3 +128,13 @@ exclusions:
   - PSYNC FAILOVER (the FAILOVER command) and cluster-bus failover, for which Promote stands.
   - The forkless (socket) full sync and its offset in the RDB file.
   - The timing of the backlog's TTL, the replication timeout, and repl-diskless-sync-delay.
+# conform's transition check needs the model's steps to compute from the observed state. The samples give
+# each node's role, IDs, offsets and digest for equality (SameOffsetSameData), but the IDs are random hex
+# where the model counts them from nextId, the data set is a digest where the model appends writes, the
+# primary a replica follows (primaryOf) stays hidden, and a node sampled before its first line has no role.
+# No model step reaches such states, so the check would fail every run for the mapping, not for Valkey.
+transitions:
+  excluded: >-
+    The samples carry replication IDs as hex and data sets as digests, which the model's steps cannot
+    compute (it numbers IDs and appends writes), and the primary a replica follows stays hidden, so no model
+    step relates two sampled states; the check needs the model's own encodings and primaryOf from the samples.

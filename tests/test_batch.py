@@ -658,6 +658,20 @@ VIOLATED = {
     "actions": {"Promote": 1},
     "targets": {},
 }
+# A run whose observed steps the model cannot take: the properties hold on every state.
+ILLEGAL_STEP = {
+    "status": "fail",
+    "properties": {"OneHistoryPerId": {"status": "holds", "claimed": True}},
+    "actions": {"Promote": 2},
+    "targets": {},
+    "transitions": {
+        "checked": 3,
+        "max_unobserved_steps": 1,
+        "holds": False,
+        "tlc_states": 4,
+        "first_violation": {"index": 3, "from": {"why": "Promote"}, "to": {"why": "Promote"}, "event": "promoted"},
+    },
+}
 
 
 def _seed(folder):
@@ -674,15 +688,16 @@ def test_spec_conform_of_an_approved_bundle_decides_the_run_and_a_drafts_is_only
         2: {"register": {"approved": False, **VIOLATED}},
         3: {"replication": {"approved": True, "status": "error", "error": "2 mapped record(s) could not be applied"}},
         4: {"replication": {"approved": True, "status": "skipped", "reason": "tla2tools.jar not found"}},
+        5: {"replication": {"approved": True, **ILLEGAL_STEP}},
     }
     monkeypatch.setattr(conform, "conform_folder", lambda folder, tools, unavailable="": canned[_seed(folder)])
-    sources = [_random(5, experiments=[REPLICATION])]
+    sources = [_random(6, experiments=[REPLICATION])]
     runner = _batch(tmp_path, sources, prune_pass=True, serial_reruns=1)
     summary = runner.run()
     ids = [job["id"] for job in runner.jobs]
     results = _results(runner)
 
-    assert [results[job_id]["status"] for job_id in ids] == ["PASS", "FAIL", "PASS", "ERROR", "PASS"]
+    assert [results[job_id]["status"] for job_id in ids] == ["PASS", "FAIL", "PASS", "ERROR", "PASS", "FAIL"]
     failed = results[ids[1]]
     assert failed["summary"].startswith("spec conform replication: OneHistoryPerId violated; ")
     assert failed["signature"]["failures"]["spec-conform:replication"] == {
@@ -693,6 +708,10 @@ def test_spec_conform_of_an_approved_bundle_decides_the_run_and_a_drafts_is_only
     # The draft's violation is kept with the run, not held against it.
     assert results[ids[2]]["conformance"]["register"]["status"] == "fail" and results[ids[2]]["signature"] is None
     assert results[ids[3]]["signature"]["failures"]["spec-conform:replication"]["status"] == "ERROR"
+    # A step the model cannot take fails an approved bundle's run as a violated property does.
+    illegal = results[ids[5]]
+    assert illegal["summary"].startswith("spec conform replication: transitions violated; ")
+    assert illegal["signature"]["failures"]["spec-conform:replication"]["verdict"] == ["transitions violated"]
     # A pruned passing run keeps what conform found.
     kept = {item.name for item in Path(runner.folder, "runs", ids[0]).iterdir()}
     assert kept == {"report.json", "scenario.yaml", "conform.json"}
@@ -700,18 +719,27 @@ def test_spec_conform_of_an_approved_bundle_decides_the_run_and_a_drafts_is_only
     replication = summary["conformance"]["replication"]
     # The digest reads the claims as shipped, a draft today; the run verdicts above came from the workers' entries.
     assert (replication["status"], replication["approved"]) == ("fail", False)
-    assert replication["counts"] == {"pass": 1, "fail": 1, "error": 1, "skipped": 1}
+    assert replication["counts"] == {"pass": 1, "fail": 2, "error": 1, "skipped": 1}
     assert replication["violations"] == [
         {"run": ids[1], "property": "OneHistoryPerId", "claimed": True, "first": {"state": 3, "why": "Promote"}}
     ]
     assert replication["errors"] == [{"run": ids[3], "error": "2 mapped record(s) could not be applied"}]
+    assert replication["transition_violations"] == [{"run": ids[5], **ILLEGAL_STEP["transitions"]["first_violation"]}]
     assert replication["skipped"] == ["tla2tools.jar not found"]
     assert replication["action_coverage"]["PartialSync"] == 1 and "Crash" in replication["never_observed"]
     report = json.loads(Path(runner.folder, replication["report"]).read_text())
-    assert report["kind"] == "spec-conformance" and [run["run"] for run in report["runs"]] == ids[:2] + ids[3:4]
+    assert (
+        report["kind"] == "spec-conformance" and [run["run"] for run in report["runs"]] == ids[:2] + ids[3:4] + ids[5:]
+    )
+    # The bundle's report counts the runs with a step the model cannot take; replication's claims exclude the check.
+    assert report["transitions"]["violated_in"] == 1 and report["transitions"]["excluded"].startswith("The samples")
     # The serial re-runs of the failed and errored runs repeat them: like counts, the digest leaves them out.
-    assert {job_id for job_id in results if job_id.startswith("serial-")} == {f"serial-{ids[1]}", f"serial-{ids[3]}"}
-    assert summary["counts"] == {"PASS": 3, "FAIL": 1, "ERROR": 1} and sum(replication["counts"].values()) == 4
+    assert {job_id for job_id in results if job_id.startswith("serial-")} == {
+        f"serial-{ids[1]}",
+        f"serial-{ids[3]}",
+        f"serial-{ids[5]}",
+    }
+    assert summary["counts"] == {"PASS": 3, "FAIL": 2, "ERROR": 1} and sum(replication["counts"].values()) == 5
     register = summary["conformance"]["register"]
     assert (register["status"], register["approved"], register["counts"]) == ("fail", False, {"fail": 1})
     assert summary["status"] == "FAIL"
