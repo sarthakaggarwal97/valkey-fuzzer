@@ -257,9 +257,11 @@ def close_quietly(*clients: Any) -> None:
                 pass
 
 
-# How the client reports a connection it could not open ("Error 49 connecting to 127.0.0.1:21120. Can't
-# assign requested address.", "Timeout connecting to server"): nothing was sent.
-_NOT_CONNECTED = re.compile(r"\bconnecting to\b")
+def _connect(client: Any) -> None:
+    """Open ``client``'s connection, sending nothing: an error here says the server was never reached."""
+
+    pool = client.connection_pool
+    pool.release(pool.get_connection("PING"))
 
 
 def send_command(client: Any, command: Sequence[Any], *, timeout_s: float, context: Any) -> Any:
@@ -268,17 +270,21 @@ def send_command(client: Any, command: Sequence[Any], *, timeout_s: float, conte
     Until the connection is open nothing has reached the server, so a connection
     that could not be opened (a host out of local ports under load, a server not
     accepting yet) is retried until ``timeout_s``, bounded by the run deadline;
-    then its error is raised. Any other error, a lost connection included, is
-    raised at once, and the command is never sent twice.
+    then its error is raised. The connection is opened first, on its own, so the
+    retry is decided by which step failed, not by the error's text. Any error of
+    the send itself, a lost connection included, is raised at once, and the
+    command is never sent twice.
     """
 
     deadline = time.monotonic() + remaining(context, timeout_s)
     while True:
         try:
-            return client.execute_command(*[str(item) for item in command])
-        except (valkey.exceptions.ConnectionError, valkey.exceptions.TimeoutError) as exc:
-            if not _NOT_CONNECTED.search(str(exc)) or time.monotonic() >= deadline or not context.sleep(0.1):
+            _connect(client)
+            break
+        except (valkey.exceptions.ConnectionError, valkey.exceptions.TimeoutError):
+            if time.monotonic() >= deadline or not context.sleep(0.1):
                 raise
+    return client.execute_command(*[str(item) for item in command])
 
 
 def send_to(handle: Any, instance_id: str, command: Sequence[Any], *, timeout_s: float, context: Any) -> dict[str, Any]:

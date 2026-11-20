@@ -7,7 +7,10 @@ from types import SimpleNamespace
 class FakeClient:
     """A client the code under test opens with ``with`` or closes: it enters as itself and closes to nothing.
     ``execute_command`` appends its arguments to ``commands`` and answers ``replies.get(args, "OK")``, raising an
-    exception reply."""
+    exception reply. Its ``connection_pool`` hands out and takes back a connected stand-in: a test of a client
+    that cannot connect gives its own ``connection_pool``."""
+
+    connection_pool = SimpleNamespace(get_connection=lambda *args, **options: None, release=lambda conn: None)
 
     def __init__(self, commands=None, replies=None):
         self.commands = [] if commands is None else commands

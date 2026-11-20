@@ -513,6 +513,45 @@ def test_a_client_side_error_is_no_reply_from_valkey():
         actions.CommandAction().run(fake_context(handle, spec), spec)
 
 
+def test_a_command_is_retried_only_while_its_connection_cannot_be_opened_whatever_the_error_says(clock):
+    cannot_connect = ValkeyConnectionError("Error 49 connecting to 127.0.0.1:7000. Can't assign requested address.")
+
+    class Pool:
+        """A connection pool that refuses the first ``failures`` connections, sending nothing."""
+
+        def __init__(self, failures):
+            self.failures, self.opened = failures, 0
+
+        def get_connection(self, *args, **options):
+            if self.opened < self.failures:
+                self.opened += 1
+                raise cannot_connect
+            return object()
+
+        def release(self, connection):
+            pass
+
+    context = clock.drive(fake_context(FakeHandle()))
+    client = FakeClient()
+    client.connection_pool = Pool(failures=3)
+    assert instances.send_command(client, ["PING"], timeout_s=5, context=context) == "OK"
+    assert client.commands == [("PING",)], "sent once, after the connection opened"
+    assert 0.3 - 1e-6 <= clock.elapsed < 5
+    # The connection opened and the send itself failed: the server may have the command, so it is not sent again,
+    # even when the error reads like a connect error.
+    client = FakeClient(error=cannot_connect)
+    with pytest.raises(ValkeyConnectionError):
+        instances.send_command(client, ["PING"], timeout_s=5, context=context)
+    assert client.commands == [("PING",)]
+    # A connection that never opens gives up at the timeout with the connect error.
+    client = FakeClient()
+    client.connection_pool = Pool(failures=10**6)
+    before = clock.elapsed
+    with pytest.raises(ValkeyConnectionError, match="connecting to"):
+        instances.send_command(client, ["PING"], timeout_s=2, context=context)
+    assert client.commands == [] and clock.elapsed - before >= 2 - 1e-6
+
+
 @pytest.mark.parametrize(
     ("raised", "status"),
     [
