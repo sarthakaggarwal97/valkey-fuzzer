@@ -499,6 +499,9 @@ _SCENARIO = _record(
     {
         "inputs": dict,
         "faults": _list(_FAULT),
+        # Model fault actions the scenario does not inject, each with the reason (no fault component does it, or no
+        # counterexample takes it): {action: reason}.
+        "unmapped": _named(str),
         "variants": _record({}, {"occurrence_shift": _list(int), "inputs": _named(list)}),
     },
 )
@@ -749,6 +752,14 @@ def _check_scenario(
     for name, values in (variants.get("inputs") or {}).items():
         if not values:
             raise SpecBundleError(f"{where}.variants.inputs.{name} must list values")
+    injected = {fault["action"] for fault in scenario.get("faults") or []}
+    for action, why in (scenario.get("unmapped") or {}).items():
+        if action not in defined or not why.strip():
+            raise SpecBundleError(
+                f"{where}.unmapped.{action} must be a model action with the reason it is not injected"
+            )
+        if action in injected:
+            raise SpecBundleError(f"{where}.unmapped.{action} is also a fault of the scenario")
 
 
 # ---------------------------------------------------------------------------

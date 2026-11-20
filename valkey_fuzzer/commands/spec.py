@@ -199,6 +199,8 @@ def translate_command(args: argparse.Namespace) -> int:
             f"{item['trigger']} #{item['occurrence']} "
             f"({item['trigger_event']}, state {item['trigger_state']}); model steps in between: {between}"
         )
+    for action, why in translation["unmapped"].items():
+        print(f"{action}: not injected by the scenario; {why}")
     write_document(os.path.join(args.out, "translation.json"), translation)
     _write(args, translation)
     return EXIT_SUCCESS

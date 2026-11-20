@@ -1,0 +1,18 @@
+# Executable counterexample of formal/slot-migration/model.tla: migrate the slot
+# of {s} from shard 0 to shard 1 under writes to it, kill the target the moment
+# it logs its claim (the model's CrashT after TClaim), and check the data and
+# the cluster once the target's replica has taken over. kill_delay_s gives the
+# target time to take writes and stream them to its replica first; `spec
+# translate slot-migration --control replica_misses_claim` writes this scenario
+# and its kill_delay_s variants.
+scenario_id: slot-migration-spec
+seed: 41
+experiment:
+  id: valkey.slot-migration-spec
+  inputs:
+    kill_delay_s: 0.2
+deployment:
+  mode: cluster
+  primaries: 3
+  replicas_per_primary: 1
+  base_port: 7760

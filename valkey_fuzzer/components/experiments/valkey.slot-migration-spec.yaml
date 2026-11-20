@@ -1,0 +1,156 @@
+# The TLA+ model in formal/slot-migration/model.tla, made executable: one slot
+# moves from its source primary S to a target primary T with a replica R
+# (CLUSTER MIGRATESLOTS) under writes to that slot, and T is killed the moment
+# it claims the slot (the model's CrashT after TClaim), so R takes over.
+#
+#   writes          Write: the key-value workload on keys under one hash tag
+#                   (prefix), so every key is in the migrated slot
+#   migration-log   Start .. TClaim, Deliver, Cancel, DropLink, CrashT and
+#                   Promote, observed in node logs with the patterns of
+#                   formal/slot-migration/mapping.yaml (spec: slot-migration)
+#   migrate         CLUSTER MIGRATESLOTS of the slot from its owner to the
+#                   primary of shard 1, waited for until the export ends
+#   kill-target     CrashT: SIGKILL the node that logs the claim, kill_delay_s
+#                   after it, and restart it after restart_delay_s, once R has
+#                   been elected
+#   data            the ledger oracle: every acknowledged write survives, but
+#                   those acknowledged within loss_window_s of the kill, which
+#                   T may not have replicated to R (the model leaves that
+#                   asynchronous loss out)
+#
+# Three primaries, so that R wins its election with S's and the third
+# primary's votes. The trace observer writes trace.jsonl, which
+# `valkey-fuzzer spec conform slot-migration RUN` replays into the model's
+# steps. Liveness is added automatically.
+id: valkey.slot-migration-spec
+deployment:
+  modes: [cluster]
+  primaries: {minimum: 3}
+  replicas_per_primary: {minimum: 1}
+metadata:
+  description: Migrate one slot under writes, kill the target as it claims the slot, and check the data and the cluster after its replica takes over
+  generator:
+    deployment:
+      cluster:
+        primaries: {minimum: 3, maximum: 4}
+        replicas_per_primary: {minimum: 1, maximum: 2}
+    inputs:
+      kill_delay_s: {minimum: 0, maximum: 1}
+      restart_delay_s: {minimum: 3, maximum: 6}
+inputs:
+  type: object
+  additionalProperties: false
+  properties:
+    prefix:
+      type: string
+      default: "{s}"
+      description: the keys' prefix, a hash tag so that every key is in one slot (3828 for {s}, in shard 0), owned by a shard other than shard 1
+    mutable_keys: {type: integer, minimum: 1, maximum: 100000, default: 50}
+    mutation_rate: {type: number, minimum: 1, maximum: 10000, default: 200}
+    kill_delay_s:
+      type: number
+      minimum: 0
+      maximum: 60
+      default: 0
+      description: wait after the target logs its claim before killing it; the writes it takes meanwhile reach its replica
+    restart_delay_s:
+      type: number
+      minimum: 0
+      maximum: 60
+      default: 4
+      description: wait before restarting the killed target; above cluster-node-timeout, so its replica is elected first
+    loss_window_s:
+      type: number
+      minimum: 0
+      maximum: 60
+      default: 1
+      description: acknowledged writes this close to the kill may be lost (the target's replica may not have them)
+components:
+  - use: valkey.observer.log-trigger
+    id: migration-log
+    config:
+      instances: all
+      poll_interval_s: 0.001
+      switch_interval_s: 0.0002
+      spec: slot-migration
+      rules:
+        - {publish: slot-migration.started, evidence_id: valkey.slot-migration.started-logged, required: true}
+        - {publish: slot-migration.import.created}
+        - {publish: slot-migration.tracking.created}
+        - {publish: slot-migration.snapshot.started}
+        - {publish: slot-migration.snapshot.received}
+        - {publish: slot-migration.paused}
+        - {publish: slot-migration.failover.requested}
+        - {publish: slot-migration.failover.granted}
+        - {publish: slot-migration.claimed, evidence_id: valkey.slot-migration.claimed-logged, required: true}
+        - {publish: slot-migration.owner.learned}
+        - {publish: slot-migration.import.cleanup}
+        - {publish: slot-migration.cancelled}
+        - {publish: slot-migration.pause.ended}
+        - {publish: slot-migration.link.lost}
+        - {publish: slot-migration.replica.promoted}
+
+  - use: valkey.observer.cluster-trace
+    id: trace
+    config: {interval_s: 0.25, spec: slot-migration}
+
+  - use: valkey.workload.key-value
+    id: writes
+    config:
+      prefix: {$ref: inputs.prefix}
+      stable_keys: 100
+      mutable_keys: {$ref: inputs.mutable_keys}
+      rate: {$ref: inputs.mutation_rate}
+      mix: {set: 0.8, del: 0.1, get: 0.1}
+      op_timeout_s: 2.0
+
+  # kill-target (valkey.fault.process-signal) kills the node whose "completed
+  # successfully. This node is now the owner of the slots" line appears: the
+  # target, at its claim.
+  - use: valkey.fault.process-signal
+    id: kill-target
+    config:
+      when_event: slot-migration.claimed
+      delay_s: {$ref: inputs.kill_delay_s}
+      instance: event
+      signal: SIGKILL
+      restart: true
+      restart_mode: background
+      restart_delay_s: {$ref: inputs.restart_delay_s}
+
+  - use: valkey.action.migrate-slots
+    id: migrate
+    depends_on: [migration-log, trace, writes, kill-target]
+    config:
+      key: {$ref: inputs.prefix}
+      shard: 1
+      timeout_s: 60
+
+  - use: valkey.action.wait-event
+    id: target-recovered
+    depends_on: [migrate]
+    config: {event: kill-target.recovered, timeout_s: 90}
+
+  - use: valkey.action.sleep
+    id: settle
+    depends_on: [target-recovered]
+    config: {seconds: 2}
+
+  - use: valkey.oracle.ledger
+    id: data
+    config:
+      workload: writes
+      acknowledged: must_survive
+      loss_window_s: {$ref: inputs.loss_window_s}
+      loss_window_faults: [kill-target]
+      converge_timeout_s: 120
+
+  - use: valkey.oracle.deployment-state
+    id: deployment-state
+    config: {validation: {stabilization_wait: 2, validation_timeout: 120}}
+required_events: [migrate.migration-started, slot-migration.claimed, kill-target.recovered, migrate.migration-completed]
+required_evidence:
+  - {evidence_id: valkey.fault.injected, source: kill-target}
+  - {evidence_id: valkey.cluster.slot-migration.result, source: migrate}
+  - {evidence_id: valkey.cluster.trace.recorded, source: trace}
+  - {evidence_id: valkey.deployment.validated, source: deployment-state}

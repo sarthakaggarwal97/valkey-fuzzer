@@ -1,7 +1,8 @@
 # Implementation evidence for model.tla: the log lines that show the steps of
-# one server's AOF rewrite, RDB save and restart. An experiment publishes them
-# with valkey.observer.log-trigger (spec: persistence). The claims compare the
-# files' writes with the data set's, which a run does not observe in the
+# one server's AOF rewrite, RDB save and restart. valkey.aof-durability and
+# valkey.save-crash-points publish them with the valkey.persistence-steps
+# fragment (valkey.observer.log-trigger, spec: persistence). The claims compare
+# the files' writes with the data set's, which a run does not observe in the
 # model's terms, so `spec conform` checks no property of this bundle: it
 # reports which steps real runs took.
 evidence:
@@ -81,3 +82,41 @@ constants:
   MaxCrashes: {max_of: [crashes], at_least: 2}
   MaxSwitches: {value: 2, why: "As MaxWrites."}
   MaxRewrites: {value: 2, why: "As MaxWrites."}
+
+scenario:
+  # Every counterexample is a sequence of file operations after which a kill
+  # would lose data or leave a manifest naming a missing file; the kill itself
+  # is never a step (each property reads what a restart would load, Restore,
+  # before any Crash), so no control takes a mapped fault and the scenario
+  # injects none: it sets the experiment that kills a server between two file
+  # operations of a rewrite (valkey.fault.syscall on the nth system call of
+  # BGREWRITEAOF), and the variants sweep the crash point, which the trace does
+  # not name. On Valkey 9 the rewrite's calls are: 1-4 the new incremental
+  # file's manifest before the fork, 5 the incremental file's fsync, 6-7 the
+  # child's temporary file, 8 the base's rename into place (RenameBase), 9-12
+  # the new manifest (PersistManifest), then the history's deletion
+  # (DeleteHistory). The direct scenario kills before call 9, between the
+  # rename and the manifest. The model's bounds (MaxWrites, MaxFiles, ...) set
+  # no input.
+  experiment: valkey.save-crash-points
+  deployment:
+    mode: standalone
+    syscall_faults: true
+    base_port: 7720
+  inputs:
+    trigger_command: [BGREWRITEAOF]
+    nth: 9
+  unmapped:
+    Crash: >-
+      No control's counterexample takes Crash: the properties are violated by
+      the state a kill would restart from, before any kill, so a fault here
+      would leave every control untranslatable. The experiment's crash
+      (valkey.fault.syscall) lands at the nth system call of the rewrite its
+      inputs name, not at a model step.
+    RewriteFails: >-
+      No fault component fails a rewrite child; a kill of the server takes the
+      child with it.
+  variants:
+    inputs:
+      nth: [8, 10, 12]
+      when: [before, after]

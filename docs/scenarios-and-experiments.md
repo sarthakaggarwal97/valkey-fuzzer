@@ -475,6 +475,7 @@ The Valkey components ship thirteen fragments:
 | `valkey.reconnect-replicas` | the `drop-replica-links` action ([`valkey.action.command`](components.md#valkeyactioncommand), `CLIENT KILL TYPE replica` on the primaries), then the `links-up` poll (every replica's `master_link_status` is `up`, within 120 s), with `drop-replica-links.completed` a required event; fragments name what `drop-replica-links` follows |
 | `valkey.psync` | `valkey.base` and a partial resync: writes for `disconnect_after_s` (input, default 1), then `valkey.reconnect-replicas` after `run-then-disconnect`, the `info` observer requiring `sync_partial_ok` to advance and `sync_full` not to, and the `logs` observer requiring both sides' PSYNC lines and forbidding a full resync; standalone or cluster with replicas |
 | `valkey.full-sync` | `valkey.base` and a forced full sync: writes for `run_before_sync_s` (input, default 1), then `change-replid` (`DEBUG CHANGE-REPL-ID`, which the `full-sync` startup overlay enables) and `valkey.reconnect-replicas` |
+| `valkey.persistence-steps` | the `persistence-steps` observer ([`valkey.observer.log-trigger`](components.md#valkeyobserverlog-trigger), `spec: persistence`), which publishes every log line [`formal/persistence`](../formal/persistence/README.md)'s mapping maps to a model step (a rewrite's start, base rename and end, a failed rewrite, a save's start and end); list `- id: persistence-steps` before the experiment's actions. `valkey.aof-durability` and `valkey.save-crash-points` extend it |
 | `valkey.replication-steps` | the `replication-steps` observer ([`valkey.observer.log-trigger`](components.md#valkeyobserverlog-trigger), `spec: replication`), which publishes every log line [`formal/replication`](../formal/replication/README.md)'s mapping maps to a model step, so a batch checks the run against the bundle ([In a batch](spec-bridge.md#in-a-batch)); list `- id: replication-steps` before the experiment's actions. `valkey.replication-chaos`, `valkey.replication-full-resync`, and `valkey.replication-partial-resync` extend it |
 | `valkey.command-table` | the `commands` workload ([`valkey.workload.command-table`](components.md#valkeyworkloadcommand-table)) at the input `command_rate` (default 0, which sends none); the `reply-schemas` oracle ([`valkey.oracle.reply-schema`](components.md#valkeyoraclereply-schema)), which holds its replies to Valkey's reply schemas; and the `command-metadata` oracle ([`valkey.oracle.command-metadata`](components.md#valkeyoraclecommand-metadata)), which holds the workload's first 1000 commands to the build's command metadata on private servers; random scenarios keep the default, so a batch turns them on for an experiment with a base (`experiment: {inputs: {command_rate: 200}}`). `valkey.cluster-chaos`, `valkey.replication-chaos`, and `valkey.cluster-partition` extend it |
 | `valkey.config-churn` | the `config-churn` workload ([`valkey.workload.config-churn`](components.md#valkeyworkloadconfig-churn)), which changes `config_changes` configs (input, 0 to 20, default 0) with `CONFIG SET` during the run; random scenarios draw how many. Its `config_churn_keys` input (`{pools: [valkey.pool.memory, valkey.pool.encodings, valkey.pool.cron]}`) gives it the keys the scenario drew from those pools, so it changes them too, to values of the same pools; the IO-thread pool is left out (an always-active IO thread costs about 0.4 of a core) |
@@ -519,7 +520,8 @@ scenario for each.
 | `valkey.replication-full-resync` | standalone or cluster, replicas ≥ 1 | | A replica stalled with `SIGSTOP` while writes overflow the backlog is refused a partial resync, completes a full resync, and converges. |
 | `valkey.replication-partial-resync` | standalone or cluster, replicas ≥ 1 | | After the primary drops every replica link, the replicas resume with a partial resync (PSYNC), no full sync happens, and they converge. |
 | `valkey.rolling-upgrade` | standalone or cluster, replicas ≥ 1 | two different builds, the target as an artifact | Every instance moves to the new build under writes, replicas first with graceful failovers, and no acknowledged write is lost. |
-| `valkey.save-crash-points` | standalone or cluster, `syscall_faults: true` | a C compiler | Kills a server at the nth system call (`write`, `fsync`, `fdatasync`, `rename`) of one save in its data directory, before or after the call: `BGSAVE`, `BGREWRITEAOF`, or a `nodes.conf` save that a peer's new `cluster-announce-human-nodename` starts. The preload, acknowledged under `appendfsync always`, must survive the restart. A sweep runs `nth` 1, 2, and so on until the fault no longer fires. |
+| `valkey.save-crash-points` | standalone or cluster, `syscall_faults: true` | a C compiler | Kills a server at the nth system call (`write`, `fsync`, `fdatasync`, `rename`) of one save in its data directory, before or after the call: `BGSAVE`, `BGREWRITEAOF`, or a `nodes.conf` save that a peer's new `cluster-announce-human-nodename` starts. The preload, acknowledged under `appendfsync always`, must survive the restart. A sweep runs `nth` 1, 2, and so on until the fault no longer fires. With `BGREWRITEAOF` it is the live counterpart of the [persistence model](../formal/persistence/README.md), whose `spec translate` scenarios it runs. |
+| `valkey.slot-migration-spec` | cluster, primaries ≥ 3, replicas ≥ 1 | | Migrates the slot of a hash tag from its shard to shard 1 under writes to that slot ([`valkey.action.migrate-slots`](components.md#valkeyactionmigrate-slots)), kills the target as it logs its claim and restarts it once its replica is elected; no acknowledged write is lost outside `loss_window_s` of the kill, and the cluster validates. The live counterpart of the [slot migration model](../formal/slot-migration/README.md) (`spec: slot-migration`). |
 | `valkey.snapshot-equivalence` | standalone, cluster | | A fixed number of seeded operations, then a BGSAVE of the quiesced dataset that must reload; records dataset, RDB, and reply digests. |
 
 An experiment can also compare one command sequence across two builds, the
@@ -579,6 +581,15 @@ Under its load, Valkey 9.2's preemptive poll of priority events sends the
 vote before the save even under `sync`: 3 of 4 runs on `unstable` failed,
 and every run passed with `priority-preemptive-poll-interval-us 0` (fork
 issue #120 has the reproduction of two winners in one epoch).
+
+`valkey.slot-migration-spec` is the live counterpart of
+[`formal/slot-migration/`](../formal/slot-migration/README.md): its kill of
+the target at the claim is the model's `CrashT`, and `spec translate` sets
+its `kill_delay_s` variants. `valkey.aof-durability` and
+`valkey.save-crash-points` publish the steps of
+[`formal/persistence/`](../formal/persistence/README.md) with the
+`valkey.persistence-steps` fragment, and the rewrite crash points of
+`valkey.save-crash-points` are what that model's counterexamples are about.
 
 A sweep of `valkey.save-crash-points` on `unstable` ran every crash point of
 the three saves, before and after each call, and every one recovered every
@@ -825,6 +836,7 @@ Inputs not listed use the `valkey.writes` ranges.
 | `valkey.replication-partial-resync` | standalone 1-3 or cluster 1-2 replicas | rate up to 2000, value size up to 1 kB, `disconnect_after_s` 0.5-3 | replication |
 | `valkey.rolling-upgrade` | standalone or cluster, 1-2 replicas | | |
 | `valkey.save-crash-points` | standalone, or 3 primaries, no replicas | `BGREWRITEAOF` (the save with the most calls), `nth` 1-12, `when` | |
+| `valkey.slot-migration-spec` | 3-4 primaries, 1-2 replicas | `kill_delay_s` 0-1, `restart_delay_s` 3-6 | |
 | `valkey.snapshot-equivalence` | standalone or cluster, 0-2 replicas | `operations` 1-3000, rate 500-5000, value size up to 8 kB | persistence, replication |
 
 Durability windows (`loss_window_s`, `loss_window_after_s`) are never drawn

@@ -154,3 +154,35 @@ constants:
   # #133 would fail once a property is conformed, as it should.
   DualChannel: {value: "FALSE", why: "The claims' condition; the mapped lines do not say whether dual channel was on."}
   AdoptOnLoad: {value: "FALSE", why: "Valkey as it is (fuzzer issue #133)."}
+
+scenario:
+  # No control's counterexample takes Crash: each is a sequence of syncs,
+  # promotions and REPLICAOFs after which two claims on one replication ID
+  # name two data sets. The one fault a counterexample takes, the link drop
+  # of keep_old_id_on_load, is what valkey.replication-full-resync injects
+  # (stall-replica, a SIGSTOP the primary answers by closing the link), on its
+  # own timer rather than on a mapped line, so the scenario injects no fault:
+  # it sets the deployment of the model's three nodes (one primary, Nodes - 1
+  # replicas; the deployment counts replicas, so the count is written here)
+  # and the variants sweep the stall. DualChannel and AdoptOnLoad set no
+  # input: the experiments take dual-channel-replication-enabled from the
+  # deployment's server_config, and AdoptOnLoad is Valkey's code.
+  experiment: valkey.replication-full-resync
+  deployment:
+    mode: standalone
+    replicas_per_primary: 2
+    base_port: 7730
+  unmapped:
+    Crash: >-
+      No control's counterexample takes Crash, and no replication experiment
+      kills a node with a fault component: valkey.replication-chaos kills
+      through its action's waves, which its schedule sets, not a log line.
+    Disconnect: >-
+      valkey.replication-full-resync drops the link with stall-replica
+      (SIGSTOP), fired by its own timer (run-then-stall.completed), not by a
+      mapped line; the trace's Disconnect follows the unobservable
+      DualLoadContinued.
+    LoadFails: No fault component fails a load.
+  variants:
+    inputs:
+      pause_s: [3, 5]

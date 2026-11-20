@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Added: every spec bundle translates into scenarios and has shipped experiments that publish its steps
+
+- `formal/replication`, `formal/persistence` and `formal/slot-migration` have a `scenario` section, so
+  `spec translate --control <name>` writes scenarios for each of the four bundles, and `spec check`'s `experiment`
+  gate compiles them. A section's new `unmapped` field lists the model's fault actions the scenario does not inject,
+  each with the reason (no fault component does it, or no counterexample takes it), and a section may have no
+  `faults`: the scenario then sets the deployment and the inputs, and the experiment runs its own schedule. The
+  bundle loader checks `unmapped` names model actions that are not also faults, and `translation.json` records it.
+- `valkey.slot-migration-spec`: a new experiment that migrates the slot of a hash tag from shard 0 to shard 1 under
+  writes to it, kills the target the moment it logs its claim (the slot migration model's `CrashT`), restarts it once
+  its replica is elected, and checks the data (ledger, with a loss window for writes the target had not replicated)
+  and the cluster. It publishes the model's steps (`spec: slot-migration`) and has a generator block, so `batch
+  --random all` and the PR batch run it and check its runs against the bundle. `valkey.action.migrate-slots` is the
+  action behind it: `CLUSTER MIGRATESLOTS` of one slot to a shard's primary, waited for until the source's export
+  ends.
+- `valkey.persistence-steps`: a fragment whose observer publishes the persistence model's steps (`spec:
+  persistence`); `valkey.aof-durability` and `valkey.save-crash-points` extend it, so a batch checks their runs
+  against `formal/persistence`. `valkey.save-crash-points` with `BGREWRITEAOF` is the experiment the persistence
+  scenarios run.
+- The checked-in counterexamples `tests/fixtures/spec/{persistence-manifest_before_base,
+  replication-keep_old_id_on_load, slot-migration-replica_misses_claim}.out` test translate per bundle without TLC.
+
 ### Changed: the election oracle and `spec conform` agree, and the spec bridge's blind spots from the audit are closed
 
 - `valkey.oracle.cluster-election-safety` claims `VoteOncePerEpoch` and `OneWinnerPerEpoch` only where

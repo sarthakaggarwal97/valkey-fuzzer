@@ -78,6 +78,10 @@ _WAVES = [
         pytest.param(lambda: scenario("valkey.save-crash-points", inputs={"trigger_command": ["BGREWRITEAOF"], "nth": 8},
                                       syscall_faults=True),
                      {"valkey.fault.injected": {"call": "rename"}}, None, id="save-crash-points-rewrite-rename"),
+        # The target is killed 0.2 s after it claims the slot, once it took writes and streamed them to its replica.
+        pytest.param(lambda: scenario("valkey.slot-migration-spec", "cluster", {"kill_delay_s": 0.2}, primaries=3, replicas=1),
+                     {"valkey.cluster.slot-migration.result": {"slot": 3828, "source": "valkey-0", "target": "valkey-2"}},
+                     None, id="slot-migration-spec-cluster"),
         pytest.param(lambda: _two_builds("valkey.mixed-version-cluster", "cluster", on="candidate"),
                      {"valkey.binary.verified": {"mixed": True}}, None, marks=live.needs_old_binary, id="mixed-version-cluster"),
         pytest.param(lambda: _two_builds("valkey.rolling-upgrade", "standalone", {"to_binary": {"$ref": "artifacts.candidate.binary"}},
