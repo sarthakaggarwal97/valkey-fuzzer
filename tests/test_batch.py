@@ -1076,8 +1076,12 @@ def test_a_plug_in_takes_part_at_every_point_of_the_batch_and_its_jobs_are_its_o
             shorthand=lambda value: {"seeds": value} if isinstance(value, list) else None,
         )
 
+        def task_options(self, options):
+            # Its own option rides into every worker's task, by a name of its own.
+            return {"toy_limit": options.workers * 10}
+
         def after_run(self, report_dir, task):
-            Path(report_dir, "toy.txt").write_text("checked")
+            Path(report_dir, "toy.txt").write_text(f"checked under {task['toy_limit']}")
 
         def judge(self, job, run_dir, report, verdict):
             # Before the leaks count: the verdict of the batch's own jobs; the plug-in's are recorded instead.
@@ -1111,7 +1115,7 @@ def test_a_plug_in_takes_part_at_every_point_of_the_batch_and_its_jobs_are_its_o
         "scenario.yaml",
         "toy.txt",
     }
-    assert results[_id(0)]["toy"] == "checked" and results[_id(0)]["summary"] == "toy: PASS"
+    assert results[_id(0)]["toy"] == "checked under 10" and results[_id(0)]["summary"] == "toy: PASS"
     assert results["toy-7"]["toy"] == "FAIL" and results["toy-8"]["toy"] == "PASS"
     # Its jobs are neither counted, grouped, re-run serially, nor sampled by a later batch's failures source.
     assert summary["counts"] == {"PASS": 2} and summary["signatures"] == [] and runner.serial_jobs() == []
@@ -1122,6 +1126,39 @@ def test_a_plug_in_takes_part_at_every_point_of_the_batch_and_its_jobs_are_its_o
     assert summary["status"] == "SKIP_UNSUPPORTED" and summary["exit_code"] == 3
     with pytest.raises(ValueError, match="already registered"):
         hooks.register(Toy())
+
+
+def test_a_plug_in_checks_the_options_it_carries_into_the_task_and_no_two_name_the_same_one(monkeypatch):
+    # BatchOptions.check asks each plug-in for its task options, so a value a plug-in cannot run under is refused
+    # before the batch starts, as the batch's own options are; the batch itself names no plug-in's option.
+    class Toy(hooks.BatchPlugin):
+        name = "toy"
+
+        def task_options(self, options):
+            if options.workers > 2:
+                raise BatchError("batch.workers: toy runs on at most 2 workers")
+            return {"toy_limit": options.workers * 10}
+
+    monkeypatch.setattr(hooks, "PLUGINS", list(hooks.PLUGINS))
+    hooks.register(Toy())
+    BatchOptions(port_base=13000, workers=2).check()
+    with pytest.raises(BatchError, match="toy runs on at most 2 workers"):
+        BatchOptions(port_base=13000, workers=3).check()
+    # spec conform's own option is in the task by its hand: the merged options hold both.
+    assert hooks.task_options(BatchOptions(workers=2, conform_tlc_timeout_s=7.5)) == {
+        "conform_tlc_timeout_s": 7.5,
+        "toy_limit": 20,
+    }
+
+    class Twin(hooks.BatchPlugin):
+        name = "twin"
+
+        def task_options(self, options):
+            return {"toy_limit": 1}
+
+    hooks.register(Twin())
+    with pytest.raises(ValueError, match=r"'twin' names task options another plug-in gives: \['toy_limit'\]"):
+        hooks.task_options(BatchOptions())
 
 
 # A pack's batch plug-in: a module an entry point of the ``valkey_fuzzer.batch_plugins`` group names.

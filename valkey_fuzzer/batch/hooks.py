@@ -54,6 +54,10 @@ class BatchPlugin:
     result, and its entry of the summary. ``kept_when_pruned`` names the files of a run folder it writes that a
     pruned PASS run keeps. ``after_run_timeout_s`` is how long ``after_run`` may take under the batch's options:
     the batch adds it to each worker's deadline, so a run that used its whole budget is not killed in this step.
+    ``task_options`` is what the plug-in carries into every worker's task under the batch's options, by names of
+    its own (the batch knows none): the values ``after_run`` reads from the task. It is also where the plug-in
+    checks them: ``BatchOptions.check`` calls it, so a value the plug-in cannot run under raises
+    :class:`~.spec.BatchError` before the batch starts.
     """
 
     name = ""
@@ -62,6 +66,9 @@ class BatchPlugin:
 
     def after_run_timeout_s(self, options: "BatchOptions") -> float:
         return 0.0
+
+    def task_options(self, options: "BatchOptions") -> dict[str, Any]:
+        return {}
 
     def after_run(self, report_dir: str, task: Mapping[str, Any]) -> None:
         """In the worker, after its run, in the run's report folder; ``task`` is the worker's task (the job and
@@ -147,3 +154,16 @@ def kept_when_pruned() -> tuple[str, ...]:
     """Every file the plug-ins keep in a pruned PASS run."""
 
     return tuple(name for plugin in PLUGINS for name in plugin.kept_when_pruned)
+
+
+def task_options(options: "BatchOptions") -> dict[str, Any]:
+    """Every plug-in's task options under ``options``, checked by each; an option two plug-ins name is refused."""
+
+    merged: dict[str, Any] = {}
+    for plugin in PLUGINS:
+        own = plugin.task_options(options)
+        repeated = sorted(set(own) & set(merged))
+        if repeated:
+            raise ValueError(f"batch plug-in {plugin.name!r} names task options another plug-in gives: {repeated}")
+        merged.update(own)
+    return merged
