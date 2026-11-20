@@ -106,7 +106,7 @@ def test_a_digest_missing_on_both_sides_is_drift(service, tmp_path, monkeypatch)
         report["reproducer"]["experiment"]["digest"] = None
 
     recorded = recorded_report(service, tmp_path, drop_digests)
-    monkeypatch.setattr(provenance, "_fuzzer_digest", lambda packages=(): None)
+    monkeypatch.setattr(provenance, "_fuzzer_digest", lambda: None)
     monkeypatch.setattr(provenance, "_experiment_digest", lambda experiment: None)
     items = {entry["item"]: entry for entry in service.prepare_replay(recorded).drift}
     assert items["fuzzer code"]["recorded"] is None and items["fuzzer code"]["replay"] is None

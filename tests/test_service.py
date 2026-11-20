@@ -2,10 +2,8 @@
 
 import copy
 import json
-import subprocess
 import sys
 from dataclasses import replace
-from importlib.metadata import EntryPoint, entry_points
 from pathlib import Path
 
 import pytest
@@ -14,7 +12,6 @@ from tests.support import component_registration, deployment_registrations, make
 from valkey_fuzzer import hoststate, provenance
 from valkey_fuzzer._data import file_sha256
 from valkey_fuzzer.catalog import (
-    PACK_GROUP,
     Catalog,
     DuplicateExperimentError,
     build_catalog,
@@ -160,97 +157,13 @@ def test_registered_components_and_directory_experiments_compile_and_run_on_a_fr
         service.catalog.register(components=(component_registration("example.action.late"),))
 
 
-_TOY_PACK = """\
-from tests.support import component_registration
-from valkey_fuzzer.registrations import DeploymentProviderRegistration
-from valkey_fuzzer.results import ComponentResult, ComponentStatus
-from valkey_fuzzer.testing import FakeDeploymentProvider
-
-
-class Echo:
-    def run(self, context, spec):
-        return ComponentResult(spec.id, ComponentStatus.PASS, context.services["deployment"]["greeting"])
-
-
-def register(catalog):
-    catalog.register(
-        components=(component_registration("toy.action.echo", factory=Echo),),
-        deployment_providers=(
-            DeploymentProviderRegistration("toy", "toy.deployment.fake", lambda: FakeDeploymentProvider({"greeting": "hi"})),
-        ),
-    )
-"""
-
-
-def _toy_service(tmp_path, monkeypatch):
-    """A service whose catalog holds the installed packs and a toy pack (a module written to ``tmp_path``), with
-    the toy experiment; returns it with the scenario that uses the toy component."""
-
-    (tmp_path / "tests_toy_pack.py").write_text(_TOY_PACK, encoding="utf-8")
-    monkeypatch.syspath_prepend(str(tmp_path))
-    (tmp_path / "experiments").mkdir()
-    (tmp_path / "experiments" / "toy.yaml").write_text(
-        "id: toy.echo\nmode: smoke\ndeployment: {modes: [toy]}\ncomponents: [{use: toy.action.echo, id: echo}]\n"
-    )
-    scenario = {"scenario_id": "toy", "seed": 1, "experiment": {"id": "toy.echo"}, "deployment": {"mode": "toy"}}
-    installed = tuple(point for point in entry_points(group=PACK_GROUP) if point.name != "toy")
-    assert "valkey" in [point.name for point in installed]
-
-    points = (*installed, EntryPoint("toy", "tests_toy_pack:register", PACK_GROUP))
-    monkeypatch.setattr("valkey_fuzzer.catalog.entry_points", lambda group: points)
-    return _service(tmp_path / "experiments"), scenario
-
-
-def test_build_catalog_registers_every_installed_pack_and_names_the_pack_of_an_unknown_component(tmp_path, monkeypatch):
-    # A pack is a ``valkey_fuzzer.packs`` entry point of an installed distribution: a register(catalog) function.
-    service, scenario = _toy_service(tmp_path, monkeypatch)
-    assert {"toy.action.echo", "valkey.action.sleep"} <= set(service.catalog.components.registered_ids)
-    outcome = service.runner.run(service.compile(scenario))
-    assert (outcome.status, outcome.component_results[0].summary) == (OutcomeStatus.PASS, "hi")
-
-    # Without the toy pack, the error names the pack to install rather than a Valkey component.
-    installed = tuple(point for point in entry_points(group=PACK_GROUP) if point.name != "toy")
-    monkeypatch.setattr("valkey_fuzzer.catalog.entry_points", lambda group: installed)
-    hint = r"no installed pack registers toy\.\* components; install the package whose 'valkey_fuzzer\.packs' entry point is named 'toy'"
-    with pytest.raises(ScenarioCompileError, match=rf"uses 'toy\.action\.echo', which is not registered; {hint}"):
-        _service(tmp_path / "experiments").compile(scenario)
-
-
-def test_deployment_providers_come_from_the_packs_and_the_caller_not_from_the_core(catalog, monkeypatch):
-    # The Valkey pack registers the local deployment's providers, one per mode, as any pack registers its own.
+def test_build_catalog_registers_the_local_deployment_providers_unless_the_caller_passes_its_own(catalog):
+    # The local deployment's providers, one per mode; a caller's providers take their place, the components stay.
     local = "valkey-fuzzer.deployment.local"
     assert catalog.deployment_providers.registered_ids == (("cluster", local), ("standalone", local))
-
-    # Without a pack the core registers none; the caller's are the only ones.
-    monkeypatch.setattr("valkey_fuzzer.catalog.entry_points", lambda group: ())
-    assert build_catalog().deployment_providers.registered_ids == ()
-    core = build_catalog(deployment_providers=(_deployment(),))
-    assert core.deployment_providers.registered_ids == (("example-mode", "example.deployment.fake"),)
-    assert core.components.registered_ids == ()
-
-    # And the core does not import the local deployment: only the pack does.
-    loaded = "import sys, valkey_fuzzer.catalog; print(sorted(m for m in sys.modules if 'deployment.local' in m))"
-    assert subprocess.run([sys.executable, "-c", loaded], capture_output=True, text=True, check=True).stdout == "[]\n"
-
-
-def test_the_code_digest_covers_the_package_of_every_component_the_plan_uses(tmp_path, monkeypatch):
-    service, scenario = _toy_service(tmp_path, monkeypatch)
-    plan = service.compile(scenario)
-    recorded = reproducer(service.catalog, plan)
-    assert provenance_drift(service.catalog, plan, recorded) == ([], [])
-    # A plan on the fuzzer's own components digests the fuzzer alone, as before.
-    own = reproducer(service.catalog, service.prepare_run(EXAMPLE).plan)["fuzzer_digest"]
-    assert own == provenance.source_digest(["valkey_fuzzer"]) != recorded["fuzzer_digest"]
-
-    # The toy pack's code changes (loaded from an edited copy): the digest, and so the replay, drift.
-    edited = tmp_path / "edited"
-    edited.mkdir()
-    (edited / "tests_toy_pack.py").write_text(_TOY_PACK + "\n# changed\n", encoding="utf-8")
-    monkeypatch.setattr(sys.modules["tests_toy_pack"], "__file__", str(edited / "tests_toy_pack.py"))
-    drift, _ = provenance_drift(service.catalog, plan, recorded)
-    # The toy pack also defines the deployment provider, whose own digest drifts as before.
-    assert [entry["item"] for entry in drift] == ["fuzzer code", "deployment provider for toy code"]
-    assert drift[0]["recorded"] == recorded["fuzzer_digest"] != drift[0]["replay"]
+    own = build_catalog(deployment_providers=(_deployment(),))
+    assert own.deployment_providers.registered_ids == (("example-mode", "example.deployment.fake"),)
+    assert "valkey.action.sleep" in own.components.registered_ids
 
 
 def test_a_packages_files_are_hashed_once_until_one_of_them_changes(tmp_path, monkeypatch):
@@ -283,7 +196,7 @@ def test_a_packages_files_are_hashed_once_until_one_of_them_changes(tmp_path, mo
         ({"first/a.yaml": "example.a", "second/a.yaml": "example.a"}, DuplicateExperimentError,
          r"experiment 'example\.a' is already registered: .*first/a\.yaml and .*second/a\.yaml"),
         ({"first/a.yaml": "valkey.snapshot-equivalence"}, DuplicateExperimentError,
-         r"is already registered: a registered pack and .*first/a\.yaml"),
+         r"is already registered: a shipped experiment and .*first/a\.yaml"),
         ({"first/a.yaml": "example.a", "second/broken.yaml": None}, ExperimentDocumentError, "duplicate key"),
     ],
     ids=["one-id-in-two-directories", "a-directory-and-a-shipped-experiment", "a-malformed-document"],

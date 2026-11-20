@@ -261,7 +261,7 @@ both_loaders = pytest.mark.skipif(
 def test_the_c_loader_reads_every_shipped_document_as_the_pure_python_one_does(catalog, monkeypatch):
     """The catalog (and every other YAML document in the tree) is the same whichever scanner reads it."""
 
-    # The pack's experiments and fragments, the examples, the zoo cases, the spec bundles, and the test fixtures.
+    # The Valkey experiments and fragments, the examples, the zoo cases, the spec bundles, and the test fixtures.
     documents = sorted(
         path for path in ROOT.rglob("*.yaml") if not any(part.startswith(".") for part in path.relative_to(ROOT).parts)
     )

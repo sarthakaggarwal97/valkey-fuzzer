@@ -23,8 +23,8 @@ def shared_catalog(experiment_directories: Sequence[ExperimentDirectory] = ()) -
     """The catalog of the Valkey components and ``experiment_directories``, built once per process.
 
     A catalog is frozen once built, so every test that would build the same one can share it; the ``catalog``
-    fixture is the one without directories. A test that patches what the build reads (the installed packs) builds
-    its own with :func:`build_catalog`.
+    fixture is the one without directories. A test that patches what the build reads builds its own with
+    :func:`build_catalog`.
     """
 
     key = tuple(str(directory) for directory in experiment_directories)

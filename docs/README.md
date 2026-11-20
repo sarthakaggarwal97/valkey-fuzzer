@@ -26,7 +26,7 @@ first group.
 
 | Page | For | One line |
 | --- | --- | --- |
-| [What is stable](stability.md) | tool and component authors | the surfaces a release keeps (commands, exit codes, YAML, report keys, component ids, entry points, `format_version`) and the ones it does not |
+| [What is stable](stability.md) | tool and component authors | the surfaces a release keeps (commands, exit codes, YAML, report keys, component ids, `format_version`) and the ones it does not |
 | [Base contracts](contracts.md) | everyone | the rules every run is held to: verdicts, evidence, fault ownership, effective config, profiles, deadlines, host state, replay |
 | [Scenarios and experiments](scenarios-and-experiments.md) | scenario and experiment authors | the file formats, the local deployment, the Valkey experiments, random scenarios and search profiles |
 | [Valkey components](components/README.md) | experiment authors | the index of every component and provider, with one page per role: [capabilities](components/capabilities.md), [workloads](components/workloads.md), [actions](components/actions.md), [faults](components/faults.md), [observers](components/observers.md), [oracles](components/oracles.md), [providers](components/providers.md) |
@@ -36,7 +36,7 @@ first group.
 
 | Page | For | One line |
 | --- | --- | --- |
-| [Adding tests](extending.md) | experiment and component authors | writing experiments, components, and providers, registering them, shipping a pack, testing |
+| [Adding tests](extending.md) | experiment and component authors | writing experiments, components, and providers, registering them, testing |
 | [Architecture](architecture.md) | framework contributors | code layout, the compiler and runner, the local deployment provider, the wave engine |
 | [Releasing](releasing.md) | maintainers | the version, the release steps, what the sdist and the wheel hold, the release workflow, the one-time PyPI setup, the porcupine checker binaries |
 | [Spec bridge](spec-bridge.md) | model and experiment authors | TLA+ bundles: `spec check`, `spec translate`, `spec conform`, the assurance report |
