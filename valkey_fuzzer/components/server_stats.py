@@ -177,10 +177,8 @@ def scenario_causes(context: Any, evidence: Sequence[Evidence]) -> dict[str, lis
 
     opened = context.obligations.report()
     changes = [*opened["undone"], *opened["still_active"]]
-    commands = _configured_commands(context.plan)
-    link_commands = [
-        " ".join(words[:2]) for words in map(checks._words, commands) if words and words[0] in _LINK_COMMANDS
-    ]
+    words = [checks._words(item) for item in _configured_commands(context.plan)]
+    link_commands = [" ".join(command[:2]) for command in words if command and command[0] in _LINK_COMMANDS]
     causes = {
         LINKS: [f"{item['owner']} ({item['kind']})" for item in changes if item["kind"] in _LINK_CHANGES]
         + [
@@ -189,10 +187,10 @@ def scenario_causes(context: Any, evidence: Sequence[Evidence]) -> dict[str, lis
             if item.evidence_id in _LINK_EVIDENCE and (item.evidence_id != EXPECTED_DOWN or item.value["instances"])
         ]
         + link_commands
-        + (["a configured command sets replication"] if checks._sets_replication(commands) else []),
+        + (["a configured command sets replication"] if checks._sets_replication(words) else []),
         STORAGE: [f"{item['owner']} ({item['kind']})" for item in changes if item["kind"] in _STORAGE_CHANGES],
         COMMANDS: _got_errors(evidence),
-        MEMORY: ["maxmemory"] if checks._limits_memory(commands, _scenario_settings(context.plan)) else [],
+        MEMORY: ["maxmemory"] if checks._limits_memory(words, _scenario_settings(context.plan)) else [],
     }
     return {cause: sorted(set(what)) for cause, what in causes.items()}
 

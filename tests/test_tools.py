@@ -9,7 +9,7 @@ import pytest
 from tests.test_command_sequence import BUILDS, SERVERS, Build, FakeServer, fake_open_raw_connection
 from tests.valkey_experiments_support import registration_for, resolved, unit_plan
 from valkey_fuzzer._data import to_plain_data
-from valkey_fuzzer.components import actions, tools
+from valkey_fuzzer.components import command_sequence, tools
 from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.schema import ConfigError, load_yaml
@@ -52,8 +52,8 @@ def builds(monkeypatch, tmp_path):
 
     BUILDS.clear()
     SERVERS.clear()
-    monkeypatch.setattr(actions, "PrivateServer", FakeServer)
-    monkeypatch.setattr(actions, "open_raw_connection", fake_open_raw_connection)
+    monkeypatch.setattr(command_sequence, "PrivateServer", FakeServer)
+    monkeypatch.setattr(command_sequence, "open_raw_connection", fake_open_raw_connection)
     paths = {}
     for label in ("candidate", "parent"):
         src = tmp_path / label / "src"

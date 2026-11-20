@@ -39,12 +39,13 @@ from valkey_fuzzer.protocols import component_artifact_dir
 from valkey_fuzzer.results import ComponentStatus, Evidence, make_evidence, make_result
 from valkey_fuzzer.schema import ConfigError, ConfigField
 
-from . import actions, checks, command_table
+from . import checks, command_sequence, command_table
 from .capabilities import resolve_binary
 from .instances import deployment, is_cluster
 from .polling import poll_until
 from .registration import component_registration
 from .schemas import INTEGER, LIST, TEXT, declared, mapping_of
+from .server import info_fields
 from .snapshots import instance_modules
 
 EVIDENCE = "valkey.command.metadata"
@@ -344,7 +345,7 @@ class _Run:
             digest = checks._ask(self.side, 0, "DEBUG", "DIGEST")
         if "reply" not in info or "reply" not in digest:
             return None
-        fields = checks._fields(info)
+        fields = info_fields(info["reply"])
         return {
             "digest": digest["reply"],
             "master_repl_offset": fields.get("master_repl_offset"),
@@ -473,13 +474,15 @@ class CommandMetadataOracle:
             return make_result(spec, ComponentStatus.ERROR, str(exc))
         side_config = {"nodes": 2, "resp": 2, "timeout_s": config["timeout_s"], "cluster": cluster}
         ports = iter(
-            actions._free_ports(4 if cluster else 2, actions._port_block(context), context.rng(spec.id, "ports"))
+            command_sequence._free_ports(
+                4 if cluster else 2, command_sequence._port_block(context), context.rng(spec.id, "ports")
+            )
         )
-        side = actions.new_side("metadata", binary, side_config, (), ports)
+        side = command_sequence.new_side("metadata", binary, side_config, (), ports)
         side.options.update({**_NODE_OPTIONS, **instance_modules(context, instance_id)})
         run = _Run(side, cluster)
         try:
-            failed = side.start(context, spec, actions._PRIVATE_SERVER_DEFAULTS, {})
+            failed = side.start(context, spec, command_sequence._PRIVATE_SERVER_DEFAULTS, {})
             if not failed:
                 failed = self._join(context, side, cluster, config["timeout_s"])
             if not failed:
@@ -557,7 +560,7 @@ class CommandMetadataOracle:
             return f"REPLICAOF failed on the replica: {sent.get('error')}"
 
         def linked() -> tuple[bool, Any]:
-            fields = checks._fields(checks._ask(side, 1, "INFO", "replication"))
+            fields = info_fields(checks._ask(side, 1, "INFO", "replication").get("reply", ""))
             return fields.get("master_link_status") == "up", fields.get("master_link_status")
 
         done, status = poll_until(linked, timeout_s=checks._SYNC_TIMEOUT_S, interval_s=0.05, context=context)

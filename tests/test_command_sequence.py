@@ -22,7 +22,7 @@ from tests import fakes
 from tests.valkey_experiments_support import registration_for, resolved, unit_plan
 from valkey_fuzzer import deadlines
 from valkey_fuzzer._data import canonical_json, to_plain_data
-from valkey_fuzzer.components import actions, capabilities, checks, server
+from valkey_fuzzer.components import capabilities, checks, command_sequence, server
 from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.schema import ConfigError, load_yaml
@@ -239,7 +239,7 @@ def fake_open_raw_connection(resp, timeout_s, *, path=None, host=None, port=None
     wire = FakeWire(server, resp)
     if server.build.connections in server.build.closes_at_connect:
         raise ValkeyConnectionError("Connection closed by server.")
-    return actions.RawConnection(wire)
+    return command_sequence.RawConnection(wire)
 
 
 @pytest.fixture
@@ -248,9 +248,9 @@ def builds(monkeypatch, tmp_path):
 
     BUILDS.clear()
     SERVERS.clear()
-    monkeypatch.setattr(actions, "PrivateServer", FakeServer)
+    monkeypatch.setattr(command_sequence, "PrivateServer", FakeServer)
     monkeypatch.setattr(capabilities, "PrivateServer", FakeServer)
-    monkeypatch.setattr(actions, "open_raw_connection", fake_open_raw_connection)
+    monkeypatch.setattr(command_sequence, "open_raw_connection", fake_open_raw_connection)
     paths = {}
     for label in ("candidate", "parent"):
         path = tmp_path / f"{label}-valkey-server"
@@ -271,7 +271,7 @@ def run(builds, commands, seed=1, **config):
 
     spec = _spec(compare_with=builds["parent"], commands=commands, **config)
     context = FakeContext(spec, deployment={"valkey_binary": builds["candidate"]}, seed=seed)
-    result = actions.CommandsAction().run(context, spec)
+    result = command_sequence.CommandsAction().run(context, spec)
     return result, (to_plain_data(result.evidence[0].value) if result.evidence else None)
 
 
@@ -328,7 +328,7 @@ def test_every_error_reply_is_recorded_as_the_server_sent_it(resp):
         b"ERR max number of clients reached",
     ]
     port = _serve([b"-" + error + b"\r\n" for error in errors])
-    connection = actions.open_raw_connection(resp, 5, host="127.0.0.1", port=port)
+    connection = command_sequence.open_raw_connection(resp, 5, host="127.0.0.1", port=port)
     try:
         assert [connection.send(["PING"]) for _ in errors] == [{"error": error.decode()} for error in errors]
     finally:
@@ -339,7 +339,7 @@ def test_every_argument_reaches_the_server_as_written_even_a_first_one_valkey_py
     # valkey-py splits a first argument at whitespace: "" became an empty request, which the server never answers.
     received = []
     port = _serve([b"-ERR unknown command ''\r\n", b"-ERR unknown command 'CONFIG GET'\r\n", b"+PONG\r\n"], received)
-    connection = actions.open_raw_connection(2, 5, host="127.0.0.1", port=port)
+    connection = command_sequence.open_raw_connection(2, 5, host="127.0.0.1", port=port)
     try:
         assert connection.send([""]) == {"error": "ERR unknown command ''"}
         assert connection.send(["CONFIG GET", 1.5]) == {"error": "ERR unknown command 'CONFIG GET'"}
@@ -943,7 +943,7 @@ def test_raw_bytes_no_reply_answers_violate_the_candidates_expect(builds):
 
 
 def test_a_connection_a_live_server_closed_is_its_answer_and_opens_anew(builds, monkeypatch):
-    monkeypatch.setattr(actions, "_EXIT_WAIT_S", 0.01)
+    monkeypatch.setattr(command_sequence, "_EXIT_WAIT_S", 0.01)
     BUILDS[builds["candidate"]].replies = {("RESET",): CLOSE}
     BUILDS[builds["parent"]].replies = {("RESET",): DIE}
     commands = [
@@ -1167,7 +1167,7 @@ def test_without_compare_with_the_sequence_runs_on_each_selected_instance(builds
     commands = [{"command": ["PING"]}, {"command": ["DBSIZE"], "expect": {"min": 1}, "connection": "other"}]
     spec = _spec(instances="all", commands=commands)
     context = FakeContext(spec, services={"valkey.deployment": handle})
-    result = actions.CommandsAction().run(context, spec)
+    result = command_sequence.CommandsAction().run(context, spec)
 
     assert result.status.value == "PASS", result.summary
     assert [item.value["instance_id"] for item in result.evidence] == ["valkey-0", "valkey-1"]
@@ -1183,9 +1183,9 @@ def test_without_compare_with_a_wrong_reply_fails_and_no_reply_is_untested(build
     spec = _spec(commands=[{"command": ["GET", "k"], "expect": {"equals": "w"}}, {"command": ["PING"]}])
     context = FakeContext(spec, services={"valkey.deployment": handle})
 
-    assert actions.CommandsAction().run(context, spec).status.value == "FAIL"
+    assert command_sequence.CommandsAction().run(context, spec).status.value == "FAIL"
     spec = _spec(commands=[{"command": ["PING"]}])
-    assert actions.CommandsAction().run(context, spec).status.value == "ERROR"
+    assert command_sequence.CommandsAction().run(context, spec).status.value == "ERROR"
 
 
 def test_without_compare_with_a_reply_the_client_cannot_parse_fails(builds):
@@ -1194,7 +1194,7 @@ def test_without_compare_with_a_reply_the_client_cannot_parse_fails(builds):
     BUILDS[builds["candidate"]].replies = {("ZSCORE", "z", "m"): Wire(b",abc\r\n")}
     spec = _spec(resp=3, commands=[{"command": ["ZSCORE", "z", "m"]}, {"command": ["PING"]}])
     context = FakeContext(spec, services={"valkey.deployment": handle})
-    result = actions.CommandsAction().run(context, spec)
+    result = command_sequence.CommandsAction().run(context, spec)
 
     assert result.status.value == "FAIL", result.summary
     assert to_plain_data(result.diagnostics) == {
@@ -1359,7 +1359,7 @@ def test_modules_parent_without_compare_with_compares_two_module_builds_on_the_d
     )
     context = FakeContext(spec, deployment={"valkey_binary": builds["candidate"]})
 
-    result = actions.CommandsAction().run(context, spec)
+    result = command_sequence.CommandsAction().run(context, spec)
 
     # Both servers ran the candidate build, one per module build; the parent build never started.
     assert result.status.value == "ERROR", result.summary
@@ -2332,13 +2332,22 @@ def test_server_config_replica_auth_runs_no_replica(builds, setting):
         builds,
         [{"command": ["SET", "k", "v"]}],
         server_config=config,
-        checks={"replica": True, "concurrency": 2, "compat": True},
+        checks={"replica": True, "concurrency": 2, "compat": True, "faults": True},
     )
 
     reason = "the server_config sets the credentials a replica authenticates to its primary with"
     assert _check(value, "replica") == {"outcome": "skipped", "reason": reason}
     assert _check(value, "compat")["sync"] == {"outcome": "skipped", "reason": reason}
     assert _check(value, "concurrency") == {"outcome": "pass"}
+    # The faults check restarts the single node without a replica of its own, as the replica check would run none,
+    # rather than start one that cannot AUTH and error on its sync. (compat-load makes a node a replica of a port
+    # nobody listens on, on purpose.)
+    assert _check(value, "faults")["outcome"] == "pass"
+    servers = _nodes(BUILDS[builds["candidate"]])
+    ports = {str(server.port) for server in servers}
+    assert not any(
+        sent[:2] == ("REPLICAOF", "127.0.0.1") and sent[2] in ports for server in servers for sent in server.sent
+    )
     assert result.status.value != "FAIL", result.summary
 
 
@@ -2506,19 +2515,19 @@ def test_the_acl_check_skips_a_sequence_that_manages_users(builds):
 def test_private_servers_take_ports_above_the_ephemeral_range(monkeypatch, ephemeral, above):
     # A private server's port in the ephemeral range can go to an outgoing connection before Valkey binds it, and
     # the server aborts, "Failed listening on port" (the faults check's restarts made it frequent on the soak).
-    monkeypatch.setattr(actions, "ephemeral_port_range", lambda: ephemeral)
-    monkeypatch.setattr(actions, "_GIVEN", set())
-    actions._private_port_span.cache_clear()
+    monkeypatch.setattr(command_sequence, "ephemeral_port_range", lambda: ephemeral)
+    monkeypatch.setattr(command_sequence, "_GIVEN", set())
+    command_sequence._private_port_span.cache_clear()
     try:
-        ports = actions._free_ports(20)
+        ports = command_sequence._free_ports(20)
     finally:
-        actions._private_port_span.cache_clear()
+        command_sequence._private_port_span.cache_clear()
     assert len(set(ports)) == 20
     if above:
         assert all(61000 <= port <= 65535 for port in ports)
 
 
-@pytest.mark.parametrize("taken", [1, actions._START_ATTEMPTS])
+@pytest.mark.parametrize("taken", [1, command_sequence._START_ATTEMPTS])
 def test_a_private_server_whose_port_was_taken_starts_again_on_fresh_ports(builds, monkeypatch, taken):
     # The soak's batches start private servers in dozens of workers at once: one can take another's port between
     # its free check and Valkey's bind, and Valkey aborts, "Failed listening on port".
@@ -2536,7 +2545,7 @@ def test_a_private_server_whose_port_was_taken_starts_again_on_fresh_ports(build
     monkeypatch.setattr(FakeServer, "start", contested)
     result, _ = run(builds, [{"command": ["PING"]}])
 
-    if taken < actions._START_ATTEMPTS:
+    if taken < command_sequence._START_ATTEMPTS:
         assert result.status.value == "PASS", result.summary
         assert _nodes(BUILDS[builds["candidate"]])[0].option("port") not in failures
     else:
@@ -2546,30 +2555,30 @@ def test_a_private_server_whose_port_was_taken_starts_again_on_fresh_ports(build
 def test_a_batch_worker_takes_private_ports_from_its_own_slice_and_never_twice(monkeypatch):
     # Workers that shared the private span still took each other's ports, a restarting node's included (the soak,
     # replaying the walk's test of valkey#4019): each worker (its deployment's loopback_block) has its own slice.
-    monkeypatch.setattr(actions, "ephemeral_port_range", lambda: (32768, 60999))
-    monkeypatch.setattr(actions, "_GIVEN", set())
-    actions._private_port_span.cache_clear()
+    monkeypatch.setattr(command_sequence, "ephemeral_port_range", lambda: (32768, 60999))
+    monkeypatch.setattr(command_sequence, "_GIVEN", set())
+    command_sequence._private_port_span.cache_clear()
     try:
-        first, second = actions._free_ports(10, block=3), actions._free_ports(10, block=3)
+        first, second = command_sequence._free_ports(10, block=3), command_sequence._free_ports(10, block=3)
     finally:
-        actions._private_port_span.cache_clear()
-    low = 61000 + 2 * actions._PRIVATE_SLICE
-    assert all(low <= port < low + actions._PRIVATE_SLICE for port in first + second)
+        command_sequence._private_port_span.cache_clear()
+    low = 61000 + 2 * command_sequence._PRIVATE_SLICE
+    assert all(low <= port < low + command_sequence._PRIVATE_SLICE for port in first + second)
     assert not set(first) & set(second)
 
 
 def test_private_ports_outside_a_slice_are_drawn_from_the_runs_rng(monkeypatch):
     # A replay draws the same ports as the run it replays (F21); the draw was the unseeded global generator's.
-    monkeypatch.setattr(actions, "ephemeral_port_range", lambda: (32768, 60999))
-    monkeypatch.setattr(actions, "_bindable", lambda port: port)
-    actions._private_port_span.cache_clear()
+    monkeypatch.setattr(command_sequence, "ephemeral_port_range", lambda: (32768, 60999))
+    monkeypatch.setattr(command_sequence, "_bindable", lambda port: port)
+    command_sequence._private_port_span.cache_clear()
     try:
         draws = []
         for _ in range(2):
-            monkeypatch.setattr(actions, "_GIVEN", set())
-            draws.append(actions._free_ports(5, rng=random.Random(7)))
+            monkeypatch.setattr(command_sequence, "_GIVEN", set())
+            draws.append(command_sequence._free_ports(5, rng=random.Random(7)))
     finally:
-        actions._private_port_span.cache_clear()
+        command_sequence._private_port_span.cache_clear()
     assert draws[0] == draws[1] and len(set(draws[0])) == 5
     assert all(61000 <= port <= 65535 for port in draws[0])
 
@@ -2956,12 +2965,12 @@ def test_checks_run_at_once_and_combine_in_their_order_whichever_finishes_first(
 
 
 def test_raw_bytes_are_read_as_whole_requests_inline_or_resp_and_what_is_cut_short_is_left_out():
-    assert actions._raw_requests("PING\r\nset k v\r\n") == [["PING"], ["SET", "K", "V"]]
-    assert actions._raw_requests("*2\r\n$3\r\nGET\r\n$1\r\nk\r\nPING\r\n") == [["GET", "K"], ["PING"]]
+    assert command_sequence._raw_requests("PING\r\nset k v\r\n") == [["PING"], ["SET", "K", "V"]]
+    assert command_sequence._raw_requests("*2\r\n$3\r\nGET\r\n$1\r\nk\r\nPING\r\n") == [["GET", "K"], ["PING"]]
     # A request cut short on purpose, as the tests of the parsers send, is no whole request.
-    assert actions._raw_requests("PI") == [] and actions._raw_requests("*2\r\n$3\r\nGET\r\n") == []
-    assert actions._raw_requests("*x\r\nSHUTDOWN\r\n") == []
-    assert actions._raw_requests({"$base64": "U0hVVERPV04NCg=="}) == [["SHUTDOWN"]]
+    assert command_sequence._raw_requests("PI") == [] and command_sequence._raw_requests("*2\r\n$3\r\nGET\r\n") == []
+    assert command_sequence._raw_requests("*x\r\nSHUTDOWN\r\n") == []
+    assert command_sequence._raw_requests({"$base64": "U0hVVERPV04NCg=="}) == [["SHUTDOWN"]]
     # A replica's handshake on private servers, and a key named like a refused command, stay allowed.
     spec = _spec(
         **_PARENT,

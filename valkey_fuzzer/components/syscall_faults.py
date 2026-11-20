@@ -25,7 +25,7 @@ from valkey_fuzzer.schema import ConfigError, ConfigField, ConfigSchema, plain_c
 
 from .faults import EVENT_TARGET, EventFault, fault_declares
 from .instances import EXPECTED_DOWN, deployment, select_instance, select_instances
-from .processes import KILL_EXIT_TIMEOUT_S, restart_once, wait_killed
+from .processes import KILL_EXIT_TIMEOUT_S, RESTART_FIELDS, record_restart, restart_once, wait_killed
 from .registration import component_registration
 from .schemas import NUMBER, TEXT, declared, mapping_of, nullable, optional
 
@@ -209,14 +209,7 @@ class SyscallFault(EventFault):
         )
 
     def _restart(self, handle: Any, record: dict[str, Any], restart: Any) -> None:
-        started = now()
-        restart()
-        record["restarted"] = True
-        # The new process can vote and acknowledge from its spawn on, before it is ready.
-        record["restart_spawned_at"] = handle.started_at(self._target)
-        record["restart_ready_at"] = now()
-        record["restart_seconds"] = round(now() - started, 3)
-        record["restart_pid"] = handle.pid(self._target)
+        record_restart(handle, self._target, record, restart)
 
     def _quiesce(self) -> None:
         self._stop.set()
@@ -268,12 +261,7 @@ _DECLARES = fault_declares(
         "exited": optional(bool),
         "exited_at": optional(float),
         "disk_vars_at_kill": optional(dict, allow_none=True),
-        "restarted": optional(bool),
-        "restart_spawned_at": optional(float),
-        "restart_ready_at": optional(float),
-        "restart_seconds": optional(float),
-        "restart_pid": optional(int, allow_none=True),
-        "restart_error": optional(str),
+        **RESTART_FIELDS,
     },
     events={"{id}.recovered": ConfigSchema({"instance_id": TEXT})},
     changes=("syscall.rule", "process.stopped"),

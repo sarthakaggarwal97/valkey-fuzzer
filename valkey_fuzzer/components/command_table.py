@@ -38,7 +38,7 @@ from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.results import ComponentStatus, Evidence, evidence_of, make_evidence, make_result
 from valkey_fuzzer.schema import ConfigError, ConfigField, plain_config
 
-from .actions import open_raw_connection
+from .command_sequence import open_raw_connection
 from .instances import deployment, is_cluster
 from .polling import StoppableThread
 from .registration import component_registration

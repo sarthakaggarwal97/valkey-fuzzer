@@ -3,7 +3,7 @@
 ``PrivateServer`` starts a throwaway server on a unix socket (no TCP port) for
 capability probes and RDB reloads; ``binary_version`` reads what a binary
 reports about itself; ``server_identity`` and ``instance_role`` read what a
-running instance reports.
+running instance reports, and ``info_fields`` parses an INFO reply's text.
 """
 
 import os
@@ -61,6 +61,13 @@ def version_tuple(text: str) -> tuple[int, ...]:
     """``"8.1.2"`` -> ``(8, 1, 2)``; empty when ``text`` has no digits."""
 
     return tuple(int(part) for part in re.findall(r"\d+", text)[:3])
+
+
+def info_fields(reply: Any) -> dict[str, str]:
+    """The ``name:value`` fields of an INFO or CLUSTER INFO ``reply`` as a raw connection records it (the server's
+    text; a record's missing reply, as ``""``, has none)."""
+
+    return dict(line.split(":", 1) for line in str(reply).split() if ":" in line)
 
 
 def server_identity(info: Mapping[str, Any]) -> dict[str, Any]:

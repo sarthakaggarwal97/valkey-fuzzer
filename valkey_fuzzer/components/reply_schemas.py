@@ -89,7 +89,7 @@ def reply_schemas() -> Mapping[str, Any]:
 
 
 def mismatch(schema: Mapping[str, Any], reply: Any, resp: int) -> Optional[str]:
-    """Where and why ``reply``, as :func:`~valkey_fuzzer.components.actions.raw_reply` records what a RESP
+    """Where and why ``reply``, as :func:`~valkey_fuzzer.components.command_sequence.raw_reply` records what a RESP
     ``resp`` connection read, does not match ``schema``; None when it matches."""
 
     problem = _mismatch(schema, reply, resp, schema, "reply")

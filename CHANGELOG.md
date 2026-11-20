@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Changed: the command sequence is its own module, and its checks tokenise once (PR-R3-6)
+
+- `valkey.action.commands` and everything it runs on (`CommandsAction`, `RawConnection`, the sides and their
+  private servers, the verdict helpers, its evidence declarations) moved from `components/actions.py` (2,564
+  lines) to `components/command_sequence.py` (1,662), unchanged; `actions.py` (941) keeps the other actions.
+  `checks.py`, `command_table.py`, `tools.py` and `command_metadata.py` import the sequence machinery from the
+  new module and nothing from `actions`. The component's id, config, evidence and registration order by id are
+  the same.
+- `checks.py` tokenises each command once (`_Checks.words`) instead of once per predicate per check (24 call
+  sites of `_words` are two), reads the CONFIG SET pairs of a command in one place (`_config_sets`) instead of
+  six, and says once why a sequence may not have a replica of the checks' own (`_Checks.replica_blocker`): the
+  `replica`, `concurrency` and `faults` checks each said it themselves. The `acl` check's skip is the shared
+  `_manages_users`. Same skips, same reasons, same outcomes, with one exception: the `faults` check of a sequence
+  whose `server_config` sets `masterauth`, `masteruser` or their `primary*` aliases ran a replica of its own,
+  which could not AUTH to the check's primary, and errored "the replica did not sync before the sequence"; it now
+  runs on the single node, as the `replica` and `concurrency` checks already left the replica out (fuzzer#147).
+- One `info_fields()` (`components/server.py`) parses INFO and CLUSTER INFO replies, where `checks.py` and the
+  sequence's cluster formation and restart each had a parser; the faults' restart record is written by
+  `processes.record_restart()` and declared by `processes.RESTART_FIELDS`, which `valkey.fault.process-signal`
+  and `valkey.fault.syscall` had copied; and `_validate_commands` validates each command through
+  `_validate_sequence_item`, with the same messages in the same order.
+
 ### Changed: the Valkey pack registers the local deployment provider, and the spec bridge imports plainly (PR-R3-5)
 
 - `build_catalog` registers no deployment provider of its own: the `valkey` pack registers the local
