@@ -384,7 +384,7 @@ class BatchRunner:
             "cores": self.run_cores,
             "valkey_binary": self.options.valkey_binary,
             "experiment_directories": list(self.options.experiment_directories),
-            "conform_tlc_timeout_s": self.options.conform_tlc_timeout_s,
+            **hooks.task_options(self.options),
         }
         env = {**os.environ, "TMPDIR": os.path.join(work, "tmp"), "PYTHONUNBUFFERED": "1"}
         task_path = os.path.join(work, "task.json")

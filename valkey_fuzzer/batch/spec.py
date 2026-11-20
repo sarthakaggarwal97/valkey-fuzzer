@@ -73,8 +73,8 @@ class BatchOptions:
             raise BatchError("batch.batch_id must name the batch")
         if self.timeout_s is not None and self.timeout_s <= 0:
             raise BatchError("batch.timeout_s must be a number of seconds greater than zero")
-        if self.conform_tlc_timeout_s <= 0:
-            raise BatchError("batch.conform_tlc_timeout_s must be a number of seconds greater than zero")
+        # Each plug-in checks the options it carries into the workers' tasks (conform_tlc_timeout_s is spec conform's).
+        hooks.task_options(self)
         # Bus ports sit CLUSTER_BUS_PORT_OFFSET above the client ports: neither may reach another worker's block.
         span = self.workers * PORT_BLOCK
         if span > CLUSTER_BUS_PORT_OFFSET or self.port_base + span - 1 + CLUSTER_BUS_PORT_OFFSET > MAX_TCP_PORT:
