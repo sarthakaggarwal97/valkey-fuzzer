@@ -311,6 +311,30 @@ def test_the_service_controls_each_instances_process_and_follows_failovers(tmp_p
         handle.new_client("valkey-1")
 
 
+def test_a_roles_sweep_asks_every_instance_at_once_so_stalled_ones_cost_it_one_timeout(monkeypatch):
+    """Under a held stall fault an instance accepts the connect and its INFO times out (2 s): the sweep used to
+    pay that per stalled instance, on every primaries() of the workloads, oracles and wave engine."""
+
+    config = DeploymentConfig(mode=DeploymentMode.STANDALONE, primaries=1, replicas_per_primary=3)
+    nodes = [instance(f"valkey-{n}", "primary" if n == 0 else "replica", 7000 + n) for n in range(4)]
+    handle = ValkeyDeploymentService(Mock(), LocalDeployment("d", config, nodes))
+    threads = set()
+
+    def stalled(host, port, timeout, query):
+        threads.add(threading.get_ident())
+        time.sleep(0.2)
+        # valkey-1's INFO timed out; the others answered, late.
+        return None if port == 7001 else Replication("primary" if port == 7000 else "replica")
+
+    monkeypatch.setattr(f"{SERVICE}.query_or_none", stalled)
+    started = time.monotonic()
+    roles = handle.roles()
+    assert time.monotonic() - started < 0.6, "the sweep waited out the stalls one after another"
+    assert len(threads) == len(nodes), "every instance was asked on its own thread"
+    # The same answers, in planning order.
+    assert list(roles.items()) == [("valkey-0", "primary"), ("valkey-2", "replica"), ("valkey-3", "replica")]
+
+
 def test_a_restart_that_outlived_the_cleanup_wait_stops_the_server_it_started(monkeypatch):
     # Cleanup released the instances while the restart still ran; its new server would outlive the deployment.
     monkeypatch.setattr(f"{SERVICE}.CLOSE_WAIT_S", 0.2)

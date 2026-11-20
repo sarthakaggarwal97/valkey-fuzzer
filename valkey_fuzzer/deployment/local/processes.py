@@ -442,11 +442,12 @@ class ProcessManager:
 
             logger.info("Waiting for all instances to be ready")
             for instance in infos:
-                # Ready once it answers as the process we started; an exit ends the wait at once.
+                # Ready once it answers as the process we started; an exit ends the wait at once. The first check
+                # runs before the server binds, so the interval is the time a start takes past that.
                 answered = wait_until(
                     lambda instance=instance: instance.process.poll() is not None or self._answers(instance),
                     timeout=READY_TIMEOUT_S,
-                    interval=0.5,
+                    interval=0.05,
                     what=f"{instance.instance_id} start",
                     retry=(valkey.ConnectionError, valkey.TimeoutError),
                     context=context,
@@ -620,7 +621,7 @@ class ProcessManager:
             if wait_ready and not wait_until(
                 lambda: self._ready_after_restart(instance, mode),
                 timeout=ready_timeout,
-                interval=0.5,
+                interval=0.05,
                 what=f"{instance.instance_id} restart",
                 context=context,
             ):

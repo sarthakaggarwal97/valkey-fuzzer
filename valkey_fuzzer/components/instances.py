@@ -62,15 +62,18 @@ def check_shard(shard: int, primaries: int, where: str = "shard") -> None:
 
 
 def select_instances(handle: Any, value: Any) -> list[str]:
-    """Resolve an instance selector against the live deployment: live roles, planned order."""
+    """Resolve an instance selector against the live deployment: live roles, planned order.
+
+    A selector that names a role reads the roles once, whichever roles it names. When no instance answers, the
+    planned roles stand in, as they do for ``handle.primaries()`` and ``handle.replicas()``.
+    """
 
     selector = InstanceSelector.parse(value)
-    roles: dict[str, str] = {}
-    if "primary" in selector.roles:
-        roles.update(dict.fromkeys(handle.primaries(), "primary"))
-    if "replica" in selector.roles:
-        roles.update(dict.fromkeys(handle.replicas(), "replica"))
-    return list(selector.resolve([instance.instance_id for instance in handle.instances], roles))
+    planned = handle.instances
+    roles: Mapping[str, str] = {}
+    if selector.roles:
+        roles = handle.roles() or {instance.instance_id: instance.role for instance in planned}
+    return list(selector.resolve([instance.instance_id for instance in planned], roles))
 
 
 def select_instance(handle: Any, value: Any) -> str:

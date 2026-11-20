@@ -299,6 +299,40 @@ def test_spawn_and_formation_waits_end_at_the_runs_deadline(tmp_path, monkeypatc
         formation.form([instance()], mode=DeploymentMode.STANDALONE)
 
 
+@pytest.mark.parametrize(
+    ("answers", "sleeps"),
+    [
+        ([True], []),
+        ([valkey.ConnectionError("not yet"), valkey.ConnectionError("not yet"), True], [0.05, 0.05]),
+    ],
+    ids=["ready-at-the-first-check", "ready-at-the-third"],
+)
+def test_a_spawned_or_restarted_server_is_ready_the_moment_it_answers_and_is_asked_every_50_ms(
+    tmp_path, answers, sleeps
+):
+    """A server binds a few milliseconds after Popen: the first check misses it, and the poll interval, not the
+    server, used to set how long a provision or a restart took (0.5 s each)."""
+
+    context = Mock(deadline=None, **{"sleep.return_value": True})
+    manager = process_manager(tmp_path)
+    with (
+        patch.object(manager, "_start_process", return_value=_running(4242)),
+        patch.object(manager, "_answers", side_effect=list(answers)),
+    ):
+        manager.spawn_all(plan_deployment(manager.config), context)
+    assert [item.args[0] for item in context.sleep.call_args_list] == sleeps
+
+    manager, replica = _pair(tmp_path)
+    context.sleep.reset_mock()
+    with (
+        patch(f"{PROCESSES}.subprocess.Popen", return_value=_running(999)),
+        patch.object(manager, "ensure_ports_available"),
+        patch.object(manager, "_ready_after_restart", side_effect=[answer is True for answer in answers]),
+    ):
+        manager.restart_instance(replica, wait_ready=True, context=context)
+    assert [item.args[0] for item in context.sleep.call_args_list] == sleeps
+
+
 def test_a_private_servers_start_wait_ends_with_its_call(monkeypatch):
     # A cancelled run waited out the private server's own timeout (F30, 15 s here): its wait is the harness's.
     VirtualClock().install(monkeypatch, deadlines)
@@ -779,11 +813,12 @@ def test_each_replica_link_seen_up_counts_although_another_replicas_info_times_o
     formation = Formation()
     formation.get_client = lambda node: clients[node.instance_id]
     formation.setup_and_sync_replication(replicas, {"valkey-0": "n0"}, timeout=5)
-    assert clock.elapsed == pytest.approx(1.0), "done on the second round"
+    assert clock.elapsed == pytest.approx(0.1), "done on the second round, 0.1 s after the first"
 
     # A link never seen up still fails provisioning, naming the replica.
     clients["valkey-1"].info.side_effect = [_replica_info()]
-    clients["valkey-2"].info.side_effect = [down] * 10
+    clients["valkey-2"].info.side_effect = None
+    clients["valkey-2"].info.return_value = down
     with pytest.raises(LocalDeploymentError, match=r"did not come up within 1.00s \(valkey-2\)"):
         formation.setup_and_sync_replication(replicas, {"valkey-0": "n0"}, timeout=1)
     # A replica whose primary has no cluster ID cannot be configured: it fails at once, not 60 s later.

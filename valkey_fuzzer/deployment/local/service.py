@@ -7,6 +7,7 @@ import threading
 import time
 import weakref
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, fields, replace
 from enum import Enum
@@ -41,6 +42,9 @@ VALKEY_DEPLOYMENT_SERVICE = "valkey.deployment"
 # How long cleanup waits for operations still running, such as a call the runner cancelled, before it stops the
 # instances under them: their waits end at the cancellation, but a query in flight still takes its own timeout.
 CLOSE_WAIT_S = 30.0
+
+# How many instances a role sweep queries at once: enough for every instance of a deployment that fits one host.
+_SWEEP_WORKERS = 32
 
 
 # How many SETs one preload pipeline sends.
@@ -504,10 +508,20 @@ class ValkeyDeploymentService:
                 client.execute_command(*command)
 
     def _live_replication(self) -> dict[str, Replication]:
-        """Each reachable instance's INFO replication; an instance that reports neither role counts as a replica."""
+        """Each reachable instance's INFO replication, in planning order; an instance that reports neither role
+        counts as a replica.
+
+        The instances are queried at once: a stalled one (a held ``stall`` fault accepts the connect, then the
+        INFO times out) costs the sweep one timeout, not one per stalled instance.
+        """
+
+        def query(info: InstanceInfo) -> Optional[Replication]:
+            return query_or_none(info.host, info.port, 2.0, query_replication)
+
+        with ThreadPoolExecutor(max_workers=min(max(len(self._infos), 1), _SWEEP_WORKERS)) as pool:
+            answers = list(pool.map(query, self._infos))
         live = {}
-        for info in self._infos:
-            replication = query_or_none(info.host, info.port, 2.0, query_replication)
+        for info, replication in zip(self._infos, answers):
             if replication is not None:
                 live[info.instance_id] = replication if replication.role else replace(replication, role="replica")
         return live

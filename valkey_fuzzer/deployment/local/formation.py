@@ -71,7 +71,7 @@ class Formation:
 
         retry = (valkey.ValkeyError, OSError)
         if not wait_until(
-            converged, timeout=timeout, interval=1.0, what="cluster meet", retry=retry, context=self._context
+            converged, timeout=timeout, interval=0.1, what="cluster meet", retry=retry, context=self._context
         ):
             raise LocalDeploymentError(
                 f"the {expected_count} cluster nodes did not all learn of each other within {timeout:.2f}s of "
@@ -128,7 +128,7 @@ class Formation:
 
         logger.info("Slot assignment complete")
 
-        # Every slot assigned and none failed, as the first node sees it: checked every 2 s for 60 s. Under a
+        # Every slot assigned and none failed, as the first node sees it: checked every 0.1 s for 60 s. Under a
         # soak's load a primary can look down for a while (cluster-node-timeout 1000), leaving its slots marked
         # failing well past 20 s although every slot is assigned; a healthy cluster is no slower for the margin.
         seen: dict[str, str] = {}
@@ -137,7 +137,7 @@ class Formation:
             seen.update(query_cluster_info(self.get_client(nodes[0])))
             return seen.get("cluster_slots_assigned") == str(HASH_SLOTS) and seen.get("cluster_slots_fail") == "0"
 
-        if not wait_until(assigned, timeout=60.0, interval=2.0, what="slot assignment", context=self._context):
+        if not wait_until(assigned, timeout=60.0, interval=0.1, what="slot assignment", context=self._context):
             raise LocalDeploymentError(
                 f"slot assignment did not propagate within 60s: {seen.get('cluster_slots_assigned')}/{HASH_SLOTS} "
                 f"assigned, {seen.get('cluster_slots_fail')} failed; check the instance logs"
@@ -184,7 +184,7 @@ class Formation:
                     logger.debug("%s: link not seen up yet: %s", instance_id, exc)
             return not pending
 
-        if not wait_until(linked, timeout=timeout, interval=1.0, what="replica links", context=self._context):
+        if not wait_until(linked, timeout=timeout, interval=0.1, what="replica links", context=self._context):
             raise LocalDeploymentError(
                 f"the replicas' links to their primaries did not come up within {timeout:.2f}s "
                 f"({', '.join(sorted(pending))}); check the instance logs for replication errors"
@@ -324,17 +324,17 @@ class Formation:
                 self.setup_primary_replica_replication(nodes)
                 primary, replicas = self._primary_replica_layout(nodes)
                 return self._settled(
-                    lambda: self._primary_replica_problem(primary, replicas), "replicas", SETTLE_TIMEOUT_S, 1.0
+                    lambda: self._primary_replica_problem(primary, replicas), "replicas", SETTLE_TIMEOUT_S, 0.1
                 )
             if len(nodes) != 1 or nodes[0].role != "primary":
                 return "a standalone deployment without replicas is one primary"
-            return self._settled(lambda: self._standalone_problem(nodes[0]), "standalone", SETTLE_TIMEOUT_S, 1.0)
+            return self._settled(lambda: self._standalone_problem(nodes[0]), "standalone", SETTLE_TIMEOUT_S, 0.1)
 
         self.reset_cluster_state(nodes)
         self.cluster_meet(nodes)
         primary_ids = self.assign_and_verify_slots(nodes)
         self.setup_and_sync_replication(nodes, primary_ids)
-        return self._settled(lambda: self._cluster_problem(nodes), "cluster", SETTLE_TIMEOUT_S, 1.0)
+        return self._settled(lambda: self._cluster_problem(nodes), "cluster", SETTLE_TIMEOUT_S, 0.1)
 
     def form(self, nodes: list[InstanceInfo], mode: DeploymentMode = DeploymentMode.CLUSTER) -> None:
         """Form ``mode`` on the spawned ``nodes`` and wait up to :data:`SETTLE_TIMEOUT_S` for it to be healthy.

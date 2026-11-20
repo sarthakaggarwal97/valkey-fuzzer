@@ -13,7 +13,6 @@ import subprocess
 import sys
 import textwrap
 import time
-from types import SimpleNamespace
 
 import pytest
 
@@ -400,16 +399,13 @@ def test_a_rule_names_only_the_fields_its_action_uses():
     assert rule_text(config, None, []) == "calls=write,rename nth=3 action=fail when=before errno=5\n"
 
 
-class _BenchmarkHandle:
-    """valkey-0 and valkey-1, each with a valkey-benchmark beside its binary: a script that records its arguments
-    and exits at once the first time, then runs until killed."""
+class _BenchmarkHandle(FakeHandle):
+    """A primary valkey-0 and a replica valkey-1, each with a valkey-benchmark beside its binary: a script that
+    records its arguments and exits at once the first time, then runs until killed."""
 
     def __init__(self, root):
         self.root = root
-        self.instances = tuple(
-            SimpleNamespace(instance_id=f"valkey-{n}", host="127.0.0.1", port=7000 + n, bus_port=17000 + n)
-            for n in range(2)
-        )
+        self.instances = fake_instances(2, host="127.0.0.1", port=lambda n: 7000 + n, bus_port=lambda n: 17000 + n)
         os.makedirs(os.path.join(root, "bin"))
         script = os.path.join(root, "bin", "valkey-benchmark")
         with open(script, "w") as out:
@@ -418,12 +414,6 @@ class _BenchmarkHandle:
                 f"[ -e {root}/ran-$4 ] || {{ touch {root}/ran-$4; exit 1; }}\nexec sleep 60\n"
             )
         os.chmod(script, 0o755)
-
-    def primaries(self):
-        return ["valkey-0"]
-
-    def replicas(self):
-        return []
 
     def binary(self, instance_id):
         return os.path.join(self.root, "bin", "valkey-server")
