@@ -33,6 +33,7 @@ from typing import Any, Optional
 import valkey
 from valkey.crc import key_slot
 
+from valkey_fuzzer._data import canonical_json
 from valkey_fuzzer.declarations import Declarations
 from valkey_fuzzer.deployment.local.queries import parse_info_text
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
@@ -43,7 +44,6 @@ from valkey_fuzzer.schema import ConfigError, ConfigField
 from . import checks, command_sequence, command_table
 from .capabilities import resolve_binary
 from .instances import deployment, is_cluster
-from .polling import poll_until
 from .registration import component_registration
 from .schemas import INTEGER, LIST, TEXT, declared, mapping_of
 from .snapshots import instance_modules
@@ -550,16 +550,8 @@ class CommandMetadataOracle:
 
         if cluster:
             return side.form_cluster(context, timeout_s) or ""
-        sent = checks.ask(side, 1, "REPLICAOF", "127.0.0.1", side.nodes[0].options["port"])
-        if "reply" not in sent:
-            return f"REPLICAOF failed on the replica: {sent.get('error')}"
-
-        def linked() -> tuple[bool, Any]:
-            fields = parse_info_text(checks.ask(side, 1, "INFO", "replication").get("reply", ""))
-            return fields.get("master_link_status") == "up", fields.get("master_link_status")
-
-        done, status = poll_until(linked, timeout_s=checks.SYNC_TIMEOUT_S, interval_s=0.05, context=context)
-        return "" if done else f"the replica's link is {status} {checks.SYNC_TIMEOUT_S:g}s after REPLICAOF"
+        synced, state = checks.replicate((side, 0), (side, 1), context, digests=False)
+        return "" if synced else f"the replica did not sync with node 0: {canonical_json(state)}"
 
 
 def _validate(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -> None:

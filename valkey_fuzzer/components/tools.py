@@ -6,7 +6,6 @@ its parent build with the same arguments, stdin, and files, and comparing their 
 stderr, with the verdicts of ``valkey.action.commands``.
 """
 
-import base64
 import hashlib
 import os
 import re
@@ -20,10 +19,18 @@ from valkey_fuzzer.declarations import Declarations
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.protocols import component_artifact_dir
 from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
-from valkey_fuzzer.schema import BASE64_KEY, ConfigError, ConfigField, plain_config
+from valkey_fuzzer.schema import ConfigError, ConfigField, plain_config
 
-from .capabilities import resolve_binary
-from .command_sequence import PRIVATE_SERVER_DEFAULTS, free_ports, is_binary, port_block
+from .command_sequence import (
+    PRIVATE_SERVER_DEFAULTS,
+    argument_bytes,
+    compared_verdict,
+    free_ports,
+    is_binary,
+    port_block,
+    two_builds,
+    without_index,
+)
 from .command_sequence import Side as _ServerSide
 from .keyspace import exact
 from .oracles import CRASH_PATTERNS, crash_cause
@@ -130,12 +137,6 @@ def _validate_tools(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -> N
             raise ConfigError(f"{where}: a run marked expect_difference needs an expect")
 
 
-def _content(value: Any) -> bytes:
-    """A file's or stdin's bytes: a ``!!binary`` value decoded, text as UTF-8."""
-
-    return base64.b64decode(value[BASE64_KEY]) if is_binary(value) else str(value).encode("utf-8")
-
-
 class _Side:
     """One build's side: its tools, its working directory, its private server, and its runs."""
 
@@ -184,7 +185,7 @@ class _Side:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        data: Optional[bytes] = b"" if run["stdin"] is None else _content(run["stdin"])
+        data: Optional[bytes] = b"" if run["stdin"] is None else argument_bytes(run["stdin"])
         deadline, stopped = time.monotonic() + timeout_s, None
         while True:
             try:
@@ -275,10 +276,7 @@ class ToolsAction:
         runs = config["runs"]
         ignore = [re.compile(pattern.encode(), re.MULTILINE) for pattern in config["ignore"]]
         try:
-            binaries = {
-                "candidate": resolve_binary(plain_config(context.plan.deployment).get("valkey_binary") or ""),
-                "parent": resolve_binary(config["compare_with"]),
-            }
+            binaries = two_builds(context, config["compare_with"])
         except OSError as exc:
             return make_result(spec, ComponentStatus.ERROR, str(exc))
         directory = os.path.realpath(component_artifact_dir(context, spec))
@@ -295,7 +293,7 @@ class ToolsAction:
             os.makedirs(side.workdir, exist_ok=True)
             for name, content in config["files"].items():
                 with open(os.path.join(side.workdir, name), "wb") as handle:
-                    handle.write(_content(content))
+                    handle.write(argument_bytes(content))
 
         try:
             if config["server"]:
@@ -372,8 +370,8 @@ class ToolsAction:
                 "index": index,
                 "run": named(index),
                 **extra,
-                "candidate": _without_index(candidate.runs[index]),
-                "parent": _without_index(parent.runs[index]),
+                "candidate": without_index(candidate.runs[index]),
+                "parent": without_index(parent.runs[index]),
             }
 
         crashes = {f"run {index}": cause for index, cause in candidate.crashes.items()}
@@ -393,7 +391,7 @@ class ToolsAction:
                 spec,
                 ComponentStatus.FAIL,
                 "; ".join(
-                    f"run {named(index)} gave {canonical_json(_without_index(candidate.runs[index]))}, not "
+                    f"run {named(index)} gave {canonical_json(without_index(candidate.runs[index]))}, not "
                     f"{canonical_json(plain_config(runs[index]['expect']))}"
                     for index in violations
                 ),
@@ -408,46 +406,19 @@ class ToolsAction:
                 or "cancelled before every run ran",
                 evidence=evidence,
             )
-        if disputed:
-            return make_result(
-                spec,
-                ComponentStatus.ERROR,
-                "expectations both builds violate alike, so they are not about the change: "
-                + ", ".join(map(named, disputed)),
-                evidence=evidence,
-                diagnostics={
-                    "reason": "expect-disputed",
-                    "pre_existing": True,
-                    "runs": [both(index, expect=plain_config(runs[index]["expect"])) for index in disputed],
-                },
-            )
-        if unexplained:
-            return make_result(
-                spec,
-                ComponentStatus.ERROR,
-                "unmarked runs differ on the two builds: " + ", ".join(map(named, unexplained)),
-                evidence=evidence,
-                diagnostics={"reason": "unexplained-difference", "runs": [both(index) for index in unexplained]},
-            )
-        if unreached:
-            return make_result(
-                spec,
-                ComponentStatus.ERROR,
-                "marked runs are the same on both builds, so they did not reach the change: "
-                + ", ".join(map(named, unreached)),
-                evidence=evidence,
-                diagnostics={"reason": "unreached-change"},
-            )
-        return make_result(
+        return compared_verdict(
             spec,
-            ComponentStatus.PASS,
-            f"{len(runs)} runs on both builds, {len(reached)} marked run(s) reached the change",
-            evidence=evidence,
+            evidence,
+            "run",
+            named,
+            disputed=[both(index, expect=plain_config(runs[index]["expect"])) for index in disputed],
+            unexplained=[both(index) for index in unexplained],
+            unreached=unreached,
+            differ="unmarked runs differ on the two builds: ",
+            same="marked runs are the same on both builds, so they did not reach the change: ",
+            total=len(runs),
+            reached=len(reached),
         )
-
-
-def _without_index(record: Mapping[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in record.items() if key != "index"}
 
 
 # One run of one side: its exit status (null when a signal ended it, or it timed out), and its output with
