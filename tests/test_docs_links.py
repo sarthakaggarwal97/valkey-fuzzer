@@ -15,6 +15,7 @@ MARKDOWN = sorted(
     for path in ROOT.rglob("*.md")
     if ".venv" not in path.parts
     and "node_modules" not in path.parts
+    and "vendor" not in path.parts  # third-party docs vendored with a Go module link to files `go mod vendor` drops
     and not path.parts[len(ROOT.parts)].startswith(".")
 )
 _LINK = re.compile(r"(?<!!)\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")

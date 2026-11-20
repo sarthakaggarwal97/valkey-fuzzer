@@ -4,7 +4,7 @@ The ``valkey.workload.key-value`` ledger is a history: every operation's
 invocation and completion, its connection, key, the value written or read,
 and its outcome. This oracle hands the mutable keys' history, closed by a
 final read of every key, to Porcupine (https://github.com/anishathalye/porcupine,
-built from ``porcupine/`` in the repository), which checks that each key
+the ``porcupine`` binary :mod:`valkey_fuzzer.components.porcupine` finds or fetches), which checks that each key
 behaves as one register. It catches what a single final read cannot: a read
 that returned a value already overwritten (a stale read after a failover or
 a restart), or a value that later vanished.
@@ -34,7 +34,6 @@ It judges under the loss policy of a ``valkey.oracle.ledger`` component
 
 import json
 import os
-import shutil
 import subprocess
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -51,11 +50,11 @@ from .files import write_jsonl
 from .instances import deployment
 from .ledger import LossScopeError, _lossy, _read_keys, load_ledger, loss_policy, wait_needed
 from .polling import read_retrying
+from .porcupine import CHECKER, find_checker
 from .registration import component_registration
 from .schemas import INTEGER, TEXT, declared, mapping_of
 from .workloads import is_stable_key
 
-CHECKER = "porcupine"
 # Porcupine caches a bitset of a key's operations per step of its search, so
 # checking a key of n operations takes about n * n / 8 bytes (368 MB for 50,000).
 _CHECKER_MEMORY_BYTES = 2 << 30
@@ -165,22 +164,9 @@ def _nanoseconds(at: float) -> int:
     return round(at * 1e9)
 
 
-def find_checker() -> str:
-    """The path of the porcupine checker; a ``FileNotFoundError`` saying how to build it when it is not on PATH."""
-
-    checker = shutil.which(CHECKER)
-    if checker is None:
-        have_go = shutil.which("go") is not None
-        raise FileNotFoundError(
-            f"{CHECKER} is not on PATH. Build it from a valkey-fuzzer checkout with "
-            f"`go -C porcupine build -o <a directory on PATH>`"
-            + ("" if have_go else " (this needs Go >= 1.21, which is not on PATH either: https://go.dev/dl/)")
-        )
-    return checker
-
-
 def probe_host() -> None:
-    """Raises when the checker is not installed: ``validate`` and the start of a run call it, before any build."""
+    """Raises when the checker is neither on PATH nor fetched: ``validate`` and the start of a run call it, before
+    any build, and the error names the fetch command and the build command."""
 
     find_checker()
 

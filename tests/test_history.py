@@ -15,6 +15,7 @@ from tests.valkey_experiments_support import fake_context, resolved
 from valkey_fuzzer.components.files import write_jsonl
 from valkey_fuzzer.components.history import HistoryOracle, register_history
 from valkey_fuzzer.components.ledger import LOSS_WINDOW, LedgerModel
+from valkey_fuzzer.components.porcupine import FETCH_COMMAND, cache_dir
 from valkey_fuzzer.components.workloads import LEDGER_EVIDENCE, KeyValueWorkload, _Target
 from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import ComponentRole
@@ -148,13 +149,13 @@ def test_an_indeterminate_write_no_read_returned_is_left_out():
 
 @pytest.fixture(scope="session")
 def porcupine_dir(tmp_path_factory):
-    """A directory holding the porcupine checker: the one on PATH, or one built from ``porcupine/``."""
+    """A directory holding the porcupine checker: the one on PATH, the fetched one, or one built from ``porcupine/``."""
 
-    found = shutil.which("porcupine")
+    found = shutil.which("porcupine") or shutil.which("porcupine", path=cache_dir())
     if found is not None:
         return os.path.dirname(found)
     if shutil.which("go") is None:
-        pytest.skip("neither porcupine nor go is on PATH: build it with `go -C porcupine build -o <dir on PATH>`")
+        pytest.skip(f"porcupine is neither on PATH nor fetched, and go is not on PATH: `{FETCH_COMMAND}` fetches it")
     directory = tmp_path_factory.mktemp("porcupine")
     subprocess.run(["go", "build", "-o", str(directory / "porcupine"), "."], cwd=ROOT / "porcupine", check=True)
     return str(directory)
