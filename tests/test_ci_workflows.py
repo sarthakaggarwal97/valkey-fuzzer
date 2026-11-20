@@ -97,8 +97,9 @@ def _fuzzer_commands(name):
 
 @pytest.mark.parametrize("name", WORKFLOW_NAMES)
 def test_every_valkey_fuzzer_command_in_a_workflow_parses_with_the_cli(name):
-    # The workflows that only run pytest or ruff, build the package, or build the image name no valkey-fuzzer command.
-    no_cli = ("build-image.yml", "lint.yml", "release.yml", "test.yml", "valkey-experiments-live.yml")
+    # The workflows that only run pytest or ruff, build the package, the image, or the porcupine checker name no
+    # valkey-fuzzer command.
+    no_cli = ("build-image.yml", "lint.yml", "porcupine.yml", "release.yml", "test.yml", "valkey-experiments-live.yml")
     assert _fuzzer_commands(name) or name in no_cli
 
 
@@ -149,13 +150,15 @@ def test_every_workflow_pins_its_actions_to_a_commit(name):
 
 
 # The jobs that write: the one that posts the PR comment the read-only summarize job rendered, the two of a
-# release that post the built distributions to a GitHub release and to PyPI (its OIDC token), and the one that
-# pushes the image on a tag.
+# release that post the built distributions to a GitHub release and to PyPI (its OIDC token), the one that
+# pushes the image on a tag, and the one that creates the release of a porcupine-v* tag from the binaries the
+# read-only build job uploaded.
 WRITING_JOBS = {
     ("valkey-pr-fuzzer.yml", "comment"): {"issues": "write", "pull-requests": "write"},
     ("release.yml", "github-release"): {"contents": "write"},
     ("release.yml", "pypi"): {"id-token": "write"},
     ("build-image.yml", "publish"): {"packages": "write"},
+    ("porcupine.yml", "publish"): {"contents": "write"},
 }
 # The image push builds the tag's Dockerfile and pushes it: a maintainer pushed the tag, no PR's code is near, and
 # pushing is what the token is for (test_the_image_workflow_pushes_only_on_a_tag_and_builds_without_pushing_otherwise).

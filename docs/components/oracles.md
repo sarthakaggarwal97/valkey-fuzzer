@@ -283,7 +283,7 @@ skips reads (`check_reads: false`), which a history check cannot honor.
 `FAIL` when a key's history is not linearizable, naming the keys
 (`illegal_keys`) and writing Porcupine's visualization of their histories
 to `illegal.html` (`visualization_path`). `ERROR` when the `porcupine`
-checker is not on `PATH`, the final read keeps failing, the check times out,
+checker is neither on `PATH` nor fetched, the final read keeps failing, the check times out,
 or the history is too large to check: Porcupine's memory grows with the
 square of a key's operation count (about 370 MB for 50,000 operations on one
 key), and the oracle refuses a history whose estimate exceeds 2 GB. Evidence:
@@ -291,12 +291,19 @@ key), and the oracle refuses a history whose estimate exceeds 2 GB. Evidence:
 unchecked-read counts, `clients`, and `history_path`.
 
 The `porcupine` checker is a small Go program in the repository's
-`porcupine/` directory (Go 1.21 or later) that wraps the Porcupine library
-with a register model. Build it onto `PATH` once per host:
+`porcupine/` directory that wraps the Porcupine library with a register
+model. Once per host, fetch the prebuilt binary of the pinned release into
+`~/.cache/valkey-fuzzer/bin` (its SHA-256 is checked against
+`valkey_fuzzer/components/porcupine_sha256sums.txt`), or build it onto `PATH`
+with Go 1.21 or later:
 
 ```bash
+valkey-fuzzer-fetch-porcupine
 go -C porcupine build -o "$HOME/.local/bin/porcupine"
 ```
+
+The oracle uses the one on `PATH`, else the fetched one
+([Get porcupine](../getting-started.md#get-porcupine)).
 
 The [`valkey.history`](../scenarios-and-experiments.md#fragments) fragment adds
 it, as `history` with `ledger: data`.
