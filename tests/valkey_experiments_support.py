@@ -1,8 +1,11 @@
 """Helpers for the Valkey components' tests: a run service with them, a shipped experiment, and what a unit test of
 one component needs: a plan, its registration, its resolved spec, and a fake run context."""
 
+from collections.abc import Sequence
+
+from valkey_fuzzer.catalog import Catalog, ExperimentDirectory, build_catalog
 from valkey_fuzzer.compiler import with_planned_instances
-from valkey_fuzzer.components import component_registrations, experiments
+from valkey_fuzzer.components import component_registrations
 from valkey_fuzzer.deployment.local.provider import local_deployment_provider_registrations
 from valkey_fuzzer.plan import ComponentSpec, DeploymentProviderIdentity, ExecutionPlan
 from valkey_fuzzer.protocols import ComponentRole
@@ -13,19 +16,33 @@ from valkey_fuzzer.testing import FakeContext, resolved_spec
 
 LOCAL_PROVIDER = DeploymentProviderIdentity("valkey-fuzzer.deployment.local")
 
+_CATALOGS: dict[tuple[str, ...], Catalog] = {}
+
+
+def shared_catalog(experiment_directories: Sequence[ExperimentDirectory] = ()) -> Catalog:
+    """The catalog of the Valkey components and ``experiment_directories``, built once per process.
+
+    A catalog is frozen once built, so every test that would build the same one can share it; the ``catalog``
+    fixture is the one without directories. A test that patches what the build reads (the installed packs) builds
+    its own with :func:`build_catalog`.
+    """
+
+    key = tuple(str(directory) for directory in experiment_directories)
+    if key not in _CATALOGS:
+        _CATALOGS[key] = build_catalog(experiment_directories)
+    return _CATALOGS[key]
+
 
 def valkey_service(**options) -> RunService:
-    """A run service with the Valkey components, its catalog already built."""
+    """A run service with the Valkey components, on the shared catalog of its ``experiment_directories``."""
 
-    service = RunService(**options)
-    service.catalog  # noqa: B018
-    return service
+    return RunService(catalog=shared_catalog(options.pop("experiment_directories", ())), **options)
 
 
 def valkey_experiment(experiment_id):
     """The shipped Valkey experiment ``experiment_id``."""
 
-    return next(item for item in experiments() if item.experiment_id == experiment_id)
+    return shared_catalog().experiments.resolve(experiment_id)
 
 
 def unit_plan(components=(), deployment_mode="standalone", document=None, resources=(), startup_overlays=()):

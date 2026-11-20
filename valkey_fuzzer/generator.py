@@ -147,10 +147,14 @@ def generator_rng(seed: int, dimension: str, attempt: int, experiment: Optional[
 
 @dataclass(frozen=True)
 class Exclusion:
-    """``path=value``: the value never appears at the path in a generated scenario."""
+    """``path=value``: the value never appears at the path in a generated scenario.
+
+    ``parsed`` is ``value`` as YAML reads it, parsed once: :meth:`matches` runs per listed value per draw.
+    """
 
     path: str
     value: str
+    parsed: Any = field(compare=False, repr=False)
 
     @classmethod
     def parse(cls, text: Any) -> "Exclusion":
@@ -159,15 +163,15 @@ class Exclusion:
         path, value = (part.strip() for part in text.split("=", 1))
         _check_path(path, "exclusion")
         try:
-            yaml.safe_load(value)
+            parsed = yaml.safe_load(value)
         except yaml.YAMLError as exc:
             raise GeneratorError(f"exclusion {text!r}: the value is not valid YAML ({exc})") from None
-        return cls(path, value)
+        return cls(path, value, parsed)
 
     def matches(self, value: Any) -> bool:
         """Whether ``value`` is the excluded one: a string as written, anything else as YAML reads it."""
 
-        return _same(value, self.value if isinstance(value, str) else yaml.safe_load(self.value))
+        return _same(value, self.value if isinstance(value, str) else self.parsed)
 
     def __str__(self) -> str:
         return f"{self.path}={self.value}"

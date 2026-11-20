@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Changed: the catalog builds five times faster, a run hashes its code once, and CI caches what it downloads (PR-R3-1)
+
+- The document loader (`valkey_fuzzer.schema`) runs on libyaml's scanner (`yaml.CSafeLoader`) when PyYAML has it,
+  with the same YAML 1.2 scalar rules, duplicate-key refusal, and `!!binary` reading; it falls back to the pure-Python
+  scanner otherwise. `build_catalog()` takes 31 ms instead of 158 ms, for every command and every batch worker. A
+  test reads every shipped YAML document and the catalog with both loaders and holds them to the same output.
+- `provenance.source_digest` reuses each package's hashed files while none of them changes size or modification
+  time, so the plan's reproducer, the report's, and the catalog digest read the package once per process: 11 ms per
+  run instead of 58 ms, and 0.3 s instead of 1.7 s over a 30-attempt `minimize`. The digest itself is unchanged.
+- An `--exclude` value is parsed as YAML once, when the exclusion is, not at every value the generator draws
+  (0.5 µs instead of 32 µs per comparison).
+- The tests share one catalog per process (`tests/conftest.py` `catalog`, `tests/valkey_experiments_support.py`
+  `shared_catalog`) instead of building 382 of them: the unit suite runs in 146 s instead of 212 s here.
+- CI caches pip's downloads (keyed on `pyproject.toml`) and Go's modules and build (keyed on `porcupine/go.sum`) in
+  every workflow, and `test.yml`'s server tests restore the Valkey build at `zoo/valkey-commit` (about 90 s to
+  make) instead of building it on every run.
+
 ### Added: `spec conform` checks the run's steps against the model (PR-P1-a)
 
 - `spec conform` checked only that every observed state satisfies the claimed properties; a run that took a step

@@ -234,6 +234,30 @@ def test_the_code_digest_covers_the_package_of_every_component_the_plan_uses(tmp
     assert drift[0]["recorded"] == recorded["fuzzer_digest"] != drift[0]["replay"]
 
 
+def test_a_packages_files_are_hashed_once_until_one_of_them_changes(tmp_path, monkeypatch):
+    """A run digests the same package for its plan, its report, and the catalog; the files are read once."""
+
+    package = tmp_path / "digested_pack"
+    package.mkdir()
+    (package / "__init__.py").write_text("X = 1\n", encoding="utf-8")
+    (package / "data.yaml").write_text("a: 1\n", encoding="utf-8")
+    monkeypatch.setitem(sys.modules, "digested_pack", type("Module", (), {"__file__": str(package / "__init__.py")}))
+    hashed = []
+    monkeypatch.setattr(provenance, "file_sha256", lambda path: hashed.append(path) or file_sha256(path))
+
+    first = provenance.source_digest(["digested_pack"])
+    assert provenance.source_digest(["digested_pack"]) == first and len(hashed) == 2
+    # A changed file (another size or modification time) is read again, and the digest moves.
+    (package / "data.yaml").write_text("a: 1\nb: 2\n", encoding="utf-8")
+    assert provenance.source_digest(["digested_pack"]) != first and len(hashed) == 4
+    # A file that cannot be read is no digest, and is not remembered as one.
+    monkeypatch.setattr(provenance, "file_sha256", lambda path: None)
+    (package / "data.yaml").write_text("a: 1\nb: 2\nc: 3\n", encoding="utf-8")
+    assert provenance.source_digest(["digested_pack"]) is None
+    monkeypatch.setattr(provenance, "file_sha256", file_sha256)
+    assert provenance.source_digest(["digested_pack"]) not in (None, first)
+
+
 @pytest.mark.parametrize(
     ("files", "error", "match"),
     [

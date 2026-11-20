@@ -4,14 +4,19 @@ good ones compile into a complete plan, and catalog loads register everything or
 import json
 import math
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from tests.support import component_registration
+from valkey_fuzzer import schema
+from valkey_fuzzer._data import to_plain_data
 from valkey_fuzzer.catalog import (
     Catalog,
     DuplicateExperimentError,
+    build_catalog,
     load_experiment_yaml,
     parse_experiment_document,
 )
@@ -29,6 +34,7 @@ from valkey_fuzzer.schema import (
 )
 
 ACTION = "example.action.fake"
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _document(**fields: Any) -> dict[str, Any]:
@@ -232,6 +238,60 @@ def test_documents_read_yaml_1_2_scalars_and_refuse_a_leading_zero(text, value):
             load_yaml_mapping(text)
     else:
         assert load_yaml_mapping(text) == {"value": value}
+
+
+def _loaded(loader, text):
+    """What ``loader`` reads from ``text``: the document, or the problem the loader's own rules refuse it for."""
+
+    try:
+        return yaml.load(text, Loader=loader)
+    except yaml.constructor.ConstructorError as exc:
+        return ("refused", exc.problem)
+    except yaml.YAMLError as exc:
+        # The two scanners word a syntax error differently; both must refuse the same documents.
+        return ("malformed", type(exc).__name__)
+
+
+both_loaders = pytest.mark.skipif(
+    schema.DOCUMENT_LOADER is schema.PURE_PYTHON_LOADER, reason="PyYAML without libyaml: one loader"
+)
+
+
+@both_loaders
+def test_the_c_loader_reads_every_shipped_document_as_the_pure_python_one_does(catalog, monkeypatch):
+    """The catalog (and every other YAML document in the tree) is the same whichever scanner reads it."""
+
+    # The pack's experiments and fragments, the examples, the zoo cases, the spec bundles, and the test fixtures.
+    documents = sorted(
+        path for path in ROOT.rglob("*.yaml") if not any(part.startswith(".") for part in path.relative_to(ROOT).parts)
+    )
+    assert len(documents) > 80
+    for path in documents:
+        text = path.read_text(encoding="utf-8")
+        assert _loaded(schema.DOCUMENT_LOADER, text) == _loaded(schema.PURE_PYTHON_LOADER, text), path
+
+    monkeypatch.setattr(schema, "DOCUMENT_LOADER", schema.PURE_PYTHON_LOADER)
+    pure = build_catalog()
+    assert to_plain_data(dict(pure.experiments.snapshot())) == to_plain_data(dict(catalog.experiments.snapshot()))
+    assert dict(pure.fragments) == dict(catalog.fragments)
+
+
+@both_loaders
+@pytest.mark.parametrize(
+    "text",
+    [
+        "a: 1\na: 2", "? [a, b]\n: 1", "value: 017400", "value: [-07]", 'value: !!binary "AA4BAgMEBQ=="',
+        "value: yes\nother: [no, on, Off, TRUE, ~, 1:30, 1_000, 2026-10-29, 5e-05, -1.5, .inf, 0o17, 0x1F]",
+        "value: \"tab\\there\"", "value: 'ünïcödé ✓'", "value: |\n  block\n  text\n", "value: >-\n  folded\n  text",
+        "- a\n-\tb", "value: {a: 1, b: [2, 3]}", "value:\n  - a: 1\n    b: 2", "&anchor a: 1\nb: *anchor",
+        "<<: {a: 1}\nb: 2", "key: value # comment", "---\nvalue: 1\n...", "value: @at", "value: [unclosed",
+    ],
+    ids=["duplicate-key", "unhashable-key", "leading-zero", "leading-zero-in-list", "binary", "scalars", "tab",
+         "unicode", "block", "folded", "tab-indent", "flow", "nested", "anchor", "merge", "comment", "markers",
+         "reserved", "unclosed"],
+)  # fmt: skip
+def test_the_c_loader_and_the_pure_python_one_agree_on_the_edge_cases(text):
+    assert _loaded(schema.DOCUMENT_LOADER, text) == _loaded(schema.PURE_PYTHON_LOADER, text)
 
 
 def test_a_valid_scenario_compiles_into_a_complete_plan():

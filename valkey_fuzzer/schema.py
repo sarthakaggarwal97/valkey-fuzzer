@@ -48,25 +48,8 @@ def document_mapping(value: Any, location: str) -> Mapping[str, Any]:
     return strict_fields(value, location, allowed=None, error=ExperimentDocumentError)
 
 
-class _UniqueKeyLoader(yaml.SafeLoader):
-    """A safe YAML loader with YAML 1.2 core scalars that rejects duplicate mapping keys.
-
-    PyYAML reads YAML 1.1, where ``yes``/``no``/``on``/``off`` are booleans,
-    ``1:30`` is 90, ``1_000`` is 1000, ``017400`` is octal, and a date is a
-    timestamp: a reject rule or an ``equals`` written ``yes`` then never
-    matches the string, and a typo becomes a number. Here only ``true`` and
-    ``false`` are booleans, numbers are plain decimals (``0o`` and ``0x``
-    allowed), and everything else is a string, except a leading-zero
-    integer, which YAML 1.1 and 1.2 read differently and is refused.
-    """
-
-
 _LEADING_ZERO_TAG = "tag:valkey-fuzzer,2026:leading-zero-integer"
-_UniqueKeyLoader.yaml_implicit_resolvers = {
-    first: [(tag, regexp) for tag, regexp in resolvers if tag in ("tag:yaml.org,2002:null", "tag:yaml.org,2002:merge")]
-    for first, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
-}
-for _tag, _pattern, _first in (
+_SCALAR_RESOLVERS = (
     ("tag:yaml.org,2002:bool", r"^(?:true|True|TRUE|false|False|FALSE)$", "tTfF"),
     ("tag:yaml.org,2002:int", r"^(?:[-+]?(?:0|[1-9][0-9]*)|0o[0-7]+|0x[0-9a-fA-F]+)$", "-+0123456789"),
     (_LEADING_ZERO_TAG, r"^[-+]?0[0-9]+$", "-+0"),
@@ -75,11 +58,10 @@ for _tag, _pattern, _first in (
         r"^(?:[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN))$",
         "-+.0123456789",
     ),
-):
-    _UniqueKeyLoader.add_implicit_resolver(_tag, re.compile(_pattern), list(_first))
+)
 
 
-def _refuse_leading_zero(loader: _UniqueKeyLoader, node: yaml.ScalarNode) -> None:
+def _refuse_leading_zero(loader: yaml.constructor.SafeConstructor, node: yaml.ScalarNode) -> None:
     raise yaml.constructor.ConstructorError(
         None,
         None,
@@ -89,10 +71,9 @@ def _refuse_leading_zero(loader: _UniqueKeyLoader, node: yaml.ScalarNode) -> Non
     )
 
 
-_UniqueKeyLoader.add_constructor(_LEADING_ZERO_TAG, _refuse_leading_zero)
-
-
-def _construct_unique_mapping(loader: _UniqueKeyLoader, node: yaml.MappingNode, deep: bool = False) -> dict:
+def _construct_unique_mapping(
+    loader: yaml.constructor.SafeConstructor, node: yaml.MappingNode, deep: bool = False
+) -> dict:
     loader.flatten_mapping(node)
     mapping = {}
     for key_node, value_node in node.value:
@@ -111,19 +92,52 @@ def _construct_unique_mapping(loader: _UniqueKeyLoader, node: yaml.MappingNode, 
     return mapping
 
 
-_UniqueKeyLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique_mapping)
-
 # How a plan, a report, and ``valkey.action.commands`` write bytes that are not valid UTF-8: a YAML ``!!binary``
 # scalar loads as this one-key mapping, since plans and reports hold JSON data only.
 BASE64_KEY = "$base64"
 
 
-def _construct_base64(loader: _UniqueKeyLoader, node: yaml.ScalarNode) -> dict:
+def _construct_base64(loader: yaml.constructor.SafeConstructor, node: yaml.ScalarNode) -> dict:
     data = loader.construct_yaml_binary(node)
     return {BASE64_KEY: base64.b64encode(data).decode("ascii")}
 
 
-_UniqueKeyLoader.add_constructor("tag:yaml.org,2002:binary", _construct_base64)
+def _document_loader(base: type) -> type:
+    """A safe YAML loader on ``base`` with YAML 1.2 core scalars that rejects duplicate mapping keys.
+
+    PyYAML reads YAML 1.1, where ``yes``/``no``/``on``/``off`` are booleans,
+    ``1:30`` is 90, ``1_000`` is 1000, ``017400`` is octal, and a date is a
+    timestamp: a reject rule or an ``equals`` written ``yes`` then never
+    matches the string, and a typo becomes a number. Here only ``true`` and
+    ``false`` are booleans, numbers are plain decimals (``0o`` and ``0x``
+    allowed), and everything else is a string, except a leading-zero
+    integer, which YAML 1.1 and 1.2 read differently and is refused.
+
+    ``base`` is :class:`yaml.SafeLoader` or :class:`yaml.CSafeLoader`: the
+    rules are resolvers and constructors, which both run the same way.
+    """
+
+    class DocumentLoader(base):
+        pass
+
+    kept = ("tag:yaml.org,2002:null", "tag:yaml.org,2002:merge")
+    DocumentLoader.yaml_implicit_resolvers = {
+        first: [(tag, regexp) for tag, regexp in resolvers if tag in kept]
+        for first, resolvers in base.yaml_implicit_resolvers.items()
+    }
+    for tag, pattern, first in _SCALAR_RESOLVERS:
+        DocumentLoader.add_implicit_resolver(tag, re.compile(pattern), list(first))
+    DocumentLoader.add_constructor(_LEADING_ZERO_TAG, _refuse_leading_zero)
+    DocumentLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique_mapping)
+    DocumentLoader.add_constructor("tag:yaml.org,2002:binary", _construct_base64)
+    return DocumentLoader
+
+
+# libyaml's scanner (CSafeLoader) reads a document in about a fifth of the pure-Python scanner's time, and every
+# command, batch worker, and test builds the catalog from 28 of them. The pure-Python loader is the fallback for a
+# PyYAML built without libyaml, and the reference the test suite holds the C one to.
+PURE_PYTHON_LOADER = _document_loader(yaml.SafeLoader)
+DOCUMENT_LOADER = _document_loader(yaml.CSafeLoader) if yaml.__with_libyaml__ else PURE_PYTHON_LOADER
 
 
 def load_yaml(source: Union[str, bytes, TextIO], source_name: str) -> Any:
@@ -132,7 +146,7 @@ def load_yaml(source: Union[str, bytes, TextIO], source_name: str) -> Any:
     if not isinstance(source, (str, bytes)):
         raise TypeError("source must be YAML text, bytes, or a text stream")
     try:
-        return yaml.load(source, Loader=_UniqueKeyLoader)
+        return yaml.load(source, Loader=DOCUMENT_LOADER)
     except yaml.YAMLError as exc:
         raise ExperimentDocumentError(f"{source_name}: {exc}") from exc
 

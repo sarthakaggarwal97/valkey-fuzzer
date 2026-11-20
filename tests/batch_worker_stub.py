@@ -123,6 +123,13 @@ class InProcessWorkers:
         # Every (pid, signal) the batch sent.
         self.signals = []
         monkeypatch.setattr(RunService, "run_plan", run_plan)
+        # Every job's worker builds a RunService on the batch's experiment directories; they share one catalog.
+        from tests.valkey_experiments_support import shared_catalog
+
+        monkeypatch.setattr(
+            "valkey_fuzzer.service.build_catalog",
+            lambda experiment_directories, deployment_providers: shared_catalog(experiment_directories),
+        )
         monkeypatch.setattr(sys.modules[__name__], "_exit", self._exit)
         monkeypatch.setattr(
             pool,

@@ -46,13 +46,19 @@ def checker_installed(monkeypatch):
     monkeypatch.setattr("valkey_fuzzer.components.history.probe_host", lambda: None)
 
 
+@pytest.fixture(scope="session")
+def catalog():
+    """The Valkey components' catalog, built once: it is frozen, so every test can read the same one."""
+
+    from tests.valkey_experiments_support import shared_catalog
+
+    return shared_catalog()
+
+
 @pytest.fixture
-def canned_runs(monkeypatch) -> CannedRuns:
+def canned_runs(monkeypatch, catalog) -> CannedRuns:
     """The Valkey components' catalog, with canned runs; every RunService the commands build uses both."""
 
-    from tests.valkey_experiments_support import valkey_service
-
-    catalog = valkey_service().catalog
     runs = CannedRuns(catalog)
     monkeypatch.setattr("valkey_fuzzer.runner.Runner.run", runs)
     monkeypatch.setattr("valkey_fuzzer.service.build_catalog", lambda **options: catalog)
@@ -75,33 +81,6 @@ def report_root(tmp_path, monkeypatch) -> None:
     """Without --artifact-dir, report folders go under <tmp>/valkey-fuzzer; <tmp> is the test's tmp_path."""
 
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
-
-
-_SOURCE_DIGESTS: dict = {}
-
-
-@pytest.fixture(autouse=True)
-def source_digest_once(monkeypatch) -> None:
-    """Hash each package's source once per test session, not on every run: the files do not change meanwhile.
-
-    The key is each package's ``__file__``, so a test that loads a package from an edited copy gets that copy's
-    digest.
-    """
-
-    import sys
-
-    from valkey_fuzzer import provenance
-
-    source_digest = provenance.source_digest
-
-    def once(packages):
-        packages = sorted(set(packages))
-        key = tuple((package, getattr(sys.modules.get(package), "__file__", None)) for package in packages)
-        if key not in _SOURCE_DIGESTS:
-            _SOURCE_DIGESTS[key] = source_digest(packages)
-        return _SOURCE_DIGESTS[key]
-
-    monkeypatch.setattr(provenance, "source_digest", once)
 
 
 @pytest.fixture(autouse=True)
