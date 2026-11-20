@@ -7,7 +7,7 @@ from typing import Any
 from ..compiler import Overrides
 from ..outcomes import EXIT_FAILURE, EXIT_HARNESS_ERROR, exit_code
 from ..reports import ReportWriteError, write_document
-from ._common import add_common_options, artifact_paths, describe_drift, service_for
+from ._common import add_common_options, artifact_paths, describe_drift, print_conform, service_for
 
 
 def register(subparsers: Any) -> None:
@@ -49,6 +49,7 @@ def replay_command(args: argparse.Namespace) -> int:
     record = result.record
     print(f"Status: {record.outcome.status.value}")
     print(f"Summary: {record.outcome.summary}")
+    print_conform(record.report)
     print(f"Report: {record.report_path}")
     code = exit_code(record.outcome.status, allow_unsupported=args.allow_unsupported)
     for entry in result.late_drift:

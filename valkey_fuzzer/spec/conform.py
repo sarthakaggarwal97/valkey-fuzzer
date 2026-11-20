@@ -33,6 +33,15 @@ owns this format: the first record is the header, ``{"kind": "header",
 "experiment_id", "inputs"}``, and every later record is one the mapping's
 evidence matches. A ``node_id`` field of the mapping resolves to its node
 through ``nodes``, and a constant mapped from a ``config`` reads ``nodes.<node>.config``.
+
+A run whose plan names a bundle (a component's ``spec``) checks itself as its
+report is written (:func:`conform_run`, from
+:meth:`~valkey_fuzzer.service.RunService.write_run_report`): the results go
+into the report's ``conform`` section, by bundle, and :func:`judge_run` turns
+an approved bundle's claimed violation into a failed component
+:func:`conform_component` of the run, so ``minimize``, ``replay`` and the bug
+zoo see a failure only the model finds. A batch reuses that section
+(:mod:`~valkey_fuzzer.batch.conform_plugin`).
 """
 
 import copy
@@ -43,10 +52,12 @@ import re
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Optional
 
+from .._data import error_record, jsonable
 from ..documents import ABSENT, get_path
+from ..results import ComponentResult, ComponentStatus, OutcomeStatus, RunOutcome
 from .bundle import (
     MODEL_FILE,
     TRACE_FILE,
@@ -88,6 +99,8 @@ REFINEMENT_WITH_TRANSITIONS = (
 _TAG = "spec-conform"
 # The run statuses of a run that reached its verdict: the only runs conform_folder checks.
 CHECKED_RUN_STATUSES = ("PASS", "FAIL")
+# The batch option that bounds the TLC run of a run's own check (conform_run); a run outside a batch uses its default.
+CONFORM_TIMEOUT_OPTION = "conform_tlc_timeout_s"
 
 
 class _SkipError(Exception):
@@ -906,6 +919,7 @@ def check_run(
                 "ObservedTrace.cfg",
                 {MODEL_FILE: bundle.model_text, "ObservedTrace.tla": module, "ObservedTrace.cfg": cfg},
             )
+            result["tlc_seconds"] = run_tlc.seconds
             if run_tlc.timed_out:
                 result["timed_out"] = True
                 raise TlaError(run_tlc.timeout_error)
@@ -949,7 +963,6 @@ def check_run(
         result["targets"][name] = {"reached": bool(reached), "states": reached}
         if reached:
             result["targets"][name]["first"] = observed.steps[reached[0] - 1]
-    failed = any(entry["status"] == "violated" and entry["claimed"] for entry in properties.values())
     if checking:
         # reports[:furthest] have a model explanation; short of the last, no step of the model (after up to
         # max_unobserved_steps unobservable ones) takes the model from record furthest to record furthest + 1.
@@ -968,13 +981,44 @@ def check_run(
                 "to": {key: observed.reports[furthest].get(key) for key in shown},
                 "event": observed.reports[furthest]["evidence"],
             }
-            failed = True
     elif transitions and claims.transitions_excluded is not None:
         result["transitions"] = {"checked": 0, "holds": None, "excluded": claims.transitions_excluded}
     elif transitions:
         result["transitions"] = {"checked": 0, "holds": None, "skipped": TRANSITIONS_UNCHECKED}
-    result["status"] = "fail" if failed else "pass"
+    result["violated"] = violated_claims(result)
+    result["first_violated"] = first_violated(result)
+    result["status"] = "fail" if result["violated"] else "pass"
     return result
+
+
+def violated_claims(result: Mapping[str, Any]) -> list[str]:
+    """What a :func:`check_run` result holds against the run: each claimed property the observed states violated,
+    and ``transitions`` when the transition check found a step the model cannot take. Empty for a pass."""
+
+    violated = sorted(
+        name
+        for name, entry in (result.get("properties") or {}).items()
+        if entry["status"] == "violated" and entry["claimed"]
+    )
+    if (result.get("transitions") or {}).get("holds") is False:
+        violated.append("transitions")
+    return violated
+
+
+def first_violated(result: Mapping[str, Any]) -> Optional[dict[str, Any]]:
+    """The first of :func:`violated_claims`, with the observed ``state`` (its index in the trace) that violates it
+    (for ``transitions``, the first observed step no model step reaches) and that ``step`` as ``steps`` lists it;
+    None for a pass."""
+
+    violated = violated_claims(result)
+    if not violated:
+        return None
+    claim = violated[0]
+    if claim == "transitions":
+        step = result["transitions"]["first_violation"]["to"]
+    else:
+        step = result["properties"][claim]["first"]
+    return {"claim": claim, "state": step["state"], "step": step}
 
 
 def conform_runs(
@@ -1088,6 +1132,97 @@ def conform_folder(
     return results
 
 
+def bundle_approved(name: str) -> bool:
+    """Whether the claims of spec bundle ``name`` are approved. A bundle that does not load counts as approved:
+    the plan named it, and nothing says its claims are a draft, so the run is not passed over its check."""
+
+    try:
+        return load_bundle(name).claims.status == "approved"
+    except SpecBundleError:
+        return True
+
+
+def conform_run(folder: str, timeout_s: float) -> dict[str, dict[str, Any]]:
+    """The run in ``folder`` (its ``report.json`` written) checked against every spec bundle its plan names
+    (:func:`conform_folder`), with TLC from ``$TLA2TOOLS_JAR`` on one worker for at most ``timeout_s``; a check
+    it stops is an error that names the option. Without TLC, a bundle that needs it is skipped, or an error if
+    its claims are approved. A check that fails outright still gives an entry per bundle, with why."""
+
+    try:
+        try:
+            tools, unavailable = TlaTools.locate(None, workers="1").within(timeout_s), ""
+        except TlaError as exc:
+            tools, unavailable = None, str(exc)
+        results = conform_folder(folder, tools, unavailable)
+    except Exception as exc:
+        # The run's report would otherwise say nothing of the bundle, not why its check did not finish.
+        error = error_record(exc, "conform")
+        problem = f"spec conform did not finish: {error['type']}: {error.get('message', '')}"
+        report = _run_report(os.path.join(folder, "report.json")) or {}
+        plan = (report.get("outcome") or {}).get("plan") or {}
+        results = {
+            name: {"status": "error", "error": problem, "approved": bundle_approved(name)}
+            for name in plan_bundles(plan)
+        }
+    for entry in results.values():
+        if entry.get("timed_out"):
+            entry["error"] = f"{entry['error']} ({CONFORM_TIMEOUT_OPTION} = {timeout_s:g}, a batch option)"
+    return results
+
+
+def conform_component(bundle: str) -> str:
+    """The ID of the component a run's verdict names for what spec conform held against it over ``bundle``."""
+
+    return f"spec-conform:{bundle}"
+
+
+def judge_run(outcome: RunOutcome, results: Mapping[str, Mapping[str, Any]]) -> RunOutcome:
+    """``outcome`` with what the conform ``results`` (by bundle, as :func:`conform_run` gives them) hold against
+    the run. For an approved bundle whose check found a claimed property violated or a step the model cannot
+    take, the run FAILs through a failed component :func:`conform_component`, whose summary names each violated
+    claim; for one whose check could not decide, that component is an ERROR, and so is the run unless it FAILed.
+    A draft's findings stay in the results, never in the verdict; an entry that does not say its claims are
+    approved is read as a draft's."""
+
+    added = []
+    status, summary = outcome.status, outcome.summary
+    for name, entry in sorted(results.items()):
+        if entry["status"] not in ("fail", "error") or not entry.get("approved", False):
+            continue
+        if entry["status"] == "fail":
+            violated = violated_claims(entry)
+            text = "; ".join(f"{claim} violated" for claim in violated)
+            diagnostics = {"bundle": name, "violated": violated, "first_violated": entry.get("first_violated")}
+            status = OutcomeStatus.FAIL
+        else:
+            text = entry["error"]
+            diagnostics = {"bundle": name}
+            if status is not OutcomeStatus.FAIL:
+                status = OutcomeStatus.ERROR
+        component = ComponentResult(
+            conform_component(name), ComponentStatus(entry["status"].upper()), text, diagnostics=jsonable(diagnostics)
+        )
+        added.append(component)
+        summary = f"spec conform {name}: {text}; {summary}"
+    if not added:
+        return outcome
+    return replace(outcome, status=status, summary=summary, component_results=outcome.component_results + tuple(added))
+
+
+def describe(name: str, entry: Mapping[str, Any]) -> str:
+    """One line for bundle ``name``'s conform entry: whether its claims are a draft, its status, and the violated
+    claims or why it was not checked."""
+
+    claims = "" if entry.get("approved") else " (draft claims)"
+    if entry["status"] == "fail":
+        detail = f": {', '.join(violated_claims(entry))} violated"
+    elif entry["status"] == "pass":
+        detail = ""
+    else:
+        detail = f": {entry.get('error') or entry.get('reason')}"
+    return f"{name}{claims}: {entry['status']}{detail}"
+
+
 def _groups(results: Sequence[Mapping[str, Any]], keys: Sequence[str], targets: Sequence[str]) -> list[dict[str, Any]]:
     groups: dict[tuple, list[Mapping[str, Any]]] = {}
     for result in results:
@@ -1117,18 +1252,26 @@ __all__ = [
     "CHECKED_RUN_STATUSES",
     "CHECKS",
     "CHECKS_WITH_TRANSITIONS",
+    "CONFORM_TIMEOUT_OPTION",
     "REFINEMENT",
     "REFINEMENT_WITH_TRANSITIONS",
     "TRANSITIONS_UNCHECKED",
     "ObservedRun",
     "RunEvidence",
+    "bundle_approved",
     "check_run",
     "collect_runs",
+    "conform_component",
     "conform_folder",
+    "conform_run",
     "conform_runs",
+    "describe",
+    "first_violated",
+    "judge_run",
     "needs_tlc",
     "plan_bundles",
     "split_next",
     "summarize",
     "trace_module",
+    "violated_claims",
 ]

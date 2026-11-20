@@ -6,11 +6,12 @@ import shlex
 import shutil
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 import yaml
 
+from tests.conform_support import approved_register, register_service, scenario_file, stub_tlc
 from tests.support import make_plan, recorded_report
 from valkey_fuzzer import coverage, provenance, reports
 from valkey_fuzzer.cli import main
@@ -18,6 +19,8 @@ from valkey_fuzzer.compiler import Overrides
 from valkey_fuzzer.minimize import failure_signature, same_failure
 from valkey_fuzzer.reports import InputError, ReportWriteError, export_scenario, write_plan
 from valkey_fuzzer.results import ComponentResult, ComponentStatus, Evidence, OutcomeStatus, RunOutcome
+from valkey_fuzzer.spec import conform, tla
+from valkey_fuzzer.spec.tla import TlaError
 
 GENERATED = ["--seed", "9", "--experiment", "valkey.cluster-chaos"]
 EXAMPLE = str(Path(__file__).resolve().parents[1] / "examples" / "valkey" / "snapshot_equivalence.yaml")
@@ -274,6 +277,83 @@ def test_report_json_leads_with_the_verdict_and_keeps_every_key_a_tool_reads(ser
     assert report["look_at"]["report_folder"] == str(tmp_path / "r")
     # The data a tool reads is unchanged: the full component results stay in the outcome.
     assert [row["component_id"] for row in report["outcome"]["component_results"]] == ["data"]
+
+
+def _register_report(tmp_path, monkeypatch, bundle, *, lost, name="r"):
+    service = register_service(tmp_path, monkeypatch, bundle, lost=lost)
+    prepared = service.prepare_run(scenario_file(tmp_path))
+    record = service.execute(prepared.plan, scenario=prepared.scenario, report_dir=str(tmp_path / name))
+    return service, record, json.loads((tmp_path / name / "report.json").read_text())
+
+
+def test_a_run_naming_a_spec_bundle_checks_itself_and_its_report_carries_what_conform_found(tmp_path, monkeypatch):
+    bundle = approved_register(tmp_path, monkeypatch)
+    stub_tlc(monkeypatch)
+    service, record, report = _register_report(tmp_path, monkeypatch, bundle, lost=True)
+    # The section comes with the reading aids, and every old key stays.
+    assert list(report)[:6] == ["status", "summary", "failed_components", "reproduce", "look_at", "conform"]
+    assert set(report) >= LEGACY_REPORT_KEYS
+    # An approved bundle's claimed violation fails the run through a named component, as an oracle's FAIL would.
+    assert (report["status"], record.outcome.status) == ("FAIL", OutcomeStatus.FAIL)
+    assert report["summary"] == "spec conform register: AckedDurable violated; experiment passed"
+    (component,) = report["failed_components"]
+    assert (component["component_id"], component["status"], component["summary"]) == (
+        "spec-conform:register",
+        "FAIL",
+        "AckedDurable violated",
+    )
+    (result,) = report["outcome"]["component_results"]
+    assert result["component_id"] == "spec-conform:register" and result["diagnostics"]["violated"] == ["AckedDurable"]
+    entry = report["conform"]["register"]
+    assert (entry["approved"], entry["status"], entry["violated"]) == (True, "fail", ["AckedDurable"])
+    assert entry["first_violated"]["claim"] == "AckedDurable" and entry["first_violated"]["state"] == 5
+    assert entry["first_violated"]["step"] == entry["properties"]["AckedDurable"]["first"]
+    assert entry["first_violated"]["step"]["why"] == "loaded sample" and entry["first_violated"]["step"]["state"] == 5
+    assert entry["tlc_seconds"] == 0.1 and entry["transitions"]["holds"] is True
+    assert result["diagnostics"]["first_violated"] == entry["first_violated"]
+    # The report replays and minimizes as any failing run's: its outcome keeps the component.
+    assert service.prepare_replay(record.report_path).verified
+    prepared = service.prepare_minimization(record.report_path)
+    assert prepared.needed and prepared.reference["failing_components"] == ["spec-conform:register"]
+    assert prepared.reference["failures"]["spec-conform:register"] == {
+        "status": "FAIL",
+        "verdict": ["AckedDurable violated"],
+    }
+    # A run that keeps every acknowledged write passes, and its report says the bundle was checked.
+    _, record, report = _register_report(tmp_path, monkeypatch, bundle, lost=False, name="kept")
+    assert (report["status"], report["failed_components"]) == ("PASS", [])
+    assert (report["conform"]["register"]["status"], report["conform"]["register"]["violated"]) == ("pass", [])
+    assert report["conform"]["register"]["first_violated"] is None
+
+
+def test_a_drafts_violation_is_recorded_and_a_missing_tlc_errors_an_approved_bundles_run(tmp_path, monkeypatch):
+    stub_tlc(monkeypatch)
+    # The register bundle ships as a draft: its violation is in the report, never in the verdict.
+    draft = approved_register(tmp_path, monkeypatch, approved=False)
+    _, record, report = _register_report(tmp_path, monkeypatch, draft, lost=True, name="draft")
+    assert (report["status"], report["summary"], report["failed_components"]) == ("PASS", "experiment passed", [])
+    assert report["conform"]["register"]["approved"] is False and report["conform"]["register"]["status"] == "fail"
+    assert report["conform"]["register"]["violated"] == ["AckedDurable"]
+    assert record.outcome.component_results == ()
+    # Without TLC, an approved bundle's claims cannot decide the run, so it is an ERROR saying what is missing.
+    bundle = approved_register(tmp_path / "approved", monkeypatch)
+    monkeypatch.setattr(tla.TlaTools, "locate", Mock(side_effect=TlaError("tla2tools.jar not found: get it")))
+    _, record, report = _register_report(tmp_path, monkeypatch, bundle, lost=False, name="no-tlc")
+    assert (report["status"], record.outcome.status) == ("ERROR", OutcomeStatus.ERROR)
+    assert report["summary"] == "spec conform register: tla2tools.jar not found: get it; experiment passed"
+    (component,) = report["failed_components"]
+    assert (component["component_id"], component["status"]) == ("spec-conform:register", "ERROR")
+    assert report["conform"]["register"] == {
+        "approved": True,
+        "status": "error",
+        "error": "tla2tools.jar not found: get it",
+    }
+    # A run whose plan names no bundle is not checked, and never loads the spec tools.
+    service = register_service(tmp_path, monkeypatch, bundle, lost=False)
+    monkeypatch.setattr(conform, "conform_run", Mock(side_effect=AssertionError("checked a run without a bundle")))
+    prepared = service.prepare_run(EXAMPLE)
+    record = service.execute(prepared.plan, scenario=prepared.scenario, report_dir=str(tmp_path / "none"))
+    assert record.report["conform"] is None and "conform" in record.report
 
 
 def test_the_report_records_the_command_and_binary_that_reproduce_it(service, canned_runs, tmp_path):

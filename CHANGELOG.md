@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Added: a run checks itself against its spec bundles, and the result is in its report (PR-P2-b)
+
+- A run whose plan names a spec bundle (a component's `spec`) ran `spec conform` only in a batch, whose worker
+  wrote `conform.json` beside the run and whose verdict carried the finding; the run's own `report.json` never
+  mentioned it, so `minimize` could not shrink a conform-only failure, `replay` did not show it, and the bug zoo
+  could not pin one. Every run now checks itself as its report is written (`run`, `replay`, each `minimize`
+  attempt, a batch's worker), after its trace is complete, with TLC bounded by `conform_tlc_timeout_s` (the batch
+  option; a run outside a batch uses its default, 300 s), and `report.json` gains a `conform` section, by bundle:
+  `approved`, `status`, `violated` (the claimed properties violated, and `transitions` for a step the model
+  cannot take), `first_violated` (`claim`, the observed `state`, the `step`), `tlc_seconds`, and the full check.
+  `null` for a run that names no bundle; every old key stays.
+- For an approved bundle, the check is part of the run's verdict: a claimed violation is the failed component
+  `spec-conform:<bundle>` of the outcome (its summary the violated claims), so the run `FAIL`s, its summary,
+  `failed_components` and failure signature name it, `minimize` keeps a reduction only while the same claims fail,
+  `replay` and `run` print a `Spec conform` line, and a zoo case names the check in `fail`. A check that could not
+  decide (TLC missing for a bundle that needs it, with the existing message) makes the run an `ERROR` through the
+  same component. A draft's violation is recorded, not held against the run. The report is written before the
+  check and again after it, so a run killed during TLC leaves a report whose `conform` is `null`.
+- The batch's conform plug-in reuses the report's section instead of running TLC twice, takes the run's verdict
+  as it is, and keeps its own path (`conform.json` after the run, judged by the batch) for a run that predates
+  the section. `spec conform` results gain `violated`, `first_violated`, and `tlc_seconds` per run everywhere.
+- The shipped bundles are drafts, so no shipped zoo case can FAIL by conform yet; `tests/test_zoo.py` pins a case
+  on the test register bundle with a stub trace whose crash loses an acknowledged write.
+
 ### Changed: the catalog builds five times faster, a run hashes its code once, and CI caches what it downloads (PR-R3-1)
 
 - The document loader (`valkey_fuzzer.schema`) runs on libyaml's scanner (`yaml.CSafeLoader`) when PyYAML has it,

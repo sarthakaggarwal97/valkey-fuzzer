@@ -79,7 +79,11 @@ def failure_signature(outcome: RunOutcome, required_evidence: Iterable[str] = ()
     ``failures`` holds each failing component's status and verdict: for a call
     that raised, the error class and phase; otherwise its summary's clauses
     with numbers and hex IDs masked, so an oracle failing for another reason
-    is another failure. A run whose failing components report crashes
+    is another failure. A claimed property a spec bundle's conform check found
+    violated is the failing component ``spec-conform:<bundle>`` of the
+    outcome (:func:`~valkey_fuzzer.spec.conform.judge_run`), its verdict the
+    violated claims, so a reduction keeps a conform failure only while the
+    same claims fail. A run whose failing components report crashes
     (``diagnostics.crashes``) is its crash causes alone: ``crashes``, with
     every other field empty, since what failed after a crash varies with
     the experiment and the timing.

@@ -47,6 +47,25 @@ sentence, are in `outcome.component_results`. A server that crashed has its
 crash report under `crashes` in the diagnostics of the failed component
 (`valkey.oracle.liveness` reports them), not in the `Summary` line.
 
+A run of an experiment that names a [spec bundle](spec-bridge.md#bundles)
+(`spec: cluster-election`, say) also checks its trace against the model
+([`spec conform` in a run](spec-bridge.md#in-a-run)), and prints the result
+after the summary:
+
+```text
+Summary: spec conform cluster-election: OneWinnerPerEpoch violated; experiment passed
+Spec conform cluster-election: fail: OneWinnerPerEpoch violated
+```
+
+Such a run FAILs through the component `spec-conform:<bundle>`, listed in
+`failed_components` with the violated claims as its `summary` (it has no
+`use`: it is the model's check, not a plan component), and the report's
+`conform` key holds the check itself: `violated`, `first_violated` (the
+claim, the observed state that violates it, and the step that reached it,
+with its event and fields), and every property's result. A bundle whose
+claims are a draft reports the same under `conform` without failing the run:
+`Spec conform cluster-election (draft claims): fail: ...`.
+
 ## 2. Run it again
 
 The report records the scenario and the seed. These commands run the same plan
@@ -62,7 +81,10 @@ report. When they differ, `replay` still runs, prints each difference as a
 warning, and records it under `provenance.drift` in the replay report. Replay does not reproduce timing, so a race can land
 differently. Every run prints a `Reproduce:` line; a generated run
 (`--seed N --experiment ID`) also prints the command that makes the same
-scenario. The report keeps it as `reproduce`.
+scenario. The report keeps it as `reproduce`. A FAIL by `spec-conform:<bundle>`
+replays and minimizes like any other: the replay checks its own trace and
+prints its `Spec conform` line, and `minimize` keeps a reduction only while
+the same claims fail.
 
 ## 3. Find the server logs
 

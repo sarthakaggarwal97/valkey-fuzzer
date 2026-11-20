@@ -1,9 +1,12 @@
 """Coverage keys, failure signatures, and minimization."""
 
+import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
+from tests.conform_support import approved_register, register_service, scenario_file, stub_tlc
 from valkey_fuzzer.coverage import coverage_tuple
 from valkey_fuzzer.deployment.local.rerun import HOST_FIELDS, deployment_reductions
 from valkey_fuzzer.environment import EnvironmentSpec, PolicySpec
@@ -192,3 +195,32 @@ def _signature_outcome(failing):
         component_results=results,
         evidence=(Evidence("tests.path", "check", "p", 1.0, True),),
     )
+
+
+def test_minimize_keeps_a_conform_failure_only_while_the_same_claim_fails(tmp_path, monkeypatch):
+    # A run FAILs only through spec conform (an approved bundle's claimed violation, no oracle's FAIL): that is the
+    # failed component spec-conform:register of its outcome, so the reference signature holds it, and each attempt's
+    # own conform check (its report's conform section) decides whether the reduction kept it.
+    bundle = approved_register(tmp_path, monkeypatch, shrinkable=True)
+    stub_tlc(monkeypatch)
+    # The crash loses the acknowledged writes only when there are at least two of them.
+    service = register_service(tmp_path, monkeypatch, bundle, lost=lambda plan: plan.inputs["writes"] >= 2)
+    prepared = service.prepare_run(scenario_file(tmp_path))
+    record = service.execute(prepared.plan, scenario=prepared.scenario, report_dir=str(tmp_path / "run"))
+    assert record.outcome.status is OutcomeStatus.FAIL
+
+    minimization = service.prepare_minimization(record.report_path)
+    assert minimization.needed and minimization.reference["failing_components"] == ["spec-conform:register"]
+    result = service.minimize(minimization, max_attempts=5, log=lambda line: None)
+    assert result.reproduced and result.confirmed
+    # writes 4 -> 1 kept every write, so conform passed and the reduction lost the failure; 4 -> 2 kept it.
+    assert [(item["step"], item["result"]) for item in result.attempts] == [
+        ("original", "reproduced"),
+        ("experiment.inputs.writes=1", "rejected"),
+        ("experiment.inputs.writes=2", "kept"),
+        ("confirm", "reproduced"),
+    ]
+    assert result.accepted == ["experiment.inputs.writes=2"] and result.scenario["experiment"]["inputs"]["writes"] == 2
+    reports = sorted(Path(result.report_dir).glob("attempt-*/report.json"), key=lambda path: int(path.parent.name[8:]))
+    conform = [json.loads(path.read_text())["conform"]["register"]["status"] for path in reports]
+    assert conform == ["fail", "pass", "fail", "fail"]

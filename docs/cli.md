@@ -309,7 +309,7 @@ run names its build.
 | `valkey_binary` | `--valkey-binary PATH` | See above. |
 | `prune_pass` | `--prune-pass` | Keep only `report.json` and `scenario.yaml` of a run that passed and left nothing behind. |
 | `serial_reruns` | `--serial-reruns N` | After the parallel runs, run `N` jobs of each `FAIL` or `ERROR` signature again, one at a time (load can explain those, not an unsupported run). |
-| `conform_tlc_timeout_s` | (spec only) | How long the worker's [`spec conform`](spec-bridge.md#in-a-batch) may run TLC on one run's observed states; default 300. A check it stops is a conform `error` whose reason names this option (an `ERROR` for the run if the bundle's claims are approved). |
+| `conform_tlc_timeout_s` | (spec only) | How long each run's own [`spec conform`](spec-bridge.md#in-a-run) check may run TLC on its observed states; default 300, which a run outside a batch uses. A check it stops is a conform `error` whose reason names this option (an `ERROR` for the run if the bundle's claims are approved). |
 | | `--out DIR` | The batch folder; default `<root>/batches/<time>-<batch id>-<suffix>`. |
 | | `--resume DIR` | Finish the batch in `DIR`. Takes only `--workers` and `--allow-unsupported`: the folder holds the sources and every other option. |
 | | `--dry-run` | List the jobs, the invalid matrix cases, and the skipped zoo cases; run nothing. |
@@ -346,8 +346,8 @@ so a batch started while another runs is refused before it starts a job
 A run's deadline is cooperative (see
 [Deadlines and cancellation](contracts.md#deadlines-and-cancellation)); a
 worker still running 60 seconds after it (or a quarter of the deadline, if
-that is longer), plus the time the worker's after-run steps may take (spec
-conform's `conform_tlc_timeout_s`, 300 seconds by default, so a run that used
+that is longer), plus the time the run's spec conform check may take after it
+(`conform_tlc_timeout_s`, 300 seconds by default, so a run that used
 its whole budget is not killed while it conforms), gets `SIGINT`, then `SIGTERM` 60 seconds later (both to the
 worker alone: its run stops its servers), then `SIGKILL` to its process group
 30 seconds later, and the job is an `ERROR` (`Deadline`). A second Ctrl-C
@@ -380,7 +380,7 @@ removed, the batch refuses to start. Dead runs' directories stay.
   results/<id>.json   one finished job
   runs/<id>/          the job's run folder: plan.json, report.json, scenario.yaml,
                       components/, logs/ (instance logs), console.log (or error.json),
-                      conform.json (when its plan names a spec bundle)
+                      conform.json (a run from before report.json's conform section)
   experiments/        a copy of every --experiment-dir's documents (only with one)
   conformance/<b>.json  the spec conform report of bundle <b> over the runs checked against it
   summary.json        the summary, rewritten when the batch stops
@@ -398,20 +398,20 @@ from the folder alone.
 
 A run whose plan names a [spec bundle](spec-bridge.md#bundles) (a
 component's `spec`, as the election and replication experiments' observers
-do) is checked against it by its worker as soon as it ends, before the
-folder is pruned: [`spec conform`](spec-bridge.md#in-a-batch), on the
-run's report and trace, with TLC from `$TLA2TOOLS_JAR` for at most
-`conform_tlc_timeout_s` per run. The result is the
-run's `conform.json` (kept when a passing run is pruned) and its result's
-`conformance`. For a bundle whose claims are approved, a claimed property
-violated on the run's observed states, or a step the model cannot take, makes
-the run a `FAIL`, and a check
-that could not decide (TLC missing, too, for a bundle that needs it; TLC
-stopped at `conform_tlc_timeout_s`; the trace the run recorded missing) makes
-it an `ERROR`; either is in the run's summary
-(`spec conform replication: ...`) and failure signature (the failing
-component `spec-conform:<bundle>`). A draft bundle's findings are reported
-and change nothing.
+do) checks itself against it as its report is written, as every run does
+([`spec conform` in a run](spec-bridge.md#in-a-run)): on its trace, with TLC
+from `$TLA2TOOLS_JAR` for at most `conform_tlc_timeout_s`. The result is the
+report's `conform` section (kept when a passing run is pruned) and its
+result's `conformance`. For a bundle whose claims are approved, a claimed
+property violated on the run's observed states, or a step the model cannot
+take, makes the run a `FAIL`, and a check that could not decide (TLC
+missing, too, for a bundle that needs it; TLC stopped at
+`conform_tlc_timeout_s`; the trace the run recorded missing) makes it an
+`ERROR`; either is in the run's summary (`spec conform replication: ...`)
+and failure signature (the failing component `spec-conform:<bundle>`). A
+draft bundle's findings are reported and change nothing. A run from before
+the report carried the section is checked by its worker after the run
+instead, into the run's `conform.json`, with the same verdict.
 
 `summary.json` has:
 
@@ -767,16 +767,18 @@ has no counterexample). A failed gate outranks an error. See [Spec bridge](spec-
 Every key below is always present, and
 `replay` and `minimize` reject a report (or a reproducer) that lacks one,
 except the reading aids (`failed_components`, `reproduce`, `look_at`,
-`reproducer.command`, `reproducer.valkey_binary`), which older reports lack.
+`conform`, `reproducer.command`, `reproducer.valkey_binary`), which older
+reports lack.
 The keys come in reading order: the verdict and where to look first, then the
 data a tool reads. Tools should read keys by name, not by position.
 
 | Key | Contents |
 | --- | --- |
 | `status`, `summary` | The outcome and its one-line summary. First in the file. |
-| `failed_components` | Each component that did not pass: `component_id`, `role`, `use`, `status`, `crash`, `summary`, `evidence_total`, and the first five `evidence` items (`evidence_id`, `value`). Text longer than 120 characters is cut and ends with its length and SHA-256; the full text is in `outcome`. Empty for a pass. |
+| `failed_components` | Each component that did not pass: `component_id`, `role`, `use`, `status`, `crash`, `summary`, `evidence_total`, and the first five `evidence` items (`evidence_id`, `value`). Text longer than 120 characters is cut and ends with its length and SHA-256; the full text is in `outcome`. Empty for a pass. A spec bundle's conform check that failed the run is the component `spec-conform:<bundle>` (no `role` or `use`: it is not a plan component), its `summary` the violated claims. |
 | `reproduce` | The `valkey-fuzzer replay <report>` command that replays this run; `null` when the report was not written to a file. |
 | `look_at` | `report_folder`, `plan`, `component_files`, and where the full results are (`outcome.component_results`). |
+| `conform` | The run checked against each [spec bundle](spec-bridge.md#bundles) its plan names, by bundle ([`spec conform` in a run](spec-bridge.md#in-a-run)): `approved`, `status` (`pass`, `fail`, `error`, `skipped`, `unexercised`, `not_run`), `violated` (the claimed properties violated, and `transitions` for a step the model cannot take), `first_violated` (`claim`, the observed `state` that violates it, and that `step`), `tlc_seconds`, and the full check (`properties`, `transitions`, `states`, `actions`, `error` or `reason`, ...). `null` when the plan names no bundle. |
 | `generated_at` | UTC timestamp |
 | `scenario` | The scenario as run, including a `--valkey-binary` override. A replay records the scenario of the report it replayed with its own `--valkey-binary` applied (also under `provenance`), or `null` for a bare plan. |
 | `outcome` | The full outcome: `plan` (the execution plan), `status`, `summary`, `component_results`, `evidence`, `diagnostics`, `started_at`, `ended_at`, and `valkey_sha`. |

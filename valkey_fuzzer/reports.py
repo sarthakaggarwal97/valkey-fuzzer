@@ -266,6 +266,7 @@ def run_report(
     provenance: Optional[Mapping[str, Any]] = None,
     generated: Optional[Mapping[str, Any]] = None,
     report_path: Optional[str] = None,
+    conform: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     """One self-contained, replayable report for a single run.
 
@@ -274,12 +275,14 @@ def run_report(
     tuple; ``reproducer`` is the environment it ran in, with
     ``generated`` (seed, experiment, attempt, exclusions, boundary)
     for a generated scenario; ``provenance`` is how a replay
-    compared with the run it replayed (None for other runs).
+    compared with the run it replayed (None for other runs); ``conform`` is
+    the run checked against each spec bundle its plan names, by bundle
+    (:func:`~valkey_fuzzer.spec.conform.conform_run`; None when it names none).
 
     The keys come in reading order: ``status``, ``summary``, ``failed_components`` (what did not pass, values cut to
     :data:`MAX_VALUE_CHARS`), ``reproduce`` (the command that replays the run, given ``report_path``), ``look_at``
-    (where the files are), then the data a tool reads. ``reproducer`` also records the ``command`` and the
-    ``valkey_binary``.
+    (where the files are), ``conform``, then the data a tool reads. ``reproducer`` also records the ``command`` and
+    the ``valkey_binary``.
     """
 
     reproducer = provenance_reproducer(catalog, outcome.plan, outcome)
@@ -302,6 +305,7 @@ def run_report(
             "component_files": os.path.join(folder, "components") if folder else None,
             "full_results": "outcome.component_results",
         },
+        "conform": to_plain_data(conform) if conform is not None else None,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "scenario": plain_config(scenario) if scenario is not None else None,
         "outcome": outcome.to_data(),
