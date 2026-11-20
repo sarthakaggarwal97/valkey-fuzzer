@@ -8,9 +8,10 @@ from typing import Optional
 
 import valkey
 
+from ...deadlines import wait_for
 from ...protocols import RunContext
 from .models import LocalDeploymentError
-from .queries import query_or_none, query_replication, valkey_client, wait_until
+from .queries import query_or_none, query_replication, valkey_client
 from .topology import DeploymentConnection, TopologyNode
 
 logger = logging.getLogger(__name__)
@@ -80,21 +81,21 @@ def _first_synced(
     refused: dict[int, str] = {}
     deadline = time.monotonic() + timeout
 
-    def decided() -> bool:
+    def decided() -> tuple[bool, None]:
         refused.clear()
         for node in candidates:
             problem = replica_sync_problem(node, primary)
             if problem is None:
                 chosen.append(node)
-                return True
+                return True, None
             refused[node.port] = problem
         if candidates and time.monotonic() < deadline and not _responds_to_ping(primary):
             # Nothing syncs from a primary that is gone.
             refused[primary.port] = "the primary does not answer"
-            return True
-        return not candidates
+            return True, None
+        return not candidates, None
 
-    wait_until(decided, timeout=timeout, interval=SYNC_POLL_S, what="a synced replica", context=context)
+    wait_for(decided, timeout_s=timeout, interval_s=SYNC_POLL_S, reason="a synced replica", context=context)
     return (chosen[0], {}) if chosen else (None, dict(refused))
 
 
@@ -220,15 +221,15 @@ def wait_until_settled(
     logger.info("Waiting for the failover of shard %s to settle (timeout: %.2fs)", shard_id, timeout)
     unread: list[str] = []
 
-    def done() -> bool:
+    def done() -> tuple[bool, None]:
         unread.clear()
         try:
-            return _shard_settled(connection, shard_id, old_primary, stopped_ports, paused_ports)
+            return _shard_settled(connection, shard_id, old_primary, stopped_ports, paused_ports), None
         except (valkey.ValkeyError, OSError, LocalDeploymentError) as exc:
             unread.append(f"{type(exc).__name__}: {exc}")
-            return False
+            return False, None
 
-    if wait_until(done, timeout=timeout, interval=0.1, what=f"shard {shard_id} failover", context=context):
+    if wait_for(done, timeout_s=timeout, interval_s=0.1, reason=f"shard {shard_id} failover", context=context)[0]:
         return True
     if unread:
         raise LocalDeploymentError(f"shard {shard_id}'s failover could not be read at the end of the wait: {unread[0]}")

@@ -16,8 +16,9 @@ fuzzer that died is removed by ``valkey-fuzzer sweep`` (:mod:`valkey_fuzzer.host
 
 import errno
 import os
-import time
 from typing import Any, Optional
+
+from .deadlines import wait_for
 
 ROOT = "/sys/fs/cgroup"
 HARNESS = "vf-harness"
@@ -122,15 +123,15 @@ def _move(pid: int, directory: str) -> bool:
 def _empty(directory: str, into: str) -> None:
     """Move every process of cgroup ``directory`` into ``into`` until none is left."""
 
-    deadline = time.monotonic() + _MOVE_TIMEOUT_S
-    while True:
+    def moved() -> tuple[bool, list[int]]:
         pids = procs(directory)
-        if not pids:
-            return
-        if time.monotonic() > deadline:
-            raise CgroupError(f"cgroup {directory} still holds processes {pids[:5]} after {_MOVE_TIMEOUT_S:g}s")
         for pid in pids:
             _move(pid, directory=into)
+        return not pids, pids
+
+    done, pids = wait_for(moved, timeout_s=_MOVE_TIMEOUT_S, interval_s=0.05, reason=f"cgroup {directory} to empty")
+    if not done:
+        raise CgroupError(f"cgroup {directory} still holds processes {pids[:5]} after {_MOVE_TIMEOUT_S:g}s")
 
 
 def enter(delegated_dir: str, controllers: tuple[str, ...]) -> str:
@@ -144,18 +145,22 @@ def enter(delegated_dir: str, controllers: tuple[str, ...]) -> str:
     if not wanted:
         _empty(delegated_dir, harness)  # Our own process may still be in D, from before the fault.
         return harness
-    deadline = time.monotonic() + _MOVE_TIMEOUT_S
-    while True:
+
+    def enabled() -> tuple[bool, Optional[OSError]]:
         _empty(delegated_dir, harness)
         try:
             _write(os.path.join(delegated_dir, "cgroup.subtree_control"), " ".join(f"+{name}" for name in wanted))
-            return harness
         except OSError as exc:
-            # EBUSY: a process appeared in D meanwhile (a fork of one that moved); move it and try again.
-            if exc.errno != errno.EBUSY or time.monotonic() > deadline:
-                raise CgroupError(
-                    f"cannot enable {', '.join(wanted)} in {delegated_dir}/cgroup.subtree_control: {exc}"
-                ) from exc
+            # EBUSY: a process appeared in D meanwhile (a fork of one that moved); move it and try again at once.
+            return exc.errno != errno.EBUSY, exc
+        return True, None
+
+    _, error = wait_for(enabled, timeout_s=_MOVE_TIMEOUT_S, interval_s=0.0, reason="the controllers to enable")
+    if error is not None:
+        raise CgroupError(
+            f"cannot enable {', '.join(wanted)} in {delegated_dir}/cgroup.subtree_control: {error}"
+        ) from error
+    return harness
 
 
 def limit(delegated_dir: str, name: str, pid: int, limits: dict[str, str]) -> str:

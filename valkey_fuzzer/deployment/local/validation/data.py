@@ -12,7 +12,7 @@ from valkey.crc import key_slot
 
 from ..cluster_nodes import HASH_SLOTS
 from ..models import DeploymentMode
-from ..queries import valkey_client
+from ..queries import read_keys, valkey_client
 from ..topology import DeploymentConnection, TopologyNode
 from .config import DataConsistencyValidationConfig
 from .results import DataConsistencyValidation, DataInconsistency
@@ -177,7 +177,7 @@ def _check_test_keys(
     slot); ``source(key)`` names where its value was read."""
     keys = list(test_keys)
     try:
-        values = _read_keys(client, keys)
+        values = read_keys(client, keys, raise_on_error=False)
     except Exception as e:
         values = [e] * len(keys)
     for key, actual_value in zip(keys, values):
@@ -310,19 +310,6 @@ def check_data(
     )
 
 
-def _read_keys(client, keys: list[str], batch_size: int = 1000) -> list:
-    """GET every key over a non-transactional pipeline; a per-key error comes back as its exception."""
-    values: list = []
-    for start in range(0, len(keys), batch_size):
-        pipeline = client.pipeline(transaction=False)
-        for key in keys[start : start + batch_size]:
-            pipeline.get(key)
-        values.extend(pipeline.execute(raise_on_error=False))
-    if len(values) != len(keys):
-        raise RuntimeError(f"Pipelined read returned {len(values)} values for {len(keys)} keys")
-    return values
-
-
 def _check_replicas(
     snapshot: Snapshot,
     test_keys: Mapping[str, str],
@@ -363,10 +350,7 @@ def _check_replicas(
 
         try:
             with valkey_client(replica.host, replica.port, config.timeout) as client:
-                if cluster:
-                    # Cluster replicas refuse direct reads without READONLY, even for their own shard's keys.
-                    client.execute_command("READONLY")
-                values = _read_keys(client, replica_keys)
+                values = read_keys(client, replica_keys, readonly=cluster, raise_on_error=False)
         except Exception as e:
             values = [e] * len(replica_keys)
             logger.warning("Error reading test keys from replica %s: %s", replica_address, e)

@@ -18,10 +18,10 @@ from typing import Any, Callable, Optional
 
 import valkey
 
-from ....deadlines import WaitInterruptedError, pause
+from ....deadlines import WaitInterruptedError, pause, wait_for
 from ....protocols import RunContext
 from ..models import DeploymentMode, InstanceInfo
-from ..queries import query_replication, valkey_client, wait_until
+from ..queries import query_replication, valkey_client
 from ..topology import DeploymentConnection
 from .cluster_state import check_cluster_status, check_slot_coverage
 from .config import StateValidationConfig
@@ -555,13 +555,13 @@ class DeploymentStateCheck:
         if not syncing:
             return False
         logger.info("Replicas in a sync, waiting for them before validating again: %s", syncing)
-        if wait_until(
-            lambda: not syncing_replicas(self._connection),
-            timeout=deadline - time.monotonic(),
-            interval=SYNC_POLL_S,
-            what="replicas in a sync",
+        if wait_for(
+            lambda: (not syncing_replicas(self._connection), None),
+            timeout_s=deadline - time.monotonic(),
+            interval_s=SYNC_POLL_S,
+            reason="replicas in a sync",
             context=self._context,
-        ):
+        )[0]:
             return True
         logger.error("Replicas still in a sync after %.0fs: %s", SYNC_WAIT_S, syncing)
         return False

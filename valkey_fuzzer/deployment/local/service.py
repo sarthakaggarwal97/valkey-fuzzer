@@ -19,6 +19,7 @@ from valkey.cluster import ClusterNode, ValkeyCluster
 from valkey.retry import Retry
 
 from ..._data import to_plain_data
+from ...deadlines import wait_for
 from ...protocols import RunContext
 from . import clock_faults, syscall_faults
 from .cluster_nodes import slot_hash_tags
@@ -30,7 +31,7 @@ from .models import (
     LocalDeploymentError,
 )
 from .processes import ProcessManager, kill_server, process_output_path, resolve_binary_path
-from .queries import Replication, close_quietly, query_or_none, query_replication, valkey_client, wait_until
+from .queries import Replication, close_quietly, query_or_none, query_replication, valkey_client
 from .topology import DeploymentConnection
 from .validation.check import DeploymentStateCheck, adapt_validation_config, scenario_rng
 from .validation.config import validation_config_from_document
@@ -92,7 +93,12 @@ def load_all_slots(connection: DeploymentConnection, keys_per_slot: int, rng: ra
 
 @dataclass(frozen=True)
 class LocalInstance:
-    """Immutable, process-free description of one locally provisioned Valkey instance."""
+    """The plan of one locally provisioned Valkey instance, as components see it: frozen, process-free.
+
+    Not a copy of :class:`InstanceInfo` for its own sake: that record's ``role`` and ``primary_id`` follow
+    the deployment's recorded role changes (a restart starts an instance in its recorded role), while the oracles
+    and the state check reason from the planned roles (replicas per shard for WAIT, the expected role counts).
+    """
 
     instance_id: str
     role: str
@@ -340,13 +346,13 @@ class ValkeyDeploymentService:
             process = self._info(instance_id).process
             if process is None:
                 return True
-            return wait_until(
-                lambda: process.poll() is not None,
-                timeout=timeout,
-                interval=0.05,
-                what=f"{instance_id} to exit",
+            return wait_for(
+                lambda: (process.poll() is not None, None),
+                timeout_s=timeout,
+                interval_s=0.05,
+                reason=f"{instance_id} to exit",
                 context=self._context,
-            )
+            )[0]
 
     # -- Files and binaries -------------------------------------------------
 
@@ -435,17 +441,15 @@ class ValkeyDeploymentService:
 
     def primaries(self) -> list[str]:
         """Return live primary instance IDs, falling back to the planned layout."""
-        roles = self.roles()
-        if roles:
-            return [item.instance_id for item in self._instances if roles.get(item.instance_id) == "primary"]
-        return [item.instance_id for item in self._instances if item.role == "primary"]
+        return self._with_role("primary")
 
     def replicas(self) -> list[str]:
         """Return live replica instance IDs, falling back to the planned layout."""
-        roles = self.roles()
-        if roles:
-            return [item.instance_id for item in self._instances if roles.get(item.instance_id) == "replica"]
-        return [item.instance_id for item in self._instances if item.role == "replica"]
+        return self._with_role("replica")
+
+    def _with_role(self, role: str) -> list[str]:
+        roles = self.roles() or {item.instance_id: item.role for item in self._instances}
+        return [item.instance_id for item in self._instances if roles.get(item.instance_id) == role]
 
     def refresh_roles(self) -> dict[str, str]:
         """Record live roles so later restarts and validators use them."""

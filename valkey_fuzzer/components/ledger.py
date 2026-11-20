@@ -14,6 +14,7 @@ from valkey.crc import key_slot
 
 from valkey_fuzzer.declarations import Declarations
 from valkey_fuzzer.deployment.local.cluster_nodes import parse_cluster_nodes, parse_slot_ranges
+from valkey_fuzzer.deployment.local.queries import read_keys
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.results import ComponentStatus, Evidence, evidence_of, make_evidence, make_result
@@ -426,25 +427,11 @@ class _Reader:
                 self.client = handle.new_client(primaries[0], timeout=5.0)
         else:
             self.client = handle.new_client(instance_id, timeout=5.0)
-        # READONLY is per-connection, so it is sent inside each pipeline.
+        # A cluster replica answers for its shard's keys only after READONLY, sent once on this connection.
         self.readonly = self.cluster and instance_id is not None
 
     def read(self, keys: Sequence[str]) -> dict[str, Optional[str]]:
-        # Pipelined GETs rather than MGET: cluster nodes reject cross-slot MGET.
-        values = {}
-        for start in range(0, len(keys), 500):
-            chunk = list(keys[start : start + 500])
-            pipe = self.client.pipeline(transaction=False)
-            if self.readonly:
-                pipe.execute_command("READONLY")
-            for key in chunk:
-                pipe.get(key)
-            replies = pipe.execute()
-            if self.readonly:
-                replies = replies[1:]
-            for key, value in zip(chunk, replies):
-                values[key] = value
-        return values
+        return dict(zip(keys, read_keys(self.client, keys, readonly=self.readonly)))
 
     def close(self) -> None:
         close_quietly(self.client)

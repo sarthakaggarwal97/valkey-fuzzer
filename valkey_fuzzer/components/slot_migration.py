@@ -22,13 +22,12 @@ from valkey.cluster import key_slot
 from valkey_fuzzer._data import jsonable
 from valkey_fuzzer.clock import now
 from valkey_fuzzer.declarations import Declarations
-from valkey_fuzzer.deployment.local.queries import close_quietly
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
 from valkey_fuzzer.schema import ConfigField, ConfigSchema
 
 from .cluster import read_view
-from .instances import check_shard, deployment, send_command, send_to, shard_primary
+from .instances import ClientCache, check_shard, deployment, send_command, send_to, shard_primary
 from .polling import poll_until
 from .registration import component_registration
 from .schemas import ANY, FLAG, INTEGER, NUMBER, TEXT, declared, mapping_of, nullable
@@ -71,25 +70,23 @@ def job_of(jobs: Sequence[Mapping[str, Any]], operation: str, slot: int) -> Opti
 
 
 def read_jobs(
-    handle: Any, clients: dict[str, Any], instance_id: str, *, context: Any
+    handle: Any, clients: ClientCache, instance_id: str, *, context: Any
 ) -> tuple[Optional[list[dict[str, Any]]], Optional[str]]:
     """``instance_id``'s ``CLUSTER GETSLOTMIGRATIONS`` as :func:`jobs_of` records, through the client ``clients``
     holds for it (opened at its first read): ``(jobs, None)``, or ``(None, error)`` when it did not answer.
 
     A follow reads both endpoints every few milliseconds, so each keeps one
     client for as long as it is followed; the caller closes them
-    (:func:`~valkey_fuzzer.deployment.local.queries.close_quietly` on ``clients.values()``). A client whose
-    connection failed or was lost is closed and dropped, so the next read opens
-    a new one: the instance may have been killed and restarted meanwhile.
+    (``clients.close()``). A client whose connection failed or was lost is
+    dropped, so the next read opens a new one: the instance may have been
+    killed and restarted meanwhile.
     """
 
-    client = clients.get(instance_id)
-    if client is None:
-        client = clients[instance_id] = handle.new_client(instance_id, timeout=2.0)
+    client = clients.get(handle, instance_id)
     try:
         reply = send_command(client, ["CLUSTER", "GETSLOTMIGRATIONS"], timeout_s=2.0, context=context)
     except (valkey.exceptions.ConnectionError, valkey.exceptions.TimeoutError, OSError) as exc:
-        close_quietly(clients.pop(instance_id, None))
+        clients.drop(instance_id)
         return None, f"{type(exc).__name__}: {exc}"
     except valkey.exceptions.ResponseError as exc:
         return None, f"{type(exc).__name__}: {exc}"
@@ -197,7 +194,7 @@ class MigrateSlotsAction:
         )
 
         # The source's client, held for the whole wait (one read per poll_interval_s).
-        clients: dict[str, Any] = {}
+        clients = ClientCache(timeout=2.0)
 
         def ended() -> tuple[bool, Any]:
             jobs, error = read_jobs(handle, clients, source, context=context)
@@ -211,7 +208,7 @@ class MigrateSlotsAction:
                 ended, timeout_s=config["timeout_s"], interval_s=config["poll_interval_s"], context=context
             )
         finally:
-            close_quietly(*clients.values())
+            clients.close()
         record["ended_at"] = now()
         record["job"] = last if isinstance(last, dict) else None
         record["state"] = str(last.get("state", "")).lower() if isinstance(last, dict) else None

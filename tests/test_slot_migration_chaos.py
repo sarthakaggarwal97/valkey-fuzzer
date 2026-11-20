@@ -23,6 +23,7 @@ from tests.valkey_experiments_support import (
 )
 from valkey_fuzzer import runner
 from valkey_fuzzer.components import component_registrations, slot_migration
+from valkey_fuzzer.components.instances import ClientCache
 from valkey_fuzzer.components.slot_migration import hash_tag, job_of, jobs_of, migration_endpoints, read_jobs
 from valkey_fuzzer.components.slot_migration_chaos import SlotMigrationChaosAction, phase_of
 from valkey_fuzzer.components.wave_operations import MIGRATION, check_waves
@@ -419,18 +420,22 @@ def test_without_a_shard_a_slot_goes_round_the_shards():
 def test_the_jobs_are_read_through_one_held_client_which_is_replaced_once_it_failed():
     handle = FakeMigrationCluster()
     context = SimpleNamespace(deadline=None, sleep=lambda seconds: True)
-    clients = {}
+    clients = ClientCache(timeout=2.0)
     assert read_jobs(handle, clients, "valkey-0", context=context) == ([], None)
     assert read_jobs(handle, clients, "valkey-0", context=context) == ([], None)
-    assert handle.clients == ["valkey-0"] and list(clients) == ["valkey-0"]
+    assert handle.clients == ["valkey-0"] and handle.closed == []
     # The instance died: the read says so, and its client is closed and dropped.
     handle.alive["valkey-0"] = False
     assert read_jobs(handle, clients, "valkey-0", context=context) == (None, "ConnectionError: valkey-0 is down")
-    assert clients == {} and handle.closed == ["valkey-0"]
+    assert handle.closed == ["valkey-0"]
     # Back (restarted): the next read opens a new client.
     handle.alive["valkey-0"] = True
     assert read_jobs(handle, clients, "valkey-0", context=context) == ([], None)
     assert handle.clients == ["valkey-0", "valkey-0"]
+    # Closing the cache closes what it still holds, once.
+    clients.close()
+    clients.close()
+    assert handle.closed == ["valkey-0", "valkey-0"]
 
 
 # ---------------------------------------------------------------------------

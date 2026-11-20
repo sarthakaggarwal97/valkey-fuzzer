@@ -288,6 +288,30 @@ def unreachable_instances(handle: Any, stopped: Iterable[str] = ()) -> list[str]
     ]
 
 
+class ClientCache:
+    """One client per instance, opened (``handle.new_client`` with ``timeout``) at its first :meth:`get` and held
+    until :meth:`drop` or :meth:`close`: a reader that polls an instance every few milliseconds does not connect
+    each time. The reader drops a client whose read failed, so the next ``get`` opens a new one: the instance may
+    have been killed and restarted meanwhile."""
+
+    def __init__(self, timeout: float):
+        self._timeout = timeout
+        self._clients: dict[str, Any] = {}
+
+    def get(self, handle: Any, instance_id: str) -> Any:
+        client = self._clients.get(instance_id)
+        if client is None:
+            client = self._clients[instance_id] = handle.new_client(instance_id, timeout=self._timeout)
+        return client
+
+    def drop(self, instance_id: str) -> None:
+        close_quietly(self._clients.pop(instance_id, None))
+
+    def close(self) -> None:
+        close_quietly(*self._clients.values())
+        self._clients.clear()
+
+
 def _connect(client: Any) -> None:
     """Open ``client``'s connection, sending nothing: an error here says the server was never reached."""
 

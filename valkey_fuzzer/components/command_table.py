@@ -40,7 +40,7 @@ from valkey_fuzzer.schema import ConfigError, ConfigField, plain_config
 
 from .command_sequence import open_raw_connection
 from .instances import deployment, is_cluster
-from .polling import StoppableThread
+from .polling import StoppableThread, paced_loop, stop_or_error
 from .registration import component_registration
 from .reply_schemas import mismatch, reply_schemas
 from .schemas import INTEGER, LIST, TEXT, declared, mapping_of
@@ -334,17 +334,13 @@ class CommandTableWorkload:
         interval = 1.0 / config["rate"]
 
         def loop(stop_event) -> None:
-            next_at = time.monotonic()
-            while not stop_event.is_set():
+            def step() -> bool:
                 tag, commands = generator.next()
                 if not self._run(tag if self._cluster else 0, protocols.choice((2, 3)), commands):
                     stop_event.wait(0.05)
-                next_at += interval
-                delay = next_at - time.monotonic()
-                if delay > 0:
-                    stop_event.wait(delay)
-                else:
-                    next_at = time.monotonic()
+                return True
+
+            paced_loop(stop_event, interval, step)
 
         self._thread = StoppableThread(f"workload-{spec.id}", loop)
         self._thread.start()
@@ -464,12 +460,9 @@ class CommandTableWorkload:
             self._forget(instance_id, resp)
 
     def stop(self, context: Any, spec: ComponentSpec):
-        problem = None
-        if self._thread is not None:
-            problem = self._thread.stop(timeout=max(30.0, self._config["op_timeout_s"] * 3))
-            if self._thread.is_alive():
-                # A worker still running owns its connections and counts: nothing of them is read.
-                return make_result(spec, ComponentStatus.ERROR, f"workload {problem}")
+        problem, error = stop_or_error(spec, max(30.0, self._config["op_timeout_s"] * 3), self._thread)
+        if error is not None:
+            return error
         self._close()
         summary = {
             "prefix": self._prefix(spec),

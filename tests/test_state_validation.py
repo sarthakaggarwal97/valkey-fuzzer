@@ -328,6 +328,24 @@ def test_parse_replication_reads_the_replication_id_failover_state_and_replica_e
     assert (replica.replication_id, replica.failover_state, replica.replicas) == (None, None, ())
 
 
+def test_read_keys_pipelines_a_thousand_gets_at_a_time_after_one_readonly():
+    keys = [f"k{index}" for index in range(2500)]
+    client = fake_client(read=lambda key: key.upper())
+    pipeline = client.pipeline.return_value
+
+    assert queries.read_keys(client, keys, readonly=True, raise_on_error=False) == [key.upper() for key in keys]
+    client.execute_command.assert_called_once_with("READONLY")
+    assert pipeline.execute.call_count == 3 and pipeline.get.call_count == 2500, "1000, 1000 and 500 GETs"
+    assert pipeline.execute.call_args.kwargs == {"raise_on_error": False}
+    # Without readonly nothing precedes the pipelines; a pipeline answering short is an error, not a short list.
+    primary = fake_client(read=_KEYS.get)
+    assert queries.read_keys(primary, sorted(_KEYS)) == [_KEYS[key] for key in sorted(_KEYS)]
+    primary.execute_command.assert_not_called()
+    pipeline.execute.side_effect = lambda raise_on_error=True: []
+    with pytest.raises(RuntimeError, match="returned 0 values for 3 keys"):
+        queries.read_keys(client, ["a", "b", "c"])
+
+
 def test_the_exported_split_slots_finds_both_kinds_of_split_and_ignores_a_failed_owner():
     # In x's view a (failed) and c both own 0-9 and c and d both own 20-29; y and z each claim 40-49 as their own.
     x = parse_cluster_nodes(
