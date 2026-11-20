@@ -1,9 +1,21 @@
 # Implementation evidence for model.tla: the log lines that show the model's
-# replication steps, and the faults that crash a node. The replication
-# experiments publish the lines with the valkey.replication-steps fragment
-# (valkey.observer.log-trigger, spec: replication). The claims compare data
-# sets, which a run does not observe in the model's terms, so `spec conform`
-# checks no property of this bundle: it reports which steps real runs took.
+# replication steps, the faults that crash a node, and the samples that show
+# each node's replication IDs, offsets and data set. The replication
+# experiments publish the lines and record the samples with the
+# valkey.replication-steps fragment (valkey.observer.log-trigger and
+# valkey.observer.trace, spec: replication). `spec conform` checks
+# SameOffsetSameData on the sampled states; the two claims about data sets as
+# sequences stay model only (claims.yaml).
+sample:
+  # valkey.observer.trace (spec: replication) reads INFO replication and DEBUG
+  # DIGEST from every node in each round, in one MULTI/EXEC, so a sample's
+  # offset and digest are of one instant. Rounds follow the replication steps
+  # and the crashes, and the observer's interval_s sets the period: DEBUG
+  # DIGEST walks the data set (about 3 us a key, during which the node serves
+  # nothing), so the valkey.replication-steps fragment samples once a second.
+  info: [replication]
+  digest: true
+  on: ['replication.*', '*.injected', '*.instance-killed']
 evidence:
   partial:
     event: replication.partial.continued
@@ -96,11 +108,60 @@ evidence:
     action: Crash
     updates:
       - {incr: crashes}
+  # A sample of one node: its role, replication IDs, offsets and backlog from
+  # INFO replication, and a DEBUG DIGEST of its data set, which stands for the
+  # model's data (equal digests, equal data sets). Valkey writes forty zeros
+  # for no secondary ID and -1 for no second offset, where the model has 0.
+  # The link stays with the log lines: INFO's up and down are coarser than the
+  # model's dual-channel states, and a sample's "down" during a sync is no
+  # disagreement with them.
+  sample-primary:
+    sample: true
+    where: {info.role: master}
+    fields:
+      node: node
+      offset: {type: int, path: info.master_repl_offset}
+      replid: {type: str, path: info.master_replid}
+      replid2: {type: str, path: info.master_replid2, map: {"0000000000000000000000000000000000000000": 0}}
+      second_offset: {type: int, path: info.second_repl_offset, map: {-1: 0}}
+      backlog: {type: int, path: info.repl_backlog_first_byte_offset}
+      digest: str
+    updates:
+      - {set: role, key: $node@Nodes, value: primary}
+      - {set: off, key: $node@Nodes, value: $offset}
+      - {set: replid, key: $node@Nodes, value: $replid}
+      - {set: replid2, key: $node@Nodes, value: $replid2}
+      - {set: secondOff, key: $node@Nodes, value: $second_offset}
+      - {set: backlog, key: $node@Nodes, value: $backlog}
+      - {set: data, key: $node@Nodes, value: $digest}
+  sample-replica:
+    # A replica is sampled while it streams (master_link_status up), when the
+    # model has it claim its ID. In a full sync, or loading its RDB file after
+    # a restart, it reports its old ID and offset over a data set being
+    # replaced; its last streaming sample stands until the next.
+    sample: true
+    where: {info.role: slave, info.master_link_status: up}
+    fields:
+      node: node
+      offset: {type: int, path: info.master_repl_offset}
+      replid: {type: str, path: info.master_replid}
+      replid2: {type: str, path: info.master_replid2, map: {"0000000000000000000000000000000000000000": 0}}
+      second_offset: {type: int, path: info.second_repl_offset, map: {-1: 0}}
+      backlog: {type: int, path: info.repl_backlog_first_byte_offset}
+      digest: str
+    updates:
+      - {set: role, key: $node@Nodes, value: replica}
+      - {set: off, key: $node@Nodes, value: $offset}
+      - {set: replid, key: $node@Nodes, value: $replid}
+      - {set: replid2, key: $node@Nodes, value: $replid2}
+      - {set: secondOff, key: $node@Nodes, value: $second_offset}
+      - {set: backlog, key: $node@Nodes, value: $backlog}
+      - {set: data, key: $node@Nodes, value: $digest}
 
 unobservable:
-  Write: Client writes are not logged; INFO offsets in samples count them.
-  Stream: Applying the stream is not logged.
-  Trim: Trimming the backlog is not logged.
+  Write: Client writes are not logged; the samples' offsets and digests show their effect.
+  Stream: Applying the stream is not logged; the samples' offsets and digests show its effect.
+  Trim: Trimming the backlog is not logged; the samples' repl_backlog_first_byte_offset shows its effect.
   DualContinueEarly: >-
     Valkey logs +CONTINUE on the main channel ("Primary accepted a Partial
     Resynchronization") and the end of the load ("Done loading RDB"); which
@@ -115,6 +176,8 @@ processes:
   Nodes:
     prefix: node
     members:
+      - {evidence: sample-primary, field: node}
+      - {evidence: sample-replica, field: node}
       - {evidence: partial, field: instance_id}
       - {evidence: full, field: instance_id}
       - {evidence: dual, field: instance_id}
@@ -129,30 +192,32 @@ state:
   link: {over: [Nodes], init: unknown}
   switches: {init: 0}
   crashes: {init: 0}
-  primaryOf: {hidden: '[n \in Nodes |-> n]', why: "The primary a replica follows is not in the mapped lines."}
-  cached: {hidden: '[n \in Nodes |-> FALSE]', why: "A cached primary is not logged."}
-  data: {hidden: '[n \in Nodes |-> <<>>]', why: "A run does not observe which writes a node holds."}
-  off: {hidden: '[n \in Nodes |-> 0]', why: "Offsets are in INFO samples, which these lines do not carry."}
-  replid: {hidden: '[n \in Nodes |-> 0]', why: "The model numbers replication IDs; Valkey's are random hex."}
-  replid2: {hidden: '[n \in Nodes |-> 0]', why: "As replid."}
-  secondOff: {hidden: '[n \in Nodes |-> 0]', why: "As off."}
-  backlog: {hidden: '[n \in Nodes |-> 0]', why: "The backlog's range is in INFO samples only."}
+  # From the samples. Valkey's IDs are random hex where the model numbers
+  # them, and a digest stands for the data set; both are compared for
+  # equality only. A node never sampled keeps these, so it claims nothing.
+  off: {over: [Nodes], init: 0}
+  replid: {over: [Nodes], init: ""}
+  replid2: {over: [Nodes], init: 0}
+  secondOff: {over: [Nodes], init: 0}
+  backlog: {over: [Nodes], init: 0}
+  data: {over: [Nodes], init: ""}
+  primaryOf: {hidden: '[n \in Nodes |-> n]', why: "INFO names the primary by host and port, not by instance; nothing conformed reads it."}
+  cached: {hidden: '[n \in Nodes |-> FALSE]', why: "A cached primary is not in INFO or the logs; a replica with its link down claims nothing, which checks less, never wrongly."}
   rdb: {hidden: '[n \in Nodes |-> [data |-> <<>>, id |-> 0, off |-> 0]]', why: "An RDB file's contents are not observed."}
   snap: {hidden: '[n \in Nodes |-> [data |-> <<>>, id |-> 0, off |-> 0]]', why: "A snapshot's contents are not observed."}
-  nextId: {hidden: '0', why: "As replid."}
-  writes: {hidden: '0', why: "As data."}
+  nextId: {hidden: '0', why: "The model numbers replication IDs; Valkey's are random hex."}
+  writes: {hidden: '0', why: "Client writes are not counted; the offsets stand for them."}
 
 constants:
-  MaxWrites: {value: 2, why: "No property is checked on observed states; the model's bound."}
+  MaxWrites: {value: 2, why: "No conformed property reads it; the model's bound."}
   MaxIds: {value: 5, why: "As MaxWrites."}
   MaxCrashes: {max_of: [crashes], at_least: 1}
   MaxSwitches: {max_of: [switches], at_least: 1}
-  # The claims hold under single-channel replication. The mapped lines carry no
-  # config, so a run cannot say whether dual channel was on; FALSE is the
-  # claims' condition, so every run is checked as claimed (as cluster-election
-  # pins FlushBeforeSave), and a dual-channel run that showed fuzzer issue
-  # #133 would fail once a property is conformed, as it should.
-  DualChannel: {value: "FALSE", why: "The claims' condition; the mapped lines do not say whether dual channel was on."}
+  # The claims hold over one channel. The trace header records each node's
+  # dual-channel-replication-enabled (valkey.observer.trace config_keys), so a
+  # dual-channel run is outside the claim: a violation there (fuzzer issue
+  # #133) is reported, not held against the run.
+  DualChannel: {config: dual-channel-replication-enabled, equals: "yes"}
   AdoptOnLoad: {value: "FALSE", why: "Valkey as it is (fuzzer issue #133)."}
 
 scenario:

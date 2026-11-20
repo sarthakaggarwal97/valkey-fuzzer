@@ -122,7 +122,7 @@ a retry succeeded makes the fault, and the run, `ERROR`.
 | [`valkey.observer.info`](#valkeyobserverinfo) | observer | any | samples INFO and checks expectations |
 | [`valkey.observer.log`](#valkeyobserverlog) | observer | any | scans instance logs |
 | [`valkey.observer.log-trigger`](#valkeyobserverlog-trigger) | observer | any | turns log lines into events |
-| [`valkey.observer.cluster-trace`](#valkeyobservercluster-trace) | observer | cluster | records events and epochs as JSONL |
+| [`valkey.observer.trace`](#valkeyobservertrace) | observer | any | records events and per-node state samples as JSONL |
 | [`valkey.oracle.liveness`](#valkeyoracleliveness) | oracle | any | instances alive, no crash reports or forbidden log lines |
 | [`valkey.oracle.error-counters`](#valkeyoracleerror-counters) | oracle | any | no error counter in INFO rose without a cause in the scenario |
 | [`valkey.oracle.quiet-end`](#valkeyoraclequiet-end) | oracle | any | every instance comes to rest: no blocked client or child process, links up, not spinning |
@@ -172,10 +172,10 @@ schemas.
 | `valkey.fault.network-partition` | `<id>.healed`<br>`<id>.injected`<br>`<id>.partitioned` | `valkey.fault.injected` | `network.partition` |
 | `valkey.fault.process-signal` | `<id>.injected`<br>`<id>.recovered` | `valkey.fault.injected`<br>`valkey.instances.expected-down` | `process.paused`<br>`process.stopped` |
 | `valkey.fault.syscall` | `<id>.injected`<br>`<id>.recovered` | `valkey.fault.injected`<br>`valkey.instances.expected-down` | `process.stopped`<br>`syscall.rule` |
-| `valkey.observer.cluster-trace` | none | `valkey.cluster.trace.recorded` | none |
 | `valkey.observer.info` | none | `{config.expectations[].evidence_id}` | none |
 | `valkey.observer.log` | none | `valkey.log.forbidden-match`<br>`{config.expect[].evidence_id}` | none |
 | `valkey.observer.log-trigger` | `{config.rules[].publish}` | `{config.rules[].evidence_id}` | none |
+| `valkey.observer.trace` | none | `valkey.trace.recorded` | none |
 | `valkey.oracle.binary-check` | none | `valkey.binary.verified` | none |
 | `valkey.oracle.cluster-election-safety` | none | `valkey.cluster.election-safety.verified`<br>`valkey.cluster.vote.unsaved-at-crash` | none |
 | `valkey.oracle.command-metadata` | none | `valkey.command.metadata` | `process.private-server` |
@@ -1396,29 +1396,46 @@ Evidence: one item per rule with `evidence_id` that was met. Events: the
 poll failed), lines may have been missed: if a rule never matched (its
 evidence or its event may be in those lines), the observer returns `ERROR`.
 
-### `valkey.observer.cluster-trace`
+### `valkey.observer.trace`
 
-Cluster mode. Writes the run's events and every node's epochs to
-`trace.jsonl`: a `header` record (the node map and `config_keys`), an `event`
-record per event, and `observation` records (each node's `currentEpoch`,
-`configEpoch`, role, slots, the primaries it knows, and the `vars` line of its
-`nodes.conf`). Sampling rounds run periodically and shortly after events, on
-a background thread, so the observer never delays a fault.
+Writes the run's events and per-node samples of the servers' state to
+`trace.jsonl`: a `header` record (the node map, `config_keys`, and what is
+sampled), an `event` record per event, and `observation` records, one per
+node per sampling round. What a round reads from a node is what the `spec`
+bundle's `mapping.yaml` asks for in its `sample:` section ([Samples](spec-bridge.md#samples)):
+INFO sections (`info`, as text fields), `DEBUG DIGEST` (`digest`) and
+`DEBUG DIGEST-VALUE` of named keys (`digest_values`), the node's cluster view
+(`current_epoch`, `config_epoch`, role, slots, the primaries it knows),
+`CLUSTER GETSLOTMIGRATIONS` (`slot_migrations`: the jobs by kind, `export`,
+`import`, and a replica's `tracking`, each in creation order), and the `vars`
+line of its `nodes.conf` (`disk`, read from the file, so a killed node still
+has one).
+A node's INFO, digests and slot migrations are read in one `MULTI`/`EXEC`,
+so the fields of one sample are of one instant. Without a `spec`, a cluster
+deployment is sampled for its view and `nodes.conf`, and a standalone one
+records events only. A node that does not answer gets an `error` record.
+Sampling rounds run periodically and shortly after events (every event, or
+those the section's `on` globs name), on a background thread, so the
+observer never delays a fault. A sample that fails at the start (`DEBUG`
+refused, say) is an `ERROR`: every node is up then, and the claims that read
+the sample would be checked on nothing. A bundle that samples `DEBUG DIGEST`
+needs `enable-debug-command yes` in the deployment's `server_config`; the
+scenario fails to compile without it.
 [`valkey-fuzzer spec conform`](spec-bridge.md#spec-conform) reads the file.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `nodes` | selector | `all` | |
-| `interval_s` | number, 0 to 3600 | 0.25 | 0 turns periodic rounds off. |
+| `interval_s` | number, 0 to 3600 | 0.25 | The sampling period; 0 turns periodic rounds off. |
 | `sample_on_events` | boolean | `true` | Also sample after events. |
 | `event_delay_s` | number, 0 to 60 | 0.05 | How long after an event its round starts. |
 | `max_rounds` | integer, 1 to 1,000,000 | 20,000 | |
 | `sample_timeout_s` | number, 0.05 to 30 | 0.5 | Client timeout per sample. |
 | `config_keys` | list | `[cluster-config-save-behavior, cluster-node-timeout]` | Configs recorded per node in the header; a node whose configs could not be read gets `config_error` instead. |
-| `spec` | string or null | `null` | A [spec bundle](spec-bridge.md); the header records its mapping's SHA-256 (and the plan's inputs), so `spec conform` can flag mapping drift. |
+| `spec` | string or null | `null` | A [spec bundle](spec-bridge.md); its mapping's `sample:` section says what to sample, and the header records the mapping's SHA-256 (and the plan's inputs), so `spec conform` can flag mapping drift. |
 | `spec_sha256` | string or null | `null` | Filled in when the scenario compiles: the SHA-256 of `spec`'s `mapping.yaml`, so the plan pins the mapping it was compiled against. A run whose mapping has another digest stops with `ERROR`; compile the scenario again. |
 
-Evidence: `valkey.cluster.trace.recorded` (the path and record counts).
+Evidence: `valkey.trace.recorded` (the path and record counts).
 
 ## Oracles
 

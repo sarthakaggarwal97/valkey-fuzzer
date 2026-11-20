@@ -212,7 +212,7 @@ def test_cluster_election_with_sync_saves_every_vote_before_it_leaves_and_confor
     killed = evidence(outcome, "valkey.fault.injected")
     assert killed["disk_vars_at_kill"] is not None and killed["trigger_payload"]["candidate"]
     bundle = load_bundle("cluster-election")
-    (run,) = collect_runs([evidence(outcome, "valkey.cluster.trace.recorded")["path"]])
+    (run,) = collect_runs([evidence(outcome, "valkey.trace.recorded")["path"]])
     observed = ObservedRun(bundle.mapping, run)
     observed.replay()
     assert observed.constants()["PersistBeforeAck"] == "TRUE"

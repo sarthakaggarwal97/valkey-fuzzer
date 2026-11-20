@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+### Added: the trace carries data samples, and `spec conform` checks a replication data claim on them
+
+- `valkey.observer.trace` (was `valkey.observer.cluster-trace`, cluster only; the evidence is
+  `valkey.trace.recorded`) runs on any deployment and samples from every node what the spec bundle's
+  `mapping.yaml` asks for in its new `sample:` section: INFO sections (`info`), `DEBUG DIGEST` (`digest`) and
+  `DEBUG DIGEST-VALUE` of named keys (`digest_keys`), the cluster view (`cluster`), `CLUSTER GETSLOTMIGRATIONS`
+  (`slot_migrations`, the jobs by kind), and the `vars` line of `nodes.conf` read from the file (`nodes_conf`), after
+  the events the section's `on` globs name and on `interval_s`. A node's INFO, digests and slot migrations are read
+  in one `MULTI`/`EXEC`. The header records what was sampled (`samples`). A sample that fails at the start is an
+  `ERROR`; a bundle that samples `DEBUG DIGEST` needs `enable-debug-command yes`, checked when the scenario
+  compiles. Without a bundle, a cluster deployment is sampled as before (the view and `nodes.conf`).
+- A mapping field can carry a `map` that renames captured values (`{master: primary}`); a sample evidence reads
+  only what the `sample:` section records, checked when the bundle loads.
+- `spec conform` reads a sample as an observed state, not a step. A sample that sets a variable to another value
+  than the events gave it is reported in the run's `sample_mismatches` (variable, key, inferred and sampled value),
+  not overwritten in silence.
+- `formal/replication`: `SameOffsetSameData`, `OneHistoryPerId` at equal offsets (two nodes that could continue one
+  replication ID at one offset hold one data set), with the control `write_without_offset`; `conform: true`, checked
+  on the trace's `INFO replication` and `DEBUG DIGEST` samples, which now observe `role`, `off`, `replid`, `replid2`,
+  `secondOff`, `backlog` and `data`. `DualChannel` comes from the trace header's
+  `dual-channel-replication-enabled`, so a dual-channel run is outside the claim instead of pinned inside it. The
+  two claims over data sets as sequences stay model only, with the reason. The `valkey.replication-steps` fragment
+  adds the `replication-trace` observer (once a second: `DEBUG DIGEST` costs a node about 3 µs a key) and enables
+  `DEBUG`; its three experiments list it.
+- `formal/cluster-election` declares `sample: {cluster, nodes_conf}`; `formal/slot-migration` declares
+  `sample: {cluster, slot_migrations}` and observes `exp`, `imp` and `track` from the jobs' states.
+- `docs/spec-bridge.md` has a [Samples](docs/spec-bridge.md#samples) section: semantics, cost, and which variables
+  each bundle observes from samples.
 ### Fixed: the minimizer's verdicts, oracle edge cases, write retries, provenance pins, and small engine checks (PR-H2)
 
 - `minimize` runs the recorded scenario before any reduction and exits `2` when it does not fail the same way

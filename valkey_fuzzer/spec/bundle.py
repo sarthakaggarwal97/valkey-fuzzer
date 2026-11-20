@@ -314,6 +314,8 @@ class FieldSpec:
     path: str
     type: str
     default: Any = ABSENT
+    # Captured values replaced by the model's names (``master`` -> ``primary``); a value not listed stays.
+    map: Mapping[Any, Any] = field(default_factory=dict)
 
     @property
     def optional(self) -> bool:
@@ -400,6 +402,39 @@ class StateVar:
 
 
 @dataclass(frozen=True)
+class SampleSpec:
+    """``sample:``: what a trace observer (``valkey.observer.trace``) reads from every node in each sampling round,
+    as the ``sample: true`` evidence finds it in an observation record. A bundle declares what it needs and nothing
+    more; the observer skips the cluster parts on a standalone deployment."""
+
+    info: tuple[str, ...]  # INFO sections, their fields as text under ``info``
+    digest: bool  # DEBUG DIGEST, under ``digest``
+    digest_keys: tuple[str, ...]  # DEBUG DIGEST-VALUE of each key, under ``digest_values.<key>``
+    cluster: bool  # CLUSTER INFO and CLUSTER NODES: the node's view (``current_epoch``, ``role``, ``slots``, ...)
+    slot_migrations: bool  # CLUSTER GETSLOTMIGRATIONS under ``slot_migrations``, the jobs by kind
+    nodes_conf: bool  # the ``vars`` line of nodes.conf under ``disk``, read from the file, also when the node is down
+    on: tuple[str, ...]  # event name globs after which a round runs; empty: after every event
+
+    def collects(self) -> bool:
+        return bool(
+            self.info or self.digest or self.digest_keys or self.cluster or self.slot_migrations or self.nodes_conf
+        )
+
+
+# The top segment of a sample field's path, and the part of ``sample:`` that records it (None: every record).
+_CLUSTER_VIEW_FIELDS = ("node_id", "current_epoch", "config_epoch", "role", "primary_id", "slots", "state", "primaries")
+_SAMPLE_PATHS = {
+    **dict.fromkeys(("node", "round", "reason", "t"), None),
+    **dict.fromkeys(_CLUSTER_VIEW_FIELDS, "cluster"),
+    "info": "info",
+    "digest": "digest",
+    "digest_values": "digest_keys",
+    "slot_migrations": "slot_migrations",
+    "disk": "nodes_conf",
+}
+
+
+@dataclass(frozen=True)
 class SpecMapping:
     """``mapping.yaml``: the single place a model's implementation evidence is defined."""
 
@@ -411,6 +446,7 @@ class SpecMapping:
     state: dict[str, StateVar]
     constants: dict[str, dict[str, Any]]
     scenario: Optional[dict[str, Any]]
+    sample: Optional[SampleSpec] = None
 
     def log_patterns(self) -> dict[str, str]:
         """``{event name: log pattern}`` for every evidence published from a log line."""
@@ -463,7 +499,7 @@ def field_refs(spec: Any) -> list[tuple[str, Optional[str]]]:
     return []
 
 
-_FIELD_SPEC = _record({"type": ConfigField(str, choices=FIELD_TYPES)}, {"path": str, "default": object})
+_FIELD_SPEC = _record({"type": ConfigField(str, choices=FIELD_TYPES)}, {"path": str, "default": object, "map": dict})
 _UPDATE = _record({}, {**dict.fromkeys(UPDATE_OPS, str), "key": object, "value": object})
 _EVIDENCE = _record(
     {"fields": _named((str, dict))},
@@ -505,9 +541,21 @@ _SCENARIO = _record(
         "variants": _record({}, {"occurrence_shift": _list(int), "inputs": _named(list)}),
     },
 )
+_SAMPLE = _record(
+    {},
+    {
+        "info": _TEXTS,
+        "digest": bool,
+        "digest_keys": _TEXTS,
+        "cluster": bool,
+        "slot_migrations": bool,
+        "nodes_conf": bool,
+        "on": _TEXTS,
+    },
+)
 _MAPPING = _record(
     {"evidence": _named(_EVIDENCE), "state": _named(dict), "constants": _named(_CONSTANT)},
-    {"unobservable": _named(str), "processes": _named(_PROCESS), "scenario": _SCENARIO},
+    {"unobservable": _named(str), "processes": _named(_PROCESS), "scenario": _SCENARIO, "sample": _SAMPLE},
 )
 
 
@@ -515,8 +563,29 @@ def _parse_fields(value: Mapping[str, Any], where: str) -> dict[str, FieldSpec]:
     fields = {}
     for name, spec in value.items():
         spec = _resolve(_FIELD_SPEC, {"type": spec} if isinstance(spec, str) else spec, f"{where}.{name}")
-        fields[name] = FieldSpec(name, spec.get("path", name), spec["type"], spec.get("default", ABSENT))
+        fields[name] = FieldSpec(
+            name,
+            spec.get("path", name),
+            spec["type"],
+            spec.get("default", ABSENT),
+            MappingProxyType(dict(spec.get("map") or {})),
+        )
     return fields
+
+
+def _parse_sample(document: Mapping[str, Any], where: str) -> SampleSpec:
+    sample = SampleSpec(
+        info=tuple(_texts(document.get("info") or [], f"{where}.info")),
+        digest=bool(document.get("digest")),
+        digest_keys=tuple(_texts(document.get("digest_keys") or [], f"{where}.digest_keys")),
+        cluster=bool(document.get("cluster")),
+        slot_migrations=bool(document.get("slot_migrations")),
+        nodes_conf=bool(document.get("nodes_conf")),
+        on=tuple(_texts(document.get("on") or [], f"{where}.on")),
+    )
+    if not sample.collects():
+        raise SpecBundleError(f"{where} must say what the trace observer records (info, digest, cluster, ...)")
+    return sample
 
 
 def _parse_update(value: Any, where: str, state_names: set[str]) -> Update:
@@ -580,6 +649,7 @@ def parse_mapping(document: Mapping[str, Any], model: tla.ModelSymbols, *, path:
             raise SpecBundleError(f"{where}.state.{var.name}.over names unknown process sets {sorted(unknown)}")
 
     evidence: dict[str, Evidence] = {}
+    sample = _parse_sample(document["sample"], f"{where}.sample") if document.get("sample") is not None else None
     for name, spec in document["evidence"].items():
         at = f"{where}.evidence.{name}"
         if ("event" in spec) == bool(spec.get("sample")):
@@ -608,6 +678,8 @@ def parse_mapping(document: Mapping[str, Any], model: tla.ModelSymbols, *, path:
             ]
             if missing:
                 raise SpecBundleError(f"{at}.fields {missing} are not captured by the log pattern")
+        if spec.get("sample"):
+            _check_sample_fields(at, fields, spec.get("where") or {}, sample)
         action = spec.get("action")
         if action is not None and action not in defined:
             raise SpecBundleError(f"{at}.action: {action!r} is not defined in {MODEL_FILE}")
@@ -710,7 +782,25 @@ def parse_mapping(document: Mapping[str, Any], model: tla.ModelSymbols, *, path:
         state=state,
         constants=constant_specs,
         scenario=scenario,
+        sample=sample,
     )
+
+
+def _check_sample_fields(
+    at: str, fields: Mapping[str, FieldSpec], where: Mapping[str, Any], sample: Optional[SampleSpec]
+) -> None:
+    """A sample evidence reads (its fields and its ``where`` filter) only what the mapping's ``sample:`` section has
+    the trace observer record."""
+
+    if sample is None:
+        raise SpecBundleError(f"{at} is a sample, but the mapping has no sample section saying what to record")
+    for path in [item.path for item in fields.values()] + list(where):
+        top = path.split(".")[0]
+        if top not in _SAMPLE_PATHS:
+            raise SpecBundleError(f"{at}: {path!r} is not a field of a sample record ({sorted(_SAMPLE_PATHS)})")
+        part = _SAMPLE_PATHS[top]
+        if part is not None and not getattr(sample, part):
+            raise SpecBundleError(f"{at} reads {path!r}, which the sample section does not record (sample.{part})")
 
 
 def _check_scenario(

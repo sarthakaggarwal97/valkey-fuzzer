@@ -3,7 +3,8 @@
 # counts sync_partial_ok without any new full sync, both sides log the PSYNC
 # handshake, and every replica converges byte-for-byte with its primary (the
 # valkey.psync procedure). `replication-steps` publishes the replication
-# model's steps from the logs (valkey.replication-steps).
+# model's steps from the logs, and `replication-trace` samples every node's
+# replication IDs, offsets and data digest (valkey.replication-steps).
 extends: [valkey.psync, valkey.replication-steps]
 id: valkey.replication-partial-resync
 metadata:
@@ -17,6 +18,7 @@ metadata:
     server_config: [valkey.pool.replication]
 components:
   - id: replication-steps
+  - id: replication-trace
 
   - use: valkey.observer.info
     id: info
