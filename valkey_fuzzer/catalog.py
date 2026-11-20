@@ -47,9 +47,9 @@ PACK_GROUP = "valkey_fuzzer.packs"
 
 
 class DuplicateExperimentError(ExperimentError):
-    def __init__(self, experiment_id: str):
+    def __init__(self, experiment_id: str, where: Optional[str] = None):
         self.experiment_id = experiment_id
-        super().__init__(f"experiment {experiment_id!r} is already registered")
+        super().__init__(f"experiment {experiment_id!r} is already registered" + (f": {where}" if where else ""))
 
 
 class UnknownExperimentError(ExperimentError):
@@ -282,8 +282,9 @@ class ExperimentRegistry(BaseRegistry[ExperimentSpec]):
 
 def load_experiment_directory(
     directory: ExperimentDirectory, *, fragments: Optional[Mapping[str, Mapping[str, Any]]] = None
-) -> tuple[ExperimentSpec, ...]:
-    """Parse the immediate ``.yaml``/``.yml`` experiments of ``directory`` in name order, registering nothing."""
+) -> dict[str, ExperimentSpec]:
+    """Parse the immediate ``.yaml``/``.yml`` experiments of ``directory`` in name order, registering nothing:
+    each by the path of its file."""
 
     path = Path(directory)
     if not path.is_dir():
@@ -292,14 +293,14 @@ def load_experiment_directory(
         (item for item in path.iterdir() if item.is_file() and item.suffix.lower() in (".yaml", ".yml")),
         key=lambda item: (item.name.casefold(), item.name),
     )
-    experiments = []
+    experiments = {}
     for document in files:
         try:
             text = document.read_text(encoding="utf-8")
         except OSError as exc:
             raise ExperimentDocumentError(f"{document}: {exc}") from exc
-        experiments.append(load_experiment_yaml(text, source_name=str(document), fragments=fragments))
-    return tuple(experiments)
+        experiments[str(document)] = load_experiment_yaml(text, source_name=str(document), fragments=fragments)
+    return experiments
 
 
 # ---------------------------------------------------------------------------
@@ -487,10 +488,18 @@ class Catalog:
         self._check_open()
         experiments: list[ExperimentSpec] = []
         directories_of: dict[str, str] = {}
+        # Each ID's file, so two files defining one ID are both named: the user need not grep for them.
+        files_of: dict[str, str] = {}
         for directory in directories:
-            loaded = load_experiment_directory(directory, fragments=self._fragments)
-            directories_of.update((spec.experiment_id, str(directory)) for spec in loaded)
-            experiments.extend(loaded)
+            for file, spec in load_experiment_directory(directory, fragments=self._fragments).items():
+                other = files_of.get(spec.experiment_id)
+                if other is None and self._experiments.get(spec.experiment_id) is not None:
+                    other = "a registered pack"
+                if other is not None:
+                    raise DuplicateExperimentError(spec.experiment_id, f"{other} and {file}")
+                files_of[spec.experiment_id] = file
+                directories_of[spec.experiment_id] = str(directory)
+                experiments.append(spec)
         self._experiments.register_many(experiments)
         self._directories.update(directories_of)
         return tuple(experiments)

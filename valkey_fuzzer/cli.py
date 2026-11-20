@@ -95,7 +95,11 @@ def main() -> int:
     try:
         # SIGTERM takes Ctrl-C's path: the run cleans up, and the command exits 130.
         with interrupt_on_sigterm():
-            return args.handler(args)
+            code = args.handler(args)
+        if not isinstance(code, int):
+            # A handler that falls off its end would exit 0: a silent success is the one exit a tool cannot see.
+            raise TypeError(f"the {args.command} command returned {code!r}, not an exit code")
+        return code
     except KeyboardInterrupt:
         print("\n\nValkey Fuzzer process was interrupted by user")
         return EXIT_INTERRUPTED

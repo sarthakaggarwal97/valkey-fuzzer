@@ -235,20 +235,23 @@ def test_the_code_digest_covers_the_package_of_every_component_the_plan_uses(tmp
 
 
 @pytest.mark.parametrize(
-    ("files", "error"),
+    ("files", "error", "match"),
     [
-        ({"first/a.yaml": "example.a", "second/a.yaml": "example.a"}, DuplicateExperimentError),
-        ({"first/a.yaml": "valkey.snapshot-equivalence"}, DuplicateExperimentError),
-        ({"first/a.yaml": "example.a", "second/broken.yaml": None}, ExperimentDocumentError),
+        ({"first/a.yaml": "example.a", "second/a.yaml": "example.a"}, DuplicateExperimentError,
+         r"experiment 'example\.a' is already registered: .*first/a\.yaml and .*second/a\.yaml"),
+        ({"first/a.yaml": "valkey.snapshot-equivalence"}, DuplicateExperimentError,
+         r"is already registered: a registered pack and .*first/a\.yaml"),
+        ({"first/a.yaml": "example.a", "second/broken.yaml": None}, ExperimentDocumentError, "duplicate key"),
     ],
     ids=["one-id-in-two-directories", "a-directory-and-a-shipped-experiment", "a-malformed-document"],
 )  # fmt: skip
-def test_a_catalog_with_a_conflict_or_a_malformed_document_is_never_built(tmp_path, files, error):
+def test_a_catalog_with_a_conflict_or_a_malformed_document_is_never_built(tmp_path, files, error, match):
     for name, experiment_id in files.items():
         (tmp_path / name).parent.mkdir(exist_ok=True)
         (tmp_path / name).write_text(_yaml(experiment_id) if experiment_id else "id: a\nid: b\n", encoding="utf-8")
 
-    with pytest.raises(error):
+    # The error names both files, so nobody greps for the second definition.
+    with pytest.raises(error, match=match):
         _service(*sorted({path.parent for path in tmp_path.glob("*/*.yaml")}), deployment_providers=())
 
 

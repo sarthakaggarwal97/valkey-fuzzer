@@ -4,6 +4,7 @@ Known-bad cases: a fault that forgets its undo, an undo that fails, a change of 
 owner finished. Each makes the run ERROR, and the runner undoes what was left; an undo run twice is harmless.
 """
 
+import logging
 import threading
 import time
 
@@ -126,9 +127,10 @@ def test_a_change_its_owner_undoes_once_passes_and_is_reported():
     ],
     ids=["forgotten", "failed-once", "keeps-failing"],
 )  # fmt: skip
-def test_a_change_its_owner_did_not_undo_makes_the_run_an_error(config, failures, undone, summary, errors_by):
+def test_a_change_its_owner_did_not_undo_makes_the_run_an_error(config, failures, undone, summary, errors_by, caplog):
     FAILURES["one"] = failures
-    outcome = _run(**config)
+    with caplog.at_level(logging.WARNING, logger="valkey_fuzzer.obligations"):
+        outcome = _run(**config)
 
     assert outcome.status is OutcomeStatus.ERROR and summary in outcome.summary, outcome.summary
     assert undone == UNDONE
@@ -139,6 +141,9 @@ def test_a_change_its_owner_did_not_undo_makes_the_run_an_error(config, failures
     assert all(
         error["type"] == "OSError" and error["message"] == "cannot undo one" for error in left[-1].get("errors", [])
     )
+    # Each undo the runner's sweeps failed is logged as it happens, not only kept for the report.
+    logged = [record.getMessage() for record in caplog.records]
+    assert logged == ["undo of tests.stopped on one failed: cannot undo one"] * errors_by.count("runner")
 
 
 @pytest.mark.parametrize(

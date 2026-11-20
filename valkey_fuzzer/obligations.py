@@ -21,6 +21,7 @@ meant to last until the deployment is removed (a kill with no restart, a
 obligation.
 """
 
+import logging
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
@@ -31,6 +32,8 @@ from typing import TYPE_CHECKING, Any, Optional
 from . import deadlines
 from ._data import error_record
 from .fields import require_name, require_text
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     # The protocols module imports this one for RunContext.obligations.
@@ -129,8 +132,9 @@ class ObligationLedger:
         if closed:
             try:
                 self.undo(obligation, "runner")
-            except Exception:
-                pass
+            except Exception as exc:
+                # The error is on the obligation (the report shows it); the log says so now, not at the end.
+                logger.warning("undo of %s on %s failed: %s", kind, target, exc)
             raise RuntimeError(
                 f"component {spec.id!r} changed {kind} on {target} after its run ended; the change was undone at once"
             )
@@ -198,8 +202,9 @@ class ObligationLedger:
         for obligation in reversed(pending):
             try:
                 self.undo(obligation, "runner")
-            except Exception:
-                pass
+            except Exception as exc:
+                # Stays open for the next sweep, recorded on the obligation; a long batch sees it in the log too.
+                logger.warning("undo of %s on %s failed: %s", obligation.kind, obligation.target, exc)
             except BaseException as exc:
                 interrupt = interrupt or exc
         if interrupt is not None:
