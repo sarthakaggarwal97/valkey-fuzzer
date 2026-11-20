@@ -638,6 +638,19 @@ class WaveRun:
         problems = [self.discharge(obligation, record, stage) for obligation in self.still_owned(record)]
         return [problem for problem in problems if problem]
 
+    def restart_killed(self, instance_id: str, stage: str) -> None:
+        """Restart a killed instance: discharge its kill's obligation as ``stage``; raise if that fails."""
+
+        with self.lock:
+            obligation, record = next(
+                (obligation, record)
+                for obligation, record in self.owned
+                if obligation.open and obligation.kind == "process.stopped" and obligation.target == instance_id
+            )
+        problem = self.discharge(obligation, record, stage)
+        if problem:
+            raise RuntimeError(problem)
+
     def release(self, stage: str, *, restarts: bool = False) -> list[str]:
         """Undo every change still in place (``stage``: who does, the heal or the final cleanup); with
         ``restarts``, restart the killed instances too (the heal restarts them in its own order).
