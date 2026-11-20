@@ -14,6 +14,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: valkey-experiments-live-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   # The tla2tools.jar that tla-model-check.yml pins: the spec bridge's live test
   # and the conform half of the election test need it.
@@ -22,6 +26,8 @@ env:
 
 jobs:
   valkey-experiments-live:
+    # The schedule runs only in the repositories that own it; any repository can dispatch it.
+    if: github.event_name != 'schedule' || github.repository == 'valkey-io/valkey-fuzzer' || github.repository == 'sarthakaggarwal97/valkey-fuzzer'
     runs-on: ubuntu-latest
     timeout-minutes: 90
 

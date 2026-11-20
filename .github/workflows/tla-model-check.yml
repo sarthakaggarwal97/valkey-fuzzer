@@ -23,6 +23,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: tla-model-check-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   # tla2tools.jar from https://github.com/tlaplus/tlaplus/releases (TLC 2.19).
   # Update the version and the SHA-256 of the release asset together, here and

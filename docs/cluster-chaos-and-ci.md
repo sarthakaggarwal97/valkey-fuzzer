@@ -223,13 +223,14 @@ validation fail the run.
 
 The reusable workflow
 [`.github/workflows/valkey-pr-fuzzer.yml`](../.github/workflows/valkey-pr-fuzzer.yml)
-builds Valkey from any ref (including a PR merge ref such as
+builds Valkey from any commit or ref (including a PR merge ref such as
 `refs/pull/123/merge`), runs a configurable number of
 `run --random --experiment valkey.cluster-chaos` runs in parallel (default
-10), uploads each run's files, and writes a summary.
+10), uploads each run's files, writes a summary, and, for a PR in the
+repository that runs the workflow, posts it as a comment.
 Every run finishes even when another fails. A run fails when the fuzzer exits
 non-zero, that is, when its outcome is not `PASS`, and the workflow fails when
-any run fails or is missing.
+any run fails or is missing, or when the runs job itself did not succeed.
 
 ### Manual trigger
 
@@ -238,7 +239,7 @@ In **Actions > Valkey Cluster PR Fuzzer**, choose **Run workflow** and fill in:
 | Input | Meaning |
 | --- | --- |
 | `pr_link` | A PR URL such as `https://github.com/valkey-io/valkey/pull/123`. Fills in the repository, ref, PR number, and PR URL. |
-| `valkey_repository`, `valkey_ref` | Without `pr_link`: the repository (`valkey-io/valkey` or a fork) and the ref to test (`refs/pull/123/merge`, `unstable`, or a commit SHA). |
+| `valkey_repository`, `valkey_ref` | Without `pr_link`: the repository (`valkey-io/valkey` or a fork) and the ref to test (`refs/pull/123/merge`, `unstable`, or a commit SHA). A ref is resolved when the build starts, so `pr_link` and a branch name build whatever is there then; a commit SHA builds exactly what you looked at. |
 | `pr_number`, `pr_url` | Optional, shown in the summary. |
 | `run_count` | Number of runs, from 1 to 256 (GitHub's limit for one matrix). Default 10. |
 | `label_name` | Shown in the summary. |
@@ -246,8 +247,11 @@ In **Actions > Valkey Cluster PR Fuzzer**, choose **Run workflow** and fill in:
 
 ### Label trigger
 
-To run the fuzzer when a label is applied to a Valkey PR, add a caller
-workflow to the Valkey repository:
+To run the fuzzer when a maintainer applies a label to a Valkey PR, add a
+caller workflow to the Valkey repository. `FUZZER_SHA` is the full commit SHA
+of the fuzzer you reviewed (`git rev-parse <tag>`): the workflow file and the
+code it checks out then both come from that commit, and a push to the fuzzer
+repository cannot change what runs against Valkey PRs.
 
 ```yaml
 name: Label-triggered Valkey Cluster Fuzzer
@@ -266,12 +270,12 @@ jobs:
       issues: write
       pull-requests: write
     if: github.event.label.name == 'run-cluster-fuzzer'
-    uses: valkey-io/valkey-fuzzer/.github/workflows/valkey-pr-fuzzer.yml@main
+    uses: valkey-io/valkey-fuzzer/.github/workflows/valkey-pr-fuzzer.yml@FUZZER_SHA # <tag>
     with:
       fuzzer_repository: valkey-io/valkey-fuzzer
-      fuzzer_ref: main
+      fuzzer_ref: FUZZER_SHA
       valkey_repository: ${{ github.repository }}
-      valkey_ref: refs/pull/${{ github.event.pull_request.number }}/merge
+      valkey_ref: ${{ github.event.pull_request.head.sha }}
       pr_number: ${{ github.event.pull_request.number }}
       pr_url: ${{ github.event.pull_request.html_url }}
       label_name: ${{ github.event.label.name }}
@@ -279,14 +283,45 @@ jobs:
 ```
 
 A caller passes `fuzzer_repository` and `fuzzer_ref`: in a called workflow,
-`github.repository` is the caller's. Pointing the workflow ref and
-`fuzzer_ref` at `main` runs the current fuzzer. Pin both to one tag or commit SHA for reproducible runs. The result
+`github.repository` is the caller's. The result
 shows on the PR as a normal check. When the PR is in the repository that runs
 the workflow, as with this caller, a sticky comment (marked
 `<!-- valkey-cluster-fuzzer-results -->`) also carries the latest summary; a
-manual run in the fuzzer repository for a Valkey PR skips the comment. A PR without a merge ref (for example, one with
-conflicts) fails at the Valkey build. A cleanup job in the caller can remove
-the label afterwards, so maintainers rerun by applying it again.
+manual run in the fuzzer repository for a Valkey PR skips the comment.
+`valkey_ref` is the PR's head commit as it was when the label was applied: a
+push after the label is not built (apply the label again to test it), and the
+commit is built on its own, not merged with the base branch. A cleanup job in
+the caller can remove the label afterwards, so maintainers rerun by applying
+it again.
+
+### Trust model
+
+The PR's code is untrusted: its Valkey build runs on the runners, and
+anything on a runner can write that runner's files, including the artifacts.
+The write token must never meet it.
+
+| Job | Token | Holds PR code or what it wrote |
+| --- | --- | --- |
+| `resolve-inputs`, `prepare-matrix` | `contents: read` | No. |
+| `build-valkey`, `random-fuzzer` | `contents: read`, checkout with `persist-credentials: false`, no secrets | Yes: builds and runs it. |
+| `summarize` | `contents: read` | Yes: reads the runs' artifacts and renders them. Every value a run wrote is shown as a code span, so it is text, not a link, mention, or HTML. |
+| `comment` | `issues: write`, `pull-requests: write` | No: checks out nothing, runs no shell, downloads the one rendered file and posts it. |
+
+The verdict does not rest on what a run wrote either: the workflow fails when
+the runs job failed, whatever the runs' `metadata.json` says.
+
+The label caller runs on `pull_request_target`, so its definition is the base
+branch's and the token is the repository's, and only a maintainer's label
+starts it: that label is the trusted moment, and the caller passes the head
+SHA the event carried, not a ref the build would resolve later. The caller
+never checks out the PR and passes no secrets (the reusable workflow declares
+none). Across every workflow: each action is pinned to a commit SHA (Dependabot
+bumps them weekly), each downloaded jar and `.deb` is checked against a
+pinned SHA-256 before it is run or installed, every job has
+`timeout-minutes`, every workflow has a `concurrency` group, and every
+schedule runs only in the repositories that own it (`valkey-io/valkey-fuzzer`;
+the soaks also in `sarthakaggarwal97/valkey-fuzzer`), while a dispatch runs in
+any repository. `tests/test_ci_workflows.py` checks each of these.
 
 ### Artifacts
 

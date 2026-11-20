@@ -164,12 +164,24 @@ def metadata(run_id, batch_dir, setup_outcome, fuzzer_outcome):
 
 
 def _cell(value, limit=None):
-    text = str(value).replace("\n", " ").replace("|", "/")
-    return text if limit is None or len(text) <= limit else text[: limit - 3] + "..."
+    """``value`` as a table cell that shows as text: a code span (no link, mention, HTML, or bare URL renders in
+    one), without the newline and pipe that would end the cell or the backtick that would end the span. The
+    runner that wrote a run's values ran the code under test. None and empty text are a dash."""
+
+    text = str(value).replace("\n", " ").replace("|", "/").replace("`", "'") if value is not None else ""
+    if limit is not None and len(text) > limit:
+        text = text[: limit - 3] + "..."
+    return f"`{text}`" if text else "-"
 
 
-def _or_dash(value):
-    return "-" if value is None else value
+def _run_row(run_id, result, duration=False, limit=None):
+    """One run's table row, every value from its metadata.json as a :func:`_cell`."""
+
+    cells = [_cell(result.get("status")), _cell(result.get("seed")), _cell(result.get("stage"))]
+    cells += [_cell(result.get("duration"))] if duration else []
+    failures = "; ".join(map(str, result.get("failed_components") or []))
+    cells += [_cell(result.get("outcome")), _cell(failures, limit=limit)]
+    return f"| {run_id} | " + " | ".join(cells) + " |"
 
 
 def summarize(env, results):
@@ -180,12 +192,16 @@ def summarize(env, results):
 
     count = int(env["RUN_COUNT"]) if env["RUN_COUNT"] else 0
     missing = [run_id for run_id in range(1, count + 1) if run_id not in results]
-    passed = sum(1 for result in results.values() if result["status"] == "success")
+    passed = sum(1 for result in results.values() if result.get("status") == "success")
     failed = len(results) - passed
     matrix_ready = env["PREPARE_MATRIX_RESULT"] == "success"
-    overall_failed = not matrix_ready or env["BUILD_RESULT"] != "success" or failed > 0 or bool(missing)
+    # The runs job's result is the runner's verdict on every run's fuzzer step, which the PR's code cannot write;
+    # a run's metadata.json was written where that code ran, so it alone never makes the workflow pass.
+    runs_ok = env["RUNS_RESULT"] == "success"
+    overall_failed = not matrix_ready or env["BUILD_RESULT"] != "success" or not runs_ok or failed > 0 or bool(missing)
     overall = "FAIL" if overall_failed else "PASS"
-    sha = env["RESOLVED_SHA"] or "unavailable"
+    # The build job's output: the PR's own make ran on that runner before it was captured.
+    sha = _cell(env["RESOLVED_SHA"] or "unavailable")
     if matrix_ready:
         counts = [
             f"- Passed runs: {passed}/{count}",
@@ -203,13 +219,14 @@ def summarize(env, results):
         "",
         f"- Valkey repository: `{env['VALKEY_REPOSITORY']}`",
         f"- Requested ref: `{env['VALKEY_REF']}`",
-        f"- Resolved SHA: `{sha}`",
+        f"- Resolved SHA: {sha}",
         f"- Fuzzer repository: `{env['FUZZER_REPOSITORY'] or 'unavailable'}`",
         f"- Fuzzer ref: `{env['FUZZER_REF'] or 'unavailable'}`",
         f"- Trigger label: `{env['LABEL_NAME']}`",
         f"- Overall result: `{overall}`",
         f"- Matrix preparation: `{env['PREPARE_MATRIX_RESULT']}`",
         f"- Build stage: `{env['BUILD_RESULT']}`",
+        f"- Fuzzer runs: `{env['RUNS_RESULT']}`",
     ]
     if env["PR_NUMBER"]:
         pr = f"[#{env['PR_NUMBER']}]({env['PR_URL']})" if env["PR_URL"] else f"#{env['PR_NUMBER']}"
@@ -226,11 +243,7 @@ def summarize(env, results):
             if result is None:
                 lines.append(f"| {run_id} | missing | - | artifact | - | - | artifact not uploaded |")
                 continue
-            failures = _cell("; ".join(result.get("failed_components") or []) or "-")
-            lines.append(
-                f"| {run_id} | {result['status']} | {_or_dash(result.get('seed'))} | {result.get('stage', '-')} "
-                f"| {_or_dash(result.get('duration'))} | {result.get('outcome') or '-'} | {failures} |"
-            )
+            lines.append(_run_row(run_id, result, duration=True))
     lines += missing_line
 
     if not env["PR_NUMBER"]:
@@ -241,7 +254,7 @@ def summarize(env, results):
         "",
         f"- Overall result: `{overall}`",
         f"- Workflow run: [View run]({env['RUN_URL']})",
-        f"- Resolved SHA: `{sha}`",
+        f"- Resolved SHA: {sha}",
         *counts,
     ]
     if matrix_ready and overall_failed:
@@ -257,12 +270,8 @@ def summarize(env, results):
             result = results.get(run_id)
             if result is None:
                 comment.append(f"| {run_id} | missing | - | artifact | - | artifact not uploaded |")
-            elif result["status"] != "success":
-                failures = _cell("; ".join(result.get("failed_components") or []) or "-", limit=200)
-                comment.append(
-                    f"| {run_id} | {result['status']} | {_or_dash(result.get('seed'))} | {result.get('stage', '-')} "
-                    f"| {result.get('outcome') or '-'} | {failures} |"
-                )
+            elif result.get("status") != "success":
+                comment.append(_run_row(run_id, result, limit=200))
         comment += [
             "",
             "Reproduce a run with `valkey-fuzzer run --seed <seed> --experiment valkey.cluster-chaos "
@@ -295,9 +304,10 @@ def batch_summary(title, batch_dir, valkey="", parent="", build="", module="", m
     ]
     for run, outcome in runs:
         plan = outcome.get("plan") or {}
-        failures = _cell("; ".join(failed_components(outcome)) or "-", limit=200)
+        failures = _cell("; ".join(failed_components(outcome)), limit=200)
         lines.append(
-            f"| {run['id']} | {run['status']} | {plan.get('scenario_id') or '-'} | {_or_dash(run.get('seed'))} "
+            f"| {run['id']} | {run['status']} | {plan.get('scenario_id') or '-'} "
+            f"| {'-' if run.get('seed') is None else run['seed']} "
             f"| {outcome.get('valkey_sha') or '-'} | {_cell(run['summary'], limit=200)} | {failures} |"
         )
     if not runs:
@@ -636,10 +646,11 @@ def main(command):
             json.dump(result, handle, indent=2)
     elif command == "summarize":
         results = {}
-        for path in sorted(glob.glob(os.path.join(env["RESULTS_DIR"], "**", "metadata.json"), recursive=True)):
+        # Each run's artifact is extracted under its name, which the workflow sets: the run ID comes from there, not
+        # from a file the PR's code could have written for another run.
+        for path in sorted(glob.glob(os.path.join(env["RESULTS_DIR"], "valkey-pr-fuzzer-run-*", "metadata.json"))):
             with open(path, encoding="utf-8") as handle:
-                result = json.load(handle)
-            results[int(result["run_id"])] = result
+                results[int(os.path.basename(os.path.dirname(path)).rsplit("-", 1)[1])] = json.load(handle)
         summary, comment, overall_failed = summarize(env, results)
         with open(env["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as handle:
             handle.write(summary)

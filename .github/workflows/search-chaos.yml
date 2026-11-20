@@ -20,8 +20,20 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: search-chaos-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # valkey-search's build dependencies, from https://github.com/valkey-io/valkey-search/releases: update the
+  # release and the SHA-256 of the asset together.
+  SEARCH_DEPS_RELEASE: 1.0.0-rc1
+  SEARCH_DEPS_SHA256: 2aba36cafd6a94c54ca11a15409e86db2705bfa8fe38fbd9c5c4c758dca3c69f
+
 jobs:
   search-chaos:
+    # The schedule runs only in the repositories that own it; any repository can dispatch it.
+    if: github.event_name != 'schedule' || github.repository == 'valkey-io/valkey-fuzzer' || github.repository == 'sarthakaggarwal97/valkey-fuzzer'
     runs-on: ubuntu-latest
     timeout-minutes: 350
     env:
@@ -44,8 +56,9 @@ jobs:
       - name: Install the build tools and valkey-search's dependencies
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q build-essential clang cmake ninja-build pkg-config libssl-dev libzstd-dev
-          curl -fsSL -o /tmp/deps.deb \
-            https://github.com/valkey-io/valkey-search/releases/download/1.0.0-rc1/valkey-search-deps-ubuntu-noble-amd64.deb
+          curl -fsSL --retry 3 -o /tmp/deps.deb \
+            "https://github.com/valkey-io/valkey-search/releases/download/${SEARCH_DEPS_RELEASE}/valkey-search-deps-ubuntu-noble-amd64.deb"
+          echo "${SEARCH_DEPS_SHA256}  /tmp/deps.deb" | sha256sum -c -
           sudo dpkg -i /tmp/deps.deb
 
       - name: Build Valkey unstable with ASan

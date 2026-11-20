@@ -17,8 +17,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: valkey-builds-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   builds:
+    # The schedule runs only in the repositories that own it; any repository can dispatch it.
+    if: github.event_name != 'schedule' || github.repository == 'valkey-io/valkey-fuzzer' || github.repository == 'sarthakaggarwal97/valkey-fuzzer'
     runs-on: ubuntu-latest
     timeout-minutes: 300
     strategy:
