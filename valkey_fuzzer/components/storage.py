@@ -2,14 +2,14 @@
 
 import errno
 import os
-from typing import Any, Optional
+from typing import Any
 
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.references import EnvironmentKind
 from valkey_fuzzer.schema import ConfigError, ConfigField, ConfigSchema, plain_config
 
 from . import providers
-from .faults import EventFault, FaultRefusedError, fault_declares
+from .faults import RELEASED_FIELDS, FaultRefusedError, HeldFault, fault_declares
 from .registration import component_registration
 from .schemas import INTEGER, TEXT, optional
 
@@ -65,43 +65,38 @@ def _tmpfs_limit(path: str) -> int:
     return limit
 
 
-class FillFilesystemFault(EventFault):
-    """Fill the tmpfs at ``path`` (at most ``max_bytes``); optionally free it again on ``release_event``.
+class FillFilesystemFault(HeldFault):
+    """Fill the tmpfs at ``path`` (at most ``max_bytes``) until ``release_event`` or recovery frees it again.
 
     Before writing it checks that ``path`` is still the size-limited tmpfs a
     ``valkey.resource.tmpfs`` resource mounted, and refuses (ERROR) any other path.
+    A fill that stopped short of a full disk is not applied, ballast and all.
     """
 
-    def _prepare(self, context: Any, spec: ComponentSpec) -> None:
+    seconds_field = "filled_seconds"
+    release_failed_text = "removing the ballast failed, so the full disk lasted until recovery"
+
+    def _resolve(self, context: Any, spec: ComponentSpec) -> None:
         self._ballast = os.path.join(self._config["path"], f".ballast-{spec.id}")
-        self._filled: Any = None
-        # The sequence number of the event that released the ballast, once it has.
-        self._released_on: Optional[int] = None
-        if self._config["release_event"]:
-            self._subscribe(self._config["release_event"], self._release)
 
     def _remove_ballast(self) -> None:
         if os.path.exists(self._ballast):
             os.remove(self._ballast)
 
-    def _release(self, event: Any) -> None:
-        if self._filled is None or self._released_on is not None:
-            return
-        # An error raised here would fail the release event's publisher (a bgsave's save-completed).
-        if self._undo_early(self._filled, "released", {"ballast": self._ballast}) is None:
-            self._released_on = event.sequence
+    def _released_payload(self, reason: str) -> dict[str, Any]:
+        return {"ballast": self._ballast}
 
-    def _fire(self, context: Any, spec: ComponentSpec, event: Any) -> dict[str, Any]:
+    def _install(self, event: Any) -> dict[str, Any]:
         limit = _tmpfs_limit(self._config["path"])
         ceiling = min(limit, self._config["max_bytes"] or limit)
         written = 0
         chunk = b"\0" * self._config["chunk_bytes"]
         full = cancelled = False
-        self._filled = self._own("disk.filled", self._ballast, self._remove_ballast)
+        self._own_change("disk.filled", self._ballast, self._remove_ballast)
         with open(self._ballast, "wb", buffering=0) as handle:
             while written < ceiling:
                 # The fill runs inside the trigger's dispatch: stop when that call is cancelled.
-                if context.cancelled:
+                if self._context.cancelled:
                     cancelled = True
                     break
                 stats = os.statvfs(os.path.dirname(self._ballast))
@@ -132,10 +127,10 @@ class FillFilesystemFault(EventFault):
         return record
 
     def _settled(self, context: Any, spec: ComponentSpec, record: dict[str, Any]) -> None:
-        if self._released_on is not None:
-            record["released_on_event_sequence"] = self._released_on
-        elif self._filled is not None:
-            record["ballast_removed"] = not self._filled.open
+        if self._installed and self._release_reason != "event":
+            # Whether recovery got the ballast off the disk (it stays when the tmpfs is busy).
+            record["ballast_removed"] = not self._change.open
+        super()._settled(context, spec, record)
 
 
 _FILL_DECLARES = fault_declares(
@@ -144,7 +139,8 @@ _FILL_DECLARES = fault_declares(
         "bytes_written": INTEGER,
         "max_bytes": INTEGER,
         "free_bytes_after": INTEGER,
-        "released_on_event_sequence": optional(int),
+        **RELEASED_FIELDS,
+        "filled_seconds": optional(float),
         "ballast_removed": optional(bool),
     },
     events={"{id}.released": ConfigSchema({"ballast": TEXT})},

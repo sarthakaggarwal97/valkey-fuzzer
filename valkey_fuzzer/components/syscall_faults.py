@@ -20,14 +20,21 @@ from typing import Any, Optional
 
 from valkey_fuzzer.clock import now
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
-from valkey_fuzzer.results import make_evidence
-from valkey_fuzzer.schema import ConfigError, ConfigField, ConfigSchema, plain_config
+from valkey_fuzzer.schema import ConfigError, ConfigField, plain_config
 
-from .faults import EVENT_TARGET, EventFault, fault_declares
-from .instances import EXPECTED_DOWN, deployment, select_instance, select_instances
-from .processes import KILL_EXIT_TIMEOUT_S, RESTART_FIELDS, record_restart, restart_once, wait_killed
+from .faults import EVENT_TARGET, KILL_DECLARES, EventFault, fault_declares
+from .instances import deployment, select_instances
+from .processes import (
+    KILL_EXIT_TIMEOUT_S,
+    KILL_FIELDS,
+    KILL_RECORD_FIELDS,
+    check_cluster_vars,
+    record_restart,
+    restart_once,
+    wait_killed,
+)
 from .registration import component_registration
-from .schemas import NUMBER, TEXT, declared, mapping_of, nullable, optional
+from .schemas import NUMBER, TEXT, nullable, optional
 
 CALLS = ("write", "fsync", "fdatasync", "rename")
 ACTIONS = ("kill", "delay", "fail")
@@ -46,10 +53,7 @@ _FIELDS = {
     "when": ConfigField(str, default="before", choices=("before", "after")),
     "delay_ms": ConfigField(int, default=1000, minimum=1, maximum=600_000),
     "errno": ConfigField(str, default="EIO"),
-    "restart": ConfigField(bool, default=True),
-    "restart_delay_s": ConfigField(float, default=0.0, minimum=0, maximum=600),
-    "ready_timeout_s": ConfigField(float, default=30.0, minimum=1, maximum=600),
-    "capture_cluster_vars": ConfigField(bool, default=False),
+    **KILL_FIELDS,
 }
 
 
@@ -62,8 +66,7 @@ def _validate(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -> None:
         raise ConfigError("peer matches sockets, which only write")
     if not isinstance(getattr(errno, config["errno"], None), int):
         raise ConfigError(f"errno {config['errno']!r} is not an errno name")
-    if config["capture_cluster_vars"] and plan.deployment_mode != "cluster":
-        raise ConfigError("capture_cluster_vars needs a cluster deployment")
+    check_cluster_vars(config, spec, plan)
     if any(char.isspace() for char in config["path"] or ""):
         raise ConfigError("path must not contain whitespace")
 
@@ -106,7 +109,6 @@ class SyscallFault(EventFault):
 
     def _prepare(self, context: Any, spec: ComponentSpec) -> None:
         handle = deployment(context)
-        self._target: Optional[str] = None
         self._watcher: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._watched: Optional[tuple[Any, str, str]] = None
@@ -118,8 +120,7 @@ class SyscallFault(EventFault):
             for instance in handle.instances:
                 if instance.instance_id in peers:
                     self._ports += [instance.port, instance.bus_port]
-        if self._config["instance"] != EVENT_TARGET:
-            self._target = select_instance(handle, self._config["instance"])
+        self._select_target(context)
 
     def _files(self, handle: Any) -> tuple[str, str, str]:
         rules = handle.syscall_fault_dir(self._target)
@@ -130,8 +131,7 @@ class SyscallFault(EventFault):
 
     def _fire(self, context: Any, spec: ComponentSpec, event: Any) -> dict[str, Any]:
         handle = deployment(context)
-        if self._target is None:
-            self._target = self._event_target(handle, event)
+        self._target_instance(handle, event)
         rule, fired, log = self._files(handle)
         path = self._config["path"]
         if path and not os.path.isabs(path):
@@ -197,16 +197,9 @@ class SyscallFault(EventFault):
         if not record["exited"]:
             record["error"] = f"{self._target} did not exit within {KILL_EXIT_TIMEOUT_S:g}s of the library's kill"
         self._announce(record)
-        if stopped is None or not record["exited"] or not self._context.sleep(self._config["restart_delay_s"]):
+        if stopped is None or not record["exited"]:
             return  # Recovery restarts it.
-        try:
-            stopped.discharge()
-        except Exception as exc:
-            record["restart_error"] = f"{type(exc).__name__}: {exc}"
-            return
-        self._context.event_bus.publish(
-            f"{self._spec.id}.recovered", source=self._spec.id, payload={"instance_id": self._target}
-        )
+        self._restart_after_kill(stopped, record)
 
     def _restart(self, handle: Any, record: dict[str, Any], restart: Any) -> None:
         record_restart(handle, self._target, record, restart)
@@ -235,8 +228,7 @@ class SyscallFault(EventFault):
     def _evidence(self, spec: ComponentSpec, record: dict[str, Any]) -> tuple:
         if self._config["action"] != "kill" or self._config["restart"]:
             return ()
-        # Down on purpose until the deployment is removed: valkey.oracle.liveness and the data oracles skip it.
-        return (make_evidence(spec, EXPECTED_DOWN, "fault.recovered", {"instances": [record["target"]]}),)
+        return self._expected_down(spec, record)
 
 
 def _remove(path: str) -> None:
@@ -258,14 +250,10 @@ _DECLARES = fault_declares(
         "path": optional(str, allow_none=True),
         "call_pid": optional(int, allow_none=True),
         "signal": optional(str),
-        "exited": optional(bool),
-        "exited_at": optional(float),
-        "disk_vars_at_kill": optional(dict, allow_none=True),
-        **RESTART_FIELDS,
+        **KILL_RECORD_FIELDS,
     },
-    events={"{id}.recovered": ConfigSchema({"instance_id": TEXT})},
     changes=("syscall.rule", "process.stopped"),
-    evidence={EXPECTED_DOWN: declared(mapping_of({"instances": ConfigField(list, items=TEXT)}))},
+    **KILL_DECLARES,
 )
 
 REGISTRATIONS = (

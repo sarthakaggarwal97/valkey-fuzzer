@@ -22,7 +22,7 @@ from tests.valkey_experiments_support import (
     valkey_experiment,
 )
 from valkey_fuzzer import runner
-from valkey_fuzzer.components import component_registrations, slot_migration, slot_migration_chaos
+from valkey_fuzzer.components import component_registrations, slot_migration
 from valkey_fuzzer.components.slot_migration import hash_tag, job_of, jobs_of, migration_endpoints, read_jobs
 from valkey_fuzzer.components.slot_migration_chaos import SlotMigrationChaosAction, phase_of
 from valkey_fuzzer.components.wave_operations import MIGRATION, check_waves
@@ -702,9 +702,9 @@ def test_a_partition_cuts_the_source_from_the_target_for_its_duration(monkeypatc
     iptables = _Iptables()
     monkeypatch.setattr(network, "run_iptables", iptables)
     monkeypatch.setattr(network, "run_iptables_restore", iptables.restore)
-    monkeypatch.setattr(slot_migration_chaos, "iptables_supported", lambda: (True, ""))
+    monkeypatch.setattr("valkey_fuzzer.components.waves.iptables_supported", lambda: (True, ""))
     removed = []
-    monkeypatch.setattr(slot_migration_chaos, "remove_partition", lambda chain: removed.append(chain))
+    monkeypatch.setattr(network, "remove_partition", lambda chain: removed.append(chain))
     handle = FakeMigrationCluster()
     waves = [[migrate(), {"op": "partition", "target": "source", "peers": "target", "at": "snapshot",
                           "duration_s": 0.05}]]  # fmt: skip
@@ -723,7 +723,9 @@ def test_a_partition_cuts_the_source_from_the_target_for_its_duration(monkeypatc
 
 
 def test_partitions_need_iptables(monkeypatch):
-    monkeypatch.setattr(slot_migration_chaos, "iptables_supported", lambda: (False, "network partitions require root"))
+    monkeypatch.setattr(
+        "valkey_fuzzer.components.waves.iptables_supported", lambda: (False, "network partitions require root")
+    )
     waves = [[migrate(), {"op": "partition", "target": "source", "peers": "target"}]]
     result, _ = run_chaos(FakeMigrationCluster(), waves)
     assert result.status is ComponentStatus.ERROR
