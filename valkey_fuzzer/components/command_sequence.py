@@ -1,9 +1,9 @@
 """``valkey.action.commands``: a command sequence on the deployment's instances or, with ``compare_with``,
 on private servers of two builds whose replies are compared; and the machinery the sequence runs on.
 
-:class:`RawConnection` sends every argument as bytes and keeps every reply as the server sent it; :class:`_Side`
+:class:`RawConnection` sends every argument as bytes and keeps every reply as the server sent it; :class:`Side`
 is one build's private servers (a :class:`_Node` each), started, named by their placeholders, and stopped with
-their logs kept; :class:`_Instance` is a deployment instance the sequence runs on; :func:`_run_sequence` runs the
+their logs kept; :class:`_Instance` is a deployment instance the sequence runs on; :func:`run_sequence` runs the
 commands on either, and the helpers after :class:`CommandsAction` judge the candidate's replies against their
 ``expect`` and the parent's. ``checks.py`` runs the checks of a compared sequence on sides of its own, and
 ``tools.py`` and ``command_table.py`` start their servers and connections through the same machinery.
@@ -128,8 +128,8 @@ _COMMANDS_FIELDS = {
 _REFUSED = {"SHUTDOWN": "it stops the server", "MONITOR": "it holds the connection"}
 # Refused on the main connection, which they would hold; allowed on a named one. Each channel of these and of the
 # unsubscribing commands is confirmed by a reply of its own, so they take one each.
-_SUBSCRIBE = ("SUBSCRIBE", "PSUBSCRIBE", "SSUBSCRIBE")
-_UNSUBSCRIBE = ("UNSUBSCRIBE", "PUNSUBSCRIBE", "SUNSUBSCRIBE")
+SUBSCRIBE = ("SUBSCRIBE", "PSUBSCRIBE", "SSUBSCRIBE")
+UNSUBSCRIBE = ("UNSUBSCRIBE", "PUNSUBSCRIBE", "SUNSUBSCRIBE")
 # What a subscriber is delivered, by its first element and length: a message answers no command.
 _DELIVERIES = {b"message": 3, b"smessage": 3, b"pmessage": 4}
 _REFUSED_DEBUG = ("RESTART", "CRASH-AND-RECOVER", "RELOAD")
@@ -141,7 +141,7 @@ _CONTAINER_COMMANDS = ("DEBUG", "MODULE", "CONFIG", "CLUSTER")
 # What both private servers run with unless server_config sets it: a crafted RESTORE payload that crashes the
 # server is a real bug, and DEBUG is allowed (a DEBUG SEGFAULT crashes the server it is sent to, which is the
 # test). An option the parent rejects is dropped on both sides, these included.
-_PRIVATE_SERVER_DEFAULTS = {"sanitize-dump-payload": "yes", "enable-debug-command": "yes"}
+PRIVATE_SERVER_DEFAULTS = {"sanitize-dump-payload": "yes", "enable-debug-command": "yes"}
 # How long a private server may take to start (a sanitizer build takes seconds, and many times that with dozens
 # starting at once), and how long a lost connection waits for its process to exit before the loss counts as
 # anything but a crash.
@@ -167,21 +167,21 @@ _NODE_FIELDS = ("id", "host", "port", "cluster-port", "shard-id")
 _CLUSTER_FIELDS = ("id", "cluster-port", "shard-id")
 
 
-def _is_binary(item: Any) -> bool:
+def is_binary(item: Any) -> bool:
     """Whether ``item`` is a binary argument, ``{"$base64": ...}``, as YAML ``!!binary`` loads."""
 
     return isinstance(item, Mapping) and set(item) == {BASE64_KEY} and isinstance(item[BASE64_KEY], str)
 
 
-def _validate_sequence_command(command: Any, name: str) -> list[str]:
+def validate_sequence_command(command: Any, name: str) -> list[str]:
     """``command`` is a non-empty list of strings, numbers, and binary arguments; its words, upper-cased (a
     binary argument is an empty word)."""
 
     if not command or not all(
-        _is_binary(item) or (isinstance(item, (str, int, float)) and not isinstance(item, bool)) for item in command
+        is_binary(item) or (isinstance(item, (str, int, float)) and not isinstance(item, bool)) for item in command
     ):
         raise ConfigError(f"{name} must be a non-empty list of strings, numbers, or !!binary values")
-    return ["" if _is_binary(item) else str(item).upper() for item in command]
+    return ["" if is_binary(item) else str(item).upper() for item in command]
 
 
 def _refusal(words: list[str], timeout_s: float, on_instances: bool) -> Optional[str]:
@@ -214,7 +214,7 @@ def _raw_requests(raw: Any) -> list[list[str]]:
     """The whole requests in raw bytes, inline or RESP, each as its upper-cased words; what follows the last
     whole one (a request cut short on purpose, bytes that are no request) is left out."""
 
-    text = (_argument(raw) if _is_binary(raw) else raw.encode("utf-8", "surrogateescape")).decode("latin-1")
+    text = (_argument(raw) if is_binary(raw) else raw.encode("utf-8", "surrogateescape")).decode("latin-1")
     lines, requests = text.split("\r\n")[:-1], []
     while lines:
         line = lines.pop(0)
@@ -270,7 +270,7 @@ def _validate_commands(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -
                 f"files: {name!r} must be a plain relative path inside the server's directory, "
                 f"none of {', '.join(_HARNESS_FILES)}"
             )
-        if not isinstance(content, str) and not _is_binary(content):
+        if not isinstance(content, str) and not is_binary(content):
             raise ConfigError(f"files: {name!r} must be a string or a !!binary value")
     if config["modules"] and not compared:
         raise ConfigError(
@@ -313,7 +313,7 @@ def _validate_sequence_item(item: Mapping[str, Any], where: str, config: Mapping
     if item["wait_s"] is not None and item["command"] is None:
         raise ConfigError(f"{where}: wait_s sends a command again; raw bytes, a read, and a restart happen once")
     if item["raw"] is not None:
-        if not item["raw"] or not (isinstance(item["raw"], str) or _is_binary(item["raw"])):
+        if not item["raw"] or not (isinstance(item["raw"], str) or is_binary(item["raw"])):
             raise ConfigError(f"{where}.raw must be a non-empty string or a !!binary value")
         # Raw bytes are refused what a command is: the walk's test of valkey#1948 sent SHUTDOWN raw, and the
         # server's clean exit was filed as a crash (fuzzer#122).
@@ -323,17 +323,17 @@ def _validate_sequence_item(item: Mapping[str, Any], where: str, config: Mapping
                 named = " ".join(words[:2]) if words[0] in _CONTAINER_COMMANDS and len(words) > 1 else words[0]
                 raise ConfigError(f"{where}: raw {named} is refused: {refused}")
     elif item["command"] is not None:
-        words = _validate_sequence_command(item["command"], f"{where}.command")
+        words = validate_sequence_command(item["command"], f"{where}.command")
         refused = _refusal(words, config["timeout_s"], not compared)
         if refused is not None:
             named = " ".join(words[:2]) if words[0] in _CONTAINER_COMMANDS and len(words) > 1 else words[0]
             raise ConfigError(f"{where}: {named} is refused: {refused}")
-        if words[0] in _SUBSCRIBE and item["connection"] == "main":
+        if words[0] in SUBSCRIBE and item["connection"] == "main":
             raise ConfigError(
                 f"{where}: {words[0]} is refused on the main connection, which it would hold; "
                 "send it on a connection of its own (connection: <name>)"
             )
-        if words[0] in (*_SUBSCRIBE, *_UNSUBSCRIBE) and len(words) != 2:
+        if words[0] in (*SUBSCRIBE, *UNSUBSCRIBE) and len(words) != 2:
             raise ConfigError(f"{where}: {words[0]} takes one channel: each is confirmed by a reply of its own")
     if item["node"] >= config["nodes"]:
         raise ConfigError(f"{where}.node is {item['node']}, but each side runs on {config['nodes']} node(s)")
@@ -354,7 +354,7 @@ def _validate_sequence_item(item: Mapping[str, Any], where: str, config: Mapping
 
 
 def _argument(item: Any) -> Any:
-    return base64.b64decode(item[BASE64_KEY]) if _is_binary(item) else item
+    return base64.b64decode(item[BASE64_KEY]) if is_binary(item) else item
 
 
 def _packed(arguments: Sequence[Any]) -> bytes:
@@ -367,7 +367,7 @@ def _packed(arguments: Sequence[Any]) -> bytes:
     return b"*%d\r\n" % len(parts) + b"".join(b"$%d\r\n%s\r\n" % (len(part), part) for part in parts)
 
 
-def _text(value: bytes) -> Any:
+def text(value: bytes) -> Any:
     """A bulk string as the evidence records it: the string when it is valid UTF-8, else ``{"$base64": ...}``."""
 
     try:
@@ -377,17 +377,17 @@ def _text(value: bytes) -> Any:
 
 
 def raw_reply(value: Any) -> Any:
-    """A reply as the connection parsed it, as JSON data: bytes through :func:`_text`, a RESP3 set sorted, an
+    """A reply as the connection parsed it, as JSON data: bytes through :func:`text`, a RESP3 set sorted, an
     error inside an array (a transaction's) as ``{"$error": ...}``, and nothing reshaped."""
 
     if isinstance(value, bytes):
-        return _text(value)
+        return text(value)
     if isinstance(value, (list, tuple)):
         return [raw_reply(item) for item in value]
     if isinstance(value, (set, frozenset)):
         return sorted((raw_reply(item) for item in value), key=canonical_json)
     if isinstance(value, Mapping):
-        keys = ((_text(key) if isinstance(key, bytes) else key) for key in value)
+        keys = ((text(key) if isinstance(key, bytes) else key) for key in value)
         return {
             (f"{BASE64_KEY}:{key[BASE64_KEY]}" if isinstance(key, dict) else str(key)): raw_reply(item)
             for key, item in zip(keys, value.values())
@@ -418,7 +418,7 @@ class RawConnection:
         ``{"protocol_error": ...}``, or a lost connection or a reply that timed out as ``{"error": ...,
         "unanswered": True}``."""
 
-        if str(command[0]).upper() in _SUBSCRIBE:
+        if str(command[0]).upper() in SUBSCRIBE:
             self.subscriber = True
         record = self._exchange(lambda: self._write(command), past_deliveries=self.subscriber)
         if str(command[0]).upper() == "SELECT" and record.get("reply") == "OK":
@@ -519,7 +519,7 @@ def _delivery(reply: Any) -> bool:
 
 def _lost(exc: BaseException) -> dict[str, Any]:
     """A command that got no reply: the reply timed out, or the connection was lost, ``closed`` when the server
-    closed it (see :func:`_run_sequence`)."""
+    closed it (see :func:`run_sequence`)."""
 
     record: dict[str, Any] = {"error": f"{type(exc).__name__}: {exc}", "unanswered": True}
     if isinstance(exc, valkey.exceptions.ConnectionError):
@@ -555,8 +555,8 @@ def open_raw_connection(
     return RawConnection(connection)
 
 
-def _run_sequence(target: Any, commands: Sequence[Mapping[str, Any]], context: Any) -> list[dict]:
-    """Every command in order on its node's connection of ``target`` (a :class:`_Side` or an
+def run_sequence(target: Any, commands: Sequence[Mapping[str, Any]], context: Any) -> list[dict]:
+    """Every command in order on its node's connection of ``target`` (a :class:`Side` or an
     :class:`_Instance`), each with its index; it stops at the first that got no reply, since the connection's
     state is unknown after it, and when the call is cancelled. A connection the server closed is its answer,
     ``{"closed": True}``, while its node lives on (the connection opens anew on its next use), and a connection
@@ -594,7 +594,7 @@ def _run_step(target: Any, item: Mapping[str, Any], context: Any) -> dict[str, A
         return target.mask(connection.read_waiting())
     if item["raw"] is not None:
         raw = item["raw"]
-        request = _argument(raw) if _is_binary(raw) else target.substitute(raw).encode()
+        request = _argument(raw) if is_binary(raw) else target.substitute(raw).encode()
         record = target.mask(connection.send_raw(request))
     elif item["wait_s"] is None:
         request = [target.substitute(argument) for argument in item["command"]]
@@ -716,16 +716,16 @@ def _side(replies: Sequence[Mapping[str, Any]], commands: Sequence[Mapping[str, 
 
 
 def _command_text(command: Sequence[Any]) -> str:
-    return " ".join("<binary>" if _is_binary(item) else str(item) for item in command)
+    return " ".join("<binary>" if is_binary(item) else str(item) for item in command)
 
 
-def _step_text(item: Mapping[str, Any]) -> str:
+def step_text(item: Mapping[str, Any]) -> str:
     """A command of a sequence as a summary names it."""
 
     if item["read"] or item["restart"]:
         text = "read" if item["read"] else "restart"
     elif item["raw"] is not None:
-        text = "raw <binary>" if _is_binary(item["raw"]) else f"raw {json.dumps(item['raw'])}"
+        text = "raw <binary>" if is_binary(item["raw"]) else f"raw {json.dumps(item['raw'])}"
     else:
         text = _command_text(item["command"])
     if item["connection"] != "main":
@@ -785,7 +785,7 @@ class _Node:
         self.logs: list[str] = []
 
 
-class _Side:
+class Side:
     """One build's side of a compared sequence: its private servers (nodes), started, owned until stopped, their
     logs kept, and the placeholders that name them."""
 
@@ -835,9 +835,7 @@ class _Side:
                 # workers at once): the node starts again on fresh ports.
                 node.owned.discharge()
                 fresh = iter(
-                    _free_ports(
-                        1 + ("cluster-port" in node.options), _port_block(context), context.rng(spec.id, "ports")
-                    )
+                    free_ports(1 + ("cluster-port" in node.options), port_block(context), context.rng(spec.id, "ports"))
                 )
                 node.options["port"] = next(fresh)
                 if "cluster-port" in node.options:
@@ -974,7 +972,7 @@ class _Side:
         """``value`` (a record, or a part of one) with this side's node IDs and ports as their placeholders, so two
         sides that behave the same compare equal; a port is masked as an integer too, as CLUSTER SLOTS replies it."""
 
-        if self.pattern is None or _is_binary(value):
+        if self.pattern is None or is_binary(value):
             return value
         if isinstance(value, str):
             return self.pattern.sub(lambda match: self.names[match.group(0)], value)
@@ -1060,14 +1058,14 @@ _GIVEN: set[int] = set()
 _GIVEN_LOCK = threading.Lock()
 
 
-def _port_block(context: Any) -> Optional[int]:
+def port_block(context: Any) -> Optional[int]:
     """The run's deployment loopback_block, which a batch gives each worker its own of; None outside a batch."""
 
     block = plain_config(context.plan.deployment).get("loopback_block") if context is not None else None
     return block if isinstance(block, int) and block > 0 else None
 
 
-def _free_ports(count: int, block: Optional[int] = None, rng: Optional[random.Random] = None) -> list[int]:
+def free_ports(count: int, block: Optional[int] = None, rng: Optional[random.Random] = None) -> list[int]:
     """``count`` distinct TCP ports free on the loopback address right now, none handed out before by this process:
     above the ephemeral range where it leaves room (see :func:`_private_port_span`), in worker ``block``'s own slice
     of it while that has room, else any the kernel hands out. The draw outside the slice is ``rng``'s (the run's
@@ -1106,11 +1104,11 @@ def _bindable(port: int) -> int:
         return sock.getsockname()[1]
 
 
-def new_side(label: str, binary: str, config: Mapping[str, Any], modules: Sequence[str], ports: Iterator[int]) -> _Side:
+def new_side(label: str, binary: str, config: Mapping[str, Any], modules: Sequence[str], ports: Iterator[int]) -> Side:
     """A side of ``config``'s nodes, not started: every node listens on a loopback port of its own (and a cluster
     bus port) from ``ports``, so nodes can meet and replicate; the sequence talks to it over its unix socket."""
 
-    side = _Side(label, binary, config["nodes"], config["resp"], config["timeout_s"])
+    side = Side(label, binary, config["nodes"], config["resp"], config["timeout_s"])
     for node in side.nodes:
         node.options = {"bind": "127.0.0.1", "port": next(ports)}
         if config["cluster"]:
@@ -1157,7 +1155,7 @@ class CommandsAction:
             except (valkey.exceptions.ValkeyError, OSError) as exc:
                 return make_result(spec, ComponentStatus.ERROR, f"cannot connect to {instance_id}: {exc}")
             try:
-                replies = _run_sequence(target, config["commands"], context)
+                replies = run_sequence(target, config["commands"], context)
             finally:
                 target.close()
             if config["judge_replies"]:
@@ -1193,15 +1191,15 @@ class CommandsAction:
             )
         except OSError as exc:
             return make_result(spec, ComponentStatus.ERROR, str(exc))
-        server_config = {**_PRIVATE_SERVER_DEFAULTS, **canonicalize_server_config(config["server_config"])}
+        server_config = {**PRIVATE_SERVER_DEFAULTS, **canonicalize_server_config(config["server_config"])}
         modules = {
             "candidate": list(config["modules"]),
             "parent": list(config["modules"] if config["modules_parent"] is None else config["modules_parent"]),
         }
         ports = iter(
-            _free_ports(
+            free_ports(
                 2 * config["nodes"] * (2 if config["cluster"] else 1),
-                _port_block(context),
+                port_block(context),
                 context.rng(spec.id, "ports"),
             )
         )
@@ -1209,11 +1207,11 @@ class CommandsAction:
         parent = new_side("parent", parent_binary, config, modules["parent"], ports)
 
         files = {
-            name: _argument(content) if _is_binary(content) else content.encode()
+            name: _argument(content) if is_binary(content) else content.encode()
             for name, content in config["files"].items()
         }
 
-        def starts(server: _Side, options: Mapping[str, Any]) -> Probed:
+        def starts(server: Side, options: Mapping[str, Any]) -> Probed:
             probed = {**options, **server.options, **server.nodes[0].options}
             return starts_with(context, spec, server.binary, probed, _START_TIMEOUT_S, files)
 
@@ -1258,12 +1256,12 @@ class CommandsAction:
                     return make_result(spec, ComponentStatus.ERROR, failed)
                 server.name_nodes()
             for server in (candidate, parent):
-                server.replies = _run_sequence(server, commands, context)
+                server.replies = run_sequence(server, commands, context)
         finally:
             for server in (candidate, parent):
                 server.finish(context, spec, commands)
 
-        reached, unexplained, unreached, uncompared, after_death = _compare(commands, candidate, parent)
+        reached, unexplained, unreached, uncompared, after_death = compare(commands, candidate, parent)
         # Replies that differ between the two builds with no change to explain it vary between runs: the variants
         # check leaves them alone, whether or not the replies are judged.
         differing = list(unexplained)
@@ -1318,7 +1316,7 @@ class CommandsAction:
         if candidate.exited is not None:
             cause = candidate.crash_cause()
             at = candidate.replies[-1]["index"] if candidate.replies else None
-            where = "before the first command" if at is None else f"on command {at} ({_step_text(commands[at])})"
+            where = "before the first command" if at is None else f"on command {at} ({step_text(commands[at])})"
             who = "the candidate" if config["nodes"] == 1 else f"the candidate's node {candidate.exited_node}"
             # A crash report or a fatal-exit line it logged makes this a crash; a clean exit with status 0 and
             # neither (a commanded SHUTDOWN) is still a FAIL but not a crash, so the walk does not file it as one
@@ -1366,7 +1364,7 @@ class CommandsAction:
                 spec,
                 ComponentStatus.ERROR,
                 "the parent died before marked commands ran on it, so they were not compared: "
-                + ", ".join(f"{index} ({_step_text(commands[index])})" for index in unexamined),
+                + ", ".join(f"{index} ({step_text(commands[index])})" for index in unexamined),
                 evidence=evidence,
                 diagnostics={"reason": "uncompared-change", "commands": unexamined},
             )
@@ -1374,10 +1372,10 @@ class CommandsAction:
             commands_disputed = [
                 {
                     "index": index,
-                    "command": _step_text(commands[index]),
+                    "command": step_text(commands[index]),
                     "expect": plain_config(commands[index]["expect"]),
-                    "candidate": _reply_at(candidate.replies, index),
-                    "parent": _reply_at(parent.replies, index),
+                    "candidate": reply_at(candidate.replies, index),
+                    "parent": reply_at(parent.replies, index),
                 }
                 for index in disputed
             ]
@@ -1394,9 +1392,9 @@ class CommandsAction:
             differences = [
                 {
                     "index": index,
-                    "command": _step_text(commands[index]),
-                    "candidate": _reply_at(candidate.replies, index),
-                    "parent": _reply_at(parent.replies, index),
+                    "command": step_text(commands[index]),
+                    "candidate": reply_at(candidate.replies, index),
+                    "parent": reply_at(parent.replies, index),
                 }
                 for index in unexplained
             ]
@@ -1413,7 +1411,7 @@ class CommandsAction:
                 spec,
                 ComponentStatus.ERROR,
                 "marked commands reply the same on both builds, so the sequence did not reach the change: "
-                + ", ".join(f"{index} ({_step_text(commands[index])})" for index in unreached),
+                + ", ".join(f"{index} ({step_text(commands[index])})" for index in unreached),
                 evidence=evidence,
                 diagnostics={"reason": "unreached-change"},
             )
@@ -1424,7 +1422,7 @@ class CommandsAction:
             + (f", dropped {', '.join(dropped)}" if dropped else "")
             + (
                 f", {len(after_death)} command(s) after the parent died not compared: "
-                + ", ".join(f"{index} ({_step_text(commands[index])})" for index in after_death)
+                + ", ".join(f"{index} ({step_text(commands[index])})" for index in after_death)
                 if after_death
                 else ""
             )
@@ -1454,20 +1452,20 @@ def _record(
     }
 
 
-def _without_index(record: Mapping[str, Any]) -> dict[str, Any]:
+def without_index(record: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in record.items() if key != "index"}
 
 
-def _reply_at(replies: Sequence[Mapping[str, Any]], index: int) -> Optional[dict[str, Any]]:
-    return next((_without_index(record) for record in replies if record["index"] == index), None)
+def reply_at(replies: Sequence[Mapping[str, Any]], index: int) -> Optional[dict[str, Any]]:
+    return next((without_index(record) for record in replies if record["index"] == index), None)
 
 
 def _violations(commands: Sequence[Mapping[str, Any]], replies: Sequence[Mapping[str, Any]]) -> list[str]:
     """The answered replies that violate their command's ``expect``, described."""
 
     return [
-        f"command {record['index']} ({_step_text(commands[record['index']])}) replied "
-        f"{canonical_json(_without_index(record))}, not {canonical_json(plain_config(commands[record['index']]['expect']))}"
+        f"command {record['index']} ({step_text(commands[record['index']])}) replied "
+        f"{canonical_json(without_index(record))}, not {canonical_json(plain_config(commands[record['index']]['expect']))}"
         for record in replies
         if not record.get("unanswered")
         and not _sequence_matches(commands[record["index"]]["expect"], record, commands[record["index"]]["compare"])
@@ -1489,7 +1487,7 @@ def _violating(commands: Sequence[Mapping[str, Any]], replies: Sequence[Mapping[
 def _same_on_parent(commands: Sequence[Mapping[str, Any]], index: int, candidate: Any, parent: Any) -> bool:
     """Whether the parent answered command ``index`` and its reply compares equal to the candidate's."""
 
-    mine, theirs = _reply_at(candidate.replies, index), _reply_at(parent.replies, index)
+    mine, theirs = reply_at(candidate.replies, index), reply_at(parent.replies, index)
     if mine is None or theirs is None or theirs.get("unanswered"):
         return False
     mode = commands[index]["compare"]
@@ -1528,7 +1526,7 @@ def _protocol_errors(commands: Sequence[Mapping[str, Any]], replies: Sequence[Ma
     return [
         {
             "index": record["index"],
-            "command": _step_text(commands[record["index"]]),
+            "command": step_text(commands[record["index"]]),
             "protocol_error": record["protocol_error"],
             "raw": record["raw"],
         }
@@ -1543,13 +1541,13 @@ def _protocol_error_text(item: Mapping[str, Any]) -> str:
 
 def _unanswered(commands: Sequence[Mapping[str, Any]], replies: Sequence[Mapping[str, Any]]) -> list[str]:
     return [
-        f"command {record['index']} ({_step_text(commands[record['index']])}) got no reply: {record['error']}"
+        f"command {record['index']} ({step_text(commands[record['index']])}) got no reply: {record['error']}"
         for record in replies
         if record.get("unanswered")
     ]
 
 
-def _compare(commands, candidate: _Side, parent: _Side) -> tuple[list[int], list[int], list[int], list[str], list[int]]:
+def compare(commands, candidate: Side, parent: Side) -> tuple[list[int], list[int], list[int], list[str], list[int]]:
     """Judge the parent's replies against the candidate's: the marked commands that reached the change, the
     unmarked ones that differ, the marked ones that do not, the commands the parent did not answer
     without dying (described), and the commands after the one it died on, which it never ran."""
@@ -1566,12 +1564,12 @@ def _compare(commands, candidate: _Side, parent: _Side) -> tuple[list[int], list
         item = commands[index]
         if record.get("unanswered") or item["compare"] == "skip":
             continue
-        other = _reply_at(parent.replies, index)
+        other = reply_at(parent.replies, index)
         if other is None or other.get("unanswered"):
             if index == died_at:
                 (reached if item["expect_difference"] else unexplained).append(index)
             elif parent.exited is None and other is not None:
-                uncompared.append(f"command {index} ({_step_text(item)}): {other['error']}")
+                uncompared.append(f"command {index} ({step_text(item)}): {other['error']}")
             elif died_at is not None and index > died_at:
                 after_death.append(index)
             continue
@@ -1660,3 +1658,26 @@ REGISTRATIONS = (
         declares=_COMMANDS_DECLARES,
     ),
 )
+
+__all__ = [
+    "PRIVATE_SERVER_DEFAULTS",
+    "REGISTRATIONS",
+    "SUBSCRIBE",
+    "UNSUBSCRIBE",
+    "CommandsAction",
+    "RawConnection",
+    "Side",
+    "compare",
+    "free_ports",
+    "is_binary",
+    "new_side",
+    "open_raw_connection",
+    "port_block",
+    "raw_reply",
+    "reply_at",
+    "run_sequence",
+    "step_text",
+    "text",
+    "validate_sequence_command",
+    "without_index",
+]

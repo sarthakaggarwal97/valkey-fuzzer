@@ -53,7 +53,7 @@ _STORAGE_CHANGES = ("disk.filled", "directory.read-only")
 # A kill or a role change lasts until the deployment is removed, so no obligation owns it: its evidence says so.
 _LINK_EVIDENCE = (EXPECTED_DOWN, "valkey.chaos.schedule", FAILOVER_RESULT, "valkey.replication.replicaof")
 # Configured commands that act on connections, the topology, or the server's internals, besides those that set
-# replication (checks._sets_replication): CLIENT KILL drops links, DEBUG CHANGE-REPL-ID forces a full resync.
+# replication (checks.sets_replication): CLIENT KILL drops links, DEBUG CHANGE-REPL-ID forces a full resync.
 _LINK_COMMANDS = ("CLIENT", "CLUSTER", "DEBUG")
 
 # A counter whose name says something went wrong, in a core section or a module's.
@@ -177,7 +177,7 @@ def scenario_causes(context: Any, evidence: Sequence[Evidence]) -> dict[str, lis
 
     opened = context.obligations.report()
     changes = [*opened["undone"], *opened["still_active"]]
-    words = [checks._words(item) for item in _configured_commands(context.plan)]
+    words = [checks.words(item) for item in _configured_commands(context.plan)]
     link_commands = [" ".join(command[:2]) for command in words if command and command[0] in _LINK_COMMANDS]
     causes = {
         LINKS: [f"{item['owner']} ({item['kind']})" for item in changes if item["kind"] in _LINK_CHANGES]
@@ -187,10 +187,10 @@ def scenario_causes(context: Any, evidence: Sequence[Evidence]) -> dict[str, lis
             if item.evidence_id in _LINK_EVIDENCE and (item.evidence_id != EXPECTED_DOWN or item.value["instances"])
         ]
         + link_commands
-        + (["a configured command sets replication"] if checks._sets_replication(words) else []),
+        + (["a configured command sets replication"] if checks.sets_replication(words) else []),
         STORAGE: [f"{item['owner']} ({item['kind']})" for item in changes if item["kind"] in _STORAGE_CHANGES],
         COMMANDS: _got_errors(evidence),
-        MEMORY: ["maxmemory"] if checks._limits_memory(words, _scenario_settings(context.plan)) else [],
+        MEMORY: ["maxmemory"] if checks.limits_memory(words, _scenario_settings(context.plan)) else [],
     }
     return {cause: sorted(set(what)) for cause, what in causes.items()}
 

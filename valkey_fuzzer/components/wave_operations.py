@@ -249,8 +249,63 @@ def starts_before(wave: Sequence[Mapping[str, Any]], earlier: int, later: int) -
     return wave[earlier]["after"] is None and wave[earlier]["delay_s"] < start
 
 
+def _check_operation(
+    kind: str,
+    operation: Mapping[str, Any],
+    where: str,
+    mode: str,
+    instances: int,
+    primaries: int,
+    replicas: int,
+    endpoints: Sequence[str],
+    document: Mapping[str, Any],
+    has_migrate: bool,
+) -> None:
+    """The rules of one operation of ``kind`` at ``where``, against the deployment (``instances`` planned,
+    ``primaries``, ``replicas`` per primary, ``document``) and its wave's migration: ``endpoints`` it may name
+    as targets, and whether the wave has a migrate operation (``has_migrate``)."""
+
+    if OPERATIONS[kind].targets:
+        targets = operation["target"] if isinstance(operation["target"], list) else [operation["target"]]
+        if not targets:
+            raise ConfigError(f"{where}.target names no instance")
+        for target in targets:
+            allowed = (*OPERATIONS[kind].targets, *endpoints) if len(targets) == 1 else ()
+            check_target(target, allowed, instances, f"{where}.target")
+    if kind == "partition" and operation["peers"] != "others":
+        if mode != MIGRATION:
+            raise ConfigError(f"{where}.peers: a {mode} partition isolates its target from every other instance")
+        peers = operation["peers"] if isinstance(operation["peers"], list) else [operation["peers"]]
+        if not peers:
+            raise ConfigError(f"{where}.peers names no instance")
+        for peer in peers:
+            check_target(peer, endpoints if len(peers) == 1 else (), instances, f"{where}.peers")
+    if mode == MIGRATION and kind in MIGRATION_OPERATIONS:
+        # It waits for the migrate operation to start, so the two may start together.
+        needs = kind == "cancel" or operation["at"] is not None
+        needs = needs or operation.get("target") in endpoints or operation.get("peers") in endpoints
+        if needs and not has_migrate:
+            raise ConfigError(f"{where}: {kind} acts on the wave's migration, so the wave needs a migrate")
+    if kind == "migrate":
+        if operation["shard"] is not None:
+            check_shard(operation["shard"], primaries, f"{where}.shard")
+    elif kind == "failover":
+        check_shard(operation["shard"], primaries, f"{where}.shard")
+    elif kind == "repoint":
+        check_target(operation["to"], ("primary", "replica"), instances, f"{where}.to")
+        if INSTANCE_ID.fullmatch(operation["to"]) and operation["to"] == operation["target"]:
+            raise ConfigError(f"{where}: a replica cannot replicate itself")
+        if operation["to"] == "replica" and replicas < 2:
+            raise ConfigError(f"{where}: repointing to another replica needs replicas_per_primary >= 2")
+    elif kind in ("partition", "degrade") and document.get("addressing") != "per_instance_loopback":
+        raise ConfigError(f"{where}: a {kind} needs deployment.addressing: per_instance_loopback")
+    if kind == "degrade":
+        check_degrade(operation, where)
+
+
 def check_waves(waves: Sequence[Sequence[Mapping[str, Any]]], mode: str, document: Mapping[str, Any]) -> None:
-    """``waves`` for a ``mode`` deployment shaped as ``document`` (a plan's deployment, with its defaults) says."""
+    """``waves`` for a ``mode`` deployment shaped as ``document`` (a plan's deployment, with its defaults) says:
+    each operation's own rules (:func:`_check_operation`), then what it needs of the rest of its wave."""
 
     waves = resolve_waves(waves, mode)
     replicas = document["replicas_per_primary"]
@@ -266,36 +321,12 @@ def check_waves(waves: Sequence[Sequence[Mapping[str, Any]]], mode: str, documen
             kind = operation["op"]
             # The wave's migration endpoints are targets only once its migrate operation started.
             endpoints = MIGRATION_TARGETS if mode == MIGRATION and kind in MIGRATION_OPERATIONS else ()
-            if OPERATIONS[kind].targets:
-                targets = operation["target"] if isinstance(operation["target"], list) else [operation["target"]]
-                if not targets:
-                    raise ConfigError(f"{where}.target names no instance")
-                for target in targets:
-                    allowed = (*OPERATIONS[kind].targets, *endpoints) if len(targets) == 1 else ()
-                    check_target(target, allowed, instances, f"{where}.target")
-            if kind == "partition" and operation["peers"] != "others":
-                if mode != MIGRATION:
-                    raise ConfigError(
-                        f"{where}.peers: a {mode} partition isolates its target from every other instance"
-                    )
-                peers = operation["peers"] if isinstance(operation["peers"], list) else [operation["peers"]]
-                if not peers:
-                    raise ConfigError(f"{where}.peers names no instance")
-                for peer in peers:
-                    check_target(peer, endpoints if len(peers) == 1 else (), instances, f"{where}.peers")
-            if mode == MIGRATION and kind in MIGRATION_OPERATIONS:
-                # It waits for the migrate operation to start, so the two may start together.
-                needs = kind == "cancel" or operation["at"] is not None
-                needs = needs or operation.get("target") in endpoints or operation.get("peers") in endpoints
-                if needs and migrate is None:
-                    raise ConfigError(f"{where}: {kind} acts on the wave's migration, so the wave needs a migrate")
-            if kind == "migrate":
-                if operation["shard"] is not None:
-                    check_shard(operation["shard"], primaries, f"{where}.shard")
-                if index != migrate:
-                    raise ConfigError(f"{where}: a wave migrates one slot; put a second migration in its own wave")
+            _check_operation(
+                kind, operation, where, mode, instances, primaries, replicas, endpoints, document, migrate is not None
+            )
+            if kind == "migrate" and index != migrate:
+                raise ConfigError(f"{where}: a wave migrates one slot; put a second migration in its own wave")
             elif kind == "failover":
-                check_shard(operation["shard"], primaries, f"{where}.shard")
                 if operation["shard"] in failovers:
                     raise ConfigError(f"{where}: shard {operation['shard']} already fails over in this wave")
                 failovers.add(operation["shard"])
@@ -304,13 +335,3 @@ def check_waves(waves: Sequence[Sequence[Mapping[str, Any]]], mode: str, documen
                 for other_index, other in enumerate(wave)
             ):
                 raise ConfigError(f"{where}: a restart needs a kill of the same wave that starts before it")
-            elif kind == "repoint":
-                check_target(operation["to"], ("primary", "replica"), instances, f"{where}.to")
-                if INSTANCE_ID.fullmatch(operation["to"]) and operation["to"] == operation["target"]:
-                    raise ConfigError(f"{where}: a replica cannot replicate itself")
-                if operation["to"] == "replica" and replicas < 2:
-                    raise ConfigError(f"{where}: repointing to another replica needs replicas_per_primary >= 2")
-            elif kind in ("partition", "degrade") and document.get("addressing") != "per_instance_loopback":
-                raise ConfigError(f"{where}: a {kind} needs deployment.addressing: per_instance_loopback")
-            if kind == "degrade":
-                check_degrade(operation, where)

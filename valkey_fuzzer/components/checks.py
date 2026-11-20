@@ -136,13 +136,13 @@ def _foreign_rdb_refusal(side: Any) -> Optional[int]:
 
 
 # Commands that reply with the NOPERM of the commands they run: the ACL check does not judge them.
-_RUNS_OTHERS = ("EVAL", "EVALSHA", "EVAL_RO", "EVALSHA_RO", "FCALL", "FCALL_RO")
+RUNS_OTHERS = ("EVAL", "EVALSHA", "EVAL_RO", "EVALSHA_RO", "FCALL", "FCALL_RO")
 # A NOPERM error, as the connection records it: valkey-py drops the NOPERM (and ERR) code, so it is known by its
 # message ("User default has no permissions to run the 'hset' command", "No permissions to access a key").
 _NOPERM = "no permissions"
 # Errors Valkey replies before it checks a command's permissions, so a refused command may reply them. A newer
 # Valkey names the command it refuses inside a transaction ("Command 'watch' not allowed inside a transaction").
-_BEFORE_ACL = re.compile(
+BEFORE_ACL = re.compile(
     r"unknown command|unknown subcommand|wrong number of arguments|Command (?:'[^']*' )?not allowed inside a transaction"
 )
 # ACL categories of speed, not function: never the one the ACL check denies.
@@ -151,8 +151,8 @@ _KEY_PATTERN = "nomatch-*"
 # The checks' own connection to a node, apart from every connection the sequence names.
 _CHECK = "\x00check"
 # A primary starts a replica's sync at once (the default waits 5 seconds for more replicas).
-_QUICK_SYNC = {"repl-diskless-sync-delay": 0}
-_SYNC_TIMEOUT_S = 30.0
+QUICK_SYNC = {"repl-diskless-sync-delay": 0}
+SYNC_TIMEOUT_S = 30.0
 _NUMBER = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
 _INTEGER = re.compile(r"[-+]?\d+")
 
@@ -208,11 +208,11 @@ def _combine(**parts: dict[str, Any]) -> dict[str, Any]:
     return {**min(parts.values(), key=lambda part: order.index(part["outcome"])), **parts}
 
 
-def _words(item: Mapping[str, Any]) -> list[str]:
+def words(item: Mapping[str, Any]) -> list[str]:
     """A command's words, upper-cased (a binary argument an empty word); none for raw bytes, a read, or a restart.
     :class:`_Checks` tokenises every command once, and the predicates below take the words."""
 
-    return [] if item["command"] is None else command_sequence._validate_sequence_command(item["command"], "command")
+    return [] if item["command"] is None else command_sequence.validate_sequence_command(item["command"], "command")
 
 
 def _config_sets(command: Sequence[str]) -> list[tuple[str, str]]:
@@ -236,7 +236,7 @@ def _script_varies(command: Sequence[str], words: Sequence[Sequence[str]]) -> bo
 
     if command[0] in ("EVAL", "EVAL_RO"):
         bodies = command[1:2]
-    elif command[0] in _RUNS_OTHERS:
+    elif command[0] in RUNS_OTHERS:
         loads = (["SCRIPT", "LOAD"], ["FUNCTION", "LOAD"])
         bodies = [other[-1] for other in words if other[:2] in loads]
     else:
@@ -307,7 +307,7 @@ def _subscribed(commands: Sequence[Mapping[str, Any]], words: Sequence[Sequence[
             continue
         if item["connection"] in connections:
             found.add(index)
-        if command[0] in command_sequence._SUBSCRIBE:
+        if command[0] in command_sequence.SUBSCRIBE:
             connections.add(item["connection"])
         elif command[0] == "RESET":
             connections.discard(item["connection"])
@@ -319,21 +319,21 @@ def _subscribed_effects(commands: Sequence[Mapping[str, Any]], words: Sequence[S
     RESET, or ``len(commands)``: RESP2 refuses it in the subscribed context, RESP3 runs it, so its effects (an
     ACL LOAD, a CONFIG SET) reach every later command on any connection (fuzzer#115)."""
 
-    allowed = ("PING", "QUIT", "RESET", *command_sequence._SUBSCRIBE, *command_sequence._UNSUBSCRIBE)
+    allowed = ("PING", "QUIT", "RESET", *command_sequence.SUBSCRIBE, *command_sequence.UNSUBSCRIBE)
     connections: set[Any] = set()
     for index, (item, command) in enumerate(zip(commands, words)):
         if not command:
             continue
         if item["connection"] in connections and command[0] not in allowed:
             return index
-        if command[0] in command_sequence._SUBSCRIBE:
+        if command[0] in command_sequence.SUBSCRIBE:
             connections.add(item["connection"])
         elif command[0] == "RESET":
             connections.discard(item["connection"])
     return len(commands)
 
 
-def _sets_replication(words: Sequence[Sequence[str]]) -> bool:
+def sets_replication(words: Sequence[Sequence[str]]) -> bool:
     """Whether the sequence makes its node a replica (or a primary) itself: a replica whose own link is down
     refuses replicas of its own (NOMASTERLINK), so no replica of it can catch up. A FAILOVER does it too, with the
     check's own replica: it fails without one, and with one swaps the two nodes' roles."""
@@ -452,7 +452,7 @@ def _changes_persistence(words: Sequence[Sequence[str]]) -> bool:
     return any(name in _PERSISTENCE_SETTINGS for command in words for name, _ in _config_sets(command))
 
 
-def _limits_memory(words: Sequence[Sequence[str]], server_config: Mapping[str, Any]) -> bool:
+def limits_memory(words: Sequence[Sequence[str]], server_config: Mapping[str, Any]) -> bool:
     """Whether the sequence or its server_config sets a maxmemory: with the compact encodings off the same data
     takes far more memory, so writes are refused (OOM) or other keys evicted by design."""
 
@@ -496,7 +496,7 @@ def _set_on_replica(side: Any, commands: Sequence[Mapping[str, Any]], words: Seq
     refuse."""
     for item, command in zip(commands, words):
         if command[:2] == ["CONFIG", "SET"] or _debug_setting(command):
-            _ask(side, 1, *[side.substitute(argument) for argument in item["command"]])
+            ask(side, 1, *[side.substitute(argument) for argument in item["command"]])
 
 
 def _scalar(value: Any) -> Any:
@@ -593,7 +593,7 @@ def _shape(record: Optional[Mapping[str, Any]], command: str = "", protocol: boo
     return canonical_json(reply)
 
 
-def _ask(side: Any, index: int, *command: Any) -> dict[str, Any]:
+def ask(side: Any, index: int, *command: Any) -> dict[str, Any]:
     """``command`` on node ``index`` of ``side``, on the checks' own connection: its record."""
 
     try:
@@ -605,7 +605,7 @@ def _ask(side: Any, index: int, *command: Any) -> dict[str, Any]:
 def _volatile(side: Any, index: int) -> bool:
     """Whether node ``index`` of ``side`` holds anything that may expire (a key, or a hash field), or cannot tell."""
 
-    record = _ask(side, index, "INFO", "keyspace")
+    record = ask(side, index, "INFO", "keyspace")
     if "reply" not in record:
         return True
     databases = (
@@ -619,7 +619,7 @@ def _owned_slots(side: Any, index: int) -> Optional[tuple[str, ...]]:
     """The slots (and slot ranges) node ``index`` of a cluster ``side`` owns, from its CLUSTER NODES; None if
     unread."""
 
-    record = _ask(side, index, "CLUSTER", "NODES")
+    record = ask(side, index, "CLUSTER", "NODES")
     myself = next((line.split() for line in str(record.get("reply", "")).splitlines() if "myself" in line), None)
     return None if "reply" not in record or myself is None else tuple(myself[8:])
 
@@ -627,7 +627,7 @@ def _owned_slots(side: Any, index: int) -> Optional[tuple[str, ...]]:
 def _is_replica(side: Any, index: int) -> bool:
     """Whether node ``index`` of ``side`` is a replica, by its INFO replication."""
 
-    return info_fields(_ask(side, index, "INFO", "replication").get("reply", "")).get("role") == "slave"
+    return info_fields(ask(side, index, "INFO", "replication").get("reply", "")).get("role") == "slave"
 
 
 def _ping(side: Any, index: int) -> dict[str, Any]:
@@ -651,7 +651,7 @@ def _categories(side: Any, words: Sequence[str]) -> Optional[set[str]]:
     ``side``; None when it knows none, or when no rule refuses the command: Valkey's ACL lets a ``no_auth`` one
     (AUTH, HELLO) run whatever its categories (fuzzer#95)."""
 
-    info = (_ask(side, 0, "COMMAND", "INFO", words[0]).get("reply") or [None])[0]
+    info = (ask(side, 0, "COMMAND", "INFO", words[0]).get("reply") or [None])[0]
     if not isinstance(info, list) or len(info) < 7 or b"no_auth" in info[2] or "no_auth" in info[2]:
         return None
     container = set(info[6])
@@ -672,7 +672,7 @@ class _Worker:
         self.replies: list[dict[str, Any]] = []
 
     def run(self, commands: Sequence[Mapping[str, Any]], context: Any) -> None:
-        self.replies = command_sequence._run_sequence(self, commands, context)
+        self.replies = command_sequence.run_sequence(self, commands, context)
 
     def connection(self, node: int, name: str) -> Any:
         if (node, name) not in self.connections:
@@ -717,8 +717,8 @@ class _Checks:
         # Replies that differ between the compared run's two builds unexplained: they vary between runs.
         self.differing = set(differing)
         self.commands = config["commands"]
-        # Each command's words (see _words), tokenised once for every predicate of every check.
-        self.words = [_words(item) for item in self.commands]
+        # Each command's words (:func:`words`), tokenised once for every predicate of every check.
+        self.words = [words(item) for item in self.commands]
         # The compared run's candidate side, finished: the replies variants compare with.
         self.base = base
         self.binaries = {"candidate": base.binary, "parent": parent_binary}
@@ -732,10 +732,10 @@ class _Checks:
 
     def free_ports(self, count: int) -> list[int]:
         """``count`` loopback ports, free now, that no check of the sequence took before (see
-        :func:`command_sequence._free_ports`, which never hands a port out twice in a run)."""
+        :func:`command_sequence.free_ports`, which never hands a port out twice in a run)."""
 
-        return command_sequence._free_ports(
-            count, command_sequence._port_block(self.context), self.context.rng(self.spec.id, "ports")
+        return command_sequence.free_ports(
+            count, command_sequence.port_block(self.context), self.context.rng(self.spec.id, "ports")
         )
 
     def start(
@@ -788,7 +788,7 @@ class _Checks:
 
         if self.config["nodes"] > 1 or self.config["cluster"]:
             return "the sequence runs on several nodes or a cluster, whose topology it sets up itself"
-        if _sets_replication(self.words):
+        if sets_replication(self.words):
             return "the sequence sets its node's replication itself"
         if _configures_replica_auth(self.server_config):
             return "the server_config sets the credentials a replica authenticates to its primary with"
@@ -819,7 +819,7 @@ class _Checks:
         :meth:`converged`)."""
 
         side, index = primary
-        sent = _ask(*replica, "REPLICAOF", "127.0.0.1", side.nodes[index].options["port"])
+        sent = ask(*replica, "REPLICAOF", "127.0.0.1", side.nodes[index].options["port"])
         if "reply" not in sent:
             return False, {"replicaof": sent}
         return self.converged(primary, replica, digests)
@@ -833,15 +833,15 @@ class _Checks:
         def attempt() -> tuple[bool, dict[str, Any]]:
             state: dict[str, Any] = {}
             for role, (side, index) in (("primary", primary), ("replica", replica)):
-                info = info_fields(_ask(side, index, "INFO", "replication").get("reply", ""))
-                state[role] = {"offset": info.get("master_repl_offset"), "digest": _ask(side, index, "DEBUG", "DIGEST")}
+                info = info_fields(ask(side, index, "INFO", "replication").get("reply", ""))
+                state[role] = {"offset": info.get("master_repl_offset"), "digest": ask(side, index, "DEBUG", "DIGEST")}
             state["link"] = info.get("master_link_status")
             if not digests:
                 return state["link"] == "up" and state["primary"]["offset"] == state["replica"]["offset"], state
             done = state["link"] == "up" and state["primary"] == state["replica"]
             return done and "reply" in state["primary"]["digest"], state
 
-        return poll_until(attempt, timeout_s=_SYNC_TIMEOUT_S, interval_s=0.1, context=self.context)
+        return poll_until(attempt, timeout_s=SYNC_TIMEOUT_S, interval_s=0.1, context=self.context)
 
     @staticmethod
     def diverged(check: str, reason: str, synced: bool, state: Mapping[str, Any], **diagnostics: Any) -> dict:
@@ -852,7 +852,7 @@ class _Checks:
         if any("reply" not in state.get(role, {}).get("digest", {}) for role in ("primary", "replica")):
             return _errored(f"the replica's data could not be compared: {canonical_json(state)}")
         return _failed(
-            f"the replica did not reach the primary's data within {_SYNC_TIMEOUT_S:g}s ({reason}): "
+            f"the replica did not reach the primary's data within {SYNC_TIMEOUT_S:g}s ({reason}): "
             f"primary {canonical_json(state['primary'])}, replica {canonical_json(state['replica'])}, "
             f"link {state['link']}",
             {"reason": reason, "check": check, **diagnostics, **state},
@@ -875,7 +875,7 @@ class _Checks:
         ]
         if self.modules["candidate"]:
             encodings = _skipped("modules are loaded")
-        elif _limits_memory(self.words, self.server_config):
+        elif limits_memory(self.words, self.server_config):
             encodings = _skipped("the sequence sets a maxmemory, which the encodings use up otherwise")
         else:
             encodings = self.variant(
@@ -900,7 +900,7 @@ class _Checks:
         side, failed = self.start(f"candidate.{name}", **start)
         try:
             if not failed:
-                side.replies = command_sequence._run_sequence(side, self.commands, self.context)
+                side.replies = command_sequence.run_sequence(side, self.commands, self.context)
         finally:
             self.finish(side)
         decided = self.judge("variants", side, failed, variant=name, **change)
@@ -914,10 +914,10 @@ class _Checks:
             compared = [index for index in compared if index < stopped["index"]]
         differences = []
         bases = _named_fresh_ids(
-            {index: command_sequence._reply_at(self.base.replies, index) for index in compared}, self.words
+            {index: command_sequence.reply_at(self.base.replies, index) for index in compared}, self.words
         )
         mines = _named_fresh_ids(
-            {index: command_sequence._reply_at(side.replies, index) for index in compared}, self.words
+            {index: command_sequence.reply_at(side.replies, index) for index in compared}, self.words
         )
         for index in compared:
             base, mine = bases[index], mines[index]
@@ -926,7 +926,7 @@ class _Checks:
                 differences.append(
                     {
                         "index": index,
-                        "command": command_sequence._step_text(self.commands[index]),
+                        "command": command_sequence.step_text(self.commands[index]),
                         "base": base,
                         "variant": mine,
                     }
@@ -936,7 +936,7 @@ class _Checks:
         if not differences and stopped is not None and stopped["index"] not in expected:
             return _errored(
                 f"the {name} variant stopped at command {stopped['index']} "
-                f"({command_sequence._step_text(self.commands[stopped['index']])}): {stopped.get('error')}"
+                f"({command_sequence.step_text(self.commands[stopped['index']])}): {stopped.get('error')}"
             )
         if not differences:
             return {"outcome": "pass"}
@@ -955,7 +955,7 @@ class _Checks:
         if blocker is not None:
             return _skipped(blocker)
         # Node 1 is the replica; the sequence names node 0 only.
-        side, failed = self.start("candidate.replica", nodes=2, options=_QUICK_SYNC)
+        side, failed = self.start("candidate.replica", nodes=2, options=QUICK_SYNC)
         synced, state = False, {}
         try:
             if not failed:
@@ -964,7 +964,7 @@ class _Checks:
                     failed = f"the replica did not sync before the sequence: {canonical_json(state)}"
             if not failed:
                 _set_on_replica(side, self.commands, self.words)
-                side.replies = command_sequence._run_sequence(side, self.commands, self.context)
+                side.replies = command_sequence.run_sequence(side, self.commands, self.context)
                 synced, state = self.converged((side, 0), (side, 1))
         finally:
             self.finish(side)
@@ -991,7 +991,7 @@ class _Checks:
 
         categories = {}
         for index, command in enumerate(words):
-            if command and command[0] not in _RUNS_OTHERS:
+            if command and command[0] not in RUNS_OTHERS:
                 found = _categories(side, command)
                 if found is not None:
                     categories[index] = found
@@ -1009,9 +1009,9 @@ class _Checks:
 
         refused = {}
         for index, (item, command) in enumerate(zip(commands, words)):
-            if not command or command[0] in _RUNS_OTHERS:
+            if not command or command[0] in RUNS_OTHERS:
                 continue
-            keys = _ask(side, 0, "COMMAND", "GETKEYS", *[side.substitute(argument) for argument in item["command"]])
+            keys = ask(side, 0, "COMMAND", "GETKEYS", *[side.substitute(argument) for argument in item["command"]])
             if "no key arguments" in keys.get("error", ""):
                 refused[index] = False
             elif keys.get("reply") and not any(fnmatch.fnmatchcase(str(key), _KEY_PATTERN) for key in keys["reply"]):
@@ -1035,12 +1035,12 @@ class _Checks:
                 rule, refused = rule_of(side, commands, words)
             if refused:
                 for index in range(len(side.nodes)):
-                    set_user = _ask(side, index, "ACL", "SETUSER", "default", *rule.split())
+                    set_user = ask(side, index, "ACL", "SETUSER", "default", *rule.split())
                     if "reply" not in set_user:
                         failed = f"ACL SETUSER default {rule}: {canonical_json(set_user)}"
                         break
             if refused and not failed:
-                side.replies = command_sequence._run_sequence(side, commands, self.context)
+                side.replies = command_sequence.run_sequence(side, commands, self.context)
         finally:
             self.finish(side, commands)
         decided = self.judge("acl", side, failed, user=f"default {rule}")
@@ -1057,10 +1057,10 @@ class _Checks:
             denied = _NOPERM in error.lower()
             found = {
                 "index": steps[index],
-                "command": command_sequence._step_text(commands[index]),
-                "reply": command_sequence._without_index(record),
+                "command": command_sequence.step_text(commands[index]),
+                "reply": command_sequence.without_index(record),
             }
-            if refused[index] and not denied and not _BEFORE_ACL.match(error):
+            if refused[index] and not denied and not BEFORE_ACL.match(error):
                 bypass.append(found)
             elif not refused[index] and denied:
                 overreach.append(found)
@@ -1089,7 +1089,7 @@ class _Checks:
         steps, commands, words = self.without_restarts()
         # With a replica too, as the replica check would run one (see replica).
         replica = self.config["checks"]["replica"] and self.replica_blocker() is None
-        side, failed = self.start("candidate.concurrency", **({"nodes": 2, "options": _QUICK_SYNC} if replica else {}))
+        side, failed = self.start("candidate.concurrency", **({"nodes": 2, "options": QUICK_SYNC} if replica else {}))
         workers: list[_Worker] = []
         hung = []
         # Whether each node a command went unanswered on answers a PING; one that exited crashed (finish finds it).
@@ -1123,7 +1123,7 @@ class _Checks:
                             {
                                 "connection": number,
                                 "index": steps[last["index"]],
-                                "command": command_sequence._step_text(commands[last["index"]]),
+                                "command": command_sequence.step_text(commands[last["index"]]),
                                 "error": last["error"],
                             }
                         )
@@ -1148,7 +1148,7 @@ class _Checks:
     # -- faults ----------------------------------------------------------------------------------------------
 
     def faults(self) -> dict[str, Any]:
-        if _sets_replication(self.words):
+        if sets_replication(self.words):
             return _skipped("the sequence sets its node's replication itself")
         if _manages_auth(self.words):
             # The check's own connection would need the password or user the sequence set (fuzzer#88's replay).
@@ -1160,7 +1160,7 @@ class _Checks:
             )
         if _delays_persistence(self.words, self.server_config):
             return _skipped("the sequence delays each key a save or a load takes, so no restart or reload ends")
-        if _limits_memory(self.words, self.server_config):
+        if limits_memory(self.words, self.server_config):
             # A load under the limit evicts other keys than the node held (the walk's test of valkey#4354 replayed).
             return _skipped("the sequence sets a maxmemory, so a load evicts by design")
         nodes = self.config["nodes"]
@@ -1187,7 +1187,7 @@ class _Checks:
         if rdb_only:
             persistence = _PERSISTENCE[0]
         side, failed = self.start(
-            "candidate.faults", nodes=nodes + (replica is not None), options={**_QUICK_SYNC, **persistence}
+            "candidate.faults", nodes=nodes + (replica is not None), options={**QUICK_SYNC, **persistence}
         )
         synced, state, problem, exact = True, {}, None, True
         try:
@@ -1200,7 +1200,7 @@ class _Checks:
                 side.replies, start = [], 0
                 for fault in [*schedule, None]:
                     end = len(self.commands) if fault is None else fault["before"]
-                    replies = command_sequence._run_sequence(side, self.commands[start:end], self.context)
+                    replies = command_sequence.run_sequence(side, self.commands[start:end], self.context)
                     side.replies += [{**record, "index": record["index"] + start} for record in replies]
                     start = end
                     if fault is None or (side.replies and side.replies[-1].get("unanswered")):
@@ -1226,7 +1226,7 @@ class _Checks:
         if side.replies and side.replies[-1].get("unanswered"):
             last = side.replies[-1]
             return _errored(
-                f"command {last['index']} ({command_sequence._step_text(self.commands[last['index']])}) got no reply "
+                f"command {last['index']} ({command_sequence.step_text(self.commands[last['index']])}) got no reply "
                 f"after the faults {canonical_json(schedule)}: {last.get('error')}"
             )
         outcome = self.diverged("faults", "replica-diverged", synced, state, faults=schedule)
@@ -1236,18 +1236,18 @@ class _Checks:
     def settled_digest(self, side: Any, node: int) -> Optional[dict[str, Any]]:
         """Node ``node``'s DEBUG DIGEST if it holds still for a moment, else None (something changes its data)."""
 
-        first = _ask(side, node, "DEBUG", "DIGEST")
+        first = ask(side, node, "DEBUG", "DIGEST")
         self.context.sleep(_SETTLE_S)
-        return first if _ask(side, node, "DEBUG", "DIGEST") == first else None
+        return first if ask(side, node, "DEBUG", "DIGEST") == first else None
 
     def loaded(self, side: Any, node: int) -> bool:
         """Wait until node ``node`` of ``side`` no longer loads its data: whether it did."""
 
         def attempt() -> tuple[bool, None]:
-            record = _ask(side, node, "INFO", "persistence")
+            record = ask(side, node, "INFO", "persistence")
             return "reply" in record and info_fields(record["reply"]).get("loading") != "1", None
 
-        return poll_until(attempt, timeout_s=_SYNC_TIMEOUT_S, interval_s=0.05, context=self.context)[0]
+        return poll_until(attempt, timeout_s=SYNC_TIMEOUT_S, interval_s=0.05, context=self.context)[0]
 
     def inject(
         self, side: Any, fault: Mapping[str, Any], replica: Optional[int], exact: bool = True
@@ -1264,7 +1264,7 @@ class _Checks:
         # The sequence's own restart returns once the node answers, while it may still load its data (the walk's
         # test of valkey#2631 replayed): DEBUG DIGEST would digest what it loaded so far.
         if not self.loaded(side, node):
-            return _errored(f"node {node} was still loading {_SYNC_TIMEOUT_S:g}s before command {fault['before']}")
+            return _errored(f"node {node} was still loading {SYNC_TIMEOUT_S:g}s before command {fault['before']}")
         # The node must keep its data, judged when nothing else changes it meanwhile: nothing it holds can expire,
         # its data holds still (no asynchronous work, as a slot migration, moves it), and in a cluster it owns the
         # same slots before and after.
@@ -1279,7 +1279,7 @@ class _Checks:
         if cluster and before is not None and _owned_slots(side, node) != slots:
             before = None
         if fault["fault"] == "reload":
-            reloaded = _ask(side, node, "DEBUG", "RELOAD")
+            reloaded = ask(side, node, "DEBUG", "RELOAD")
             if str(reloaded.get("error", "")).startswith("BUSY"):
                 # A script the sequence left running holds the node (fuzzer#88's replay): no reload to judge.
                 return None
@@ -1298,7 +1298,7 @@ class _Checks:
             # far): its data is judged once it loaded.
             if not self.loaded(side, node):
                 return _errored(
-                    f"node {node} was still loading {_SYNC_TIMEOUT_S:g}s after a restart before "
+                    f"node {node} was still loading {SYNC_TIMEOUT_S:g}s after a restart before "
                     f"command {fault['before']}"
                 )
         # What a reload before the fault dropped as expired, a restart from the AOF replays: the node holds it again
@@ -1310,12 +1310,12 @@ class _Checks:
             and (slots is None or (_owned_slots(side, node) == slots and not _is_replica(side, node)))
             and poll_until(
                 lambda: (not _volatile(side, node), None),
-                timeout_s=_SYNC_TIMEOUT_S,
+                timeout_s=SYNC_TIMEOUT_S,
                 interval_s=0.05,
                 context=self.context,
             )[0]
         ):
-            after = _ask(side, node, "DEBUG", "DIGEST")
+            after = ask(side, node, "DEBUG", "DIGEST")
             if "reply" in after and after != before:
                 return _failed(
                     f"node {node} came back from {what} before command {fault['before']} with DEBUG DIGEST "
@@ -1339,15 +1339,15 @@ class _Checks:
         if bool(self.modules["candidate"]) != bool(self.modules["parent"]):
             return _skipped("a module is loaded on one build only")
         dbfilename = str(self.server_config.get("dbfilename", "dump.rdb"))
-        parent, failed = self.start("parent.compat", "parent", options=_QUICK_SYNC)
+        parent, failed = self.start("parent.compat", "parent", options=QUICK_SYNC)
         load = sync = None
         try:
             if not failed:
-                parent.replies = command_sequence._run_sequence(parent, self.commands, self.context)
+                parent.replies = command_sequence.run_sequence(parent, self.commands, self.context)
                 # The digest of what SAVE wrote: read before and after it, until no key expired in between.
                 for _ in range(3):
-                    digest, saved = _ask(parent, 0, "DEBUG", "DIGEST"), _ask(parent, 0, "SAVE")
-                    if _ask(parent, 0, "DEBUG", "DIGEST") == digest:
+                    digest, saved = ask(parent, 0, "DEBUG", "DIGEST"), ask(parent, 0, "SAVE")
+                    if ask(parent, 0, "DEBUG", "DIGEST") == digest:
                         break
                 else:
                     saved = {"error": "its data changed while it saved, three times"}
@@ -1375,9 +1375,9 @@ class _Checks:
         described, or an empty string: the merge changes what that command writes, so the parent's data may hold
         what the candidate never makes (a negative expire it refuses to write, and drops when it loads one)."""
 
-        for index in command_sequence._compare(self.commands, self.base, parent)[0]:
+        for index in command_sequence.compare(self.commands, self.base, parent)[0]:
             if "@write" in (_categories(parent, self.words[index]) or ()):
-                return f"command {index} ({command_sequence._step_text(self.commands[index])})"
+                return f"command {index} ({command_sequence.step_text(self.commands[index])})"
         return ""
 
     def compat_load(self, rdb: str, dbfilename: str, digest: Mapping[str, Any], changed: str) -> dict[str, Any]:
@@ -1390,15 +1390,15 @@ class _Checks:
         try:
             if not failed and not self.loaded(side, 0):
                 # A key-load-delay the sequence sets slows the load at startup (the walk's test of valkey#1317).
-                mine = {"error": f"it still loaded the parent's RDB after {_SYNC_TIMEOUT_S:g}s", "unanswered": True}
+                mine = {"error": f"it still loaded the parent's RDB after {SYNC_TIMEOUT_S:g}s", "unanswered": True}
             elif not failed:
                 # It loaded the RDB as a primary at startup, which drops the keys that expired since the parent saved;
                 # loaded again as a replica (of no server that answers), it keeps them, as the parent's digest does.
-                mine = _ask(side, 0, "REPLICAOF", "127.0.0.1", self.free_ports(1)[0])
+                mine = ask(side, 0, "REPLICAOF", "127.0.0.1", self.free_ports(1)[0])
                 if "reply" in mine:
-                    mine = _ask(side, 0, "DEBUG", "RELOAD", "NOSAVE")
+                    mine = ask(side, 0, "DEBUG", "RELOAD", "NOSAVE")
                 if "reply" in mine:
-                    mine = _ask(side, 0, "DEBUG", "DIGEST")
+                    mine = ask(side, 0, "DEBUG", "DIGEST")
         finally:
             self.finish(side)
         diagnostics = {"reason": "compat-load", "rdb": rdb}
@@ -1430,7 +1430,7 @@ class _Checks:
         return {"outcome": "pass"}
 
     def compat_sync(self, parent: Any, changed: str) -> dict[str, Any]:
-        if _sets_replication(self.words):
+        if sets_replication(self.words):
             return _skipped("the sequence sets its node's replication itself")
         if _configures_replica_auth(self.server_config):
             return _skipped("the server_config sets the credentials a replica authenticates to its primary with")
@@ -1474,9 +1474,22 @@ class _Checks:
             digest: Mapping[str, Any] = {}
             try:
                 if not failed:
-                    side.replies = command_sequence._run_sequence(side, self.commands, self.context)
-                    digest = _ask(side, 0, "DEBUG", "DIGEST")
+                    side.replies = command_sequence.run_sequence(side, self.commands, self.context)
+                    digest = ask(side, 0, "DEBUG", "DIGEST")
             finally:
                 self.finish(side)
             self._own = digest if side.exited is None and "reply" in digest else None
         return self._own
+
+
+__all__ = [
+    "BEFORE_ACL",
+    "QUICK_SYNC",
+    "RUNS_OTHERS",
+    "SYNC_TIMEOUT_S",
+    "ask",
+    "limits_memory",
+    "run_checks",
+    "sets_replication",
+    "words",
+]
