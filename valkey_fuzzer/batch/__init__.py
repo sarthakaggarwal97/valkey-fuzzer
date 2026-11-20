@@ -73,9 +73,12 @@ The package::
     results.py          ``job_result``: a finished job's status and failure signature
     pool.py             ``BatchRunner``: the worker slots, sweeps, deadlines, resume
     summary.py          ``summary.json``
-    hooks.py            the plug-in points: ``BatchSource`` and ``BatchPlugin``
+    hooks.py            the plug-in points: ``BatchSource`` and ``BatchPlugin``; the installed plug-ins
     zoo_plugin.py       the bug zoo as a plug-in
     conform_plugin.py   spec conformance as a plug-in
+
+The plug-ins are the ``valkey_fuzzer.batch_plugins`` entry points, one per pack (``pyproject.toml``,
+``docs/extending.md``); the fuzzer's own, ``valkey``, is :func:`shipped_plugins`.
 """
 
 from . import hooks, sources  # noqa: F401  (registers the built-in sources)
@@ -98,8 +101,15 @@ from .spec import (
 from .worker import main, run_worker
 from .zoo_plugin import ZooPlugin
 
-hooks.register(ZooPlugin())
-hooks.register(ConformancePlugin())
+
+def shipped_plugins() -> list[BatchPlugin]:
+    """The ``valkey`` entry point of the ``valkey_fuzzer.batch_plugins`` group: the bug zoo, then spec conformance."""
+
+    return [ZooPlugin(), ConformancePlugin()]
+
+
+# The entry point above resolves to this module while it loads: shipped_plugins is bound before this line runs.
+hooks.register_installed()
 
 __all__ = [
     "DEFAULT_PORT_BASE",
@@ -122,6 +132,7 @@ __all__ = [
     "main",
     "normalize_source",
     "run_worker",
+    "shipped_plugins",
     "signature_key",
     "signature_label",
     "worst",

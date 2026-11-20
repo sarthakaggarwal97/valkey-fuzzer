@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Changed: the batch's plug-ins are entry points, and the command prints what each describes (PR-R3-4)
+
+- The bug zoo and spec conformance are no longer registered by `valkey_fuzzer.batch` by name: the batch registers
+  the `valkey_fuzzer.batch_plugins` entry points, one per pack and named after it, each a function returning the
+  pack's `BatchPlugin` instances, in name order (the fuzzer's own is `valkey`, `valkey_fuzzer.batch:shipped_plugins`).
+  A pack can now bring a batch source or plug-in (docs/extending.md, "Ship a pack").
+- `BatchPlugin.describe(entry)` gives the lines `valkey-fuzzer batch` prints of the plug-in's summary entry; the
+  zoo's case verdicts and the `spec conform` digests moved from the command into their plug-ins, so the command
+  names neither. `Verdict.with_leaks(leaks)` is the leak adjustment of a finished job's verdict.
+- No change to `batch.json`, `jobs.json`, `results/*.json`, `conformance/*.json`, `summary.json`, `batch.log`, the
+  console output, or the exit codes for the same seeds.
+
 ### Added: chaos during slot migration (PR-C1)
 
 - `valkey.action.slot-migration-chaos`, the slot-migration mode of the wave engine: each wave moves one hash slot

@@ -12,6 +12,7 @@ import signal
 import subprocess
 import sys
 import time
+from importlib.metadata import EntryPoint, entry_points
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -1091,6 +1092,160 @@ def test_a_plug_in_takes_part_at_every_point_of_the_batch_and_its_jobs_are_its_o
     assert summary["status"] == "SKIP_UNSUPPORTED" and summary["exit_code"] == 3
     with pytest.raises(ValueError, match="already registered"):
         hooks.register(Toy())
+
+
+# A pack's batch plug-in: a module an entry point of the ``valkey_fuzzer.batch_plugins`` group names.
+_TOY_BATCH_PACK = """\
+from pathlib import Path
+
+from valkey_fuzzer.batch.hooks import BatchPlugin, BatchSource
+from valkey_fuzzer.schema import ConfigField, ConfigSchema
+
+
+def _jobs(value, index, service, options, expansion):
+    expansion.recorded["toy"] = {"seeds": value["seeds"]}
+    for seed in value["seeds"]:
+        scenario = {"scenario_id": f"toy-{seed}", "seed": seed, "experiment": {"id": "valkey.snapshot-equivalence"},
+                    "deployment": {"mode": "standalone"}}
+        expansion.add({"id": f"toy-{seed}", "source": "toy", "label": "toy", "scenario": scenario, "toy": {"seed": seed}})
+
+
+class Toy(BatchPlugin):
+    name = "toy"
+    source = BatchSource(
+        "toy", ConfigSchema({"seeds": ConfigField(list, items=ConfigField(int))}), lambda settings, base_dir, where: settings, _jobs
+    )
+
+    def after_run(self, report_dir, task):
+        Path(report_dir, "toy.txt").write_text("checked")
+
+    def record(self, job, run_dir, report, result):
+        return result["status"] if "toy" in job else Path(run_dir, "toy.txt").read_text()
+
+    def summarize(self, runner, results, main):
+        return {"statuses": {result["id"]: result["toy"] for result in results.values() if result["source"] == "toy"}}, []
+
+    def describe(self, entry):
+        return [f"  toy {job_id}: {status}" for job_id, status in sorted(entry["statuses"].items())]
+
+
+def batch_plugins():
+    return [Toy()]
+"""
+
+
+def test_the_plug_ins_are_the_entry_points_of_their_group_and_a_packs_takes_part_like_the_fuzzers(
+    tmp_path, workers, stub, monkeypatch, capsys
+):
+    # The fuzzer's own are the ``valkey`` entry point (pyproject.toml): the zoo, then spec conformance.
+    installed = tuple(entry_points(group=hooks.PLUGIN_GROUP))
+    assert "valkey" in [point.name for point in installed]
+    assert [type(plugin).__name__ for plugin in batch.shipped_plugins()] == ["ZooPlugin", "ConformancePlugin"]
+    assert [plugin.name for plugin in hooks.PLUGINS] == ["zoo", "conformance"]
+
+    (tmp_path / "tests_toy_batch.py").write_text(_TOY_BATCH_PACK, encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    points = (*installed, EntryPoint("toy", "tests_toy_batch:batch_plugins", hooks.PLUGIN_GROUP))
+    monkeypatch.setattr(hooks, "entry_points", lambda group: points)
+    builtin = {kind: s for kind, s in hooks.SOURCES.items() if not any(s is p.source for p in hooks.PLUGINS)}
+    monkeypatch.setattr(hooks, "PLUGINS", [])
+    monkeypatch.setattr(hooks, "SOURCES", builtin)
+    hooks.register_installed()
+    # Packs in name order (toy before valkey), a pack's plug-ins in the order its function returns them.
+    assert [plugin.name for plugin in hooks.PLUGINS] == ["toy", "zoo", "conformance"]
+    assert list(hooks.SOURCES) == ["random", "matrix", "scenarios", "failures", "toy", "zoo"]
+
+    stub.behave(**{"8": "fail:data"})
+    spec = tmp_path / "batch.yaml"
+    random = {"experiments": [SNAPSHOT], "seeds": 1, "first_seed": 0, "excludes": EXCLUDES}
+    spec.write_text(yaml.safe_dump({"port_base": 12000, "sources": [{"random": random}, {"toy": {"seeds": [7, 8]}}]}))
+    with patch("sys.argv", ["valkey-fuzzer", "batch", str(spec), "--out", str(tmp_path / "b")]):
+        assert main() == 0
+    out = capsys.readouterr().out
+    results = {path.stem: json.loads(path.read_text()) for path in Path(tmp_path, "b", "results").glob("*.json")}
+    # Its source expanded, the worker ran its after_run, it recorded each job, and its jobs were its own to judge.
+    assert json.loads(Path(tmp_path, "b", "batch.json").read_text())["toy"] == {"seeds": [7, 8]}
+    assert results[_id(0)]["toy"] == "checked" and results["toy-8"]["toy"] == "FAIL"
+    summary = json.loads(Path(tmp_path, "b", "summary.json").read_text())
+    assert summary["toy"] == {"statuses": {"toy-7": "PASS", "toy-8": "FAIL"}} and summary["counts"] == {"PASS": 1}
+    # The command printed what it describes, in the plug-ins' order, between the batch's lines and its status.
+    assert out.index("Cores per run") < out.index("  toy toy-7: PASS\n  toy toy-8: FAIL\n") < out.index("Status: PASS")
+
+
+@pytest.mark.parametrize(
+    ("entry", "lines"),
+    [
+        (None, []),
+        (
+            {
+                "cases": [
+                    {"case": "waits", "holds": None, "pending": True},
+                    {"case": "holds", "holds": True, "undecided": None, "controls": [{"status": "PASS"}],
+                     "scenarios": {"a.yaml": {"detection_rate": 1.0}, "b.yaml": {"detection_rate": 0.5}}},
+                    {"case": "broken", "holds": False, "undecided": None, "controls": [{"status": "PASS"}, {"status": "PASS"}],
+                     "scenarios": {"a.yaml": {"detection_rate": 0.0}}},
+                    {"case": "unsure", "holds": None, "undecided": "ERROR", "controls": [{"status": "ERROR"}],
+                     "scenarios": {"a.yaml": {"detection_rate": 1.0}}},
+                ],
+                "skipped": [{"case": "later", "reason": "needs the fix"}],
+            },
+            [
+                "  zoo waits: not finished",
+                "  zoo OK    holds: control PASS; detected a.yaml 100%, b.yaml 50%",
+                "  zoo FAIL  broken: control PASS/PASS; detected a.yaml 0%",
+                "  zoo ERROR unsure: control ERROR; detected a.yaml 100%",
+                "  zoo SKIP later: needs the fix",
+            ],
+        ),
+    ],
+)  # fmt: skip
+def test_the_zoo_describes_each_case_verdict_and_skipped_case(entry, lines):
+    assert batch.ZooPlugin().describe(entry) == lines
+
+
+def test_spec_conformance_describes_each_bundles_digest():
+    digests = {
+        "approved": {
+            "status": "fail",
+            "approved": True,
+            "counts": {"pass": 2, "fail": 1, "error": 1},
+            "violations": [
+                {"run": "r1", "property": "Safe", "claimed": True},
+                {"run": "r2", "property": "Live", "claimed": False},
+            ],
+            "errors": [{"run": "r3", "error": "x" * 300}],
+            "never_observed": ["Crash", "Save"],
+            "skipped": [],
+        },
+        "draft": {"status": "skipped", "approved": False, "counts": {"skipped": 1}, "skipped": ["no jar"]},
+        "gone": {"status": "error", "counts": {"pass": 1}, "skipped": [], "error": "bundle gone does not load"},
+    }
+    assert batch.ConformancePlugin().describe(digests) == [
+        "  spec conform approved (approved): fail (error 1, fail 1, pass 2)",
+        "    runs/r1: Safe violated",
+        "    runs/r2: Live violated (outside the claim)",
+        f"    runs/r3: {'x' * 200}",
+        "    never observed: Crash, Save",
+        "  spec conform draft (draft): skipped (skipped 1)",
+        "    skipped: no jar",
+        "  spec conform gone: error (pass 1)",
+        "    bundle gone does not load",
+    ]
+    # Up to five violations and five errors of a bundle are printed.
+    many = {"status": "fail", "counts": {}, "skipped": [], "errors": [{"run": f"r{i}", "error": "e"} for i in range(9)],
+            "violations": [{"run": f"r{i}", "property": "P", "claimed": True} for i in range(9)]}  # fmt: skip
+    assert len(batch.ConformancePlugin().describe({"b": many})) == 11
+    assert hooks.BatchPlugin().describe({"anything": 1}) == []
+
+
+def test_a_verdict_with_leaks_is_an_error_that_names_them_first():
+    verdict = results.Verdict("PASS", "PASS", {"status": "PASS"})
+    assert verdict.with_leaks([]) is verdict
+    leaked = verdict.with_leaks([{"kind": "process"}])
+    assert (leaked.status, leaked.summary) == ("ERROR", "passed its checks but left 1 leftover: process")
+    assert leaked.signature is verdict.signature and verdict.status == "PASS"
+    failed = results.Verdict("FAIL", "data:FAIL", {}).with_leaks([{"kind": "mount"}, {"kind": "dir"}, {"kind": "dir"}])
+    assert (failed.status, failed.summary) == ("FAIL", "left 3 leftovers: dir, mount; data:FAIL")
 
 
 def test_a_workers_deadline_covers_the_plug_ins_after_run_steps(tmp_path, workers, stub, monkeypatch):

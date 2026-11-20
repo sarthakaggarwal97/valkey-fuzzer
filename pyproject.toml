@@ -51,6 +51,12 @@ valkey-fuzzer = "valkey_fuzzer.cli:main"
 [project.entry-points."valkey_fuzzer.packs"]
 valkey = "valkey_fuzzer.components:register"
 
+# Batch plug-ins: the batch registers every entry point of this group, one per pack and named after it, each a
+# function returning the pack's BatchPlugin instances (docs/extending.md, "Ship a pack"). The bug zoo and spec
+# conformance are the fuzzer's.
+[project.entry-points."valkey_fuzzer.batch_plugins"]
+valkey = "valkey_fuzzer.batch:shipped_plugins"
+
 # The packages are listed (tests/test_packaging.py keeps the list complete)
 # because the spec bundles under formal/ ship as valkey_fuzzer/formal: a
 # shipped experiment that names a bundle (spec: cluster-election) must find

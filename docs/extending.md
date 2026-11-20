@@ -716,6 +716,22 @@ Rules:
 - **An editable install** (`pip install -e .`) records the entry points when
   it installs; reinstall after you add or rename one.
 
+A pack may also take part in a batch (`valkey-fuzzer batch`): a kind of
+`sources` entry of its own, a step after each run in the worker, an amendment
+to a finished job's verdict, a field of its result, an entry of `summary.json`
+with the statuses it adds to the batch's, and the lines the command prints of
+that entry. Subclass `BatchPlugin` from `valkey_fuzzer.batch.hooks` (a
+`BatchSource` for the source; the hooks are `after_run`, `judge`, `record`,
+`summarize`, `describe`) and declare a second entry point, named like the
+pack, in the `valkey_fuzzer.batch_plugins` group, whose value is a function
+returning the pack's plug-in instances: `toy = "toy_pack:batch_plugins"`.
+Every batch and every worker registers the group's entry points in name
+order, a pack's plug-ins in the order its function returns them; the fuzzer's
+own, `valkey`, are the bug zoo and spec conformance. A plug-in's `name` keys
+its record in `batch.json`, its field of a result, and its summary entry, and
+a job its source adds carries that name: the batch neither counts it, groups
+it by failure signature, nor runs it again (the plug-in judges it).
+
 ## Testing
 
 ### In-process

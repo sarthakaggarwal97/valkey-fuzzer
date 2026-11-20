@@ -211,3 +211,25 @@ class ConformancePlugin(BatchPlugin):
                 "targets_reached": report["targets_reached"],
             }
         return digests, []
+
+    def describe(self, entry: Any) -> list[str]:
+        return [line for name, digest in entry.items() for line in _describe(name, digest)]
+
+
+def _describe(name: str, digest: Mapping[str, Any]) -> list[str]:
+    """The command's lines for one bundle's digest: its status and counts, up to five violations and errors, the
+    actions never observed, the reasons runs were skipped, and the error of a bundle that did not load."""
+
+    counts = ", ".join(f"{status} {count}" for status, count in sorted(digest["counts"].items()))
+    claims = " (approved)" if digest.get("approved") else " (draft)" if "approved" in digest else ""
+    lines = [f"  spec conform {name}{claims}: {digest['status']} ({counts})"]
+    for item in digest.get("violations", [])[:5]:
+        outside = "" if item["claimed"] else " (outside the claim)"
+        lines.append(f"    runs/{item['run']}: {item['property']} violated{outside}")
+    lines += [f"    runs/{item['run']}: {item['error'][:200]}" for item in digest.get("errors", [])[:5]]
+    if digest.get("never_observed"):
+        lines.append(f"    never observed: {', '.join(digest['never_observed'])}")
+    lines += [f"    skipped: {reason}" for reason in digest["skipped"]]
+    if digest.get("error"):
+        lines.append(f"    {digest['error']}")
+    return lines
