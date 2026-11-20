@@ -24,6 +24,8 @@ if not BINARY:
     pytest.skip("valkey-server is not available", allow_module_level=True)
 
 PARTITIONS = capabilities.iptables_supported()[0] and capabilities.per_instance_loopback_supported()[0]
+LIBFAKETIME_SUPPORTED, LIBFAKETIME_REASON = capabilities.libfaketime_supported()
+CGROUP_V2_SUPPORTED, CGROUP_V2_REASON = capabilities.cgroup_v2_supported(("cpu", "memory"))
 ELECTION = "valkey.cluster-election-durability"
 
 
@@ -177,6 +179,34 @@ def test_cluster_partition_fails_over_heals_and_bounds_loss(runtime):
         run_scenario(runtime, _partition()), fields={"valkey.data.ledger-verified": {"loss_scope_slots": [[0, 5460]]}}
     )
     assert "VF-" not in subprocess.run(["iptables", "-S"], capture_output=True, text=True).stdout, "chains removed"
+
+
+@pytest.mark.skipif(not LIBFAKETIME_SUPPORTED, reason=LIBFAKETIME_REASON or "no libfaketime")
+def test_clock_skew_shifts_the_primarys_wall_clock_and_expiry_follows_it(runtime):
+    # libfaketime sets the primary's clock back, so a volatile key's absolute expiry is in the replica's past:
+    # the replica reads it as expired but keeps it, and only the primary's DEL (once its clock is restored)
+    # removes it. The whole pipeline is exercised: the deployment under libfaketime, the fault, and the oracles.
+    outcome = run_scenario(
+        runtime, scenario("valkey.clock-skew-expiry", replicas=1, clock_faults=True, inputs={"offset_s": -30, "ttl_s": 10})
+    )  # fmt: skip
+    check(outcome)
+    injected = evidence(outcome, "valkey.fault.injected")
+    assert injected["applied"] and injected["target"] == "valkey-0" and injected["skew_measured_s"] < -25
+    assert injected["release_reason"] == "event"
+
+
+@pytest.mark.skipif(not CGROUP_V2_SUPPORTED, reason=CGROUP_V2_REASON or "no delegated cgroup v2")
+def test_resource_pressure_throttles_the_primary_and_the_replica_links_survive(runtime):
+    # A cgroup v2 CPU quota throttles the primary under writes for a few seconds; the replica link must survive
+    # it with no resync and every write converge. The fault is not applied unless the kernel actually throttled.
+    outcome = run_scenario(
+        runtime,
+        scenario("valkey.replication-cpu-starvation", replicas=1, inputs={"cpu_percent": 1, "starve_s": 3, "mutation_rate": 2000}),
+    )  # fmt: skip
+    check(outcome)
+    injected = evidence(outcome, "valkey.fault.injected")
+    assert injected["applied"] and injected["target"] == "valkey-0"
+    assert injected["stats"]["cpu.stat.nr_throttled"] > 0 and injected["release_reason"] == "event"
 
 
 def test_a_kill_in_the_save_of_a_granted_vote_lands_before_the_vote_is_on_disk(runtime):

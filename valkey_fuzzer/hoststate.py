@@ -21,11 +21,13 @@ valkey-server        ``valkey-fuzzer-owner=<owner>`` in its process title, set w
 iptables chain       the name ``VF-<owner>-<8 hex digits>``
 tmpfs mount          the mount point ``<tmp>/valkey-fuzzer-mounts/<owner>/<name>``
                      (an empty mount point, made before its mount, too)
+cgroup leaf          the name ``vf-<owner>-<8 hex digits>``, in the sweeping process's
+                     own cgroup (:mod:`valkey_fuzzer.cgroups`)
 ===================  ===============================================================
 
 :func:`sweep` lists every tagged item whose owner process is gone and, unless
-``dry_run``, removes it: it kills the servers, deletes the chains, unmounts
-the mounts, and removes the directories, in that order. Anything untagged, and
+``dry_run``, removes it: it kills the servers, deletes the chains, releases the
+cgroup leaves, unmounts the mounts, and removes the directories, in that order. Anything untagged, and
 anything whose owner is alive (or whose liveness cannot be decided), is never
 touched; nor is a directory that, with its tag file, belongs to another user,
 nor a shared one (:func:`shared_directory`), whatever tag it holds.
@@ -58,11 +60,13 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Optional
 
+from . import cgroups
 from .deployment.local.models import DEFAULT_BASE_DATA_DIR
 
 OWNER_FILE = ".valkey-fuzzer-owner"
 TITLE_TAG = "valkey-fuzzer-owner="
 CHAIN_PREFIX = "VF-"
+CGROUP_PREFIX = "vf-"
 MOUNT_ROOT_NAME = "valkey-fuzzer-mounts"
 # Sticky and world-writable, like /tmp: see shared_directory.
 SHARED_MODE = 0o1777
@@ -75,6 +79,7 @@ _OWNER = r"(\d+)-([0-9a-f]{6})"
 _OWNER_RE = re.compile(rf"^{_OWNER}$")
 _TITLE_RE = re.compile(rf"{re.escape(TITLE_TAG)}{_OWNER}(?!\S)")
 _CHAIN_RE = re.compile(rf"^-N ({re.escape(CHAIN_PREFIX)}{_OWNER}-[0-9a-f]{{8}})$")
+_CGROUP_RE = re.compile(rf"^{re.escape(CGROUP_PREFIX)}{_OWNER}-[0-9a-f]{{8}}$")
 # The server, and the children it forks (valkey-rdb-bgsave, valkey-aof-rewrite, valkey-rdb-to-replicas,
 # valkey-module-fork, ...), which carry its title, tag included, and outlive a SIGKILLed server; and the benchmark
 # a workload runs beside it, tagged in its argv[0] (:class:`~valkey_fuzzer.components.workloads.BenchmarkWorkload`).
@@ -390,6 +395,19 @@ def chain_name(label: str) -> str:
     return f"{CHAIN_PREFIX}{current_owner().token}-{hashlib.sha256(label.encode()).hexdigest()[:8]}"
 
 
+def cgroup_name(label: str) -> str:
+    """``vf-<owner>-<hash of label>``: the name of a cgroup leaf this process makes."""
+
+    return f"{CGROUP_PREFIX}{current_owner().token}-{hashlib.sha256(label.encode()).hexdigest()[:8]}"
+
+
+def cgroup_owner(name: str) -> Optional[Owner]:
+    """The owner a cgroup leaf's ``name`` is tagged with, or None (not a fuzzer's leaf)."""
+
+    match = _CGROUP_RE.match(name)
+    return Owner(int(match.group(1)), match.group(2)) if match else None
+
+
 def mount_parent() -> str:
     """The directory this process creates its tmpfs mount points in: ``<tmp>/valkey-fuzzer-mounts/<owner>``.
 
@@ -479,7 +497,7 @@ def tagged_chains(iptables: Iptables = run_iptables) -> Optional[list[tuple[str,
 class Leftover:
     """One tagged host change: what it is, who made it, and what the sweep did with it.
 
-    ``kind`` is ``server`` (``target`` is the PID), ``chain``, ``mount``,
+    ``kind`` is ``server`` (``target`` is the PID), ``chain``, ``cgroup``, ``mount``,
     ``mount point`` (an empty one), or ``directory`` (``target`` is the path). ``action`` is ``removed``,
     ``would remove`` (a dry run), ``failed`` (``reason`` says why), or
     ``skipped`` (``--older-than`` excluded it, or it changed hands since it
@@ -582,6 +600,21 @@ def _find_servers(gone: Gone) -> list[Leftover]:
         owner = server_owner(command)
         if owner is not None and pid != os.getpid() and gone(owner):
             found.append(Leftover("server", str(pid), owner.token, age, command))
+    return found
+
+
+def _find_cgroups(gone: Gone) -> list[Leftover]:
+    """The fuzzer-named cgroup leaves of gone owners in this process's own cgroup (a resource-pressure fault's,
+    left when its fuzzer died); none outside a cgroup v2 hierarchy."""
+
+    path = cgroups.own_cgroup()
+    if path is None:
+        return []
+    found = []
+    for entry in _subdirectories(os.path.join(cgroups.ROOT, path.lstrip("/"))):
+        owner = cgroup_owner(entry.name)
+        if owner is not None and gone(owner):
+            found.append(Leftover("cgroup", entry.path, owner.token, None))
     return found
 
 
@@ -748,6 +781,12 @@ def _remove_chain(item: Leftover) -> Optional[str]:
     return None
 
 
+def _remove_cgroup(item: Leftover) -> Optional[str]:
+    # The servers in it were killed first; whatever is left moves to the unlimited harness leaf beside it.
+    cgroups.remove_leaf(item.target, os.path.join(os.path.dirname(item.target), cgroups.HARNESS))
+    return None
+
+
 def _unmount(item: Leftover) -> Optional[str]:
     if not _is_root():
         raise RuntimeError("unmounting needs root")
@@ -813,6 +852,7 @@ def _remove_directory(item: Leftover) -> Optional[str]:
 _REMOVERS: dict[str, Callable[[Leftover], Optional[str]]] = {
     "server": _kill_server,
     "chain": _remove_chain,
+    "cgroup": _remove_cgroup,
     "mount": _unmount,
     "mount point": _remove_mount_point,
     "directory": _remove_directory,
@@ -831,7 +871,7 @@ def sweep(
     ``roots`` are the directories whose immediate children are checked for
     tagged directories (default: :func:`default_roots`). ``older_than`` leaves
     anything younger than that many seconds, and anything whose age is unknown
-    (a chain), alone. ``owners`` (owner tokens) limits the sweep to what those
+    (a chain, a cgroup leaf), alone. ``owners`` (owner tokens) limits the sweep to what those
     processes left: the batch runner sweeps each worker after its run. An owner recorded in another PID
     namespace is kept as alive (its PID means nothing here).
     Iptables chains carry no namespace: they are judged by PID alone.
@@ -852,6 +892,7 @@ def sweep(
             report.unchecked.append("iptables chains: listing them needs root")
         else:
             found += [Leftover("chain", chain, owner.token, None) for chain, owner in chains if gone(owner)]
+    found += _find_cgroups(gone)
     roots = default_roots() if roots is None else roots
     found += _find_mounts(now, gone)
     found += _find_mount_points(roots, now, gone)

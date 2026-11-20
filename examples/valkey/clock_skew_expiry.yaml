@@ -1,0 +1,18 @@
+# Set the primary's clock 30 seconds back (libfaketime, in the server process
+# only) and check a volatile key across the replication link: the replica reads
+# it as expired by its own clock while the primary still serves it, and deletes
+# it only once the primary, its clock restored, expires it and sends the DEL.
+# Needs the libfaketime package (or VALKEY_FUZZER_LIBFAKETIME naming the
+# library); without it the run is an ERROR that names the package.
+scenario_id: clock-skew-expiry
+seed: 3
+experiment:
+  id: valkey.clock-skew-expiry
+  inputs:
+    offset_s: -30
+    ttl_s: 10
+deployment:
+  mode: standalone
+  replicas_per_primary: 1
+  base_port: 7940
+  clock_faults: true

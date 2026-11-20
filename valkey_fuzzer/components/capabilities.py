@@ -42,7 +42,10 @@ from typing import Any, Callable, Optional
 
 import valkey
 
+from valkey_fuzzer import cgroups
 from valkey_fuzzer.declarations import Declarations
+from valkey_fuzzer.deployment.local import clock_faults
+from valkey_fuzzer.deployment.local.models import LocalDeploymentError
 from valkey_fuzzer.deployment.local.processes import SOURCE_BUILD_DIR
 from valkey_fuzzer.deployment.local.server_config import config_for_build
 from valkey_fuzzer.hoststate import run_iptables
@@ -490,6 +493,25 @@ def iptables_supported() -> tuple[bool, str]:
     if probe.returncode != 0:
         return False, f"iptables is not usable: {probe.stderr.strip()[:200]}"
     return True, ""
+
+
+def libfaketime_supported() -> tuple[bool, str]:
+    """Whether ``valkey.fault.clock-skew`` can run: libfaketime is installed (or ``VALKEY_FUZZER_LIBFAKETIME``
+    names it); else the reason, which names the package."""
+
+    try:
+        clock_faults.find_library()
+    except LocalDeploymentError as exc:
+        return False, str(exc)
+    return True, ""
+
+
+def cgroup_v2_supported(controllers: tuple[str, ...] = ("cpu", "memory")) -> tuple[bool, str]:
+    """Whether ``valkey.fault.resource-pressure`` can run with ``controllers``: this process's cgroup is a
+    delegated cgroup v2 of its own (:func:`valkey_fuzzer.cgroups.delegated`); else the reason."""
+
+    directory, reason = cgroups.delegated(controllers)
+    return directory is not None, reason
 
 
 def per_instance_loopback_supported() -> tuple[bool, str]:

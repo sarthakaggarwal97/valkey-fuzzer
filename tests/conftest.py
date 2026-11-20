@@ -38,12 +38,20 @@ class CannedRuns:
 
 
 @pytest.fixture(autouse=True)
-def checker_installed(monkeypatch):
-    """The host probe of ``valkey.oracle.history`` passes, so a test that validates or runs a scenario with the
-    oracle needs no Go toolchain. The tests of the probe itself (tests/test_history.py) put the real one back; the
-    tests of the checker build or find the real porcupine."""
+def checker_installed(request, monkeypatch):
+    """The host probes of ``valkey.oracle.history``, ``valkey.fault.clock-skew`` and ``valkey.fault.resource-pressure``
+    pass, so a test that validates or runs a scenario with them needs no Go toolchain, libfaketime, or delegated
+    cgroup. The tests of the probes themselves (tests/test_history.py, tests/test_clock_skew.py,
+    tests/test_resource_pressure.py) put the real ones back; the tests of the checker build or find the real
+    porcupine. A ``live`` test keeps the real libfaketime and cgroup checks: it starts real servers and must use
+    the real library and cgroup subtree, not a stub path nothing can load."""
 
     monkeypatch.setattr("valkey_fuzzer.components.history.probe_host", lambda: None)
+    if request.node.get_closest_marker("live") is None:
+        monkeypatch.setattr(
+            "valkey_fuzzer.deployment.local.clock_faults.find_library", lambda: "/stub/libfaketime.so.1"
+        )
+        monkeypatch.setattr("valkey_fuzzer.cgroups.delegated", lambda controllers, **where: ("/stub/cgroup", ""))
 
 
 @pytest.fixture(scope="session")

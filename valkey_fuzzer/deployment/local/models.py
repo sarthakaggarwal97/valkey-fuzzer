@@ -67,6 +67,8 @@ class DeploymentConfig:
     loopback_block: int = 0
     # Start every server with the syscall fault library (``syscall_faults.c``), for ``valkey.fault.syscall``.
     syscall_faults: bool = False
+    # Start every server with libfaketime, reading a timestamp file of its own, for ``valkey.fault.clock-skew``.
+    clock_faults: bool = False
 
     def __post_init__(self):
         defaults = DEFAULT_DIMENSIONS[self.mode]
