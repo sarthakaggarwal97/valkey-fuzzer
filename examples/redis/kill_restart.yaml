@@ -1,0 +1,13 @@
+# The redis pack's experiment (packs/redis, docs/second-target.md): SIGKILL one redis-server under SET/GET writes,
+# restart it from its append-only file, and check that every acknowledged write survived. Needs the pack
+# installed (`pip install packs/redis`) and `redis-server` on PATH, or `redis_binary: /path/to/redis-server`.
+scenario_id: redis-kill-restart
+seed: 1
+experiment:
+  id: redis.kill-restart
+  inputs:
+    run_before_kill_s: 2
+    run_after_restart_s: 1
+deployment:
+  mode: redis
+  base_port: 7400

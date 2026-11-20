@@ -1,0 +1,57 @@
+# SIGKILL a standalone Redis under a SET/GET workload, restart it from its append-only file, and hold it to
+# the policy appendfsync always promises: every acknowledged write survives. The fault fires inside the
+# dispatch of run-before-kill.completed, so the kill lands at the same point in every run; the restart is
+# immediate, and run-after-restart keeps the workload writing to the restarted server before the oracles judge
+# it. The ledger oracle checks the dataset against what the clients saw; liveness and crash check the server.
+id: redis.kill-restart
+deployment:
+  modes: [redis]
+metadata:
+  description: Kill a Redis server under writes, restart it from its AOF, and verify every acknowledged write survived
+inputs:
+  properties:
+    keys: {type: integer, minimum: 1, maximum: 100000, default: 200}
+    rate: {type: number, minimum: 0.1, maximum: 20000, default: 200}
+    run_before_kill_s: {type: number, minimum: 0, maximum: 600, default: 2}
+    run_after_restart_s: {type: number, minimum: 0, maximum: 600, default: 1}
+startup_overlays:
+  - overlay_id: aof
+    server_config:
+      appendonly: "yes"
+      appendfsync: always
+components:
+  - use: redis.workload.set-get
+    id: writes
+    config:
+      keys: {$ref: inputs.keys}
+      rate: {$ref: inputs.rate}
+
+  - use: redis.fault.process-signal
+    id: kill
+    config:
+      when_event: run-before-kill.completed
+      signal: SIGKILL
+
+  - use: redis.action.sleep
+    id: run-before-kill
+    depends_on: [writes, kill]
+    config: {seconds: {$ref: inputs.run_before_kill_s}}
+
+  - use: redis.action.sleep
+    id: run-after-restart
+    depends_on: [run-before-kill]
+    config: {seconds: {$ref: inputs.run_after_restart_s}}
+
+  - use: redis.oracle.ledger
+    id: data
+    config: {workload: writes}
+
+  - use: redis.oracle.liveness
+    id: liveness
+
+  - use: redis.oracle.crash
+    id: crash
+required_events: [run-before-kill.completed, kill.injected, kill.recovered]
+required_evidence:
+  - {evidence_id: redis.fault.injected, source: kill}
+  - {evidence_id: redis.ledger.verified, source: data}

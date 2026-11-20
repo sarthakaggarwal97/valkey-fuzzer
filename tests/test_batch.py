@@ -35,14 +35,17 @@ from valkey_fuzzer.batch import (
     results,
     worker,
 )
+from valkey_fuzzer.catalog import Catalog
 from valkey_fuzzer.cli import main
 from valkey_fuzzer.commands import batch as batch_command
 from valkey_fuzzer.deployment.local import ports
 from valkey_fuzzer.hoststate import OWNER_FILE, sweep
+from valkey_fuzzer.registrations import DeploymentProviderRegistration
 from valkey_fuzzer.results import OutcomeStatus, RunOutcome
 from valkey_fuzzer.schema import ConfigField, ConfigSchema
 from valkey_fuzzer.spec import conform
 from valkey_fuzzer.spec.tla import TOOLS_HINT, TlaTools
+from valkey_fuzzer.testing import FakeDeploymentProvider
 
 from .batch_worker_stub import InProcessWorkers
 from .valkey_experiments_support import valkey_service
@@ -173,6 +176,29 @@ def test_the_worker_isolates_its_run_keeps_a_zoo_build_and_refuses_a_scenario_to
     )
     assert "plans 6 instances; a batch worker's port block holds 5" in (tmp_path / "big" / "error.json").read_text()
     assert len(canned_runs.plans) == 2, "nothing started"
+
+
+def test_a_worker_places_a_job_through_the_fields_its_provider_places_a_deployment_with():
+    # The local deployment takes its worker's port block, data directory, and loopback block; another pack's
+    # provider only what its host_fields name (the redis pack's has no loopback block); a draw whose base names
+    # no mode gets them all, and an unknown mode is the compile's to report.
+    catalog = valkey_service().catalog
+    toy = Catalog()
+    toy.register(
+        deployment_providers=(
+            DeploymentProviderRegistration(
+                "toy", "toy.deployment.fake", FakeDeploymentProvider, host_fields=("base_port",)
+            ),
+        )
+    )
+    toy.freeze()
+    task = {"base_port": 40000, "data_dir": "/data", "loopback_block": 1}
+    everything = {"deployment": {"base_port": 40000, "base_data_dir": "/data", "loopback_block": 1}}
+    assert worker._placement(catalog, {"deployment": {"mode": "standalone"}}, task) == everything
+    assert worker._placement(catalog, {"deployment": {"mode": "cluster", "primaries": 3}}, task) == everything
+    assert worker._placement(catalog, {}, task) == everything
+    assert worker._placement(catalog, {"deployment": {"mode": "nope"}}, task) == everything
+    assert worker._placement(toy, {"deployment": {"mode": "toy"}}, task) == {"deployment": {"base_port": 40000}}
 
 
 def test_a_batch_folder_keeps_the_experiments_its_runs_load(tmp_path):
