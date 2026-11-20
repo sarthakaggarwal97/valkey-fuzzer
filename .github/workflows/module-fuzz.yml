@@ -109,6 +109,12 @@ jobs:
   fuzz:
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout_minutes }}
+    # A called workflow has no run of its own, so the group is the job's: one caller's runs of one module and
+    # experiment on one ref queue behind each other (a schedule that outlasts its interval), while its calls for
+    # other modules or experiments run beside them.
+    concurrency:
+      group: module-fuzz-${{ github.repository }}-${{ github.ref }}-${{ inputs.module }}-${{ inputs.experiment }}
+      cancel-in-progress: false
     # An empty image is no container: the job runs on the runner.
     container: ${{ inputs.image }}
     defaults:
