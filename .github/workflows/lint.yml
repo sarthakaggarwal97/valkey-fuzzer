@@ -34,7 +34,7 @@ jobs:
       run: pip install 'ruff==0.14.3'
 
     - name: Ruff lint check
-      run: ruff check valkey_fuzzer/ tests/ examples/ .github/scripts/
+      run: ruff check valkey_fuzzer/ tests/ examples/ packs/ .github/scripts/
 
     - name: Ruff format check
-      run: ruff format --check valkey_fuzzer/ tests/ examples/ .github/scripts/
+      run: ruff format --check valkey_fuzzer/ tests/ examples/ packs/ .github/scripts/

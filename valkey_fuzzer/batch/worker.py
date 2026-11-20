@@ -2,17 +2,19 @@
 
 import os
 import sys
-from collections.abc import Sequence
-from typing import Optional
+from collections.abc import Mapping, Sequence
+from typing import Any, Optional
 
 from .._data import error_record
-from ..compiler import Overrides, with_valkey_binary
+from ..catalog import Catalog
+from ..compiler import Overrides, scenario_provider, with_valkey_binary
 from ..documents import merge
 from ..generator import Exclusion
 from ..hoststate import interrupt_on_sigterm
 from ..outcomes import EXIT_HARNESS_ERROR, EXIT_INTERRUPTED, exit_code, print_outcome
 from ..plan import ExecutionPlan
 from ..reports import write_document
+from ..schema import ScenarioCompileError
 from ..service import PreparedRun, RunService
 from ..spec.conform import CONFORM_TIMEOUT_OPTION
 from . import hooks
@@ -26,18 +28,33 @@ def _check_port_block(plan: ExecutionPlan) -> None:
         raise BatchError(f"the scenario plans {count} instances; a batch worker's port block holds {PORT_BLOCK}")
 
 
+def _placement(catalog: Catalog, document: Mapping[str, Any], task: Mapping[str, Any]) -> dict[str, Any]:
+    """The job's place on this host as deployment fields: its worker's port block and data directory, and its
+    loopback block. A scenario's provider gets the ones it places a deployment with (its ``host_fields``): a
+    pack's provider knows nothing of the local deployment's. A draw whose base names no mode gets them all; the
+    generator draws a local deployment."""
+
+    fields = {
+        "base_port": task["base_port"],
+        "base_data_dir": task["data_dir"],
+        "loopback_block": task["loopback_block"],
+    }
+    deployment = document.get("deployment")
+    mode = deployment.get("mode") if isinstance(deployment, Mapping) else None
+    if isinstance(mode, str):
+        try:
+            registration = scenario_provider(catalog, mode, deployment.get("provider"))
+        except ScenarioCompileError:
+            return {"deployment": fields}  # The compile reports it.
+        fields = {name: value for name, value in fields.items() if name in registration.host_fields}
+    return {"deployment": fields}
+
+
 def run_worker(task_path: str) -> int:
     """Run the job in ``task_path`` in its report folder; the exit code is the run's (2 when it cannot start)."""
 
     task = read_json(task_path)
     job, report_dir = task["job"], task["report_dir"]
-    isolation = {
-        "deployment": {
-            "base_port": task["base_port"],
-            "base_data_dir": task["data_dir"],
-            "loopback_block": task["loopback_block"],
-        }
-    }
     service = RunService(
         experiment_directories=task["experiment_directories"],
         artifact_dir=task["artifact_dir"],
@@ -51,15 +68,14 @@ def run_worker(task_path: str) -> int:
                 seed=draw["seed"],
                 experiment=draw["experiment"],
                 excludes=[Exclusion.parse(item) for item in draw["excludes"]],
-                base=merge(draw["base"], isolation),
+                base=merge(draw["base"], _placement(service.catalog, draw["base"], task)),
                 profile=draw["profile"],
                 free_ports=False,
                 overrides=Overrides(binary=task["valkey_binary"], keep_own_binary=True),
             )
         else:
-            scenario = merge(
-                with_valkey_binary(service.catalog, job["scenario"], task["valkey_binary"], override=False), isolation
-            )
+            scenario = with_valkey_binary(service.catalog, job["scenario"], task["valkey_binary"], override=False)
+            scenario = merge(scenario, _placement(service.catalog, scenario, task))
             prepared = PreparedRun(scenario=scenario, plan=service.compile(scenario))
         _check_port_block(prepared.plan)
     except Exception as exc:

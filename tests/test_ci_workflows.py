@@ -98,8 +98,8 @@ def _fuzzer_commands(name):
 @pytest.mark.parametrize("name", WORKFLOW_NAMES)
 def test_every_valkey_fuzzer_command_in_a_workflow_parses_with_the_cli(name):
     # The workflows that only run pytest or ruff, build the package, the image, or the porcupine checker name no
-    # valkey-fuzzer command.
-    no_cli = ("build-image.yml", "lint.yml", "porcupine.yml", "release.yml", "test.yml", "valkey-experiments-live.yml")
+    # valkey-fuzzer command (test.yml runs the redis pack's example, so it is checked).
+    no_cli = ("build-image.yml", "lint.yml", "porcupine.yml", "release.yml", "valkey-experiments-live.yml")
     assert _fuzzer_commands(name) or name in no_cli
 
 

@@ -140,3 +140,54 @@ jobs:
       run: |
         python -m pytest -q -rs -m live tests/test_live_spec_register.py tests/test_live_valkey_experiments.py \
           -k "aof-durability or replication- or cluster-chaos or slot-migration-chaos or data_only_experiment or register_counterexample"
+
+  redis-pack:
+    # The second target (docs/second-target.md): the redis pack under packs/redis, installed from its own
+    # pyproject.toml next to the fuzzer, its tests on a fake process, then its shipped experiment once against
+    # Redis OSS at the commit packs/redis/redis-commit pins. The unit tests above run without the pack: the
+    # Valkey catalog they check must hold the Valkey components alone.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        persist-credentials: false
+
+    - name: Set up Python
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      with:
+        python-version: '3.12'
+        cache: pip
+        cache-dependency-path: pyproject.toml
+
+    # The build takes about two minutes and changes only with the pinned commit.
+    - name: Restore the Redis build
+      id: redis-build
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: /tmp/redis
+        key: redis-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packs/redis/redis-commit') }}
+
+    - name: Build Redis at the pinned commit
+      if: steps.redis-build.outputs.cache-hit != 'true'
+      run: |
+        git init --quiet /tmp/redis
+        git -C /tmp/redis fetch --quiet --depth 1 https://github.com/redis/redis.git "$(tr -d '[:space:]' < packs/redis/redis-commit)"
+        git -C /tmp/redis checkout --quiet FETCH_HEAD
+        make -C /tmp/redis -j"$(nproc)"
+
+    - name: Put Redis on PATH
+      run: echo "/tmp/redis/src" >> "$GITHUB_PATH"
+
+    - name: Install the fuzzer and the pack
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install -e '.[dev]' -e packs/redis
+
+    - name: Run the pack's tests on a fake process
+      run: python -m pytest -m "not slow" packs/redis
+
+    # The example scenario takes redis-server from PATH; a PASS exits 0.
+    - name: Run the shipped experiment against Redis
+      run: valkey-fuzzer run examples/redis/kill_restart.yaml --verbose
