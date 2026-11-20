@@ -12,8 +12,8 @@ and cluster chaos and the CI workflows are in [Cluster chaos and CI](cluster-cha
 - [Report folders](#report-folders)
 - [run](#run) (and [generated scenarios](#generated-scenarios-run---random)),
   [batch](#batch), [validate](#validate), [list](#list), [replay](#replay),
-  [minimize](#minimize), [cleanup-logs](#cleanup-logs),
-  [sweep](#sweep), [spec](#spec)
+  [minimize](#minimize), [findings](#findings), [cleanup-logs](#cleanup-logs),
+  [sweep](#sweep), [fetch-valkey](#fetch-valkey), [spec](#spec)
 - [Run reports](#run-reports)
 
 ## Commands
@@ -26,8 +26,10 @@ and cluster chaos and the CI workflows are in [Cluster chaos and CI](cluster-cha
 | `list experiments\|components\|generators` | List the installed experiments, components, or generator hooks, or print the catalog as JSON. |
 | `replay REPORT` | Check a recorded run against this environment, then run its execution plan again. |
 | `minimize REPORT` | Shrink a failing scenario while its failure signature holds. |
+| `findings list\|show KEY` | Read the failure signatures batches recorded in a [findings store](#findings). |
 | `cleanup-logs SEED` | Delete the instance logs of one seed. |
 | `sweep` | Remove what fuzzer processes that are gone left on this host. |
+| `fetch-valkey [REF]` | Build a Valkey tag, branch, or commit once into the cache and print its `valkey-server`. |
 | `spec check\|translate\|conform` | Check a TLA+ spec bundle, turn its counterexamples into scenarios, and check runs against it. |
 
 `valkey-fuzzer --version` prints the version, and `valkey-fuzzer COMMAND
@@ -133,7 +135,7 @@ Evidence in `report.json` names the artifact files it refers to.
 Every user's runs on a host share the default directories: `<temp dir>/valkey-fuzzer`
 and its `<kind>` folders (`runs/`, `batches/`, ...), the default
 `base_data_dir` and its `logs/`, `<temp dir>/valkey-fuzzer-mounts`,
-`/tmp/valkey-fuzzer-locks`, and `/tmp/valkey-build`. One the fuzzer creates
+and `/tmp/valkey-fuzzer-locks`. One the fuzzer creates
 gets mode `1777`, sticky and world-writable like `/tmp`, so a run as root
 (partitions and tmpfs need it) does not leave it unwritable for other users,
 and no user can remove another's files in it. A directory that already exists
@@ -310,6 +312,7 @@ run names its build.
 | `prune_pass` | `--prune-pass` | Keep only `report.json` and `scenario.yaml` of a run that passed and left nothing behind. |
 | `serial_reruns` | `--serial-reruns N` | After the parallel runs, run `N` jobs of each `FAIL` or `ERROR` signature again, one at a time (load can explain those, not an unsupported run). |
 | `conform_tlc_timeout_s` | (spec only) | How long each run's own [`spec conform`](spec-bridge.md#in-a-run) check may run TLC on its observed states; default 300, which a run outside a batch uses. A check it stops is a conform `error` whose reason names this option (an `ERROR` for the run if the bundle's claims are approved). |
+| `findings` | `--findings PATH` | The [findings store](#findings) the batch appends its failure signatures to when it finishes; default `findings.json` in the batch folder. Several batches given one `PATH` share it. A relative `PATH` in a spec is read from the spec's directory. |
 | | `--out DIR` | The batch folder; default `<root>/batches/<time>-<batch id>-<suffix>`. |
 | | `--resume DIR` | Finish the batch in `DIR`. Takes only `--workers` and `--allow-unsupported`: the folder holds the sources and every other option. |
 | | `--dry-run` | List the jobs, the invalid matrix cases, and the skipped zoo cases; run nothing. |
@@ -384,6 +387,7 @@ removed, the batch refuses to start. Dead runs' directories stay.
   experiments/        a copy of every --experiment-dir's documents (only with one)
   conformance/<b>.json  the spec conform report of bundle <b> over the runs checked against it
   summary.json        the summary, rewritten when the batch stops
+  findings.json       the failure signatures across batches (see findings), unless --findings names a store
   batch.log           one line per finished job
   workers.json, work/ the jobs running now and the workers' scratch (while running)
 ```
@@ -676,6 +680,39 @@ same way on other code proves less. It still runs. The minimized scenario goes t
 stdout. Each candidate run gets a report folder under `<root>/minimize/`
 (`attempt-1` is the recorded scenario's run).
 
+## findings
+
+```bash
+valkey-fuzzer findings list --store soak/20261120T0100
+valkey-fuzzer findings list --store soak/findings.json --status new
+valkey-fuzzer findings show 3f1c2a9b7d4e --store soak/findings.json
+```
+
+A **findings store** is a `findings.json` that batches append to when they
+finish: one entry per failure signature, across batches. Each batch writes
+the one beside its `summary.json`; `batch --findings PATH` (or `findings:` in
+a batch spec) points several batches, a nightly soak's say, at one store. An
+entry is one [signature key](#the-batch-folder) (`signature_key` in
+`summary.json`, the key `minimize` prints) with:
+
+| Key | Contents |
+| --- | --- |
+| `key`, `label`, `experiment`, `outcome`, `signature` | The signature as the batch's `summary.json` groups it (a crash by its causes alone, across experiments). |
+| `status` | `new`: no earlier batch in this store had seen it. `known`: a second batch has seen it since (set when that batch records it). `fixed`: set by hand, in the file, when the bug is fixed; a fixed finding a batch sees again is `new` again. The command only reads. |
+| `first_seen`, `last_seen` | When a batch first and last recorded a run of it (the summary's `updated_at`). |
+| `count`, `runs` | How many runs hit it, and each one's batch folder and job id. A run counts once: a resumed or re-summarized batch adds nothing. |
+| `reproduce` | The command that runs the latest of them again: `valkey-fuzzer replay <its report.json>`, or `valkey-fuzzer run <its scenario.yaml>` for a run that left no report; `null` when neither exists. |
+
+The file is `{"format_version": 1, "findings": {<key>: <entry>}}`, rewritten
+whole and atomically; a store another `format_version` wrote is refused as a
+[run report](#run-reports) is. `list` prints one line per finding (status,
+runs, first and last seen, key, label), `new` before `known` before `fixed`
+and the last seen first; `--status` keeps one status. `show KEY` prints one
+entry as JSON; `KEY` may be a prefix that names exactly one finding. `--store`
+is the file, or a batch folder, whose `findings.json` is read; without it,
+`findings.json` in the working directory. A missing store is an input error
+(exit `64`).
+
 ## cleanup-logs
 
 ```bash
@@ -743,6 +780,39 @@ not be. A deployment kept with `enable_cleanup: false`, and a
 `valkey.resource.tmpdir` with `keep: true`, lose their tag when the run ends,
 so the sweep leaves them. Instance logs under `<base_data_dir>/logs` are
 evidence, not leftovers (`cleanup-logs` removes them).
+
+## fetch-valkey
+
+```bash
+valkey-fuzzer fetch-valkey                 # the pinned 9.1.3 commit a deployment builds without a binary
+valkey-fuzzer fetch-valkey 9.1.3           # a tag
+valkey-fuzzer fetch-valkey unstable        # a branch, as it is now
+valkey-fuzzer fetch-valkey 29173b67508b2de4c0f0ed551f3b47cf19fc3ca8
+```
+
+Builds one `REF` of `valkey-io/valkey` once and prints the path of its
+`valkey-server`, and nothing else on stdout, so a script can capture it
+(`--valkey-binary "$(valkey-fuzzer fetch-valkey 9.1.3)"`). A tag or branch
+is resolved to its commit first (`git ls-remote`; an annotated tag to the
+commit it tags; a tag before a branch of the same name); a full 40-character
+commit hash is taken as it is, and a shorter one is refused. The build goes
+to `$XDG_CACHE_HOME/valkey-fuzzer/valkey/<commit>/` (`~/.cache/valkey-fuzzer/valkey/<commit>/`
+by default): the commit itself is fetched into an empty repository and
+checked out, so a moved tag changes nothing; `make -j` builds it aside and
+the tree is renamed into place only once the build succeeded. The git and
+make output goes to `<commit>.build.log` beside it, and one log line on
+stderr says whether the cached build is used or a build starts and where.
+The whole tree is kept: the config table is read from the `config.c` beside
+the binary. Builds of different commits sit side by side; one at a time
+builds (a lock in the cache), and the build is bounded to 30 minutes. The
+command needs git, make, a C compiler, and network access.
+
+A deployment that names no `valkey_binary` and finds no `valkey-server` on
+`PATH` uses the pinned commit's build in this cache, and makes it on its
+first run when it is not there
+([Choose a Valkey binary](getting-started.md#choose-a-valkey-binary));
+`valkey-fuzzer fetch-valkey` makes it ahead of time. The cache is the user's
+own and safe to delete.
 
 ## spec
 

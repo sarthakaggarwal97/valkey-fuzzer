@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.request import urlopen
 
+from valkey_fuzzer import cache
 from valkey_fuzzer.outcomes import EXIT_HARNESS_ERROR, EXIT_SUCCESS
 
 CHECKER = "porcupine"
@@ -37,7 +38,7 @@ _GOARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "ar
 def cache_dir() -> str:
     """Where the fetched checker goes: ``$XDG_CACHE_HOME/valkey-fuzzer/bin``, by default ``~/.cache/valkey-fuzzer/bin``."""
 
-    return os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "valkey-fuzzer", "bin")
+    return cache.cache_dir("bin")
 
 
 def asset_name(system: Optional[str] = None, machine: Optional[str] = None) -> str:

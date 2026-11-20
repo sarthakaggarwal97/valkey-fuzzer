@@ -698,12 +698,11 @@ class RunService:
         reference_outcome = RunOutcome.from_data(report["outcome"])
         plan = reference_outcome.plan
         drift, _ = report_drift(self.catalog, self.compile, plan, scenario, report, overrides.binary)
-        required = [requirement.evidence_id for requirement in plan.required_evidence]
         return Minimization(
             scenario=with_valkey_binary(self.catalog, scenario, overrides.binary),
             plan=plan,
-            reference=failure_signature(reference_outcome, required),
-            required_evidence=required,
+            reference=failure_signature(reference_outcome),
+            required_evidence=[requirement.evidence_id for requirement in plan.required_evidence],
             drift=drift,
         )
 

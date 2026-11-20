@@ -15,6 +15,8 @@ from typing import Any
 from ..capacity import usable_cores
 from ..deadlines import wait_for
 from ..deployment.local.ports import LOCK_DIRECTORY
+from ..findings import FINDINGS_FILE, STATUSES
+from ..findings import record as record_findings
 from ..hoststate import Owner, open_shared_lock, owner_of, shared_directory, sweep
 from ..provenance import catalog_digest
 from ..reports import FORMAT_VERSION, REPORT_FILE, SCENARIO_FILE, format_version_problem, write_document
@@ -225,6 +227,7 @@ class BatchRunner:
                 shutil.rmtree(self._path("work"), ignore_errors=True)
             summary = self.summary()
             write_document(self._path("summary.json"), summary)
+            self._record_findings(summary)
             return summary
         finally:
             for sig, handler in previous.items():
@@ -263,6 +266,20 @@ class BatchRunner:
         """Counts, failure signatures with their serial re-runs, the plug-ins' entries, leaks, and the batch's status."""
 
         return summarize(self)
+
+    @property
+    def findings_path(self) -> str:
+        """The findings store this batch appends to: the ``findings`` option, else ``findings.json`` in the folder."""
+
+        return self.options.findings or self._path(FINDINGS_FILE)
+
+    def _record_findings(self, summary: Mapping[str, Any]) -> None:
+        """Append the summary's failure signatures to the findings store, and log what that added."""
+
+        touched = record_findings(self.findings_path, summary)
+        counts = {status: sum(entry["status"] == status for entry in touched.values()) for status in STATUSES}
+        added = ", ".join(f"{count} {status}" for status, count in counts.items() if count) or "nothing new"
+        self.log(f"findings: {added} in {self.findings_path}")
 
     # -- recovery and sweeps ---------------------------------------------------
 

@@ -47,7 +47,7 @@ from valkey_fuzzer import cgroups
 from valkey_fuzzer.declarations import Declarations
 from valkey_fuzzer.deployment.local import clock_faults
 from valkey_fuzzer.deployment.local.models import LocalDeploymentError
-from valkey_fuzzer.deployment.local.processes import SOURCE_BUILD_DIR
+from valkey_fuzzer.deployment.local.processes import VALKEY_SOURCE_SHA, cached_valkey_binary
 from valkey_fuzzer.deployment.local.server_config import config_for_build
 from valkey_fuzzer.hoststate import run_iptables, run_tc
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
@@ -179,10 +179,6 @@ def planned_server_configs(plan: ExecutionPlan) -> dict[str, list[tuple[list[str
     return grouped
 
 
-# Where the local deployment builds valkey-server when none is configured or on PATH.
-_SOURCE_BUILD = os.path.join(SOURCE_BUILD_DIR, "valkey", "src", "valkey-server")
-
-
 def resolve_binary(binary: str) -> str:
     """The executable to probe for a deployment's ``binary``; an empty one is the deployment's own default.
 
@@ -194,8 +190,10 @@ def resolve_binary(binary: str) -> str:
     try:
         return providers.resolve_binary("valkey-server")
     except FileNotFoundError:
-        if os.path.isfile(_SOURCE_BUILD):
-            return _SOURCE_BUILD
+        # The cached build of the pinned commit, which the local deployment makes when PATH has no valkey-server.
+        cached = cached_valkey_binary(VALKEY_SOURCE_SHA)
+        if os.path.isfile(cached):
+            return cached
         raise FileNotFoundError(
             "valkey-server is not on PATH; set deployment.valkey_binary or put valkey-server on PATH"
         ) from None

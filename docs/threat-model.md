@@ -26,7 +26,7 @@ valkey-fuzzer list components --format json | jq -r '.[] | select(.declares.chan
 
 | Change | Mechanism | Needs | Code |
 | --- | --- | --- | --- |
-| **Servers.** Starts `valkey-server` processes from the binary you name, `PATH`, or its own build under `/tmp/valkey-build`; each binds one loopback address (`127.0.0.1`, or `127.0.B.N` with per-instance addressing), `protected-mode no`, no password, `maxmemory 500mb`, and a process title that names the fuzzer process as owner. It refuses a port already in use. At the end: `SIGTERM`, then `SIGKILL` after 5 s, and the data directory is deleted (logs stay). | `subprocess.Popen`, signals | nothing | `deployment/local/processes.py` (`build_instance_command`, `_stop_process`), `deployment/local/server_config.py` |
+| **Servers.** Starts `valkey-server` processes from the binary you name, `PATH`, or its own build under `~/.cache/valkey-fuzzer/valkey`; each binds one loopback address (`127.0.0.1`, or `127.0.B.N` with per-instance addressing), `protected-mode no`, no password, `maxmemory 500mb`, and a process title that names the fuzzer process as owner. It refuses a port already in use. At the end: `SIGTERM`, then `SIGKILL` after 5 s, and the data directory is deleted (logs stay). | `subprocess.Popen`, signals | nothing | `deployment/local/processes.py` (`build_instance_command`, `_stop_process`), `deployment/local/server_config.py` |
 | **Private servers.** Capability probes, `valkey.action.commands`, `valkey.action.tools`, and the `rdb-snapshot`, `dataset-digest`, and `command-metadata` oracles start short-lived servers on a Unix socket (`--port 0`, `--unixsocketperm 700`) in a `/tmp/vfp-*` directory of their own. | as above | nothing | `components/server.py` (`PrivateServer`) |
 | **Signals** (`process.stopped`, `process.paused`). `SIGKILL`, `SIGTERM`, `SIGSTOP`, `SIGCONT` to the run's own servers; a kill also kills the children the server forked (an RDB save, an AOF rewrite), read from `/proc/<pid>/task/*/children`, or from a `ps` listing where `/proc` lacks it; the server is `SIGSTOP`ped first so it cannot reap a child before the kill lands. | `os.kill` | nothing | `components/faults.py`, `components/processes.py`, `deployment/local/processes.py` (`kill_server`) |
 | **Partitions** (`network.partition`). One iptables chain `VF-<owner>-<hash>` per fault with `DROP` rules in both directions between the exact loopback addresses of the isolated instances and their peers, jumped to from the top of `INPUT`; the chain and the jump are removed at heal or recovery. | `iptables` | root; `deployment.addressing: per_instance_loopback` | `components/network.py` (`drop_between`, `remove_partition`), `hoststate.py` (`remove_chain`) |
@@ -36,9 +36,9 @@ valkey-fuzzer list components --format json | jq -r '.[] | select(.declares.chan
 | **Syscall faults** (`syscall.rule`). With `deployment.syscall_faults: true`, every server of the deployment starts with a library the fuzzer compiles from `syscall_faults.c` (`cc -O2 -shared -fPIC`) in `LD_PRELOAD`. It delays, fails with an errno, or `SIGKILL`s its own process at the n-th `write`, `writev`, `fsync`, `fdatasync`, or `rename` that matches a rule file the fault writes beside the instance's data directory. No `ptrace`; nothing outside the server's process. | `LD_PRELOAD` | a C compiler | `deployment/local/syscall_faults.py`, `syscall_faults.c`, `components/syscall_faults.py` |
 | **Clock skew** (`clock.skewed`). With `deployment.clock_faults: true`, every server starts with the distribution's libfaketime in `LD_PRELOAD`, reading a timestamp file of its own; the fault rewrites one instance's file (`+<offset> x<rate>`) and restores `+0 x1`. Only that process's wall clock moves (`DONT_FAKE_MONOTONIC`); the host clock is never touched. | `LD_PRELOAD` | libfaketime | `deployment/local/clock_faults.py`, `components/clock_skew.py` |
 | **Server config and client pause** (`server.config`, `server.client-pause`). `CONFIG SET` of a setting the chaos action restores, `CLIENT PAUSE` lifted at recovery. | Valkey commands | nothing | `components/replication_chaos.py` |
-| **Files.** Report folders under `<temp dir>/valkey-fuzzer/`, instance data and logs under `/tmp/valkey-fuzzer/` (`base_data_dir`), a source build under `/tmp/valkey-build`, locks under `/tmp/valkey-fuzzer-locks`. The shared roots are made `1777` like `/tmp`; a run's own folders `0700`. | file writes | nothing | `hoststate.py` (`shared_directory`, `new_run_folder`) |
+| **Files.** Report folders under `<temp dir>/valkey-fuzzer/`, instance data and logs under `/tmp/valkey-fuzzer/` (`base_data_dir`), locks under `/tmp/valkey-fuzzer-locks`, source builds under the user's own `~/.cache/valkey-fuzzer/valkey/<commit>/` (`$XDG_CACHE_HOME`). The shared roots are made `1777` like `/tmp`; a run's own folders `0700`. | file writes | nothing | `hoststate.py` (`shared_directory`, `new_run_folder`) |
 | **Tools.** `valkey.action.tools` runs a build's `valkey-cli`, `valkey-benchmark`, `valkey-check-rdb`, or `valkey-check-aof` against a private server, with `VALKEYCLI_*` and `REDISCLI_*` stripped from the environment and the run stopped at 4 GB resident; `valkey.workload.benchmark` runs `valkey-benchmark` against the deployment. | `subprocess` | nothing | `components/tools.py`, `components/workloads.py` |
-| **Network.** Without a `valkey-server`, most experiments `git clone` Valkey 9.1.3 from GitHub and build it (refused when the tag no longer names the pinned commit). Nothing else leaves the host. | `git`, `make` | network | `processes.py` (`build_valkey`) |
+| **Network.** Without a `valkey-server`, most experiments `git fetch` the pinned commit of Valkey 9.1.3 from GitHub by its hash and build it (the commit itself, so a moved tag changes nothing); `valkey-fuzzer fetch-valkey REF` resolves a tag or branch with `git ls-remote` first. Nothing else leaves the host. | `git`, `make` | network | `processes.py` (`fetch_valkey`) |
 
 ## Scoping guards
 
@@ -162,10 +162,12 @@ reviewed commit ([Label trigger](cluster-chaos-and-ci.md#label-trigger)).
   `protected-mode no` and no password. A fuzzer run as root therefore lets any local user make root write a file
   (`CONFIG SET dir`, `dbfilename`, `SAVE`). Run as root only on a host where
   you are the only user.
-- **`/tmp/valkey-build` is shared.** A run with no `--valkey-binary` and no
-  `valkey-server` on `PATH` executes `/tmp/valkey-build/valkey/src/valkey-server`
-  if it exists, whoever built it; the directory is `1777`, and only the build
-  itself is locked. On a shared host pass `--valkey-binary`.
+- **The cached build is trusted.** A run with no `--valkey-binary` and no
+  `valkey-server` on `PATH` executes the pinned commit's build in the user's
+  own cache (`~/.cache/valkey-fuzzer/valkey/<commit>/src/valkey-server`) if
+  it exists; nothing checks that it is still the build the fuzzer made.
+  Whoever can write the cache can choose the binary. Delete the directory to
+  rebuild, or pass `--valkey-binary`.
 - **A `SIGKILL`ed fuzzer cleans nothing up.** Its servers keep running and its
   chains, devices, leaves, and mounts stay until `valkey-fuzzer sweep` (as
   root for the chains, devices, and mounts). A partition left behind drops

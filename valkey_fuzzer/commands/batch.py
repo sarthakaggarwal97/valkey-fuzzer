@@ -77,6 +77,12 @@ def register(subparsers: Any) -> None:
         "--out", metavar="DIR", help="Batch folder (default: <artifact dir>/batches/<time>-<id>-<suffix>)"
     )
     folder.add_argument(
+        "--findings",
+        metavar="PATH",
+        help="Findings store to append this batch's failure signatures to, shared by every batch given the same "
+        "PATH (default: findings.json in the batch folder)",
+    )
+    folder.add_argument(
         "--resume",
         metavar="DIR",
         help="Finish an interrupted batch (only --workers and --allow-unsupported may be given)",
@@ -185,6 +191,8 @@ def batch_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
             settings["timeout_s"] = args.timeout
         if args.valkey_binary:
             settings["valkey_binary"] = os.path.abspath(args.valkey_binary)
+        if args.findings:
+            settings["findings"] = os.path.abspath(args.findings)
         options = BatchOptions(
             **settings,
             experiment_directories=tuple(os.path.abspath(path) for path in args.experiment_dirs),

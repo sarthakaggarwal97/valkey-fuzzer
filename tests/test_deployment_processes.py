@@ -34,7 +34,7 @@ from valkey_fuzzer.deployment.local.formation import SETTLE_TIMEOUT_S, Formation
 from valkey_fuzzer.deployment.local.models import DeploymentMode, LocalDeploymentError
 from valkey_fuzzer.deployment.local.planner import plan_deployment
 from valkey_fuzzer.deployment.local.ports import PortUnavailableError
-from valkey_fuzzer.deployment.local.processes import VALKEY_SOURCE_REF, InstanceIdentityError, installed_valkey_binary
+from valkey_fuzzer.deployment.local.processes import VALKEY_SOURCE_SHA, InstanceIdentityError, installed_valkey_binary
 from valkey_fuzzer.deployment.local.queries import valkey_client
 from valkey_fuzzer.deployment.local.server_config import DEFAULT_MAXMEMORY, arguments_for_build
 
@@ -207,16 +207,23 @@ def test_binaries_must_exist(tmp_path):
         process_manager(tmp_path, valkey_binary=str(tmp_path / "missing-valkey-server")).resolve_valkey_binary()
 
 
-def test_components_find_valkey_server_and_read_slot_ranges_as_the_deployment_does(tmp_path):
+def test_components_find_valkey_server_and_read_slot_ranges_as_the_deployment_does(tmp_path, monkeypatch):
     binary = tmp_path / "valkey-server"
     binary.write_text("#!/bin/sh\n")
     with pytest.raises(PermissionError, match="probe binary"):
         processes.resolve_binary_path(str(binary), "probe binary")
     binary.chmod(0o755)
     assert processes.resolve_binary_path(str(binary)) == str(binary)
-    built = os.path.join(processes.SOURCE_BUILD_DIR, "valkey", "src", "valkey-server")
-    with patch(f"{PROCESSES}.shutil.which", return_value=None), patch(f"{PROCESSES}.os.path.exists", return_value=True):
-        assert installed_valkey_binary() == built, "the source build the deployment falls back to"
+    # The cached build of the pinned commit is the one a deployment without a binary falls back to, under
+    # $XDG_CACHE_HOME (else ~/.cache), and only once it is built.
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    built = tmp_path / "cache" / "valkey-fuzzer" / "valkey" / VALKEY_SOURCE_SHA / "src" / "valkey-server"
+    assert processes.cached_valkey_binary(VALKEY_SOURCE_SHA) == str(built)
+    with patch(f"{PROCESSES}.shutil.which", return_value=None):
+        assert installed_valkey_binary() is None
+        built.parent.mkdir(parents=True)
+        built.write_text("#!/bin/sh\n")
+        assert installed_valkey_binary() == str(built), "the source build the deployment falls back to"
     assert cluster_nodes.parse_slot_ranges(["0-5", "7", "[8->-abc]"]) == [(0, 5), (7, 7)]
     assert cluster_nodes.parse_slots_in_flight(["0-5", "[8->-abc]", "[9-<-def]", "[x->-abc]"]) == {8, 9}
 
@@ -235,14 +242,17 @@ def test_slot_ranges_merge_overlap_and_format_as_cluster_nodes_shows_them():
     )
 
 
-def test_the_source_build_is_pinned_parallel_and_built_aside_under_a_lock(tmp_path):
-    # Concurrent batch workers without a binary must not race on one clone, or build an unpinned HEAD.
-    commands, timeouts, outputs = [], [], []
+def _fake_build(commands, timeouts, outputs, resolved=None, listing=""):
+    """A ``subprocess.run`` that records the git and make commands of a build, and fakes their results: ``git
+    ls-remote`` answers ``listing``, ``rev-parse`` answers ``resolved``, and ``make`` leaves ``src/valkey-server``
+    in its directory."""
 
     def run(command, cwd=None, check=False, timeout=None, stdout=None, stderr=None, capture_output=False, text=False):
         commands.append((command, cwd))
+        if "ls-remote" in command:
+            return subprocess.CompletedProcess(command, 0, listing, "")
         if "rev-parse" in command:
-            return subprocess.CompletedProcess(command, 0, f"{processes.VALKEY_SOURCE_SHA}\n", "")
+            return subprocess.CompletedProcess(command, 0, f"{resolved}\n", "")
         timeouts.append(timeout)
         outputs.append((stdout.name, stderr))
         if command[0] == "make":
@@ -250,32 +260,103 @@ def test_the_source_build_is_pinned_parallel_and_built_aside_under_a_lock(tmp_pa
             os.makedirs(os.path.dirname(binary))
             open(binary, "w").close()
 
+    return run
+
+
+def test_the_source_build_is_pinned_parallel_and_built_aside_under_a_lock(tmp_path, caplog):
+    # Concurrent batch workers without a binary must not race on one tree, or build another commit than the pin.
+    commands, timeouts, outputs = [], [], []
+    cache = tmp_path / "cache"
     manager = process_manager(tmp_path, valkey_binary="")
     with (
         patch(f"{PROCESSES}.shutil.which", return_value=None),
-        patch(f"{PROCESSES}.subprocess.run", side_effect=run),
+        patch(f"{PROCESSES}.subprocess.run", side_effect=_fake_build(commands, timeouts, outputs, VALKEY_SOURCE_SHA)),
         patch(f"{PROCESSES}.fcntl.flock") as flock,
+        caplog.at_level(logging.INFO),
     ):
-        binary = manager.resolve_valkey_binary(base_dir=str(tmp_path / "build"), build_timeout=600.0)
+        binary = manager.resolve_valkey_binary(build_timeout=600.0, cache=str(cache))
 
-    (clone, _), (resolve, _), (make, make_dir) = commands
-    assert clone[:2] == ["git", "clone"] and "--depth" in clone
-    assert clone[clone.index("--branch") + 1] == VALKEY_SOURCE_REF
-    # The tag is movable: the commit it resolved to is checked against the pin, and recorded in the build log.
-    assert resolve == ["git", "-C", clone[-1], "rev-parse", "HEAD"]
+    (init, _), (fetch, _), (checkout, _), (resolve, _), (make, make_dir) = commands
+    work = init[2]
+    # The pinned commit itself is fetched into an empty repository: a moved tag changes nothing.
+    assert init == ["git", "-C", work, "init", "--quiet"] and work.startswith(str(cache / VALKEY_SOURCE_SHA))
+    assert fetch == [
+        "git",
+        "-C",
+        work,
+        "fetch",
+        "--quiet",
+        "--depth",
+        "1",
+        processes.VALKEY_REPOSITORY,
+        VALKEY_SOURCE_SHA,
+    ]
+    assert checkout == ["git", "-C", work, "checkout", "--quiet", "--detach", "FETCH_HEAD"]
+    assert resolve == ["git", "-C", work, "rev-parse", "HEAD"]
     assert make[0] == "make" and make[1].startswith("-j")
-    assert make_dir == clone[-1] != str(tmp_path / "build" / "valkey"), "built aside, then renamed into place"
-    assert binary == str(tmp_path / "build" / "valkey" / "src" / "valkey-server") and os.path.isfile(binary)
+    assert make_dir == work != str(cache / VALKEY_SOURCE_SHA), "built aside, then renamed into place"
+    assert binary == str(cache / VALKEY_SOURCE_SHA / "src" / "valkey-server") and os.path.isfile(binary)
     assert flock.call_count == 2  # taken, then released
-    # A hung clone or make cannot hold the run past its deadline.
-    assert timeouts[0] == 600.0 and 0 < timeouts[1] <= 600.0
-    # The clone and make output goes to one file beside the build, not the terminal.
-    build_log = str(tmp_path / "build" / "build.log")
-    assert outputs == [(build_log, subprocess.STDOUT)] * 2 and os.path.isfile(build_log)
-    assert f"valkey {VALKEY_SOURCE_REF} is commit {processes.VALKEY_SOURCE_SHA}" in Path(build_log).read_text()
+    # A hung fetch or make cannot hold the run past its deadline.
+    assert all(0 < timeout <= 600.0 for timeout in timeouts) and len(timeouts) == 4
+    # The git and make output goes to one file beside the build, not the terminal, and one line says where.
+    build_log = str(cache / f"{VALKEY_SOURCE_SHA}.build.log")
+    assert outputs == [(build_log, subprocess.STDOUT)] * 4 and os.path.isfile(build_log)
+    assert f"valkey commit {VALKEY_SOURCE_SHA[:12]} is checked out" in Path(build_log).read_text()
+    assert [record.getMessage() for record in caplog.records if "Valkey" in record.getMessage()] == [
+        f"Building Valkey commit {VALKEY_SOURCE_SHA[:12]} into {cache / VALKEY_SOURCE_SHA} (about a minute; once, "
+        f"then reused); output: {build_log}"
+    ]
+
+    # Built once: the next resolution runs nothing and says it uses the cache.
+    caplog.clear()
+    with (
+        patch(f"{PROCESSES}.shutil.which", return_value=None),
+        patch(f"{PROCESSES}.subprocess.run", side_effect=AssertionError("built again")),
+        caplog.at_level(logging.INFO),
+    ):
+        assert manager.resolve_valkey_binary(cache=str(cache)) == binary
+    assert [record.getMessage() for record in caplog.records] == [
+        f"Using the cached Valkey build of commit {VALKEY_SOURCE_SHA[:12]}: {binary}"
+    ]
 
 
-def test_a_source_build_whose_tag_moved_off_the_pinned_commit_is_refused(tmp_path):
+def test_a_tag_or_branch_is_resolved_to_its_commit_before_the_cache_is_looked_in(tmp_path):
+    commit, tag_object = "a" * 40, "b" * 40
+    listing = f"{tag_object}\trefs/tags/9.9.9\n{commit}\trefs/tags/9.9.9^{{}}\n"
+    commands, timeouts, outputs = [], [], []
+    with (
+        patch(f"{PROCESSES}.subprocess.run", side_effect=_fake_build(commands, timeouts, outputs, commit, listing)),
+        patch(f"{PROCESSES}.fcntl.flock"),
+    ):
+        assert processes.fetch_valkey("9.9.9", cache=str(tmp_path)) == (
+            commit,
+            str(tmp_path / commit / "src" / "valkey-server"),
+        )
+        # An annotated tag resolves to the commit it tags, not the tag object; the second fetch finds the cache.
+        assert commands[0][0] == [
+            "git",
+            "ls-remote",
+            processes.VALKEY_REPOSITORY,
+            "refs/tags/9.9.9",
+            "refs/tags/9.9.9^{}",
+            "refs/heads/9.9.9",
+        ]
+        assert commands[2][0][-1] == commit
+        assert processes.fetch_valkey("9.9.9", cache=str(tmp_path))[0] == commit and len(commands) == 7
+        # A full commit hash is fetched as it is; a short one, or a name the repository lacks, is refused.
+        assert processes.resolve_valkey_ref("c" * 40) == "c" * 40 and len(commands) == 7
+        with pytest.raises(LocalDeploymentError, match="has no tag or branch 'nope'"):
+            processes.resolve_valkey_ref("nope")
+        with pytest.raises(LocalDeploymentError, match="has no tag or branch 'abc1234'"):
+            processes.resolve_valkey_ref("abc1234")
+    # A branch of the same name as a tag loses to the tag.
+    both = f"{commit}\trefs/heads/x\n{tag_object}\trefs/tags/x\n"
+    with patch(f"{PROCESSES}.subprocess.run", side_effect=_fake_build([], [], [], listing=both)):
+        assert processes.resolve_valkey_ref("x") == tag_object
+
+
+def test_a_fetch_that_checks_out_another_commit_than_asked_is_refused(tmp_path):
     def run(command, cwd=None, **options):
         if "rev-parse" in command:
             return subprocess.CompletedProcess(command, 0, "f" * 40 + "\n", "")
@@ -285,13 +366,13 @@ def test_a_source_build_whose_tag_moved_off_the_pinned_commit_is_refused(tmp_pat
         patch(f"{PROCESSES}.subprocess.run", side_effect=run),
         patch(f"{PROCESSES}.fcntl.flock"),
         pytest.raises(
-            LocalDeploymentError, match=rf"resolved to commit {'f' * 40}, not the pinned {processes.VALKEY_SOURCE_SHA}"
+            LocalDeploymentError, match=rf"the fetch of Valkey commit {VALKEY_SOURCE_SHA} checked out {'f' * 40}"
         ),
     ):
-        processes.build_valkey(str(tmp_path / "build"))
+        processes.fetch_valkey(VALKEY_SOURCE_SHA, cache=str(tmp_path / "cache"))
     # Nothing half-built is left where a later build would find it: only the log and the lock remain.
-    assert not (tmp_path / "build" / "valkey").exists()
-    assert sorted(item.name for item in (tmp_path / "build").iterdir()) == [".lock", "build.log"]
+    assert not (tmp_path / "cache" / VALKEY_SOURCE_SHA).exists()
+    assert sorted(item.name for item in (tmp_path / "cache").iterdir()) == [".lock", f"{VALKEY_SOURCE_SHA}.build.log"]
 
 
 def test_spawn_and_formation_waits_end_at_the_runs_deadline(tmp_path, monkeypatch):
@@ -912,5 +993,5 @@ def test_a_failed_source_build_names_the_file_holding_its_output(tmp_path, caplo
         caplog.at_level(logging.ERROR),
         pytest.raises(subprocess.CalledProcessError),
     ):
-        processes.build_valkey(str(tmp_path / "build"))
-    assert str(tmp_path / "build" / "build.log") in caplog.text
+        processes.fetch_valkey(VALKEY_SOURCE_SHA, cache=str(tmp_path / "cache"))
+    assert str(tmp_path / "cache" / f"{VALKEY_SOURCE_SHA}.build.log") in caplog.text

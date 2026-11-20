@@ -22,9 +22,9 @@ from typing import Any, Optional
 
 import valkey
 
+from ...cache import cache_dir
 from ...clock import now
 from ...hoststate import (
-    open_shared_lock,
     run_bounded,
     server_tag_arguments,
     shared_directory,
@@ -58,14 +58,16 @@ logger = logging.getLogger(__name__)
 
 # How long a spawned instance has to answer PING.
 READY_TIMEOUT_S = 60.0
-# How long a source build (clone and make) may take, at most.
+# How long a source build (fetch and make) may take, at most.
 BUILD_TIMEOUT_S = 1800.0
-# Where valkey-server is built when no binary is configured or on PATH, and the release it builds: the tag, for
-# the clone, and the commit it must resolve to, since a tag can be moved.
-SOURCE_BUILD_DIR = "/tmp/valkey-build"
+# The Valkey a deployment without a configured binary runs when PATH has none: the release, and the commit it is
+# pinned to, which is what :func:`fetch_valkey` fetches and builds (a moved tag changes nothing), into the cache.
 VALKEY_REPOSITORY = "https://github.com/valkey-io/valkey.git"
 VALKEY_SOURCE_REF = "9.1.3"
 VALKEY_SOURCE_SHA = "29173b67508b2de4c0f0ed551f3b47cf19fc3ca8"
+
+# A full commit hash: fetched as it is; anything else is a tag or branch to resolve first.
+_COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 
 # CLUSTER NODES flags of a node its peers do not count on.
 _UNHEALTHY_FLAGS = frozenset({"fail", "fail?", "handshake", "noaddr"})
@@ -232,78 +234,113 @@ def resolve_binary_path(configured_binary: str, label: str = "valkey_binary") ->
     raise FileNotFoundError(f"Configured {label} '{configured_binary}' could not be found on PATH.")
 
 
-def _built_binary(base_dir: str) -> str:
-    return os.path.join(base_dir, "valkey", "src", "valkey-server")
+def valkey_cache_dir() -> str:
+    """Where :func:`fetch_valkey` builds: ``<cache>/valkey``, one ``<commit>/`` source tree each
+    (:mod:`valkey_fuzzer.cache`; ``~/.cache/valkey-fuzzer/valkey`` by default)."""
+    return cache_dir("valkey")
 
 
-def installed_valkey_binary(base_dir: str = SOURCE_BUILD_DIR) -> Optional[str]:
+def cached_valkey_binary(sha: str, cache: Optional[str] = None) -> str:
+    """The ``valkey-server`` of the build of commit ``sha`` in the cache (:func:`valkey_cache_dir` without
+    ``cache``), whether or not it has been built."""
+    return os.path.join(cache or valkey_cache_dir(), sha, "src", "valkey-server")
+
+
+def installed_valkey_binary(cache: Optional[str] = None) -> Optional[str]:
     """The valkey-server a deployment without a configured binary runs, without building one: ``valkey-server``
-    on PATH, else the one :func:`build_valkey` built under ``base_dir``; None when neither exists."""
-    built = _built_binary(base_dir)
-    return shutil.which("valkey-server") or (built if os.path.exists(built) else None)
+    on PATH, else the cached build of the pinned commit (:func:`fetch_valkey`); None when neither exists."""
+    cached = cached_valkey_binary(VALKEY_SOURCE_SHA, cache)
+    return shutil.which("valkey-server") or (cached if os.path.exists(cached) else None)
 
 
-def build_valkey(base_dir: str = SOURCE_BUILD_DIR, timeout: float = BUILD_TIMEOUT_S) -> str:
-    """``base_dir/valkey/src/valkey-server``, building Valkey :data:`VALKEY_SOURCE_REF` there first if it is not,
-    within ``timeout`` seconds (``subprocess.TimeoutExpired`` past it).
+def resolve_valkey_ref(ref: str, timeout: float = 60.0) -> str:
+    """The commit ``ref`` names in :data:`VALKEY_REPOSITORY`: a full commit hash as it is; a tag or branch as
+    ``git ls-remote`` resolves it (an annotated tag to the commit it tags; a tag before a branch of the same name).
+    A ``LocalDeploymentError`` names a ref the repository lacks."""
+    if _COMMIT_RE.fullmatch(ref):
+        return ref
+    tag, peeled, head = f"refs/tags/{ref}", f"refs/tags/{ref}^{{}}", f"refs/heads/{ref}"
+    listing = subprocess.run(
+        ["git", "ls-remote", VALKEY_REPOSITORY, tag, peeled, head],
+        check=True,
+        timeout=timeout,
+        capture_output=True,
+        text=True,
+    ).stdout
+    found = {}
+    for line in listing.splitlines():
+        sha, _, name = line.partition("\t")
+        found[name] = sha
+    for name in (peeled, tag, head):
+        if name in found:
+            return found[name]
+    raise LocalDeploymentError(
+        f"{VALKEY_REPOSITORY} has no tag or branch {ref!r}: give a tag, a branch, or a full 40-character commit hash"
+    )
 
-    One build at a time: concurrent batch workers wait on a lock in
-    ``base_dir``. The clone is built aside and renamed into place only once
-    ``make`` succeeded, so nobody ever runs a half-built tree. Every user's
-    runs share the default ``base_dir`` (a shared directory) and its lock.
+
+def fetch_valkey(ref: str, *, cache: Optional[str] = None, timeout: float = BUILD_TIMEOUT_S) -> tuple[str, str]:
+    """The commit ``ref`` names (:func:`resolve_valkey_ref`) and its ``valkey-server``, built once into
+    ``<cache>/<commit>/`` and found there afterwards, within ``timeout`` seconds (``subprocess.TimeoutExpired``
+    past it). One log line says which: the cached build it uses, or the build it starts and where its output goes.
+
+    One build at a time: concurrent batch workers wait on a lock in the cache. The commit itself is fetched (so
+    a moved tag changes nothing), built aside, and renamed into place only once ``make`` succeeded, so nobody
+    ever runs a half-built tree.
     """
-    target = os.path.join(base_dir, "valkey")
-    binary = _built_binary(base_dir)
-    if base_dir == SOURCE_BUILD_DIR:
-        shared_directory(base_dir)
-    else:
-        os.makedirs(base_dir, exist_ok=True)
-    with open(open_shared_lock(os.path.join(base_dir, ".lock"))) as lock:
+    deadline = time.monotonic() + timeout
+    sha = resolve_valkey_ref(ref, timeout=min(60.0, timeout))
+    cache = cache or valkey_cache_dir()
+    binary = cached_valkey_binary(sha, cache)
+    described = f"{ref} (commit {sha[:12]})" if ref != sha else f"commit {sha[:12]}"
+    if os.path.exists(binary):
+        logger.info("Using the cached Valkey build of %s: %s", described, binary)
+        return sha, binary
+    os.makedirs(cache, exist_ok=True)
+    with open(os.path.join(cache, ".lock"), "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
             if not os.path.exists(binary):
-                work = tempfile.mkdtemp(prefix="valkey-", dir=base_dir)
-                deadline = time.monotonic() + timeout
-                build_log = os.path.join(base_dir, "build.log")
-                logger.info(
-                    "Building Valkey %s from source (about a minute; once, then reused); output: %s",
-                    VALKEY_SOURCE_REF,
-                    build_log,
-                )
-                try:
-                    # The git and make output goes to a file, not the terminal; a failure points at it.
-                    with open(build_log, "w", encoding="utf-8") as output:
-                        clone = ["git", "clone", "--depth", "1", "--branch", VALKEY_SOURCE_REF, VALKEY_REPOSITORY, work]
-                        subprocess.run(clone, check=True, timeout=timeout, stdout=output, stderr=subprocess.STDOUT)
-                        # The tag is movable; the commit it resolved to is what the build is pinned to.
-                        resolved = subprocess.run(
-                            ["git", "-C", work, "rev-parse", "HEAD"],
-                            check=True,
-                            timeout=60,
-                            capture_output=True,
-                            text=True,
-                        ).stdout.strip()
-                        if resolved != VALKEY_SOURCE_SHA:
-                            raise LocalDeploymentError(
-                                f"Valkey {VALKEY_SOURCE_REF} resolved to commit {resolved}, not the pinned "
-                                f"{VALKEY_SOURCE_SHA}: the tag moved, or the clone is not {VALKEY_REPOSITORY}"
-                            )
-                        output.write(f"valkey {VALKEY_SOURCE_REF} is commit {resolved}\n")
-                        make = ["make", f"-j{os.cpu_count() or 1}"]
-                        remaining = max(0.0, deadline - time.monotonic())
-                        subprocess.run(
-                            make, cwd=work, check=True, timeout=remaining, stdout=output, stderr=subprocess.STDOUT
-                        )
-                    os.rename(work, target)
-                except BaseException:
-                    logger.error("The Valkey build failed; its output is in %s", build_log)
-                    shutil.rmtree(work, ignore_errors=True)
-                    raise
+                _build_valkey(sha, described, cache, deadline)
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
     if not os.path.exists(binary):
         raise LocalDeploymentError(f"the Valkey build finished without {binary}; build it by hand or pass a binary")
-    return binary
+    return sha, binary
+
+
+def _build_valkey(sha: str, described: str, cache: str, deadline: float) -> None:
+    """Fetch commit ``sha`` into a directory beside ``<cache>/<sha>``, build it, and rename it into place."""
+    target = os.path.join(cache, sha)
+    work = tempfile.mkdtemp(prefix=f"{sha}.", dir=cache)
+    build_log = f"{target}.build.log"
+    logger.info(
+        "Building Valkey %s into %s (about a minute; once, then reused); output: %s", described, target, build_log
+    )
+
+    def git(*arguments: str, **options: Any) -> subprocess.CompletedProcess:
+        remaining = max(0.0, deadline - time.monotonic())
+        return subprocess.run(["git", "-C", work, *arguments], check=True, timeout=remaining, **options)
+
+    try:
+        # The git and make output goes to a file, not the terminal; a failure points at it.
+        with open(build_log, "w", encoding="utf-8") as output:
+            to_log = {"stdout": output, "stderr": subprocess.STDOUT}
+            git("init", "--quiet", **to_log)
+            git("fetch", "--quiet", "--depth", "1", VALKEY_REPOSITORY, sha, **to_log)
+            git("checkout", "--quiet", "--detach", "FETCH_HEAD", **to_log)
+            resolved = git("rev-parse", "HEAD", capture_output=True, text=True).stdout.strip()
+            if resolved != sha:
+                raise LocalDeploymentError(f"the fetch of Valkey commit {sha} checked out {resolved}")
+            output.write(f"valkey {described} is checked out\n")
+            remaining = max(0.0, deadline - time.monotonic())
+            make = ["make", f"-j{os.cpu_count() or 1}"]
+            subprocess.run(make, cwd=work, check=True, timeout=remaining, **to_log)
+        os.rename(work, target)
+    except BaseException:
+        logger.error("The Valkey build failed; its output is in %s", build_log)
+        shutil.rmtree(work, ignore_errors=True)
+        raise
 
 
 def process_output_path(log_file: str) -> Optional[str]:
@@ -344,13 +381,14 @@ class ProcessManager:
                     plan.valkey_binary, f"instance_binaries for {plan.instance_id}"
                 )
 
-    def resolve_valkey_binary(self, base_dir: str = SOURCE_BUILD_DIR, build_timeout: float = BUILD_TIMEOUT_S) -> str:
-        """The deployment's valkey-server: the configured one, else ``valkey-server`` on PATH, else a build
-        under ``base_dir`` within ``build_timeout`` seconds (see :func:`build_valkey`) as a last resort."""
+    def resolve_valkey_binary(self, build_timeout: float = BUILD_TIMEOUT_S, cache: Optional[str] = None) -> str:
+        """The deployment's valkey-server: the configured one, else ``valkey-server`` on PATH, else the pinned
+        commit's build in the cache, made within ``build_timeout`` seconds if it is not there yet
+        (:func:`fetch_valkey`, which logs which it is)."""
         configured_binary = self.config.valkey_binary
         if configured_binary:
             return resolve_binary_path(configured_binary)
-        return installed_valkey_binary(base_dir) or build_valkey(base_dir, build_timeout)
+        return shutil.which("valkey-server") or fetch_valkey(VALKEY_SOURCE_SHA, cache=cache, timeout=build_timeout)[1]
 
     def create_instance_directories(self, instance_id: str, data_root: Optional[str] = None) -> tuple[str, str]:
         """Create an instance's directories and return its data directory and log file.

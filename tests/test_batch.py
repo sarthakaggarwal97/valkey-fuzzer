@@ -332,6 +332,59 @@ def test_a_later_batch_reruns_one_sample_of_each_failure_of_an_earlier_batch(tmp
     }
 
 
+def test_a_batch_appends_its_signatures_to_a_findings_store_beside_its_summary_or_a_shared_one(tmp_path, workers, stub):
+    stub.behave(**{"0": "fail:data", "1": "fail:data", "2": "error", "3": "pass"})
+    first = _batch(tmp_path, [_random(4)], name="first", workers=2)
+    summary = first.run()
+    store = json.loads(Path(first.folder, "findings.json").read_text())
+    assert store["format_version"] == 1 and set(store["findings"]) == {g["key"] for g in summary["signatures"]}
+    data = store["findings"][next(g["key"] for g in summary["signatures"] if g["runs"] == [_id(0), _id(1)])]
+    assert data["status"] == "new" and data["count"] == 2 and data["experiment"] == SNAPSHOT
+    assert data["runs"] == [{"batch": first.folder, "id": _id(0)}, {"batch": first.folder, "id": _id(1)}]
+    assert data["reproduce"] == f"valkey-fuzzer replay {first.folder}/runs/{_id(1)}/report.json"
+    assert data["first_seen"] == data["last_seen"] == summary["updated_at"] and "data:FAIL" in data["label"]
+    assert f"findings: 2 new in {first.folder}/findings.json" in _log(first)
+
+    # Several batches given one store: the data failure the second one also hits is known from then on; a
+    # batch that hit nothing says so, and still leaves the store.
+    shared = str(tmp_path / "soak" / "findings.json")
+    stub.behave(**{"0": "fail:data", "1": "pass"})
+    second = _batch(tmp_path, [_random(2)], name="second", findings=shared)
+    second.run()
+    third = _batch(tmp_path, [_random(1)], name="third", findings=shared)
+    third.run()
+    assert json.loads(Path(second.folder, "batch.json").read_text())["options"]["findings"] == shared
+    assert not Path(second.folder, "findings.json").exists()
+    store = json.loads(Path(shared).read_text())
+    [entry] = store["findings"].values()
+    assert entry["key"] == data["key"] and entry["status"] == "known" and entry["count"] == 2
+    assert [run["batch"] for run in entry["runs"]] == [second.folder, third.folder]
+    assert f"findings: 1 new in {shared}" in _log(second) and f"findings: 1 known in {shared}" in _log(third)
+    stub.behave(**{"0": "pass"})
+    fourth = _batch(tmp_path, [_random(1)], name="fourth")
+    fourth.run()
+    assert f"findings: nothing new in {fourth.folder}/findings.json" in _log(fourth)
+    assert json.loads(Path(fourth.folder, "findings.json").read_text())["findings"] == {}
+
+
+def test_the_findings_option_is_a_path_the_command_and_a_spec_make_absolute(tmp_path, monkeypatch, workers, stub):
+    monkeypatch.chdir(tmp_path)
+    spec = tmp_path / "batch.yaml"
+    random = {"experiments": [SNAPSHOT], "seeds": 1, "first_seed": 0, "excludes": EXCLUDES}
+    spec.write_text(yaml.safe_dump({"port_base": 12000, "findings": "soak/all.json", "sources": [{"random": random}]}))
+    with patch("sys.argv", ["valkey-fuzzer", "batch", str(spec), "--out", "b"]):
+        assert main() == 0
+    assert json.loads(Path(tmp_path, "b", "batch.json").read_text())["options"]["findings"] == str(
+        tmp_path / "soak" / "all.json"
+    )
+    assert (tmp_path / "soak" / "all.json").exists()
+    with patch("sys.argv", ["valkey-fuzzer", "batch", str(spec), "--out", "c", "--findings", "other.json"]):
+        assert main() == 0
+    assert json.loads(Path(tmp_path, "c", "batch.json").read_text())["options"]["findings"] == str(
+        tmp_path / "other.json"
+    )
+
+
 def test_a_resumed_batch_sweeps_and_reruns_only_the_job_that_was_running_and_one_process_runs_it(
     tmp_path, workers, stub
 ):

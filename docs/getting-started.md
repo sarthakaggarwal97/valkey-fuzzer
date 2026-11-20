@@ -51,11 +51,12 @@ The local deployment looks for `valkey-server` in this order:
 
 1. `--valkey-binary PATH`, or `deployment.valkey_binary` in the scenario;
 2. `valkey-server` on `PATH`;
-3. a previous build at `/tmp/valkey-build/valkey/src/valkey-server`;
-4. otherwise it clones release 9.1.3 of `https://github.com/valkey-io/valkey.git`
-   (the tag must resolve to the commit pinned in the code, `29173b6`, or the
-   build is refused: a moved tag is not built) and builds it with `make` into
-   `/tmp/valkey-build/valkey`, one build at a time.
+3. the cached build of the pinned commit of release 9.1.3, `29173b6`, at
+   `~/.cache/valkey-fuzzer/valkey/29173b67508b2de4c0f0ed551f3b47cf19fc3ca8/src/valkey-server`
+   (`$XDG_CACHE_HOME/valkey-fuzzer/valkey/<commit>/` when that is set);
+4. otherwise it fetches that commit of `https://github.com/valkey-io/valkey.git`
+   (the commit itself, so a moved tag changes nothing) and builds it with
+   `make` into that directory, one build at a time.
 
 Only four experiments probe the binary before the deployment starts
 (`valkey.capability.build-probe`): `valkey.cluster-election-durability`,
@@ -63,15 +64,17 @@ Only four experiments probe the binary before the deployment starts
 `valkey.rolling-upgrade`. The probe goes through steps 1 to 3, so without a
 binary these report `ERROR` instead of building one. Every other experiment,
 including the quickstart's `valkey.aof-durability`, reaches step 4 on a host
-with no binary: it clones and builds Valkey 9.1.3 before it starts, which
+with no binary: it fetches and builds Valkey 9.1.3 before it starts, which
 takes about 70 seconds and 280 MB, and needs git, make, a C compiler, and
-network access. It logs one line when it starts and writes the clone and make
-output to `/tmp/valkey-build/build.log`. The build is reused afterwards. To
-build Valkey yourself once, or point at a build:
+network access. It logs one line when it starts and writes the git and make
+output to `<commit>.build.log` beside the build. The build is reused
+afterwards. To make it ahead of the first run, or to build another Valkey (a
+tag, a branch, or a full commit hash) into the same cache and point a run at
+it:
 
 ```bash
-git clone --depth 1 --branch 9.1.3 https://github.com/valkey-io/valkey.git && make -C valkey -j"$(nproc)"
-valkey-fuzzer run examples/valkey/aof_durability.yaml --valkey-binary "$PWD/valkey/src/valkey-server"
+valkey-fuzzer fetch-valkey
+valkey-fuzzer run examples/valkey/aof_durability.yaml --valkey-binary "$(valkey-fuzzer fetch-valkey unstable)"
 ```
 
 Use a binary where it was built. A `valkey-server` copied out of its build

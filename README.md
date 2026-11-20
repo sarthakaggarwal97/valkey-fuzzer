@@ -25,17 +25,19 @@ experiment, cluster chaos (failovers with process kills) included.
 **Build Valkey.** Use the binary where it was built. A `valkey-server` copied
 out of its build tree can crash at start (it cannot find its Lua module), and
 the run then reports `FAIL`. The fuzzer finds a binary on `PATH`, or the build
-it makes itself under `/tmp/valkey-build`:
+it makes itself under `~/.cache/valkey-fuzzer/valkey/<commit>/`. One command
+makes that build ahead of time and prints its path:
 
 ```bash
-git clone --depth 1 --branch 9.1.3 https://github.com/valkey-io/valkey.git && make -C valkey -j"$(nproc)"
-export PATH="$PWD/valkey/src:$PATH"
+valkey-fuzzer fetch-valkey
 ```
 
-That needs git, make, and a C compiler, and takes about a minute. Without a
-binary, most experiments clone and build Valkey 9.1.3 for you on the first
-run, in the same way, under `/tmp/valkey-build` (about 70 seconds and 280 MB),
-and log one line when it starts. Four experiments never build one and
+That needs git, make, and a C compiler, and takes about a minute; run again,
+it prints the same path and builds nothing, and `fetch-valkey 9.1.3`,
+`fetch-valkey unstable`, or a full commit hash builds another Valkey beside
+it ([fetch-valkey](docs/cli.md#fetch-valkey)). Without a binary, most
+experiments make the same build for you on the first run (about 70 seconds
+and 280 MB) and log one line when it starts. Four experiments never build one and
 report `ERROR` instead: `valkey.cluster-election-durability`,
 `valkey.cluster-vote-save-crash`, `valkey.mixed-version-cluster`, and
 `valkey.rolling-upgrade`. [Getting started](docs/getting-started.md#choose-a-valkey-binary)
@@ -172,7 +174,7 @@ each inside its run, and what is left to you.
   `SIGKILL`, `SIGTERM`, and `SIGSTOP`, and restarts them. It refuses to start
   when a planned port is already in use.
 - It writes instance data and logs under `/tmp/valkey-fuzzer`, reports under
-  the temporary directory, and may build Valkey under `/tmp/valkey-build`.
+  the temporary directory, and may build Valkey under `~/.cache/valkey-fuzzer/valkey`.
 - On Linux as root, `valkey.bgsave-disk-full` mounts a tmpfs and fills it,
   and `valkey.cluster-partition` and the partitions of
   `valkey.replication-chaos` add iptables rules. `valkey.replication-degraded-link`,

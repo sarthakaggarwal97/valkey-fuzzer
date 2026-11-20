@@ -1,14 +1,12 @@
 """A finished job's result: its status, failure signature, and what the plug-ins judged and recorded."""
 
-import hashlib
 import json
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from .._data import canonical_json
-from ..minimize import empty_signature, failure_signature
+from ..minimize import empty_signature, failure_signature, signature_key, signature_label
 from ..reports import REPORT_FILE
 from ..results import RunOutcome
 from . import hooks
@@ -36,44 +34,12 @@ def results_of(folder: str) -> dict[str, dict[str, Any]]:
     }
 
 
-def signature_key(experiment: Optional[str], signature: Mapping[str, Any]) -> str:
-    """A failure signature's group: the experiment and every signature field but the path evidence; for a
-    crash, its causes alone, so one crash is one group whichever experiment hit it."""
-
-    if signature.get("crashes"):
-        material: dict[str, Any] = {"crashes": signature["crashes"]}
-    else:
-        material = {"experiment": experiment, **{k: v for k, v in signature.items() if k != "path_evidence"}}
-    return hashlib.sha256(canonical_json(material).encode()).hexdigest()[:12]
-
-
-def signature_label(experiment: Optional[str], signature: Mapping[str, Any]) -> str:
-    """One line naming a failure signature: status, experiment, failing components, first verdict or error;
-    for a crash, its causes."""
-
-    if signature.get("crashes"):
-        return f"{signature['status']} | crash | {'; '.join(signature['crashes'])[:300]}"
-    parts = [signature["status"], experiment or "-"]
-    failures = signature["failures"]
-    if failures:
-        parts.append(",".join(f"{name}:{entry['status']}" for name, entry in sorted(failures.items())))
-        first = failures[sorted(failures)[0]]["verdict"]
-        if first:
-            parts.append(first[0][:160])
-    for key in ("missing_events", "missing_evidence"):
-        if signature[key]:
-            parts.append(f"{key.replace('_', ' ')}: {', '.join(signature[key])}")
-    if signature["error_type"]:
-        parts.append(f"{signature['error_type']} during {signature['error_phase']}")
-    return " | ".join(parts)
-
-
 def _signature(outcome: Optional[RunOutcome], error: Optional[Mapping[str, Any]]) -> dict[str, Any]:
-    """:func:`~valkey_fuzzer.minimize.failure_signature` of a run's outcome; of its ``error`` when it left none."""
+    """:func:`~valkey_fuzzer.minimize.failure_signature` of a run's outcome, as the minimizer derives it; of its
+    ``error`` when it left none."""
 
     if outcome is not None:
-        required = [item.evidence_id for item in outcome.plan.required_evidence]
-        return failure_signature(outcome, required)
+        return failure_signature(outcome)
     return empty_signature("ERROR", error_type=error["type"], error_phase=error.get("phase"))
 
 
