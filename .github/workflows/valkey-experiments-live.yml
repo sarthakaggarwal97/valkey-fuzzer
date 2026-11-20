@@ -44,12 +44,45 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      - name: Build Valkey unstable and 8.1
+      - name: Build Valkey unstable
         run: |
           git clone --depth 1 https://github.com/valkey-io/valkey.git /tmp/valkey-unstable
-          git clone --depth 1 --branch 8.1 https://github.com/valkey-io/valkey.git /tmp/valkey-8.1
           make -C /tmp/valkey-unstable -j"$(nproc)"
+
+      # 8.1 is a release branch that moves only on patch releases, so its build (about 90 s) is kept between
+      # nights, keyed on the branch's tip: a new tip builds once, then every night restores it. The whole tree is
+      # kept, as test.yml keeps its pinned build. The cache is saved right after the build, not in a post step,
+      # so a night whose experiments fail still saves it.
+      - name: Resolve the tip of Valkey 8.1
+        id: valkey-8-1
+        run: |
+          sha="$(git ls-remote https://github.com/valkey-io/valkey.git refs/heads/8.1 | cut -f1)"
+          test -n "${sha}"
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: Restore the Valkey 8.1 build
+        id: valkey-8-1-build
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/valkey-8.1
+          key: valkey-8.1-build-${{ runner.os }}-${{ runner.arch }}-${{ steps.valkey-8-1.outputs.sha }}
+
+      - name: Build Valkey 8.1 at that tip
+        if: steps.valkey-8-1-build.outputs.cache-hit != 'true'
+        env:
+          VALKEY_8_1_SHA: ${{ steps.valkey-8-1.outputs.sha }}
+        run: |
+          git init --quiet /tmp/valkey-8.1
+          git -C /tmp/valkey-8.1 fetch --quiet --depth 1 https://github.com/valkey-io/valkey.git "${VALKEY_8_1_SHA}"
+          git -C /tmp/valkey-8.1 checkout --quiet FETCH_HEAD
           make -C /tmp/valkey-8.1 -j"$(nproc)"
+
+      - name: Save the Valkey 8.1 build
+        if: steps.valkey-8-1-build.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/valkey-8.1
+          key: ${{ steps.valkey-8-1-build.outputs.cache-primary-key }}
 
       - name: Install project
         run: |

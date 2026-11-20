@@ -904,6 +904,29 @@ def test_the_host_probe_skips_a_run_whose_degradations_cannot_work_here(monkeypa
 
 
 @pytest.mark.parametrize(
+    ("requirement", "check", "reason"),
+    [
+        ("libfaketime", "libfaketime_supported", "libfaketime is not installed (no libfaketime.so.1 under /usr/lib)"),
+        ("cgroup_v2", "cgroup_v2_supported", "this process runs in the root cgroup; run the fuzzer in a delegated cgroup"),
+    ],
+)  # fmt: skip
+def test_the_host_probe_skips_a_run_whose_clock_skew_or_resource_pressure_cannot_work_here(
+    monkeypatch, requirement, check, reason
+):
+    # The same checks the faults' own probes make, as a host-probe requirement: the experiment is SKIP_UNSUPPORTED
+    # with the reason, where the fault's probe alone made it an ERROR.
+    monkeypatch.setattr(capabilities, check, lambda *controllers: (False, reason))
+    spec = resolved(
+        ComponentSpec(role=ComponentRole.CAPABILITY, use="valkey.capability.host-probe", id="h", config={"requires": [requirement]})
+    )  # fmt: skip
+    result = capabilities.HostCapabilityProbe().probe(None, spec)
+    assert result.status is ComponentStatus.SKIP and result.summary == reason
+    monkeypatch.setattr(capabilities, check, lambda *controllers: (True, ""))
+    result = capabilities.HostCapabilityProbe().probe(None, spec)
+    assert result.status is ComponentStatus.PASS and result.summary == f"host satisfies {requirement}"
+
+
+@pytest.mark.parametrize(
     ("which", "cap_eff", "tc_ok", "reason"),
     [
         ({"tc": None, "ip": "/sbin/ip"}, "0000003fffffffff", True, "tc not installed"),

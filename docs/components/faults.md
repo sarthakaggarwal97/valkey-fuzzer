@@ -225,7 +225,10 @@ expiry, `TIME`, and the timeouts Valkey measures against the wall clock.
 The library is the host's `libfaketime` package (`libfaketime.so.1` under
 `/usr/lib/*/faketime`, `/usr/lib64/faketime`, `/usr/lib/faketime`, or
 `/usr/local/lib/faketime`), or whatever `VALKEY_FUZZER_LIBFAKETIME` names.
-Without it the fault's probe makes the run an `ERROR` that names the package.
+Pair it with `valkey.capability.host-probe` and `requires: [linux,
+libfaketime]`, as `valkey.clock-skew-expiry` does: a host without the library
+is then `SKIP_UNSUPPORTED` naming the package; without the host-probe, the
+fault's own probe makes the run an `ERROR` that names it.
 After writing the file the fault reads `TIME` on the instance and compares it
 with the host's clock: a skew the server does not show (libfaketime not
 loaded) leaves the fault not applied (`ERROR`). The real time is restored on
@@ -264,8 +267,11 @@ It needs a delegated cgroup v2 of the run's own (for example under
 `systemd-run --user --scope valkey-fuzzer ...`): cgroup v2 mounted at
 `/sys/fs/cgroup`, this process's cgroup not the root one, writable by this
 user, holding the controllers the limits need and only this user's processes.
-Otherwise the fault's probe and its firing refuse with the reason, and the run
-is an `ERROR`. Nothing is ever written outside that cgroup, no process but the
+Pair it with `valkey.capability.host-probe` and `requires: [linux,
+cgroup_v2]`, as `valkey.replication-cpu-starvation` does: a host without such
+a cgroup is then `SKIP_UNSUPPORTED` with the reason. Without the host-probe,
+the fault's probe and its firing refuse with the reason, and the run is an
+`ERROR`. Nothing is ever written outside that cgroup, no process but the
 run's own is moved, and a leaf a dead fuzzer left is removed by
 `valkey-fuzzer sweep`. There is no fallback without cgroups: a fully stopped
 instance is already `valkey.fault.process-signal` with `SIGSTOP`.

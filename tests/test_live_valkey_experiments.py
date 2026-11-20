@@ -188,6 +188,16 @@ def _gossip_delay():
     )
 
 
+def _clock_skew():
+    return scenario("valkey.clock-skew-expiry", replicas=1, clock_faults=True, inputs={"offset_s": -30, "ttl_s": 10})
+
+
+def _cpu_starvation():
+    return scenario(
+        "valkey.replication-cpu-starvation", replicas=1, inputs={"cpu_percent": 1, "starve_s": 3, "mutation_rate": 2000}
+    )
+
+
 @pytest.mark.parametrize(
     ("build", "patch"),
     [
@@ -195,6 +205,8 @@ def _gossip_delay():
         pytest.param(_partition, (capabilities, "iptables_supported", lambda: (False, "requires iptables")), id="cluster-partition"),
         pytest.param(_degraded_link, (capabilities, "netem_supported", lambda: (False, "tc not installed")), id="replication-degraded-link"),
         pytest.param(_gossip_delay, (capabilities, "netem_supported", lambda: (False, "tc not installed")), id="cluster-gossip-delay"),
+        pytest.param(_clock_skew, (capabilities, "libfaketime_supported", lambda: (False, "libfaketime is not installed")), id="clock-skew-expiry"),
+        pytest.param(_cpu_starvation, (capabilities, "cgroup_v2_supported", lambda *controllers: (False, "no delegated cgroup v2")), id="replication-cpu-starvation"),
     ],
 )  # fmt: skip
 def test_an_experiment_is_unsupported_without_its_prerequisites(runtime, monkeypatch, build, patch):
@@ -226,9 +238,7 @@ def test_clock_skew_shifts_the_primarys_wall_clock_and_expiry_follows_it(runtime
     # libfaketime sets the primary's clock back, so a volatile key's absolute expiry is in the replica's past:
     # the replica reads it as expired but keeps it, and only the primary's DEL (once its clock is restored)
     # removes it. The whole pipeline is exercised: the deployment under libfaketime, the fault, and the oracles.
-    outcome = run_scenario(
-        runtime, scenario("valkey.clock-skew-expiry", replicas=1, clock_faults=True, inputs={"offset_s": -30, "ttl_s": 10})
-    )  # fmt: skip
+    outcome = run_scenario(runtime, _clock_skew())
     check(outcome)
     injected = evidence(outcome, "valkey.fault.injected")
     assert injected["applied"] and injected["target"] == "valkey-0" and injected["skew_measured_s"] < -25
@@ -239,10 +249,7 @@ def test_clock_skew_shifts_the_primarys_wall_clock_and_expiry_follows_it(runtime
 def test_resource_pressure_throttles_the_primary_and_the_replica_links_survive(runtime):
     # A cgroup v2 CPU quota throttles the primary under writes for a few seconds; the replica link must survive
     # it with no resync and every write converge. The fault is not applied unless the kernel actually throttled.
-    outcome = run_scenario(
-        runtime,
-        scenario("valkey.replication-cpu-starvation", replicas=1, inputs={"cpu_percent": 1, "starve_s": 3, "mutation_rate": 2000}),
-    )  # fmt: skip
+    outcome = run_scenario(runtime, _cpu_starvation())
     check(outcome)
     injected = evidence(outcome, "valkey.fault.injected")
     assert injected["applied"] and injected["target"] == "valkey-0"

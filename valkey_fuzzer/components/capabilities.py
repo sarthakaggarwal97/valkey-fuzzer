@@ -28,7 +28,8 @@ there, so a deployment that does not load it is ``SKIP``.
 ``valkey.capability.host-probe`` makes a run ``SKIP_UNSUPPORTED`` on a host
 that cannot run it: not Linux, not root (or root, for permission faults), no
 tmpfs mounts, no usable iptables, no usable ``tc`` netem (``tc`` and ``ip``
-with ``CAP_NET_ADMIN``), or no per-instance loopback addresses.
+with ``CAP_NET_ADMIN``), no libfaketime, no delegated cgroup v2 of the run's
+own, or no per-instance loopback addresses.
 """
 
 import contextlib
@@ -562,7 +563,17 @@ def per_instance_loopback_supported() -> tuple[bool, str]:
 # valkey.capability.host-probe
 # ---------------------------------------------------------------------------
 
-_HOST_REQUIREMENTS = ("linux", "root", "not_root", "tmpfs", "iptables", "netem", "per_instance_loopback")
+_HOST_REQUIREMENTS = (
+    "linux",
+    "root",
+    "not_root",
+    "tmpfs",
+    "iptables",
+    "netem",
+    "libfaketime",
+    "cgroup_v2",
+    "per_instance_loopback",
+)
 
 _HOST_FIELDS = {"requires": ConfigField(list, items=ConfigField(str, choices=_HOST_REQUIREMENTS))}
 
@@ -585,11 +596,13 @@ class HostCapabilityProbe:
                 unmet.append("requires root")
             elif requirement == "not_root" and providers.as_root():
                 unmet.append("permission faults are ineffective as root")
-            elif requirement in ("tmpfs", "iptables", "netem", "per_instance_loopback"):
+            elif requirement in ("tmpfs", "iptables", "netem", "libfaketime", "cgroup_v2", "per_instance_loopback"):
                 check = {
                     "tmpfs": providers.tmpfs_supported,
                     "iptables": iptables_supported,
                     "netem": netem_supported,
+                    "libfaketime": libfaketime_supported,
+                    "cgroup_v2": cgroup_v2_supported,
                     "per_instance_loopback": per_instance_loopback_supported,
                 }[requirement]
                 supported, reason = check()

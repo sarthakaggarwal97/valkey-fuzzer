@@ -69,17 +69,18 @@ def test_every_experiment_is_judged_by_liveness_and_one_without_required_inputs_
         ),
     ],
 )  # fmt: skip
-def test_a_fault_without_its_host_capability_errors_with_the_reason_instead_of_passing(
+def test_an_experiment_without_its_host_capability_is_unsupported_with_the_reason_instead_of_passing(
     runtime, monkeypatch, experiment, deployment, target, missing, reason
 ):
-    # The batch path (service.run_plan) turns the component probe's refusal into an ERROR outcome naming the
-    # missing capability, before anything starts: a run on a host without libfaketime or a delegated cgroup is
-    # an ERROR-with-reason, never a silent PASS or SKIP.
+    # The batch path (service.run_plan) lets the experiment's host-probe say what the host lacks before anything
+    # starts: a run on a host without libfaketime or a delegated cgroup is SKIP_UNSUPPORTED-with-reason, never a
+    # silent PASS, and no longer the ERROR the fault's own probe (which stays, for a scenario without the
+    # host-probe) made it.
     monkeypatch.setattr(target, missing)
     plan = runtime.compile({"scenario_id": "x", "seed": 1, "experiment": {"id": experiment}, "deployment": deployment})
     outcome = runtime.run_plan(plan, timeout=30)
-    assert outcome.status.value == "ERROR", outcome.summary
-    assert "cannot run on this host" in outcome.summary and reason in outcome.summary
+    assert outcome.status.value == "SKIP_UNSUPPORTED", outcome.summary
+    assert "required capability 'host' is unsupported" in outcome.summary and reason in outcome.summary
 
 
 def test_a_full_disk_is_logged_evidence_whether_the_save_forks_or_not():
