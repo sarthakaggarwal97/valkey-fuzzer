@@ -1007,16 +1007,23 @@ def check_run(
         result["transitions"] = {"checked": 0, "holds": None, "excluded": claims.transitions_excluded}
     elif transitions:
         result["transitions"] = {"checked": 0, "holds": None, "skipped": TRANSITIONS_UNCHECKED}
-    result["violated"] = violated_claims(result)
-    result["first_violated"] = first_violated(result)
-    result["status"] = "fail" if result["violated"] else "pass"
+    violated = violated_claims(result)
+    result["violated"] = violated
+    result["first_violated"] = first_violated(result, violated)
+    result["status"] = "fail" if violated else "pass"
     return result
 
 
 def violated_claims(result: Mapping[str, Any]) -> list[str]:
     """What a :func:`check_run` result holds against the run: each claimed property the observed states violated,
-    and ``transitions`` when the transition check found a step the model cannot take. Empty for a pass."""
+    and ``transitions`` when the transition check found a step the model cannot take. Empty for a pass.
 
+    The list the result stores (``violated``) when it has one; derived from its ``properties`` and ``transitions``
+    for a result from before it was stored (a ``conform.json`` of an older release).
+    """
+
+    if "violated" in result:
+        return list(result["violated"])
     violated = sorted(
         name
         for name, entry in (result.get("properties") or {}).items()
@@ -1027,12 +1034,11 @@ def violated_claims(result: Mapping[str, Any]) -> list[str]:
     return violated
 
 
-def first_violated(result: Mapping[str, Any]) -> Optional[dict[str, Any]]:
-    """The first of :func:`violated_claims`, with the observed ``state`` (its index in the trace) that violates it
-    (for ``transitions``, the first observed step no model step reaches) and that ``step`` as ``steps`` lists it;
-    None for a pass."""
+def first_violated(result: Mapping[str, Any], violated: Sequence[str]) -> Optional[dict[str, Any]]:
+    """The first of ``violated`` (the result's :func:`violated_claims`), with the observed ``state`` (its index in
+    the trace) that violates it (for ``transitions``, the first observed step no model step reaches) and that
+    ``step`` as ``steps`` lists it; None for a pass."""
 
-    violated = violated_claims(result)
     if not violated:
         return None
     claim = violated[0]

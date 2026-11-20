@@ -40,9 +40,10 @@ Error: tla2tools.jar not found and java not found on PATH: the spec bridge needs
 ```
 
 Before anything runs, the jar is probed (`java -cp tla2tools.jar tlc2.TLC -h`)
-for TLC's version and for `-dumpTrace`: a jar that does not run TLC, or runs
-one older than 2.19 (the version the bridge is tested with), is an error,
-exit `2`, naming the jar. The jar's SHA-256 is looked up among the releases
+for TLC's version and for `-dumpTrace`, once per jar in a process (a jar that
+changes on disk is probed again): a jar that does not run TLC, or runs one
+older than 2.19 (the version the bridge is tested with), is an error, exit
+`2`, naming the jar. The jar's SHA-256 is looked up among the releases
 the bridge knows (`TLA_TOOLS_RELEASES` in `valkey_fuzzer/spec/tla.py`: v1.7.4,
 the one CI pins, and v1.8.0, the first whose TLC dumps traces as JSON); another
 jar runs with a warning on stderr, since its TLC may print what the bridge

@@ -63,6 +63,7 @@ from .reports import (
 from .results import OutcomeStatus, RunOutcome
 from .runner import PreflightError, Runner
 from .schema import load_yaml_mapping, plain_config
+from .spec.conform import conform_run, judge_run
 
 # The deadline of a run that names none and has no search-profile budget (seconds).
 DEFAULT_TIMEOUT_S = 1200.0
@@ -566,8 +567,6 @@ class RunService:
         if conform:
             results = self.conform(report_dir, outcome)
             if results:
-                from .spec.conform import judge_run
-
                 outcome = judge_run(outcome, results)
                 report = self.run_report(
                     outcome,
@@ -583,12 +582,10 @@ class RunService:
     def conform(self, report_dir: str, outcome: RunOutcome) -> dict[str, dict[str, Any]]:
         """The run in ``report_dir`` (its ``report.json`` written) checked against each spec bundle its plan names,
         by bundle (:func:`~valkey_fuzzer.spec.conform.conform_run`, TLC bounded by ``conform_tlc_timeout_s``);
-        empty when it names none, so a run without a bundle never loads the spec tools."""
+        empty when it names none, so a run without a bundle never looks for java and the jar."""
 
         if not any((component.config or {}).get("spec") for component in outcome.plan.components):
             return {}
-        from .spec.conform import conform_run
-
         return conform_run(report_dir, self._conform_tlc_timeout_s)
 
     def run_report(

@@ -2,6 +2,7 @@
 acknowledges a write before saving it, so a crash loses it. The slow tests run TLC (java and ``$TLA2TOOLS_JAR``)."""
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -230,19 +231,23 @@ def test_the_tools_are_probed_for_tlcs_version_and_whether_it_dumps_json_traces(
     monkeypatch.setitem(tla.TLA_TOOLS_RELEASES, digest, "v9.9.9")
     tools = TlaTools.locate(str(jar), strict=True)
     assert tools.warnings == () and tools.identity()["release"] == "v9.9.9"
-    # A 2026 TLC takes -dumpTrace; its version is a date, later than 2.19 as numbers.
+    # A 2026 TLC takes -dumpTrace; its version is a date, later than 2.19 as numbers. (The probe is cached on the
+    # jar, which has not changed: a new java at the same path needs the cache cleared.)
     java.write_text(f'#!/bin/sh\nprintf "%s\\n" "{HELP_2026}"\n')
+    tla._probe.cache_clear()
     tools = TlaTools.locate(str(jar))
     assert (tools.tlc_version, tools.json_trace) == ("2026.11.19.180144", True)
     assert tla.version_key("2026.11.19.180144") > tla.version_key("2.19") > tla.version_key("2.18")
     # Too old, or no TLC at all (a corrupt jar): an error that names the jar and how to get one.
     java.write_text('#!/bin/sh\necho "TLC - Version 2.18 of 01 January 2023"\n')
+    tla._probe.cache_clear()
     with pytest.raises(
         TlaError,
         match=rf"^TLC 2.18 in {re.escape(str(jar))} is older than 2.19, the oldest the spec bridge runs; the spec bridge needs Java 11",
     ):
         TlaTools.locate(str(jar))
     java.write_text('#!/bin/sh\necho "Error: Could not find or load main class tlc2.TLC" >&2\nexit 1\n')
+    tla._probe.cache_clear()
     with pytest.raises(
         TlaError,
         match=r"does not run TLC \(tlc2.TLC -h printed no version: Error: Could not find or load main class tlc2.TLC\)",
@@ -250,6 +255,31 @@ def test_the_tools_are_probed_for_tlcs_version_and_whether_it_dumps_json_traces(
         TlaTools.locate(str(jar))
     # Tools made without the probe (as tests do) report no version; check records TLC's banner instead.
     assert TlaTools(jar=str(jar)).identity()["tlc_version"] is None
+
+
+def test_the_probe_runs_once_per_jar_and_again_when_the_jar_changes(tmp_path, monkeypatch):
+    # Every java start is a line in calls; the probe is the only one these tools make.
+    calls = tmp_path / "calls"
+    java, jar = _fake_java(tmp_path, f'echo "$*" >> "{calls}"\necho "{HELP_2_19}"')
+    monkeypatch.setattr(tla.shutil, "which", lambda name: str(java))
+    tools = TlaTools.locate(str(jar))
+    again = TlaTools.locate(str(jar), workers="1", strict=False).within(5.0)
+    assert len(calls.read_text().splitlines()) == 1
+    # The digest the probe took is the one identity reports, on the probed tools and on their copies.
+    digest = hashlib.sha256(b"not a jar").hexdigest()
+    assert tools.digest == again.digest == digest and again.identity()["sha256"] == digest
+    assert again.tlc_version == "2.19" and again.timeout_s == 5.0
+    # A changed jar (its size or modification time) is probed and hashed again.
+    jar.write_bytes(b"not a jar, rebuilt")
+    assert TlaTools.locate(str(jar)).digest == hashlib.sha256(b"not a jar, rebuilt").hexdigest()
+    assert len(calls.read_text().splitlines()) == 2
+    # A probe that fails is not kept: the next locate tries the jar again.
+    java.write_text(f'#!/bin/sh\necho "$*" >> "{calls}"\necho "no TLC here" >&2\nexit 1\n')
+    jar.write_bytes(b"not a jar, broken")
+    for _ in range(2):
+        with pytest.raises(TlaError, match="does not run TLC"):
+            TlaTools.locate(str(jar))
+    assert len(calls.read_text().splitlines()) == 4
 
 
 def test_tlc_dumps_the_trace_as_json_when_it_can(tmp_path, monkeypatch):

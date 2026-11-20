@@ -19,7 +19,15 @@ from typing import TYPE_CHECKING, Any, Optional
 from ..minimize import verdict_clauses
 from ..reports import FORMAT_VERSION, format_version_problem, write_document
 from ..spec.bundle import SpecBundleError, load_bundle
-from ..spec.conform import CHECKED_RUN_STATUSES, conform_run, describe, plan_bundles, summarize
+from ..spec.conform import (
+    CHECKED_RUN_STATUSES,
+    CONFORM_TIMEOUT_OPTION,
+    conform_run,
+    describe,
+    plan_bundles,
+    summarize,
+    violated_claims,
+)
 from .hooks import BatchPlugin
 from .results import Verdict, read_json
 from .spec import BatchError, BatchOptions, worst
@@ -30,8 +38,6 @@ if TYPE_CHECKING:
 # What a worker writes in its run folder for a run whose report has no conform section: the run checked against
 # the spec bundles its plan names, as ``{"format_version": ..., "bundles": {<bundle>: <result>}}``.
 CONFORMANCE_FILE = "conform.json"
-# The batch option that bounds a worker's TLC run on its run's observed states (BatchOptions).
-CONFORM_TIMEOUT_OPTION = "conform_tlc_timeout_s"
 CONFORMANCE_DIRECTORY = "conformance"
 
 
@@ -120,11 +126,12 @@ class ConformancePlugin(BatchPlugin):
         _conform(report_dir, task[CONFORM_TIMEOUT_OPTION])
 
     def judge(self, job: Mapping[str, Any], run_dir: str, report: Optional[Mapping[str, Any]], verdict: Verdict) -> Any:
-        conformance = _conformance(run_dir, report)
-        if _recorded(report) is not None:
+        recorded = _recorded(report)
+        if recorded is not None:
             # The run judged itself (spec.conform.judge_run): its status, summary and signature, formed from its
             # outcome, already carry an approved bundle's finding as the failed component spec-conform:<bundle>.
-            return conformance
+            return recorded
+        conformance = _conformance(run_dir, report)
         for name, entry in sorted(conformance.items()):
             # A draft's findings are reported, not held against the run. Every entry says whether its claims are
             # approved: the worker's (conform_folder), and the ones made here for a run whose worker wrote no
@@ -134,13 +141,7 @@ class ConformancePlugin(BatchPlugin):
             if entry["status"] not in ("fail", "error") or not entry.get("approved", False):
                 continue
             if entry["status"] == "fail":
-                violated = sorted(
-                    prop
-                    for prop, item in entry["properties"].items()
-                    if item["status"] == "violated" and item["claimed"]
-                )
-                if (entry.get("transitions") or {}).get("holds") is False:
-                    violated.append("transitions")
+                violated = violated_claims(entry)
                 clauses, text = [f"{prop} violated" for prop in violated], f"{', '.join(violated)} violated"
             else:
                 clauses, text = verdict_clauses(entry["error"]), entry["error"]
