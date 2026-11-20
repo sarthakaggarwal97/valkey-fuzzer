@@ -23,11 +23,11 @@ hosts that cannot do this into ``SKIP_UNSUPPORTED`` before anything starts.
 
 import ipaddress
 import threading
-import time
 import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any, Optional
 
+from valkey_fuzzer.clock import now
 from valkey_fuzzer.hoststate import chain_name, remove_chain, run_iptables
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.schema import ConfigError, ConfigField, ConfigSchema, plain_config
@@ -221,7 +221,7 @@ class PartitionFault(EventFault):
             if error:
                 self._heal_errors = [error]
                 return
-            self._healed_at = time.time()
+            self._healed_at = now()
             self._heal_reason = reason
 
     def _heal_on_event(self, event: Any) -> None:
@@ -237,7 +237,7 @@ class PartitionFault(EventFault):
     def _settled(self, context: Any, spec: ComponentSpec, record: dict[str, Any]) -> None:
         with self._lock_heal:
             if self._installed and self._healed_at is None and not self._partition.open:
-                self._healed_at = time.time()
+                self._healed_at = now()
                 self._heal_reason = "recover"
         if self._heal_errors:
             record["heal_errors"] = self._heal_errors

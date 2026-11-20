@@ -21,12 +21,12 @@ This module is the run loop, its conflict claims, and its undo ownership;
 
 import contextvars
 import threading
-import time
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from typing import Any, Callable, Optional
 
+from valkey_fuzzer.clock import now
 from valkey_fuzzer.declarations import Declarations
 from valkey_fuzzer.deployment.local.validation.config import STATE_VALIDATION_SCHEMA
 from valkey_fuzzer.results import ComponentStatus, make_result
@@ -246,12 +246,12 @@ class WaveRun:
                     self.unclaim(record)
             return record
         finally:
-            record.setdefault("finished_at", time.time())
+            record.setdefault("finished_at", now())
             self.done[record["index"]].set()
 
     def landed(self, record: dict[str, Any], affected: Sequence[str]) -> None:
         """``record``'s fault is in place and acts on ``affected``."""
-        record["applied_at"] = time.time()
+        record["applied_at"] = now()
         record["affected"] = sorted(set(affected))
 
     # -- heal, validation, and verdicts ---------------------------------------------
@@ -448,7 +448,7 @@ class WaveRun:
             "signal": config["signal"],
             "operation": record["index"],
             "wave": record["wave"],
-            "at": time.time(),
+            "at": now(),
             "success": True,
         }
         with self.lock:

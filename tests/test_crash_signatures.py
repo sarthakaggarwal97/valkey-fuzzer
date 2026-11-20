@@ -418,7 +418,7 @@ def test_a_probe_server_that_crashes_on_a_probe_command_is_a_crash(monkeypatch, 
             output.write_text(f"{OVERFLOW}\n" if crashed else "")
             raise valkey.exceptions.ConnectionError("Connection closed by server.")
 
-        def start(self):
+        def start(self, context=None):
             return None
 
         def stop(self):

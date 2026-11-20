@@ -472,7 +472,9 @@ class CommandMetadataOracle:
         except OSError as exc:
             return make_result(spec, ComponentStatus.ERROR, str(exc))
         side_config = {"nodes": 2, "resp": 2, "timeout_s": config["timeout_s"], "cluster": cluster}
-        ports = iter(actions._free_ports(4 if cluster else 2, actions._port_block(context)))
+        ports = iter(
+            actions._free_ports(4 if cluster else 2, actions._port_block(context), context.rng(spec.id, "ports"))
+        )
         side = actions.new_side("metadata", binary, side_config, (), ports)
         side.options.update({**_NODE_OPTIONS, **instance_modules(context, instance_id)})
         run = _Run(side, cluster)

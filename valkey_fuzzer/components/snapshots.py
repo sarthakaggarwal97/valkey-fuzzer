@@ -122,7 +122,7 @@ def load_rdb(
     try:
         shutil.copyfile(rdb_path, os.path.join(server.workdir, "dump.rdb"))
         try:
-            exit_output = server.start()
+            exit_output = server.start(context)
         except (OSError, TimeoutError) as exc:
             raise RdbLoadTimeoutError(f"the loading server did not start: {exc}") from exc
         if exit_output is not None:
@@ -451,8 +451,7 @@ def serialization_problem(
         server = PrivateServer(binary, server_arguments(server_config), timeout_s=_PROBE_START_TIMEOUT_S, prefix="vfd-")
         owned = context.obligations.open(spec, "process.private-server", server.workdir, server.stop)
         try:
-            # PrivateServer.start polls with time.sleep: not cancellable, but bounded by its timeout.
-            exit_output = server.start()
+            exit_output = server.start(context)
             if exit_output is not None:
                 return f"the determinism probe's server exited at startup: {exit_output[-300:]}"
             server.client.restore("probe", 0, payload)

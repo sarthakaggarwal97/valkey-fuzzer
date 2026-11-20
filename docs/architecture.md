@@ -91,6 +91,7 @@ they use directly (see [The Valkey components](#the-valkey-components)).
 | `valkey_fuzzer/compiler.py` | `ScenarioCompiler`: scenario plus catalog to execution plan. |
 | `valkey_fuzzer/runner.py` | `Runner`: the run lifecycle and containment; it watches component calls through `deadlines.py`. |
 | `valkey_fuzzer/deadlines.py` | The watchdog that runs a component call on its own thread and cancels it at its deadline, and the cancelled calls still running. |
+| `valkey_fuzzer/clock.py` | `now`: the run clock every compared timestamp (ledger operations, loss windows, fault times, evidence) is read from; monotonic, anchored to wall time at process start. |
 | `valkey_fuzzer/verdict.py` | The outcome rules. |
 | `valkey_fuzzer/environment/` | Artifact, resource, and policy specs; the environment provider protocol, registration, and registry; `EnvironmentProvisioner` and `EnvironmentLease`; `resolve_plan`, which binds a plan to what was acquired. |
 | `valkey_fuzzer/deployment/local/` | The local deployment provider (see [below](#the-local-deployment-provider)). |
@@ -350,7 +351,8 @@ touches nothing else. `provision`:
      `REPLICAOF <host> <port>` on each replica, then every link must be up
      and point at the primary;
    - cluster: `CLUSTER RESET HARD` on every node (after checking it is the
-     process it started), `CLUSTER MEET` from `valkey-0` until every node
+     process it started) until each knows only itself and holds no slot,
+     `CLUSTER MEET` from `valkey-0` until every node
      knows all the others (up to 30 seconds), `CLUSTER ADDSLOTS` with each
      primary's range, polling up to 10 times, 2 seconds apart, until
      `cluster_slots_assigned:16384` and `cluster_slots_fail:0`, then

@@ -30,7 +30,6 @@ import operator
 import os
 import re
 import shutil
-import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Optional
@@ -38,6 +37,7 @@ from typing import Any, Optional
 import valkey
 
 from valkey_fuzzer._data import to_plain_data
+from valkey_fuzzer.clock import now
 from valkey_fuzzer.declarations import Declarations
 from valkey_fuzzer.deployment.local import processes
 from valkey_fuzzer.deployment.local.server_config import (
@@ -649,7 +649,7 @@ class ConfigChurnWorkload:
         def change() -> None:
             instance_id = rng.choice(sorted(instance.instance_id for instance in handle.instances))
             offered = candidates(instance_id)
-            record: dict[str, Any] = {"at": time.time(), "instance": instance_id}
+            record: dict[str, Any] = {"at": now(), "instance": instance_id}
             if not offered:
                 self._changes.append({**record, "skipped": "its build has no config table, or none left to change"})
                 return

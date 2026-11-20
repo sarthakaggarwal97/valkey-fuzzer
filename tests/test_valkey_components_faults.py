@@ -6,6 +6,7 @@ import signal
 import subprocess
 import time
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -311,6 +312,40 @@ def test_an_event_targeted_kill_records_the_cluster_vars_it_left_on_disk_and_nee
             }
             assert record["restarted"] is True
     assert "names no known instance" in result.summary
+
+
+def test_an_interrupt_while_a_fault_fires_leaves_a_record_recovery_reads_at_once():
+    # Ctrl-C inside the dispatch left ``_record`` at "firing": recovery waited 600 s, then said "could not be
+    # applied: None" (F13).
+    handle = _Handle()
+    handle.send_signal = Mock(side_effect=KeyboardInterrupt())
+    context = fake_context(handle)
+    spec = resolved(
+        ComponentSpec(
+            role=ComponentRole.FAULT, use="valkey.fault.process-signal", id="fault", config={"when_event": "go"}
+        )
+    )
+    fault = ProcessSignalFault()
+    fault.inject(context, spec)
+    with pytest.raises(KeyboardInterrupt):
+        fault._on_event(SimpleNamespace(name="go", sequence=1, payload={}))
+
+    started = time.monotonic()
+    result = fault.recover(context, spec)
+    assert time.monotonic() - started < 1.0
+    assert result.status is ComponentStatus.ERROR
+    assert "fault could not be applied: interrupted while firing: KeyboardInterrupt" in result.summary
+
+
+def test_recovery_waits_for_a_firing_only_until_its_own_deadline(monkeypatch):
+    handle = _Handle()
+    context, spec, fault = _fire(ProcessSignalFault(), handle, "valkey.fault.process-signal", occurrence=2)
+    fault._fire_done.clear()  # a firing that never ends
+    context.deadline = time.monotonic() + 0.2
+    started = time.monotonic()
+    result = fault.recover(context, spec)
+    assert 0.2 <= time.monotonic() - started < 2.0
+    assert result.status is ComponentStatus.ERROR and "still firing when recovery timed out" in result.summary
 
 
 @pytest.mark.parametrize("restart_mode", ["immediate", "recover"])

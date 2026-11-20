@@ -16,9 +16,9 @@ import os
 import re
 import sys
 import threading
-import time
 from typing import Any, Optional
 
+from valkey_fuzzer.clock import now
 from valkey_fuzzer.declarations import Declarations
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.protocols import component_artifact_dir
@@ -147,7 +147,7 @@ class InfoObserver:
     def _sample(self, phase: str, event: Optional[Any] = None, clients: Optional[dict[str, Any]] = None) -> None:
         clients = self._clients if clients is None else clients
         for instance_id in self._instances:
-            record: dict[str, Any] = {"phase": phase, "instance_id": instance_id, "at": time.time()}
+            record: dict[str, Any] = {"phase": phase, "instance_id": instance_id, "at": now()}
             if event is not None:
                 record["event"] = event.name
                 record["event_sequence"] = event.sequence
@@ -697,7 +697,7 @@ class LogTriggerObserver:
             lines = self._new_lines(instance_id)
             if not lines:
                 continue
-            detected_at = time.time()
+            detected_at = now()
             for line in lines:
                 for index, (_, pattern) in enumerate(self._rules):
                     match = pattern.search(line)

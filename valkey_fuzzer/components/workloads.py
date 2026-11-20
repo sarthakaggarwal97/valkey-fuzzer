@@ -51,11 +51,13 @@ from typing import Any, Optional
 import valkey
 
 from valkey_fuzzer.declarations import Declarations
+from valkey_fuzzer.hoststate import owner_tag
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.protocols import component_artifact_dir
 from valkey_fuzzer.results import ComponentStatus, make_evidence, make_result
 from valkey_fuzzer.schema import ConfigError, ConfigField, ConfigSchema
 
+from ..clock import now
 from ..deadlines import WaitInterruptedError
 from .files import write_jsonl
 from .instances import close_quietly, deployment, is_cluster, select_instances
@@ -313,7 +315,7 @@ class KeyValueWorkload:
         numbering = itertools.count(1)
         self._targets = [_Target(handle, config["op_timeout_s"], numbering) for _ in range(config["clients"])]
         self._target = self._targets[0]
-        self._started_at = time.time()
+        self._started_at = now()
 
         stable = {
             stable_key(prefix, index): make_value(rng, config["value_size"], config["compressible"], f"s{index}")
@@ -451,7 +453,7 @@ class KeyValueWorkload:
                     for key, value in chunk:
                         pipe.set(key, value)
                     replies = pipe.execute()
-                    acknowledged_at = time.time()
+                    acknowledged_at = now()
                     if not all(reply is True or reply == "OK" for reply in replies):
                         raise RuntimeError(f"unexpected preload replies: {replies[:3]}")
                     # A preloaded key is an acknowledged write: a crash soon
@@ -526,7 +528,7 @@ class KeyValueWorkload:
         """
 
         target = target or self._target
-        entry: dict[str, Any] = {"id": op_id, "op": op, "key": key, "t_start": time.time()}
+        entry: dict[str, Any] = {"id": op_id, "op": op, "key": key, "t_start": now()}
         if value is not None:
             entry["value"] = value
         entries = [entry]
@@ -564,7 +566,7 @@ class KeyValueWorkload:
             return self._record(entries, _classify(exc), target, exc)
         if op != "get" and self._config.get("wait_replicas"):
             # The write's own reply ends it; WAIT only adds how far it replicated.
-            entry["t_end"] = time.time()
+            entry["t_end"] = now()
             self._wait(client, entry, target)
             for item in entries[1:]:
                 item.update({field: entry[field] for field in ("t_end", "wait", "wait_error") if field in entry})
@@ -577,7 +579,7 @@ class KeyValueWorkload:
             # Reconnect after any failure: an error reply such as READONLY means
             # the endpoint stopped being the writable primary (e.g. failover).
             target.reset()
-        t_end = time.time()
+        t_end = now()
         for entry in entries:
             entry["outcome"] = outcome
             if exc is not None:
@@ -658,7 +660,7 @@ class KeyValueWorkload:
             "clients": self._config.get("clients", 1),
             "prefix": key_prefix(spec, self._config) if self._config else None,
             "started_at": self._started_at,
-            "stopped_at": time.time(),
+            "stopped_at": now(),
             "ledger_path": ledger_path,
             "preload_path": preload_path,
             "replies_digest": replies_digest(self._ledger),
@@ -795,8 +797,14 @@ class BenchmarkWorkload:
             return make_result(spec, ComponentStatus.ERROR, f"no valkey-benchmark beside the build: {missing}")
 
         def spawn(instance_id: str) -> None:
+            # The benchmark loops forever and nothing tags it: its argv[0] carries this process's owner tag, as a
+            # server's title does, so ``valkey-fuzzer sweep`` finds one the harness left behind.
+            tool, *arguments = commands[instance_id]
             self._processes[instance_id] = subprocess.Popen(
-                commands[instance_id], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                [f"{tool} {owner_tag()}", *arguments],
+                executable=tool,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
             self._starts[instance_id] = self._starts.get(instance_id, 0) + 1
 

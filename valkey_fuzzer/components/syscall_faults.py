@@ -16,9 +16,9 @@ import json
 import os
 import signal
 import threading
-import time
 from typing import Any, Optional
 
+from valkey_fuzzer.clock import now
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.results import make_evidence
 from valkey_fuzzer.schema import ConfigError, ConfigField, ConfigSchema, plain_config
@@ -146,7 +146,7 @@ class SyscallFault(EventFault):
         record: dict[str, Any] = {
             "target": self._target,
             "rule": text.strip(),
-            "armed_at": time.time(),
+            "armed_at": now(),
             "pid": handle.pid(self._target),
             "lands_later": True,
         }
@@ -180,7 +180,7 @@ class SyscallFault(EventFault):
                 "call": acted.get("call"),
                 "path": acted.get("path"),
                 "call_pid": acted.get("pid"),
-                "applied_at": float(acted.get("t") or time.time()),
+                "applied_at": float(acted.get("t") or now()),
             }
         )
         if self._config["action"] != "kill":
@@ -209,13 +209,13 @@ class SyscallFault(EventFault):
         )
 
     def _restart(self, handle: Any, record: dict[str, Any], restart: Any) -> None:
-        started = time.time()
+        started = now()
         restart()
         record["restarted"] = True
         # The new process can vote and acknowledge from its spawn on, before it is ready.
         record["restart_spawned_at"] = handle.started_at(self._target)
-        record["restart_ready_at"] = time.time()
-        record["restart_seconds"] = round(time.time() - started, 3)
+        record["restart_ready_at"] = now()
+        record["restart_seconds"] = round(now() - started, 3)
         record["restart_pid"] = handle.pid(self._target)
 
     def _quiesce(self) -> None:

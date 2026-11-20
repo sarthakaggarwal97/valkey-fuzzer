@@ -66,13 +66,13 @@ reads.
 
 import functools
 import threading
-import time
 import uuid
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from valkey_fuzzer.clock import now
 from valkey_fuzzer.deployment.local.queries import parse_replication
 from valkey_fuzzer.hoststate import chain_name
 from valkey_fuzzer.plan import ComponentSpec
@@ -180,7 +180,7 @@ class StandaloneWaves(WaveRun):
         if len(primaries) != 1:
             raise RuntimeError(f"replication chaos needs exactly one live primary, found {primaries}")
         self.primary = primaries[0]
-        self.term = _Tenure(self.primary, time.time())
+        self.term = _Tenure(self.primary, now())
         self.windows: list[dict[str, Any]] = []
         # When each instance was told to follow another, every time.
         self.demoted_at: dict[str, list[float]] = {item: [] for item in self.ids}
@@ -241,14 +241,14 @@ class StandaloneWaves(WaveRun):
         with self.lock:
             self.follows[instance_id] = primary_id
             if primary_id is not None and self.handle.is_alive(instance_id):
-                self.demoted_at[instance_id].append(time.time())
+                self.demoted_at[instance_id].append(now())
 
     # -- Offsets and loss windows -------------------------------------------
 
     def sample(self) -> None:
         with self.lock:
             term = self.term
-        at = time.time()
+        at = now()
         info = self.info(term.instance_id, timeout=0.5)
         if is_primary(info):
             offset = _replication_offset(info)
@@ -301,7 +301,7 @@ class StandaloneWaves(WaveRun):
     def close_windows(self) -> list[dict[str, Any]]:
         """End every open window when its old primary stopped acknowledging writes: exited or demoted."""
 
-        now = time.time()
+        closed_at = now()
         with self.lock:
             for window in self.windows:
                 if "end" in window:
@@ -315,7 +315,7 @@ class StandaloneWaves(WaveRun):
                     and kill.get("exited_at")
                     and kill["at"] >= window["tenure_started_at"]
                 ]
-                window["end"] = min(ends) if ends else now
+                window["end"] = min(ends) if ends else closed_at
                 # A kill before the promotion ends the window at the exit, which may precede the promotion.
                 window["end"] = max(window["end"], window["start"])
             return list(self.windows)
@@ -446,7 +446,7 @@ class StandaloneWaves(WaveRun):
             return
         if error:
             record["failover_error"] = error
-        promoted_at = time.time()
+        promoted_at = now()
         self.succeed(target, promoted_at, forced=False, sync=None, reason=f"graceful promotion of {target}")
         self._follow(target, record)
         record.update(success=True, promoted_at=promoted_at)
@@ -458,7 +458,7 @@ class StandaloneWaves(WaveRun):
         self, record: dict[str, Any], target: str, old: str, info: Mapping[str, Any], config: dict[str, Any]
     ) -> None:
         sync = {"replid": str(parse_replication(info).replication_id), "offset": _replication_offset(info)}
-        promoted_at = time.time()
+        promoted_at = now()
         self.landed(record, self.ids)
         self.promote_now(target)
         self.succeed(target, promoted_at, forced=True, sync=sync, reason=f"forced promotion of {target}")
@@ -609,7 +609,7 @@ class StandaloneWaves(WaveRun):
         info = offsets[target][0]
         sync = {"replid": str(parse_replication(info).replication_id), "offset": _replication_offset(info)}
         old = self.primary
-        promoted_at = time.time()
+        promoted_at = now()
         self.promote_now(target)
         # The heal replaces a killed primary: the kill's durability effect.
         self.succeed(target, promoted_at, forced=True, sync=sync, reason=f"heal promoted {target}")

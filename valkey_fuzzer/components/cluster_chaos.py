@@ -16,10 +16,10 @@ could have caused it (:func:`excusing_kills`). ``valkey.oracle.deployment-state`
 validates the deployment once more at the end, with the action's kills and keys.
 """
 
-import time
 from collections.abc import Mapping, Sequence
 from typing import Any, Optional
 
+from valkey_fuzzer.clock import now
 from valkey_fuzzer.schema import ConfigField
 
 from .schemas import FLAG, INTEGER, MAPPING
@@ -116,7 +116,7 @@ class ClusterWaves(WaveRun):
         # Kills of the shard's members wait until it settled (see ``Operation.mutates``).
         if not self.claim(record, [], shards=(config["shard"],)):
             return
-        record["applied_at"] = time.time()
+        record["applied_at"] = now()
         result = self.handle.failover(
             config["shard"],
             force=config["force"],
