@@ -106,22 +106,18 @@ def _no_probes(request):
         yield
 
 
-def test_provision_builds_a_service_that_runs_commands_restarts_and_is_cleaned_up():
+def test_provision_builds_a_service_that_restarts_and_is_cleaned_up():
     launch = FakeLaunch()
     launch.processes.restart_instance.side_effect = [None, RuntimeError("died")]
     provider, context = launch.provider(), run_context(make_plan(server_config={"appendonly": "no"}))
 
     deployment = provider.provision(context)
     handle = deployment.handle
-    stale = handle._command_clients["valkey-0"] = Mock()
-    stale.execute_command.return_value = b"PONG"
 
     assert launch.seed == 17 and launch.processes.spawn_all.call_args.args[0][0].server_config == {"appendonly": "no"}
     assert deployment.services == {VALKEY_DEPLOYMENT_SERVICE: handle} and deployment.valkey_sha == "abc1234"
     assert [node.instance_id for node in handle.instances] == ["valkey-0"] and handle.mode is DeploymentMode.STANDALONE
-    assert handle.execute_command("valkey-0", "PING") == b"PONG"
     handle.restart("valkey-0", wait_ready=False)
-    stale.close.assert_called_once()  # the cached client was bound to the old process
     with pytest.raises(LocalDeploymentError, match="failed to restart instance 'valkey-0'"):
         handle.restart("valkey-0")
     with pytest.raises(LocalDeploymentError, match="already owns"):
@@ -133,7 +129,7 @@ def test_provision_builds_a_service_that_runs_commands_restarts_and_is_cleaned_u
 
     launch.processes.cleanup_deployment.assert_called_once_with(launch.instances)
     with pytest.raises(LocalDeploymentError, match="already been cleaned up"):
-        handle.execute_command("valkey-0", "PING")
+        handle.pid("valkey-0")
 
 
 def test_provisioning_waits_and_the_source_build_end_by_the_runs_deadline(monkeypatch):

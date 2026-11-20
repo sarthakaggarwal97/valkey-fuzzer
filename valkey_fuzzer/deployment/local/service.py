@@ -128,8 +128,6 @@ class ValkeyDeploymentService:
         # Clients handed to components; whatever is still open is closed when
         # the deployment is cleaned up.
         self._clients: weakref.WeakSet[Any] = weakref.WeakSet()
-        # One client per instance for execute_command, replaced when the instance restarts.
-        self._command_clients: dict[str, valkey.Valkey] = {}
         instance_ids = [info.instance_id for info in deployment.instances]
         self._processes = processes
         self._context = context
@@ -242,13 +240,12 @@ class ValkeyDeploymentService:
         self._close_clients()
 
     def _close_clients(self) -> None:
-        for client in [*self._clients, *self._command_clients.values()]:
+        for client in list(self._clients):
             try:
                 client.close()
             except Exception:  # pragma: no cover - best effort
                 pass
         self._clients.clear()
-        self._command_clients.clear()
 
     def _info(self, instance_id: str) -> InstanceInfo:
         try:
@@ -264,19 +261,6 @@ class ValkeyDeploymentService:
                 return self._instances_by_id[instance_id]
             except KeyError as exc:
                 raise KeyError(f"unknown instance ID {instance_id!r}") from exc
-
-    def execute_command(self, instance_id: str, *args: Any, **kwargs: Any) -> Any:
-        """Execute one command without exporting a reconnectable raw client."""
-
-        with self._operation():
-            info = self._info(instance_id)
-            with self._lock:
-                client = self._command_clients.get(instance_id)
-                if client is None:
-                    client = self._command_clients[instance_id] = valkey.Valkey(
-                        host=info.host, port=info.port, socket_timeout=5, decode_responses=True
-                    )
-            return client.execute_command(*args, **kwargs)
 
     def restart(self, instance_id: str, wait_ready: bool = True, ready_timeout: float = 30.0) -> LocalInstance:
         """Restart one instance while preserving its resolved startup config.
@@ -312,14 +296,6 @@ class ValkeyDeploymentService:
                     raise LocalDeploymentError(
                         f"deployment {self.deployment_id!r} was cleaned up during the restart of {instance_id!r}"
                     )
-                # The cached client is bound to the old process's socket.
-                with self._lock:
-                    stale = self._command_clients.pop(instance_id, None)
-                if stale is not None:
-                    try:
-                        stale.close()
-                    except Exception:  # pragma: no cover - best effort
-                        pass
                 return self._instances_by_id[instance_id]
 
     # -- Process control ---------------------------------------------------

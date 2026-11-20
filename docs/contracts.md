@@ -213,14 +213,6 @@ default is checked like writing it out. For example,
 deployment's default `appendfsync everysec` makes too short. A plan whose
 provider would now start other instances is refused.
 
-A config Valkey renamed is written either way and records as written; a build
-knows only one of the names. Every start of a build (the deployment's instances, its
-restarts, and every private server) gives it the name and value it knows, and
-the build probe's `config_get` and `config_set` read and set that name. One
-table, `RENAMED_CONFIGS` in `valkey_fuzzer/deployment/local/server_config.py`,
-holds these renames. A command an action sends, `CONFIG SET` included, is sent
-as written.
-
 ## Legal space and search profiles
 
 An experiment's `metadata.generator` block and its inputs schema are its
