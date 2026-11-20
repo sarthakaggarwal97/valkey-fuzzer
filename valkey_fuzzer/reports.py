@@ -115,16 +115,17 @@ def _write_text(path: str, text: str, what: str) -> None:
 
 
 def write_document(path: str, data: Any, output_format: str = "json") -> None:
-    """Atomically write ``data`` to ``path`` as JSON or YAML."""
+    """Atomically write ``data`` to ``path`` as JSON or YAML; ``data`` must be plain data (a value JSON has no
+    form for, a set or a path, is a bug in what built it, not written as its ``str()``)."""
 
     if output_format not in {"json", "yaml"}:
         raise ValueError(f"unsupported output format: {output_format}")
     try:
         if output_format == "json":
-            text = json.dumps(data, indent=2, allow_nan=False, default=str) + "\n"
+            text = json.dumps(data, indent=2, allow_nan=False) + "\n"
         else:
             text = yaml.safe_dump(data, default_flow_style=False, sort_keys=False)
-    except (ValueError, yaml.YAMLError) as exc:
+    except (TypeError, ValueError, yaml.YAMLError) as exc:
         raise ReportWriteError(f"could not write the report to {path}: {exc}") from exc
     _write_text(path, text, "the report")
 

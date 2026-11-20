@@ -109,6 +109,9 @@ _ROLE_MISMATCH = ExperimentSpec(
     [
         pytest.param(_bad(scenario=lambda s: s.update(unexpected=True)), ScenarioCompileError, "unknown fields", id="unknown-field"),
         pytest.param(_bad(scenario=lambda s: s.update(seed=True)), ScenarioCompileError, "seed must be an integer", id="bool-seed"),
+        # Names, folders, and ports derive from the seed: it is 0 to 2**64-1.
+        pytest.param(_bad(scenario=lambda s: s.update(seed=-1)), ScenarioCompileError, r"seed must be from 0 to 2\*\*64-1, got -1", id="negative-seed"),
+        pytest.param(_bad(scenario=lambda s: s.update(seed=2**64)), ScenarioCompileError, r"seed must be from 0 to 2\*\*64-1", id="oversized-seed"),
         pytest.param(_bad(scenario=lambda s: s["deployment"].pop("mode")), ScenarioCompileError, "missing required field 'mode'", id="no-mode"),
         pytest.param(_bad(scenario=lambda s: s["deployment"].update(mode="cluster")), ScenarioCompileError, "not supported", id="unsupported-mode"),
         pytest.param(_bad(registrations=()), ScenarioCompileError, r"uses 'example\.action\.fake', which is not registered", id="unregistered-component"),

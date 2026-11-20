@@ -365,6 +365,16 @@ def test_usage_errors_exit_64_apart_from_harness_errors(tmp_path, canned_runs):
     assert _cli("run", scenario) == EXIT_HARNESS_ERROR, "a scenario that does not compile is not a usage error"
 
 
+def test_a_command_that_returns_no_exit_code_is_a_harness_error_not_a_silent_success(monkeypatch, capsys):
+    # A handler that falls off its end returns None, which sys.exit takes as 0.
+    def forgetful(subparsers):
+        subparsers.add_parser("forgetful").set_defaults(handler=lambda args: None)
+
+    monkeypatch.setattr("valkey_fuzzer.cli.register_commands", forgetful)
+    assert _cli("forgetful") == EXIT_HARNESS_ERROR
+    assert "Error: the forgetful command returned None, not an exit code" in capsys.readouterr().err
+
+
 def test_replay_compares_the_valkey_binary_digest_and_a_chosen_binary_is_no_drift(tmp_path, canned_runs):
     binary, other = tmp_path / "valkey-server", tmp_path / "candidate-server"
     for path in (binary, other):

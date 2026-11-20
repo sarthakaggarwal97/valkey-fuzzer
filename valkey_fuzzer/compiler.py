@@ -546,6 +546,9 @@ class ScenarioCompiler:
         seed = envelope["seed"]
         if isinstance(seed, bool) or not isinstance(seed, int):
             raise located(ScenarioCompileError("seed must be an integer"), "seed")
+        # Names (<experiment>-seed<N>), folders, and ports derive from it: a negative or oversized seed gives odd ones.
+        if not 0 <= seed < 2**64:
+            raise located(ScenarioCompileError(f"seed must be from 0 to 2**64-1, got {seed}"), "seed")
         experiment = strict_fields(
             envelope["experiment"],
             "experiment",

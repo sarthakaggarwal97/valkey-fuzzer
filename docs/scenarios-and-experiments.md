@@ -46,7 +46,7 @@ deployment:
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `scenario_id` | yes | Name used in reports and folder names: letters, digits, `.`, `_`, `:`, `-`. |
-| `seed` | yes | Integer. Seeds every component's random streams and names the instance log files. |
+| `seed` | yes | Integer, 0 to 2**64-1. Seeds every component's random streams and names the instance log files. |
 | `experiment` | yes | `id` and optional `inputs`. |
 | `deployment` | yes | `mode`, optional `provider`, and the provider's own fields. |
 | `artifacts`, `resources`, `policies` | no | See [Artifacts, resources, and policies](#artifacts-resources-and-policies). |

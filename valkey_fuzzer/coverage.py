@@ -23,7 +23,8 @@ from .results import RunOutcome
 
 
 def _digest(value: Any) -> str:
-    return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+    # Plain data only: a set's str() has no fixed order, so a key over it would differ between processes.
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
 
 def static_tuple(plan: ExecutionPlan, host_fields: Collection[str] = ()) -> dict[str, Any]:

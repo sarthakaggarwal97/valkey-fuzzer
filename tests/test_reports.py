@@ -12,7 +12,7 @@ import pytest
 import yaml
 
 from tests.support import make_plan, recorded_report
-from valkey_fuzzer import provenance, reports
+from valkey_fuzzer import coverage, provenance, reports
 from valkey_fuzzer.cli import main
 from valkey_fuzzer.compiler import Overrides
 from valkey_fuzzer.minimize import failure_signature, same_failure
@@ -218,6 +218,18 @@ def test_an_exported_scenario_replaces_the_old_file_whole_or_not_at_all(tmp_path
     with pytest.raises(ReportWriteError, match="could not write the scenario"):
         export_scenario({"scenario_id": "s", "seed": 1}, str(target))
     assert target.read_text(encoding="utf-8") == "old: scenario\n" and list(tmp_path.iterdir()) == [target]
+
+
+def test_a_document_holding_what_json_cannot_write_is_an_error_not_its_str(tmp_path):
+    # Written as str(), a set's order (and so a coverage key over it) would differ between processes.
+    target = tmp_path / "report.json"
+    with pytest.raises(ReportWriteError, match=r"could not write the report to .*report\.json: Object of type set"):
+        reports.write_document(str(target), {"keys": {"b", "a"}})
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        coverage._digest({"b", "a"})
+    assert not target.exists()
+    reports.write_document(str(target), {"keys": ["a", "b"]})
+    assert json.loads(target.read_text()) == {"keys": ["a", "b"]}
 
 
 # The keys of a report.json and of its reproducer before the readable layout; sarthakaggarwal97/valkey-ci-agent
