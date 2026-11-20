@@ -220,10 +220,11 @@ the owner tag `valkey-fuzzer sweep` finds leftover servers by), `protected-mode`
 
 The deployment-wide binary is, in order: `valkey_binary` (a path, which must
 exist and be executable, or a command name on `PATH`); `valkey-server` on
-`PATH`; a previous build at `/tmp/valkey-build/valkey/src/valkey-server`;
-otherwise a fresh clone of release 9.1.3 of
-`https://github.com/valkey-io/valkey.git` built with `make`, under a lock so
-concurrent runs build it once. `--valkey-binary` on the command line sets
+`PATH`; the cached build of the pinned commit of release 9.1.3
+(`~/.cache/valkey-fuzzer/valkey/<commit>/src/valkey-server`, which
+`valkey-fuzzer fetch-valkey` makes ahead of time); otherwise that commit of
+`https://github.com/valkey-io/valkey.git` fetched and built with `make` into
+the cache, under a lock so concurrent runs build it once. `--valkey-binary` on the command line sets
 `valkey_binary`. Every `instance_binaries` entry must name an existing
 binary. The outcome records the server's git SHA, read from
 `valkey-server --version`, as `valkey_sha`, and each instance's binary and its

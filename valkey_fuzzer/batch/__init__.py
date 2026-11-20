@@ -42,15 +42,20 @@ The batch folder::
                         for a run from before report.json's conform section
     conformance/<b>.json  the spec conform report of spec bundle <b> over the runs that exercised it
     summary.json        counts, failure signatures, serial re-runs, zoo verdicts, conformance, leaks, exit code
+    findings.json       the failure signatures across batches (:mod:`valkey_fuzzer.findings`), unless the
+                        ``findings`` option names a store elsewhere
     batch.log           one line per finished job
 
 A batch resumes where it stopped: finished jobs keep their results, a job that
 was running is swept and run again (its slot retired if the sweep could not
 remove what it left), and a worker that outlived a killed batch is stopped
 first. Non-PASS runs are grouped by the minimizer's failure signature
-(:func:`~valkey_fuzzer.minimize.failure_signature`); with ``serial_reruns`` a
+(:func:`~valkey_fuzzer.minimize.failure_signature`, named by its
+:func:`~valkey_fuzzer.minimize.signature_key`); with ``serial_reruns`` a
 sample of each group runs again one at a time, which separates failures that
-need load from real ones.
+need load from real ones. When the batch finishes, each group is appended to
+the findings store (``findings.json`` beside ``summary.json``, or the one the
+``findings`` option names, which several batches share), one entry per key.
 
 Each run whose plan names a spec bundle (a component's ``spec``) checks
 itself against it as its report is written, as ``valkey-fuzzer spec conform``
@@ -81,12 +86,13 @@ The plug-ins are the ``valkey_fuzzer.batch_plugins`` entry points, one per pack 
 ``docs/extending.md``); the fuzzer's own, ``valkey``, is :func:`shipped_plugins`.
 """
 
+from ..minimize import signature_key, signature_label
 from . import hooks, sources  # noqa: F401  (registers the built-in sources)
 from .conform_plugin import ConformancePlugin
 from .hooks import BatchPlugin, BatchSource
 from .jobs import MAX_JOBS, Expansion, expand
 from .pool import HOST_LOCK, WORKER_COMMAND, BatchRunner
-from .results import Verdict, job_result, signature_key, signature_label
+from .results import Verdict, job_result
 from .sources import failure_samples
 from .spec import (
     DEFAULT_PORT_BASE,

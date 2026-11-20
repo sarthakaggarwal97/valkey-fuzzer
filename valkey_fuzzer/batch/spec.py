@@ -40,6 +40,7 @@ _OPTION_FIELDS = {
     "prune_pass": ConfigField(bool, required=False),
     "serial_reruns": ConfigField(int, minimum=0, required=False),
     "conform_tlc_timeout_s": ConfigField(float, required=False),
+    "findings": ConfigField(str, required=False, allow_none=True),
 }
 _SPEC = ConfigSchema({**_OPTION_FIELDS, "sources": ConfigField(list, required=False, allow_none=True)})
 
@@ -50,7 +51,8 @@ class BatchOptions:
 
     ``conform_tlc_timeout_s`` bounds the TLC run of each run's ``spec conform`` check on its observed states
     (:meth:`~valkey_fuzzer.service.RunService.write_run_report`, :mod:`.conform_plugin`); a run it stops is a
-    conform ``error`` that names this option.
+    conform ``error`` that names this option. ``findings`` is the findings store the batch appends its failure
+    signatures to (:mod:`valkey_fuzzer.findings`); None means ``findings.json`` in the batch folder.
     """
 
     batch_id: str = "batch"
@@ -62,6 +64,7 @@ class BatchOptions:
     prune_pass: bool = False
     serial_reruns: int = 0
     conform_tlc_timeout_s: float = CONFORM_TLC_TIMEOUT_S
+    findings: Optional[str] = None
     experiment_directories: tuple[str, ...] = ()
 
     def check(self) -> None:
@@ -135,6 +138,7 @@ def load_spec(path: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         raise BatchError(str(exc)) from None
     base_dir = os.path.dirname(os.path.abspath(path))
     sources = document.pop("sources", None) or []
-    if document.get("valkey_binary"):
-        document["valkey_binary"] = absolute(document["valkey_binary"], base_dir, "valkey_binary")
+    for name in ("valkey_binary", "findings"):
+        if document.get(name):
+            document[name] = absolute(document[name], base_dir, name)
     return document, [normalize_source(source, base_dir) for source in sources]

@@ -8,8 +8,10 @@ scenario is in [Getting started](getting-started.md); every option is in the
 [Triage](triage.md).
 
 - [What the host needs](#what-the-host-needs)
+- [Fetch a Valkey build](#fetch-a-valkey-build)
 - [Run a soak](#run-a-soak)
 - [Where the results go](#where-the-results-go)
+- [Findings across soaks](#findings-across-soaks)
 - [Disk, ports, cores, and memory](#disk-ports-cores-and-memory)
 - [Stop and resume](#stop-and-resume)
 - [Clean up after a killed fuzzer](#clean-up-after-a-killed-fuzzer)
@@ -46,6 +48,46 @@ valkey-fuzzer run examples/valkey/replication_degraded_link.yaml
 valkey-fuzzer run examples/valkey/replication_cpu_starvation.yaml
 valkey-fuzzer run examples/valkey/clock_skew_expiry.yaml
 ```
+
+## Fetch a Valkey build
+
+A run that names no `valkey_binary` and finds no `valkey-server` on `PATH`
+uses the build of Valkey 9.1.3 (commit `29173b6`) in the fuzzer's cache,
+`~/.cache/valkey-fuzzer/valkey/29173b67508b2de4c0f0ed551f3b47cf19fc3ca8/`
+(`$XDG_CACHE_HOME/valkey-fuzzer/valkey/<commit>/` when that is set), and
+makes it on the first run that needs it: about a minute and 280 MB, with git,
+make, a C compiler, and network access, under a lock so parallel workers
+build it once. Make it before the soak instead, so its first job does not
+spend its deadline building, and so a host without network at soak time has
+it:
+
+```bash
+valkey-fuzzer fetch-valkey
+```
+
+It prints the binary's path and nothing else on stdout, and one log line on
+stderr: `Using the cached Valkey build of commit 29173b67508b: ...` when the
+cache has it, or `Building Valkey commit 29173b67508b into ... (about a
+minute; once, then reused); output: <commit>.build.log` when it does not. Run
+it again and it prints the same path and builds nothing. To soak another
+Valkey, name a tag, a branch, or a full commit hash; each goes to its own
+`<commit>/` directory, and the path it prints is what `--valkey-binary`
+takes:
+
+```bash
+valkey-fuzzer fetch-valkey unstable
+valkey-fuzzer batch --random all --seeds 1 --profile nightly-soak --workers 8 \
+  --valkey-binary "$(valkey-fuzzer fetch-valkey unstable)" --out "soak/$(date -u +%Y%m%dT%H%M)"
+```
+
+A tag or branch is resolved to its commit first (`git ls-remote`), so a
+branch builds what it points at now, and a second `fetch-valkey unstable` a
+day later builds the new head beside the old one. The report of every run
+records the commit its servers were built from (`reproducer.valkey_sha`),
+read from `valkey-server --version`, whichever way the binary was found. The
+cache is yours alone (nothing in it is shared between users) and safe to
+delete; `fetch-valkey` rebuilds what is missing. The options and the exact
+layout are in the [reference](cli.md#fetch-valkey).
 
 ## Run a soak
 
@@ -116,6 +158,52 @@ is an `ERROR` for its run). A `SKIP_UNSUPPORTED` row names what the host
 lacks, so a soak's first summary is also the host check. From there,
 [Triage](triage.md).
 
+## Findings across soaks
+
+One soak's `summary.json` says what failed that night. The **findings
+store** says what has failed over every night: a `findings.json` with one
+entry per failure signature that batches append to when they finish. Each
+batch writes the one beside its `summary.json`; give every soak the same
+`--findings PATH` and they share it:
+
+```bash
+valkey-fuzzer batch soak.yaml --findings soak/findings.json --out "soak/$(date -u +%Y%m%dT%H%M)"
+```
+
+or `findings: findings.json` in `soak.yaml` (relative to the spec's
+directory). The batch's last lines then include `findings: 1 new, 2 known in
+<the store's path>` (or `findings: nothing new`). An entry keeps the
+signature and its label, when it was
+first and last seen, how many runs hit it and which (by batch folder and job
+id, so a resumed batch counts nothing twice), a command that reproduces the
+latest of them, and a status:
+
+- `new`: no earlier batch in this store had seen it. This is what to read
+  after a soak.
+- `known`: a second batch has seen it since. Nothing to do until it is fixed.
+- `fixed`: set by hand, in the file, once the bug is fixed. A fixed finding a
+  later batch hits again is `new` again, so a regression surfaces.
+
+Read it with the `findings` command, which takes the store or a batch folder:
+
+```bash
+valkey-fuzzer findings list --store soak/findings.json --status new
+valkey-fuzzer findings show 3f1c2a9b7d4e --store soak/findings.json
+```
+
+```text
+status  runs first seen last seen  key          label
+new        3 2026-11-20 2026-11-20 3f1c2a9b7d4e FAIL | valkey.aof-durability | data:FAIL | lost N keys
+```
+
+`show` prints the entry as JSON, with the `reproduce` command (`valkey-fuzzer
+replay <report.json>` of the latest run) and every run. The key is the
+`signature_key` of `summary.json` and the key `minimize` prints, so the three
+name one failure. A batch of `--failures` re-runs appends to its own folder's
+store unless told otherwise, so a shared store counts only the soaks. The
+keys and layout are in the [reference](cli.md#findings); what a signature is
+and how to read one is in [Triage](triage.md#the-failure-signature).
+
 ## Disk, ports, cores, and memory
 
 **Disk.** Measured on this host with Valkey 9.1.3: a passing run's folder is
@@ -125,7 +213,8 @@ workload's operations); a 19-job soak batch with `--prune-pass` is 2.3 MB. Insta
 under `/tmp/valkey-fuzzer/logs/` (`base_data_dir`), about 2 KB per instance
 per run plus whatever the server logs; `valkey-fuzzer cleanup-logs SEED
 --force` removes one seed's, and they are safe to delete by age. The first run
-without a `valkey-server` builds one under `/tmp/valkey-build` (278 MB). Put
+without a `valkey-server` builds one under `~/.cache/valkey-fuzzer/valkey/`
+(278 MB per commit; [Fetch a Valkey build](#fetch-a-valkey-build)). Put
 batch folders on a disk you can fill: `--out`, or `--artifact-dir DIR` for
 every default folder.
 

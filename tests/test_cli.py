@@ -20,9 +20,10 @@ from valkey_fuzzer.commands._common import add_common_options
 from valkey_fuzzer.components import history
 from valkey_fuzzer.deployment.local import config as local_config
 from valkey_fuzzer.hoststate import Owner, current_owner
+from valkey_fuzzer.minimize import failure_signature, signature_key
 from valkey_fuzzer.outcomes import EXIT_FAILURE, EXIT_HARNESS_ERROR, EXIT_INTERRUPTED, EXIT_UNSUPPORTED, EXIT_USAGE
 from valkey_fuzzer.reports import SCENARIO_FILE
-from valkey_fuzzer.results import OutcomeStatus
+from valkey_fuzzer.results import OutcomeStatus, RunOutcome
 from valkey_fuzzer.runner import PreflightError
 
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "valkey"
@@ -331,8 +332,14 @@ def test_minimize_runs_the_original_first_and_exits_non_zero_when_it_does_not_re
     report = _run_report(tmp_path)
     canned_runs.status = OutcomeStatus.PASS
     assert _cli("minimize", report, "--max-attempts", 3, "--artifact-dir", tmp_path) == EXIT_HARNESS_ERROR
-    assert "the failure did not reproduce, so nothing was minimized" in capsys.readouterr().err
+    out, err = capsys.readouterr()
+    assert "the failure did not reproduce, so nothing was minimized" in err
     assert len(canned_runs.plans) == 2, "the recorded run and the original's re-run: no candidate ran"
+    # The signature it holds is named by the key a batch's summary.json and findings.json give the same failure.
+    data = json.loads(Path(report).read_text())
+    signature = failure_signature(RunOutcome.from_data(data["outcome"]))
+    key = signature_key(data["scenario"]["experiment"]["id"], signature)
+    assert f"Minimizing snapshot-equivalence: signature {key} {json.dumps(signature)}" in out
 
 
 def test_minimize_confirms_its_result_and_exits_non_zero_when_it_does_not_fail_again(tmp_path, canned_runs, capsys):

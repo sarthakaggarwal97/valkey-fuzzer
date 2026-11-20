@@ -337,11 +337,12 @@ touches nothing else. `provision`:
    `CLUSTER RESET HARD`. The check repeats, for all of them, right before
    the instances are spawned, and for one instance before it restarts;
 3. **resolves the binary**: the configured `valkey_binary`, `valkey-server`
-   on `PATH`, a previous build at `/tmp/valkey-build/valkey/src/valkey-server`,
-   or a shallow clone of `valkey-io/valkey` at release 9.1.3 (checked against
-   the pinned commit, since a tag can move), built with
-   `make -j` aside and moved into place, under a lock so concurrent runs build
-   it once, within 30 minutes and the run's deadline. Every
+   on `PATH`, or the pinned commit of release 9.1.3 in the cache
+   (`~/.cache/valkey-fuzzer/valkey/<commit>/src/valkey-server`), fetched
+   from `valkey-io/valkey` by its commit (so a moved tag changes nothing) and
+   built with `make -j` aside and moved into place when it is not there yet,
+   under a lock so concurrent runs build it once, within 30 minutes and the
+   run's deadline (`valkey-fuzzer fetch-valkey` does the same ahead of time). Every
    `instance_binaries` entry is resolved to an absolute path, and the git SHA
    is read from `valkey-server --version`;
 4. **starts every instance** and waits up to 30 seconds for each to answer

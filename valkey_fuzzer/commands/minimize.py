@@ -9,6 +9,7 @@ from typing import Any
 import yaml
 
 from ..compiler import Overrides
+from ..minimize import signature_key
 from ..outcomes import EXIT_HARNESS_ERROR, EXIT_SUCCESS
 from ._common import add_common_options, describe_drift, positive_count, service_for
 
@@ -33,7 +34,9 @@ def minimize_command(args: argparse.Namespace) -> int:
     if not prepared.needed:
         print(f"Nothing to minimize: the run's status is {prepared.reference['status']}")
         return EXIT_SUCCESS
-    print(f"Minimizing {prepared.plan.scenario_id}: signature {json.dumps(prepared.reference)}")
+    # The same key a batch's summary.json and findings.json give this failure.
+    key = signature_key(prepared.plan.experiment_id, prepared.reference)
+    print(f"Minimizing {prepared.plan.scenario_id}: signature {key} {json.dumps(prepared.reference)}")
     result = service.minimize(prepared, timeout=args.timeout, max_attempts=args.max_attempts, log=print)
     if result.report_dir:
         print(f"Reports: {result.report_dir}")

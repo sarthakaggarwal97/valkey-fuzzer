@@ -10,7 +10,8 @@ it in its result's diagnostics as ``crashes`` (instance to cause, such as an
 assertion's file:line and condition), and the signature is then the causes,
 numbers and hex IDs masked, and nothing that failed after them. The
 minimizer keeps a reduction only when the signature holds; the batch runner
-groups its non-PASS runs by it.
+groups its non-PASS runs by it, and :mod:`valkey_fuzzer.findings` keeps one
+entry per :func:`signature_key` across batches.
 
 The **minimizer** greedily shrinks a failing scenario (its deployment, as the
 deployment provider's ``reductions`` hook shrinks it, and its ``shrinkable``
@@ -20,11 +21,12 @@ unreduced scenario first, so a failure that does not reproduce is not
 """
 
 import copy
+import hashlib
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Callable, Optional
 
-from ._data import to_plain_data
+from ._data import canonical_json, to_plain_data
 from .plan import ExecutionPlan
 from .results import RunOutcome
 
@@ -73,8 +75,12 @@ def empty_signature(status: str, **fields: Any) -> dict[str, Any]:
     }
 
 
-def failure_signature(outcome: RunOutcome, required_evidence: Iterable[str] = ()) -> dict[str, Any]:
+def failure_signature(outcome: RunOutcome, required_evidence: Optional[Iterable[str]] = None) -> dict[str, Any]:
     """What must stay true for a reduced scenario to count as the same failure.
+
+    ``required_evidence`` is the evidence the run had to observe, the plan's own unless given: ``path_evidence``
+    is what of it the run observed. The batch and the minimizer both derive the signature here, and name it with
+    :func:`signature_key` and :func:`signature_label`.
 
     ``failures`` holds each failing component's status and verdict: for a call
     that raised, the error class and phase; otherwise its summary's clauses
@@ -89,6 +95,8 @@ def failure_signature(outcome: RunOutcome, required_evidence: Iterable[str] = ()
     the experiment and the timing.
     """
 
+    if required_evidence is None:
+        required_evidence = [item.evidence_id for item in outcome.plan.required_evidence]
     diagnostics = to_plain_data(outcome.diagnostics)
     failing = [result for result in outcome.component_results if result.status.value in ("FAIL", "ERROR")]
     crashes = _crashes(failing)
@@ -141,6 +149,39 @@ def same_failure(reference: Mapping[str, Any], candidate: Mapping[str, Any]) -> 
     return all(candidate.get(key) == reference.get(key) for key in keys) and set(reference["path_evidence"]) <= set(
         candidate["path_evidence"]
     )
+
+
+def signature_key(experiment: Optional[str], signature: Mapping[str, Any]) -> str:
+    """A failure signature's group: the experiment and every signature field but the path evidence; for a
+    crash, its causes alone, so one crash is one group whichever experiment hit it. The batch groups by it,
+    ``--failures`` samples by it, and ``findings.json`` keeps one entry per key."""
+
+    if signature.get("crashes"):
+        material: dict[str, Any] = {"crashes": signature["crashes"]}
+    else:
+        material = {"experiment": experiment, **{k: v for k, v in signature.items() if k != "path_evidence"}}
+    return hashlib.sha256(canonical_json(material).encode()).hexdigest()[:12]
+
+
+def signature_label(experiment: Optional[str], signature: Mapping[str, Any]) -> str:
+    """One line naming a failure signature: status, experiment, failing components, first verdict or error;
+    for a crash, its causes."""
+
+    if signature.get("crashes"):
+        return f"{signature['status']} | crash | {'; '.join(signature['crashes'])[:300]}"
+    parts = [signature["status"], experiment or "-"]
+    failures = signature["failures"]
+    if failures:
+        parts.append(",".join(f"{name}:{entry['status']}" for name, entry in sorted(failures.items())))
+        first = failures[sorted(failures)[0]]["verdict"]
+        if first:
+            parts.append(first[0][:160])
+    for key in ("missing_events", "missing_evidence"):
+        if signature[key]:
+            parts.append(f"{key.replace('_', ' ')}: {', '.join(signature[key])}")
+    if signature["error_type"]:
+        parts.append(f"{signature['error_type']} during {signature['error_phase']}")
+    return " | ".join(parts)
 
 
 def smaller(value: Any, minimum: Any) -> list[Any]:

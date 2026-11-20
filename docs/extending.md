@@ -414,9 +414,9 @@ role as `primary` or `replica`, or `None`). Components find `valkey-server`
 the same way, with `valkey_fuzzer.deployment.local.processes`:
 `resolve_binary_path(binary, label)` turns a path or command name
 into an absolute executable path (raising `FileNotFoundError` or
-`PermissionError`), and `SOURCE_BUILD_DIR` is where the deployment builds
-Valkey when no binary is configured or on `PATH` (the server is
-`valkey/src/valkey-server` under it). `STATE_VALIDATION_SCHEMA`
+`PermissionError`), and `cached_valkey_binary(VALKEY_SOURCE_SHA)` is the
+`valkey-server` the deployment builds into the cache when no binary is
+configured or on `PATH` (`fetch_valkey(ref)` builds any ref there). `STATE_VALIDATION_SCHEMA`
 (`valkey_fuzzer.deployment.local.validation.config`) checks a `validation`
 mapping for `state_check` when the scenario compiles, including that its
 `stabilization_wait` is below its `validation_timeout`.

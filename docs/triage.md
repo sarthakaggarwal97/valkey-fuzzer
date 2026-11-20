@@ -111,6 +111,21 @@ one bug: a verdict that names a key or an instance ID changes between runs
 (`vf:writes:m:N` and `vf:writes:stable:N` above). Two runs with one
 signature are one bug until a fix shows otherwise.
 
+Across soaks, the same key names the same failure in the findings store
+([Findings across soaks](operations.md#findings-across-soaks)): the batch's
+`findings.json`, or the one every soak was given with `--findings`. Its
+`status` says whether a signature is `new` tonight or `known` from an earlier
+soak, and `show` gives the replay command of its latest run:
+
+```bash
+valkey-fuzzer findings list --store soak/findings.json --status new
+valkey-fuzzer findings show <key> --store soak/findings.json
+```
+
+Once the bug is fixed, set the entry's `status` to `fixed` in the file; a
+later soak that hits the key again makes it `new`, so a regression shows up
+in the next `--status new` listing.
+
 ## Fuzzer bug or Valkey bug
 
 | You see | It is | Do |

@@ -387,14 +387,14 @@ def test_binary_drift_names_a_referenced_binary_it_cannot_read():
 
 
 def test_binary_drift_reads_the_source_built_default_binary_as_a_run_would_start_it(tmp_path, monkeypatch):
-    # With no binary configured and none on PATH, a run starts the one built under /tmp/valkey-build; a replay
+    # With no binary configured and none on PATH, a run starts the pinned commit's build in the cache; a replay
     # compares that one too rather than call it unreadable.
     from valkey_fuzzer.deployment.local import processes
 
     built = tmp_path / "valkey-server"
     built.write_text("#!/bin/sh\n")
     monkeypatch.setattr(processes.shutil, "which", lambda name: None)
-    monkeypatch.setattr(processes, "_built_binary", lambda base_dir: str(built))
+    monkeypatch.setattr(processes, "cached_valkey_binary", lambda sha, cache=None: str(built))
     plan = make_plan(deployment={"mode": "standalone"})
     recorded = [{"instance_id": "valkey-0", "binary": str(built), "binary_sha256": file_sha256(str(built))}]
 

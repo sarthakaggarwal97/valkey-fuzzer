@@ -8,12 +8,12 @@ import traceback
 from typing import Any
 
 from . import __version__
-from .commands import batch, listing, minimize, replay, run, spec, sweep, validate
+from .commands import batch, fetch_valkey, findings, listing, minimize, replay, run, spec, sweep, validate
 from .hoststate import interrupt_on_sigterm
 from .outcomes import EXIT_HARNESS_ERROR, EXIT_INTERRUPTED, EXIT_USAGE
 from .reports import InputError
 
-COMMAND_MODULES = (run, batch, validate, listing, replay, minimize, sweep, spec)
+COMMAND_MODULES = (run, batch, validate, listing, replay, minimize, findings, sweep, fetch_valkey, spec)
 
 
 class _Parser(argparse.ArgumentParser):
@@ -58,6 +58,13 @@ Examples (paths are relative to a checkout of the repository):
   valkey-fuzzer batch examples/valkey/cluster_election_batch.yaml --workers 2
   valkey-fuzzer batch --zoo BUILDS --workers 2
   valkey-fuzzer batch --resume BATCH_FOLDER
+
+  # The failure signatures batches recorded (findings.json beside summary.json, or --findings PATH)
+  valkey-fuzzer findings list --store BATCH_FOLDER
+  valkey-fuzzer findings show KEY --store BATCH_FOLDER
+
+  # Build Valkey once into ~/.cache/valkey-fuzzer/valkey/<commit> and print its valkey-server
+  valkey-fuzzer fetch-valkey 9.1.3
 
   # Data-only experiments from a directory
   valkey-fuzzer run examples/standalone_scenario.yaml --experiment-dir examples/experiments
