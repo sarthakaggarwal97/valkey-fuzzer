@@ -85,7 +85,7 @@ experiment:
       - {pattern: "Index validation failed"}
 ```
 
-Each item is a [`valkey.action.commands`](components.md#valkeyactioncommands)
+Each item is a [`valkey.action.commands`](components/actions.md#valkeyactioncommands)
 command: `command` and an optional `expect`. A `verify` read runs on the
 primary and every replica, so its reply must be the same everywhere. A few
 hundred commands is the usual size; the fuzzer's own
@@ -210,6 +210,6 @@ An experiment of your own is a data-only YAML file in your repository
 and change what you need: another fault, a longer settle, an oracle of the
 module's own, such as `valkey.oracle.search-results`
 ([Scenarios and experiments](scenarios-and-experiments.md) has the format,
-[Valkey components](components.md) every component). The `base` input works
+[Valkey components](components/README.md) every component). The `base` input works
 the same way; its `experiment.inputs` must match what your experiment
 declares.

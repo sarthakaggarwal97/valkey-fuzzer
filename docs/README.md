@@ -20,6 +20,7 @@ first group.
 | [Threat model](threat-model.md) | operators, security reviewers | what the fuzzer does to the host, the scoping guards, root, hostile experiment files, CI trust, residual risks |
 | [Cluster chaos and CI](cluster-chaos-and-ci.md) | cluster chaos users, CI maintainers | running cluster chaos, kill safety, the GitHub workflows, reproducing a CI failure |
 | [Bug zoo](bug-zoo.md) | experiment authors, soak maintainers | deliberately broken Valkey builds the experiments must catch, and how to add one |
+| [Fuzzing a module from its own repository](module-repos.md) | module maintainers | the reusable workflow a module repository calls, the module's commands as a base file, the Docker image, what a run uploads, reading a FAIL |
 
 ## Reference
 
