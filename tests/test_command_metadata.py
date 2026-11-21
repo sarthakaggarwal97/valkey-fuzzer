@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 from valkey.crc import key_slot
 
+from tests.support import fake_executable
 from tests.test_command_sequence import (
     BUILDS,
     CLOSE,
@@ -21,14 +22,18 @@ from tests.test_command_sequence import (
     fake_open_raw_connection,
 )
 from tests.test_command_table import _flat
-from tests.valkey_experiments_support import fake_context, registration_for, resolved, unit_plan, valkey_service
+from tests.valkey_experiments_support import (
+    fake_context,
+    rejects_config,
+    resolved,
+    valkey_service,
+)
 from valkey_fuzzer._data import to_plain_data
 from valkey_fuzzer.components import command_metadata, command_sequence, command_table
 from valkey_fuzzer.components.command_metadata import CommandMetadataOracle, range_positions, spec_positions
 from valkey_fuzzer.generator import generate
 from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import ComponentRole
-from valkey_fuzzer.schema import ConfigError
 
 READONLY = Error("READONLY You can't write against a read only replica.")
 ARITY = Error("ERR wrong number of arguments for 'x' command")
@@ -167,9 +172,7 @@ def builds(monkeypatch, tmp_path):
     SERVERS.clear()
     monkeypatch.setattr(command_sequence, "PrivateServer", FakeServer)
     monkeypatch.setattr(command_sequence, "open_raw_connection", fake_open_raw_connection)
-    path = tmp_path / "valkey-server"
-    path.write_text("#!/bin/sh\n")
-    path.chmod(0o755)
+    path = fake_executable(tmp_path / "valkey-server")
     BUILDS[str(path)] = Build()
     return str(path)
 
@@ -319,14 +322,10 @@ def test_the_private_servers_load_the_deployments_modules(builds, tmp_path, monk
 
 
 def test_the_oracle_names_a_command_table_workload_of_its_plan():
-    registration = registration_for("valkey.oracle.command-metadata")
     writes = ComponentSpec(role=ComponentRole.WORKLOAD, use="valkey.workload.key-value", id="writes")
     for workload in ("writes", "missing"):
-        spec = ComponentSpec(
-            role=ComponentRole.ORACLE, use=registration.component_id, id="metadata", config={"workload": workload}
-        )
-        with pytest.raises(ConfigError, match=r"is not a valkey\.workload\.command-table of this plan$"):
-            registration.resolve_config(spec, unit_plan((writes, spec)))
+        match = r"is not a valkey\.workload\.command-table of this plan$"
+        rejects_config("valkey.oracle.command-metadata", {"workload": workload}, match, writes)
 
 
 @pytest.mark.parametrize("experiment", ["valkey.cluster-chaos", "valkey.replication-chaos", "valkey.cluster-partition"])

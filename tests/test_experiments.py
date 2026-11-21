@@ -4,13 +4,12 @@ good ones compile into a complete plan, and catalog loads register everything or
 import json
 import math
 from dataclasses import replace
-from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
 
-from tests.support import component_registration
+from tests.support import ROOT, component_registration
 from valkey_fuzzer import schema
 from valkey_fuzzer._data import to_plain_data
 from valkey_fuzzer.catalog import (
@@ -34,7 +33,6 @@ from valkey_fuzzer.schema import (
 )
 
 ACTION = "example.action.fake"
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def _document(**fields: Any) -> dict[str, Any]:

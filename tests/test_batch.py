@@ -44,9 +44,9 @@ from valkey_fuzzer.spec import conform
 from valkey_fuzzer.spec.tla import TOOLS_HINT, TlaTools
 
 from .batch_worker_stub import InProcessWorkers
+from .support import ROOT, fake_executable
 from .valkey_experiments_support import valkey_service
 
-ROOT = Path(__file__).resolve().parent.parent
 STUB = [sys.executable, str(ROOT / "tests" / "batch_worker_stub.py")]
 SNAPSHOT = "valkey.snapshot-equivalence"
 EXCLUDES = ["server_config.io-threads=4", "server_config.repl-diskless-load=swapdb"]
@@ -619,9 +619,7 @@ def test_zoo_cases_run_through_the_batch_and_one_that_does_not_hold_fails_it(tmp
         (zoo / case / "case.yaml").write_text(yaml.safe_dump({"description": case, "catches": "data", "runs": 5, "min_detection_rate": 1.0,
                                                               "scenarios": [{"file": "scenario.yaml", "fail": [expected]}]}))  # fmt: skip
     for build in ("clean", "drops-writes", "mis-specified"):
-        (builds / build / "src").mkdir(parents=True)
-        (builds / build / "src" / "valkey-server").write_text(f"#!/bin/sh\necho 'Valkey server v=255.255.255 sha={COMMIT[:8]}:0 malloc=libc'\n")  # fmt: skip
-        (builds / build / "src" / "valkey-server").chmod(0o755)
+        fake_executable(builds / build / "src" / "valkey-server", f"echo 'Valkey server v=255.255.255 sha={COMMIT[:8]}:0 malloc=libc'")  # fmt: skip
     stub.behave(clean="pass", drops_writes="fail:data", mis_specified="fail:data")
     sources = [_random(2), normalize_source({"zoo": {"builds": str(builds), "directory": str(zoo)}}, "/")]
     runner = _batch(tmp_path, sources, workers=3)
@@ -648,7 +646,7 @@ def test_zoo_cases_run_through_the_batch_and_one_that_does_not_hold_fails_it(tmp
     cases = {case["case"]: case for case in summary["zoo"]["cases"]}
     assert cases["drops-writes"]["holds"] is None and cases["drops-writes"]["undecided"] == "ERROR"
     assert summary["zoo"]["undecided"] == ["drops-writes"] and summary["status"] == "FAIL"
-    (builds / "clean" / "src" / "valkey-server").write_text("#!/bin/sh\necho 'Valkey server sha=deadbeef:0'\n")
+    fake_executable(builds / "clean" / "src" / "valkey-server", "echo 'Valkey server sha=deadbeef:0'")
     with pytest.raises(Exception, match="not built from the pinned commit"):
         _batch(tmp_path, sources, name="other-commit")
 

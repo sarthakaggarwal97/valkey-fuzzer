@@ -11,7 +11,14 @@ from pathlib import Path
 import pytest
 
 from tests.fakes import FakeHandle, fake_instances
-from tests.valkey_experiments_support import evidence_values, injected_fault, registration_for, resolved, unit_plan
+from tests.valkey_experiments_support import (
+    evidence_values,
+    injected_fault,
+    registration_for,
+    rejects_config,
+    resolved,
+    unit_plan,
+)
 from valkey_fuzzer.components import capabilities
 from valkey_fuzzer.components.clock_skew import ClockSkewFault, measure_skew, time_spec
 from valkey_fuzzer.components.faults import FAULT_INJECTED
@@ -22,7 +29,6 @@ from valkey_fuzzer.deployment.local.processes import ProcessManager
 from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.results import ComponentStatus
-from valkey_fuzzer.schema import ConfigError
 
 REAL_FIND_LIBRARY = clock_faults.find_library
 
@@ -164,12 +170,8 @@ def test_a_deployment_without_clock_faults_cannot_be_skewed(tmp_path):
     ],
 )
 def test_bad_clock_skew_configs_fail_to_compile(config, document, message):
-    spec = ComponentSpec(
-        role=ComponentRole.FAULT, use="valkey.fault.clock-skew", id="f", config={"when_event": "x", **config}
-    )
-    plan = unit_plan((spec,), document={"mode": "standalone", **document})
-    with pytest.raises(ConfigError, match=message):
-        registration_for("valkey.fault.clock-skew").resolve_config(spec, plan)
+    config = {"when_event": "x", **config}
+    rejects_config("valkey.fault.clock-skew", config, message, document={"mode": "standalone", **document})
 
 
 def test_the_library_is_the_named_one_or_the_packages_and_its_absence_names_the_package(tmp_path, monkeypatch):

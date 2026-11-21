@@ -9,15 +9,15 @@ from pathlib import Path
 import pytest
 
 from tests.fakes import FakeClient, FakeHandle, fake_instances
-from tests.valkey_experiments_support import fake_context, registration_for, resolved, unit_plan
+from tests.support import FORMAL
+from tests.valkey_experiments_support import fake_context, registration_for, rejects_config, resolved, unit_plan
 from valkey_fuzzer.components.trace import TraceObserver
 from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.results import ComponentStatus
-from valkey_fuzzer.schema import ConfigError
 from valkey_fuzzer.spec.bundle import SpecBundleError, load_bundle
 
-REPLICATION = Path(__file__).resolve().parents[1] / "formal" / "replication"
+REPLICATION = FORMAL / "replication"
 INFO = "# Replication\r\nrole:master\r\nmaster_replid:{}\r\nmaster_replid2:{}\r\nmaster_repl_offset:1234567890123456789012345678901234567890\r\n"
 
 
@@ -196,8 +196,7 @@ def test_a_bundle_that_samples_debug_digest_needs_the_debug_command_enabled():
     spec = ComponentSpec(
         role=ComponentRole.OBSERVER, use="valkey.observer.trace", id="trace", config={"spec": "replication"}
     )
-    with pytest.raises(ConfigError, match="enable-debug-command"):
-        registration_for("valkey.observer.trace").resolve_config(spec, unit_plan((spec,)))
+    rejects_config(spec.use, spec.config, "enable-debug-command")
     plan = unit_plan((spec,), document={"mode": "standalone", "server_config": {"enable-debug-command": "yes"}})
     assert registration_for("valkey.observer.trace").resolve_config(spec, plan)["spec"] == "replication"
 

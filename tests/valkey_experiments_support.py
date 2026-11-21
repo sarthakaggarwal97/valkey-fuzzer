@@ -2,6 +2,10 @@
 one component needs: a plan, its registration, its resolved spec, and a fake run context."""
 
 from collections.abc import Sequence
+from pathlib import Path
+
+import pytest
+import yaml
 
 from valkey_fuzzer.catalog import Catalog, ExperimentDirectory, build_catalog
 from valkey_fuzzer.compiler import with_planned_instances
@@ -10,7 +14,7 @@ from valkey_fuzzer.deployment.local.provider import local_deployment_provider_re
 from valkey_fuzzer.plan import ComponentSpec, DeploymentProviderIdentity, ExecutionPlan
 from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.results import evidence_of
-from valkey_fuzzer.schema import plain_config
+from valkey_fuzzer.schema import ConfigError, plain_config
 from valkey_fuzzer.service import RunService
 from valkey_fuzzer.testing import FakeContext, resolved_spec
 
@@ -45,6 +49,25 @@ def valkey_experiment(experiment_id):
     return shared_catalog().experiments.resolve(experiment_id)
 
 
+def experiment_directory(tmp_path, *documents) -> Path:
+    """``tmp_path / "experiments"`` holding each experiment of ``documents`` as ``<id>.yaml``."""
+
+    directory = tmp_path / "experiments"
+    directory.mkdir(parents=True, exist_ok=True)
+    for document in documents:
+        text = yaml.safe_dump(document, sort_keys=False)
+        (directory / f"{document['id']}.yaml").write_text(text, encoding="utf-8")
+    return directory
+
+
+def experiment_runtime(tmp_path, *documents, **options) -> RunService:
+    """A run service with the experiments ``documents``, written under ``tmp_path`` with its artifacts; ``options``
+    are the service's."""
+
+    options.setdefault("artifact_dir", str(tmp_path / "artifacts"))
+    return valkey_service(experiment_directories=(str(experiment_directory(tmp_path, *documents)),), **options)
+
+
 def unit_plan(components=(), deployment_mode="standalone", document=None, resources=(), startup_overlays=()):
     """A plan holding ``components`` and an evidence oracle, to check component configs against.
 
@@ -77,6 +100,15 @@ def resolved(spec):
     """``spec`` with its config's defaults, as the compiler records it."""
 
     return resolved_spec(registration_for(spec.use), spec)
+
+
+def rejects_config(use, config, match, *others, **plan_options):
+    """Component ``use`` with ``config`` fails to compile with a ConfigError matching ``match``, in a unit plan
+    of it, ``others``, and ``plan_options``."""
+
+    spec = ComponentSpec(role=ComponentRole(use.split(".")[1]), use=use, id="subject", config=config)
+    with pytest.raises(ConfigError, match=match):
+        registration_for(use).resolve_config(spec, unit_plan((spec, *others), **plan_options))
 
 
 def fake_context(handle, *components, **kwargs):

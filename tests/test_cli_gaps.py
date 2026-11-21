@@ -4,15 +4,15 @@
 import json
 import re
 import shlex
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 import yaml
 
 from tests.conftest import cli as _cli
+from tests.support import EXAMPLES, ROOT
 from tests.test_batch import _batch, _random, stub, workers  # noqa: F401  (the batch tests' fixtures)
-from tests.valkey_experiments_support import shared_catalog, valkey_service
+from tests.valkey_experiments_support import experiment_directory, experiment_runtime, shared_catalog, valkey_service
 from valkey_fuzzer.batch import normalize_source
 from valkey_fuzzer.cli import create_parser
 from valkey_fuzzer.deployment.local.config import deployment_config_from_document
@@ -20,8 +20,6 @@ from valkey_fuzzer.deployment.local.planner import plan_deployment
 from valkey_fuzzer.fields import did_you_mean, strict_fields
 from valkey_fuzzer.outcomes import EXIT_USAGE
 
-ROOT = Path(__file__).resolve().parents[1]
-EXAMPLES = ROOT / "examples"
 EXPERIMENTS = EXAMPLES / "experiments"
 
 pytestmark = pytest.mark.usefixtures("report_root")
@@ -152,10 +150,7 @@ def test_a_mistyped_component_or_experiment_names_the_closest_ones(tmp_path):
         "deployment": {"modes": ["standalone"]},
         "components": [{"use": "valkey.action.command-seq", "id": "go"}],
     }
-    directory = tmp_path / "experiments"
-    directory.mkdir()
-    (directory / "trial.yaml").write_text(yaml.safe_dump(experiment))
-    typo = valkey_service(experiment_directories=[str(directory)])
+    typo = experiment_runtime(tmp_path, experiment)
     with pytest.raises(ValueError, match=r"'valkey.action.command-seq'.*not registered; did you mean '"):
         typo.compile(
             {"scenario_id": "t", "seed": 1, "experiment": {"id": "trial.typo"}, "deployment": {"mode": "standalone"}}
@@ -173,13 +168,11 @@ def test_replaying_a_scenario_says_to_use_run(tmp_path, canned_runs, capsys):
 def _strict_setup(tmp_path, *, required):
     """A scenario of a copy of the shipped replica-kill experiment, with or without its own required evidence."""
 
-    directory = tmp_path / "experiments"
-    directory.mkdir(exist_ok=True)
     experiment = yaml.safe_load((EXAMPLES / "valkey" / "experiments" / "replica-killed-under-writes.yaml").read_text())
     experiment["id"] = "trial.replica-kill"
     if not required:
         del experiment["required_events"], experiment["required_evidence"]
-    (directory / "trial.yaml").write_text(yaml.safe_dump(experiment))
+    directory = experiment_directory(tmp_path, experiment)
     scenario = tmp_path / "trial.yaml"
     scenario.write_text(
         yaml.safe_dump(

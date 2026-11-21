@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 from tests.conform_support import SCENARIO, approved_register, register_service, stub_tlc
+from tests.support import fake_executable
 from tests.valkey_experiments_support import valkey_service
 from valkey_fuzzer import zoo
 from valkey_fuzzer.spec.conform import conform_component, plan_bundles
@@ -30,9 +31,7 @@ def test_the_zoo_pins_one_commit_beside_its_build_script_and_its_cases_catch_dis
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case.case_id)
 def test_every_zoo_run_compiles_with_its_expected_components(tmp_path, case):
     for name in ["clean", *(item.case_id for item in CASES if item.patched)]:
-        (tmp_path / name / "src").mkdir(parents=True)
-        (tmp_path / name / "src" / "valkey-server").write_text("#!/bin/sh\n")
-        (tmp_path / name / "src" / "valkey-server").chmod(0o755)
+        fake_executable(tmp_path / name / "src" / "valkey-server")
     runtime = valkey_service(artifact_dir=str(tmp_path / "artifacts"))
     runs = zoo.zoo_runs(case, tmp_path, runtime.catalog)
     assert [run.control for run in runs].count(True) == len(case.scenarios) and len(runs) == len(case.scenarios) * (
@@ -133,9 +132,7 @@ def test_a_case_pins_a_bug_only_spec_conform_catches(tmp_path, monkeypatch):
     bundle = approved_register(tmp_path, monkeypatch)
     stub_tlc(monkeypatch)
     for name in ("clean", "case"):
-        (tmp_path / "builds" / name / "src").mkdir(parents=True)
-        (tmp_path / "builds" / name / "src" / "valkey-server").write_text("#!/bin/sh\n")
-        (tmp_path / "builds" / name / "src" / "valkey-server").chmod(0o755)
+        fake_executable(tmp_path / "builds" / name / "src" / "valkey-server")
     document = {**_CASE, "catches": "spec conform of the register bundle (AckedDurable)",
                 "scenarios": [{"file": "scenario.yaml", "fail": ["spec-conform:register"]}]}  # fmt: skip
     case = _case(tmp_path, document, scenario=SCENARIO)

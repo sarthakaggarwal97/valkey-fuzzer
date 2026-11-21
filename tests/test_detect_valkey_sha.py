@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.support import fake_executable
 from valkey_fuzzer.components import server
 from valkey_fuzzer.deployment.local.processes import detect_valkey_sha
 
@@ -26,13 +27,11 @@ def test_the_sha_comes_from_the_version_output_and_a_release_build_has_none(stdo
 def test_a_sanitizer_builds_version_is_read_without_its_leak_report(tmp_path, monkeypatch):
     # gcc's ASan on aarch64 reports the options sds main leaves behind when --version exits, and exits 1: every
     # artifact and probe of that build failed. Its version is not a leak test.
-    binary = tmp_path / "valkey-server"
-    binary.write_text(
-        "#!/bin/sh\n"
+    binary = fake_executable(
+        tmp_path / "valkey-server",
         'case "$ASAN_OPTIONS" in *detect_leaks=0*) ;; *) echo "ERROR: LeakSanitizer" >&2; exit 1;; esac\n'
-        'echo "Valkey server v=9.9.9 sha=0123abcd:0 malloc=libc bits=64 build=1"\n'
+        'echo "Valkey server v=9.9.9 sha=0123abcd:0 malloc=libc bits=64 build=1"',
     )
-    binary.chmod(0o755)
     monkeypatch.setenv("ASAN_OPTIONS", "allocator_may_return_null=1")
     assert server.parse_version_output(server.version_output(str(binary)))["version"] == "9.9.9"
     assert detect_valkey_sha(str(binary)) == "0123abcd"

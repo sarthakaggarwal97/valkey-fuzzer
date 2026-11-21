@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.support import component_registration, deployment_registrations, make_plan
+from tests.support import EXAMPLES, component_registration, deployment_registrations, fake_executable, make_plan
 from valkey_fuzzer import hoststate, provenance
 from valkey_fuzzer._data import file_sha256
 from valkey_fuzzer.catalog import (
@@ -32,7 +32,7 @@ from valkey_fuzzer.schema import ExperimentDocumentError, ScenarioCompileError
 from valkey_fuzzer.service import RunService
 from valkey_fuzzer.testing import FakeDeploymentProvider
 
-EXAMPLE = str(Path(__file__).resolve().parents[1] / "examples" / "valkey" / "snapshot_equivalence.yaml")
+EXAMPLE = str(EXAMPLES / "valkey" / "snapshot_equivalence.yaml")
 
 
 def test_report_folders_sort_by_start_time_and_never_collide(tmp_path, monkeypatch):
@@ -319,9 +319,7 @@ def test_replay_compares_each_artifact_by_its_recorded_sha256(service, canned_ru
     # per-instance comparison never sees it.
     binaries = {}
     for name in ("baseline", "candidate"):
-        binaries[name] = tmp_path / f"{name}-server"
-        binaries[name].write_text(f"#!/bin/sh\n# {name}\n")
-        binaries[name].chmod(0o755)
+        binaries[name] = fake_executable(tmp_path / f"{name}-server", f"# {name}")
     scenario = tmp_path / "upgrade.yaml"
     scenario.write_text(
         json.dumps(
@@ -366,7 +364,7 @@ def test_replay_compares_each_artifact_by_its_recorded_sha256(service, canned_ru
     }
     prepared = service.prepare_run(str(scenario))
     record = service.execute(prepared.plan, scenario=prepared.scenario, report_dir=str(tmp_path / "r"))
-    binaries["candidate"].write_text("#!/bin/sh\n# rebuilt from another commit\n")
+    fake_executable(binaries["candidate"], "# rebuilt from another commit")
 
     replay = service.prepare_replay(record.report_path)
     assert replay.drift == []

@@ -12,13 +12,12 @@ valkey-json (``libjson.so``) for that valkey-server.
 
 import base64
 import os
-from pathlib import Path
 
 import pytest
-import yaml
 
 from tests.live_support import BINARY, check, evidence, run_scenario, scenario
-from tests.valkey_experiments_support import registration_for, valkey_service
+from tests.support import EXAMPLES
+from tests.valkey_experiments_support import experiment_runtime, registration_for, valkey_service
 from valkey_fuzzer._data import to_plain_data
 from valkey_fuzzer.components import command_sequence
 from valkey_fuzzer.components.server import PrivateServer
@@ -42,7 +41,7 @@ needs_parent = pytest.mark.skipif(
 )
 JSON_MODULE = os.environ.get("VALKEY_FUZZER_JSON_MODULE")
 needs_json = pytest.mark.skipif(not JSON_MODULE, reason="set VALKEY_FUZZER_JSON_MODULE to a valkey-json build")
-EXAMPLE_EXPERIMENTS = Path(__file__).resolve().parents[1] / "examples" / "valkey" / "experiments"
+EXAMPLE_EXPERIMENTS = EXAMPLES / "valkey" / "experiments"
 
 
 def module_payloads(count):
@@ -84,19 +83,11 @@ def module_data_experiment(payloads):
     }
 
 
-def _runtime(tmp_path, *documents):
-    directory = tmp_path / "experiments"
-    directory.mkdir()
-    for document in documents:
-        (directory / f"{document['id']}.yaml").write_text(yaml.safe_dump(document, sort_keys=False))
-    return valkey_service(experiment_directories=(str(directory),), artifact_dir=str(tmp_path / "artifacts"))
-
-
 def test_module_data_reloads_with_the_deployments_modules_and_digests_the_same_on_replicas(tmp_path):
     assert os.path.isfile(DATATYPE), f"{DATATYPE} is not built"
     document = scenario("test.module-data", replicas=1, server_config={"loadmodule": DATATYPE})
 
-    outcome = run_scenario(_runtime(tmp_path, module_data_experiment(module_payloads(3))), document)
+    outcome = run_scenario(experiment_runtime(tmp_path, module_data_experiment(module_payloads(3))), document)
 
     check(outcome, "PASS")
     digest = evidence(outcome, "valkey.dataset.digest")
@@ -126,7 +117,7 @@ def _probing(commands):
 
 
 def test_the_build_probe_finds_a_modules_commands_only_where_the_deployment_loads_it(tmp_path):
-    runtime = _runtime(tmp_path, _probing(["datatype.get"]))
+    runtime = experiment_runtime(tmp_path, _probing(["datatype.get"]))
 
     loaded = run_scenario(runtime, scenario("test.module-commands", server_config={"loadmodule": DATATYPE}))
     check(loaded, "PASS")
@@ -230,7 +221,7 @@ def test_json_get_compares_as_json_on_two_servers_loading_valkey_json(resp):
 
 @needs_json
 def test_the_build_probe_finds_json_get_where_the_deployment_loads_valkey_json(tmp_path):
-    runtime = _runtime(tmp_path, _probing(["JSON.GET"]))
+    runtime = experiment_runtime(tmp_path, _probing(["JSON.GET"]))
 
     check(run_scenario(runtime, scenario("test.module-commands", server_config={"loadmodule": JSON_MODULE})), "PASS")
     check(run_scenario(runtime, scenario("test.module-commands")), "SKIP_UNSUPPORTED")

@@ -10,7 +10,6 @@ import re
 import shlex
 import subprocess
 import sys
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -25,9 +24,9 @@ from valkey_fuzzer.results import ComponentResult, ComponentStatus, OutcomeStatu
 from valkey_fuzzer.spec.tla import TLA_TOOLS_RELEASES, TLA_TOOLS_VERSION
 
 from .generator_support import generate_scenario
+from .support import EXAMPLES, ROOT
 from .valkey_experiments_support import valkey_service
 
-ROOT = Path(__file__).resolve().parent.parent
 WORKFLOWS = ROOT / ".github" / "workflows"
 REGISTER = ROOT / "tests" / "fixtures" / "spec" / "register"
 # The live tests that need root: a tmpfs mount, iptables partitions, and tc netem degradations.
@@ -1240,7 +1239,7 @@ def test_the_search_chaos_workflow_starts_valkey_search_with_its_index_check_on(
 # The image and the module repositories' reusable workflow (docs/module-repos.md)
 # ---------------------------------------------------------------------------
 
-EXAMPLE_EXPERIMENTS = ROOT / "examples" / "valkey" / "experiments"
+EXAMPLE_EXPERIMENTS = EXAMPLES / "valkey" / "experiments"
 MODULE_CHAOS_BASE = {
     "deployment": {"server_config": {"loadmodule": "/opt/module/libjson.so"}},
     "experiment": {

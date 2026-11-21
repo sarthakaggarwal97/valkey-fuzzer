@@ -7,12 +7,11 @@ test; ``VALKEY_FUZZER_OLD_BINARY`` is an older release for cross-version tests.
 import os
 import shutil
 import time
-from pathlib import Path
 
 import pytest
 import yaml
 
-from tests.valkey_experiments_support import evidence_values, valkey_service
+from tests.valkey_experiments_support import evidence_values, experiment_runtime
 from valkey_fuzzer._data import to_plain_data
 from valkey_fuzzer.components import EXPERIMENT_DIRECTORY
 from valkey_fuzzer.deployment.local.ports import highest_base_port, port_unavailable_reason
@@ -20,7 +19,6 @@ from valkey_fuzzer.deployment.local.ports import highest_base_port, port_unavail
 BINARY = os.environ.get("VALKEY_FUZZER_BINARY") or shutil.which("valkey-server")
 OLD_BINARY = os.environ.get("VALKEY_FUZZER_OLD_BINARY")
 needs_old_binary = pytest.mark.skipif(not OLD_BINARY, reason="set VALKEY_FUZZER_OLD_BINARY to an older build")
-EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "valkey"
 
 
 # Live runs take their ports in order from one cursor, wrapping around once it reaches the host's ephemeral
@@ -102,10 +100,7 @@ def variant_runtime(tmp_path, experiment_file, variant, edit):
     document = yaml.safe_load((EXPERIMENT_DIRECTORY / experiment_file).read_text(encoding="utf-8"))
     document["id"] = f"{document['id']}-{variant}"
     edit(document)
-    directory = tmp_path / "experiments"
-    directory.mkdir(exist_ok=True)
-    (directory / experiment_file).write_text(yaml.safe_dump(document), encoding="utf-8")
-    return valkey_service(experiment_directories=(str(directory),), artifact_dir=str(tmp_path / "artifacts"))
+    return experiment_runtime(tmp_path, document)
 
 
 def builds(scenario, baseline, candidate):

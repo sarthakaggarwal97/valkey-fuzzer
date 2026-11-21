@@ -17,6 +17,7 @@ import pytest
 from tests.conform_support import approved_register, register_service, scenario_file
 from tests.conftest import TLA_JAR as JAR
 from tests.conftest import cli, needs_tlc
+from tests.support import FORMAL, fake_executable
 from tests.valkey_experiments_support import valkey_service
 from valkey_fuzzer import __version__
 from valkey_fuzzer.cli import create_parser
@@ -45,7 +46,7 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures" / "spec"
 BUNDLE = FIXTURES / "register"
 CONTROL = BUNDLE / "negative-controls" / "ack-before-save.cfg"
 COUNTEREXAMPLE = FIXTURES / "register-ack-before-save.out"
-ELECTION = Path(__file__).resolve().parents[1] / "formal" / "cluster-election"
+ELECTION = FORMAL / "cluster-election"
 ID = {name: name[-1] * 40 for name in ("valkey-0", "valkey-1", "valkey-2", "valkey-3")}
 
 
@@ -204,9 +205,7 @@ def test_translate_reads_a_json_counterexample_as_it_reads_the_text(tmp_path):
 def _fake_java(tmp_path, script):
     """A stand-in for java: a shell script, and an empty jar next to it."""
 
-    java = tmp_path / "java"
-    java.write_text(f"#!/bin/sh\n{script}\n")
-    java.chmod(0o755)
+    java = fake_executable(tmp_path / "java", script)
     jar = tmp_path / "tla2tools.jar"
     jar.write_bytes(b"not a jar")
     return java, jar
@@ -1854,28 +1853,23 @@ def test_check_rejects_a_module_outside_the_standard_ones_before_running_sany(tm
     ],
 )  # fmt: skip
 def test_check_is_an_error_not_a_failure_when_its_tools_or_bundle_cannot_be_used(tmp_path, monkeypatch, java, gate):
-    fake = tmp_path / "java"
-    fake.write_text(f"#!/bin/sh\n{java}\n")
-    fake.chmod(0o755)
-    (tmp_path / "tla2tools.jar").write_bytes(b"")
+    fake, jar = _fake_java(tmp_path, java)
     monkeypatch.setattr(TlaTools, "locate", classmethod(lambda cls, jar, **kwargs: TlaTools(jar=jar, java=str(fake))))
     bundle = BUNDLE if java else tmp_path / "missing"
     output = tmp_path / "assurance.json"
-    assert _cli("check", bundle, "--tla2tools", tmp_path / "tla2tools.jar", "--output", output) == 2
+    assert _cli("check", bundle, "--tla2tools", jar, "--output", output) == 2
     report = json.loads(output.read_text())
     assert report["status"] == report["gates"][gate]["status"] == "error", json.dumps(report["gates"])
 
 
 def test_check_without_tlcs_action_coverage_is_an_error_not_an_unmapped_bundle(tmp_path, monkeypatch):
     # TLC finishes but prints no coverage block: the output says nothing about the mapping.
-    fake = tmp_path / "java"
-    fake.write_text(
-        '#!/bin/sh\ncase "$*" in *tla2sany*) echo "Parsing file $PWD/model.tla";; '
-        '*) echo "TLC2 Version 2.19"; echo "Model checking completed. No error has been found.";; esac\n'
+    fake, jar = _fake_java(
+        tmp_path,
+        'case "$*" in *tla2sany*) echo "Parsing file $PWD/model.tla";; '
+        '*) echo "TLC2 Version 2.19"; echo "Model checking completed. No error has been found.";; esac',
     )
-    fake.chmod(0o755)
-    (tmp_path / "tla2tools.jar").write_bytes(b"")
-    report = check_bundle(str(BUNDLE), TlaTools(jar=str(tmp_path / "tla2tools.jar"), java=str(fake)))
+    report = check_bundle(str(BUNDLE), TlaTools(jar=str(jar), java=str(fake)))
     gates = report["gates"]
     assert gates["model_checked"]["status"] == "pass"
     assert gates["model_coverage"]["status"] == gates["mapping_complete"]["status"] == "error", json.dumps(gates)
@@ -1900,9 +1894,9 @@ def test_a_tool_run_has_no_hidden_time_limit_and_the_commands_default_to_one_hou
 
 def test_a_tool_run_past_its_time_is_killed_with_its_process_group(tmp_path, monkeypatch):
     # A stand-in for java that, like TLC, leaves a child process running.
-    java = tmp_path / "java"
-    java.write_text('#!/bin/sh\n[ "$1" = warm ] && exit 0\nsleep 60 &\necho $! > "$CHILD_PID_FILE"\nwait\n')
-    java.chmod(0o755)
+    java = fake_executable(
+        tmp_path / "java", '[ "$1" = warm ] && exit 0\nsleep 60 &\necho $! > "$CHILD_PID_FILE"\nwait'
+    )
     # macOS scans a new executable at its first run, which can take longer than the run's 1s.
     subprocess.run([str(java), "warm"], check=True)
     monkeypatch.setenv("CHILD_PID_FILE", str(tmp_path / "child.pid"))

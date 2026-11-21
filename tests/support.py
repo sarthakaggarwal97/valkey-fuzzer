@@ -24,6 +24,20 @@ from valkey_fuzzer.registrations import ComponentRegistration, DeploymentProvide
 
 FAKE_DEPLOYMENT_PROVIDER = "tests.deployment.fake"
 
+ROOT = Path(__file__).resolve().parents[1]
+EXAMPLES = ROOT / "examples"
+FORMAL = ROOT / "formal"
+
+
+def fake_executable(path, script="") -> Path:
+    """``path`` made an executable ``/bin/sh`` script running ``script``, its directories made; the path."""
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"#!/bin/sh\n{script}\n")
+    path.chmod(0o755)
+    return path
+
 
 def component_registration(component_id="example.action.fake", role=None, *, factory=object, **options):
     """A registration of ``component_id`` in the role its ID names, declaring nothing unless ``declares`` says."""
@@ -141,9 +155,7 @@ def environment_provider(behavior: ProviderBehavior, kind) -> EnvironmentProvide
 def recorded_report(service, tmp_path, edit=None) -> str:
     """Run examples/valkey/snapshot_equivalence.yaml with ``service`` and save its report, changed by ``edit``, for a replay."""
 
-    prepared = service.prepare_run(
-        str(Path(__file__).resolve().parents[1] / "examples" / "valkey" / "snapshot_equivalence.yaml")
-    )
+    prepared = service.prepare_run(str(EXAMPLES / "valkey" / "snapshot_equivalence.yaml"))
     report = copy.deepcopy(
         service.execute(prepared.plan, scenario=prepared.scenario, report_dir=str(tmp_path / "r")).report
     )

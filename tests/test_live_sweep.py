@@ -19,11 +19,12 @@ import valkey
 import yaml
 
 from tests.live_support import BINARY, free_port_block, scenario
+from tests.support import ROOT
 from valkey_fuzzer import hoststate
 from valkey_fuzzer.deployment.local.models import DeploymentConfig
 
 pytestmark = [pytest.mark.live, pytest.mark.slow]
-REPOSITORY = str(Path(__file__).resolve().parents[1])
+REPOSITORY = str(ROOT)
 
 if not BINARY:
     pytest.skip("valkey-server is not available", allow_module_level=True)

@@ -1,12 +1,12 @@
 """The local deployment's document, config layers, startup overlays, effective config, and fitting state checks."""
 
 import copy
-from pathlib import Path
 
 import pytest
 import yaml
 
-from tests.valkey_experiments_support import valkey_service
+from tests.support import EXAMPLES
+from tests.valkey_experiments_support import experiment_runtime, valkey_service
 from valkey_fuzzer._data import to_plain_data
 from valkey_fuzzer.compiler import ScenarioCompileError
 from valkey_fuzzer.components import EXPERIMENT_DIRECTORY
@@ -202,8 +202,7 @@ def test_a_scenario_relying_on_the_defaults_is_checked_like_one_that_spells_them
         document.pop("startup_overlays")
     else:
         document["startup_overlays"][0]["server_config"] = overlay
-    (tmp_path / "variant.yaml").write_text(yaml.safe_dump(document))
-    runtime = valkey_service(experiment_directories=(str(tmp_path),))
+    runtime = experiment_runtime(tmp_path, document)
 
     with pytest.raises(ScenarioCompileError, match="every instance runs appendfsync everysec"):
         runtime.compile(_scenario({"mode": "standalone"}, "tests.aof-defaults", loss_window_s=1))
@@ -247,9 +246,7 @@ def test_an_impossible_validation_config_is_rejected(document, message):
 def test_a_scenario_whose_stabilization_wait_takes_the_whole_validation_timeout_does_not_validate(
     tmp_path, wait, valid
 ):
-    scenario = yaml.safe_load(
-        (Path(__file__).resolve().parents[1] / "examples/valkey/replication_chaos.yaml").read_text()
-    )
+    scenario = yaml.safe_load((EXAMPLES / "valkey" / "replication_chaos.yaml").read_text())
     scenario["experiment"]["inputs"]["validation"] = {"stabilization_wait": wait, "validation_timeout": 30}
     path = tmp_path / "scenario.yaml"
     path.write_text(yaml.safe_dump(scenario))

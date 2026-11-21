@@ -19,13 +19,14 @@ from valkey.exceptions import InvalidResponse, ResponseError
 from valkey.exceptions import TimeoutError as ValkeyTimeoutError
 
 from tests import fakes
-from tests.valkey_experiments_support import registration_for, resolved, unit_plan
+from tests.support import fake_executable
+from tests.valkey_experiments_support import registration_for, rejects_config, resolved, unit_plan
 from valkey_fuzzer import deadlines
 from valkey_fuzzer._data import canonical_json, to_plain_data
 from valkey_fuzzer.components import capabilities, checks, command_sequence, server
 from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import ComponentRole
-from valkey_fuzzer.schema import ConfigError, load_yaml
+from valkey_fuzzer.schema import load_yaml
 from valkey_fuzzer.testing import FakeContext
 
 # What a fake build does with a command (see Build).
@@ -253,9 +254,7 @@ def builds(monkeypatch, tmp_path):
     monkeypatch.setattr(command_sequence, "open_raw_connection", fake_open_raw_connection)
     paths = {}
     for label in ("candidate", "parent"):
-        path = tmp_path / f"{label}-valkey-server"
-        path.write_text("#!/bin/sh\n")
-        path.chmod(0o755)
+        path = fake_executable(tmp_path / f"{label}-valkey-server")
         paths[label] = str(path)
         BUILDS[str(path)] = Build()
     return paths
@@ -1328,9 +1327,7 @@ _PARENT = {"compare_with": "/opt/parent/valkey-server"}
     ],
 )  # fmt: skip
 def test_a_bad_sequence_config_fails_to_compile(config, error):
-    spec = ComponentSpec(role=ComponentRole.ACTION, use="valkey.action.commands", id="seq", config=config)
-    with pytest.raises(ConfigError, match=error):
-        registration_for("valkey.action.commands").resolve_config(spec, unit_plan((spec,)))
+    rejects_config("valkey.action.commands", config, error)
 
 
 @pytest.mark.parametrize(
