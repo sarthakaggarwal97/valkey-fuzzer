@@ -348,10 +348,11 @@ def test_replication_chaos_that_breaks_or_runs_nothing_does_not_pass(monkeypatch
 # Conflict keys: overlapping faults on one state are serialized
 # ---------------------------------------------------------------------------
 
-# The second change starts while the first holds and would end after it.
+# The second change starts while the first holds and would end after it. The waves run in real time, so each
+# side of that overlap has 0.4 s of margin: with 0.05 s, CI's 3.12 job saw the second start after the first's undo.
 _FLIPS = [
-    {"op": "backlog_pressure", "repl_backlog_size": 16384, "output_limit": 65536, "duration_s": 0.1},
-    {"op": "backlog_pressure", "repl_backlog_size": 65536, "output_limit": 262144, "duration_s": 0.1, "delay_s": 0.05},
+    {"op": "backlog_pressure", "repl_backlog_size": 16384, "output_limit": 65536, "duration_s": 0.5},
+    {"op": "backlog_pressure", "repl_backlog_size": 65536, "output_limit": 262144, "duration_s": 0.8, "delay_s": 0.1},
 ]
 
 
