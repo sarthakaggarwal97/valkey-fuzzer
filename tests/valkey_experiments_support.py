@@ -102,6 +102,13 @@ def resolved(spec):
     return resolved_spec(registration_for(spec.use), spec)
 
 
+def spec_for(use, component_id, role, config):
+    """The resolved spec of component ``use`` as ``component_id`` in ``role`` with ``config``."""
+
+    spec = ComponentSpec(role=role, use=use, id=component_id, config=config)
+    return resolved_spec(registration_for(use), spec)
+
+
 def rejects_config(use, config, match, *others, **plan_options):
     """Component ``use`` with ``config`` fails to compile with a ConfigError matching ``match``, in a unit plan
     of it, ``others``, and ``plan_options``."""

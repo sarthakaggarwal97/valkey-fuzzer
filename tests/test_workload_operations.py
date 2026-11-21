@@ -10,8 +10,8 @@ from types import SimpleNamespace
 import pytest
 import valkey
 
-from tests.test_replication_durability import _component, _standalone, _StoreClient
-from tests.valkey_experiments_support import fake_context
+from tests.ledger_support import StoreClient, standalone
+from tests.valkey_experiments_support import fake_context, spec_for
 from valkey_fuzzer.components.ledger import LedgerModel, load_ledger
 from valkey_fuzzer.components.snapshots import _list_problems
 from valkey_fuzzer.components.workloads import (
@@ -34,7 +34,7 @@ _DRAWS_BEFORE = "6e94533472a3581681baaab677a076c0dd042d9c9ddafe709e2cc34f6f3ecbd
 _PRELOAD_BEFORE = "25ad54b74b6603f7c58e9a55cf0843a8784c9f7a0ea6b6b3b97c3e7cf0e8b484"
 
 
-class _Client(_StoreClient):
+class _Client(StoreClient):
     """A store that also renames, holds lists, and records every pipelined list read."""
 
     def __init__(self, rename_error=None):
@@ -76,8 +76,8 @@ class _Client(_StoreClient):
 
 def _run(tmp_path, client, seed=7, **config):
     config = {"stable_keys": 3, "mutable_keys": 20, "rate": 5000, "max_ops": 300, "drain_on_stop": True, **config}
-    spec = _component("valkey.workload.key-value", "writes", ComponentRole.WORKLOAD, config)
-    context = fake_context(_standalone(client), spec, artifact_dir=str(tmp_path), seed=seed)
+    spec = spec_for("valkey.workload.key-value", "writes", ComponentRole.WORKLOAD, config)
+    context = fake_context(standalone(client), spec, artifact_dir=str(tmp_path), seed=seed)
     workload = KeyValueWorkload()
     assert workload.start(context, spec).status.value == "PASS"
     result = workload.stop(context, spec)
@@ -90,7 +90,7 @@ def _digest(material):
 
 
 def test_the_defaults_draw_the_same_operations_and_values_as_before_renames_and_list_reads(tmp_path):
-    workload, result = _run(tmp_path, _StoreClient())
+    workload, result = _run(tmp_path, StoreClient())
     ledger = [[e["id"], e["op"], e["key"], e.get("value"), e["outcome"], e.get("reply")] for e in workload._ledger]
     assert len(ledger) == 300 and _digest(ledger) == _DRAWS_BEFORE
     assert _digest(sorted(workload._preload.items())) == _PRELOAD_BEFORE

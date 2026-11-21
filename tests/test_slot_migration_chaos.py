@@ -12,6 +12,7 @@ import valkey
 from valkey.cluster import key_slot
 
 from tests.fakes import FakeClient
+from tests.network_fakes import Iptables
 from tests.valkey_experiments_support import (
     chaos_operation,
     chaos_schedule,
@@ -692,27 +693,10 @@ def test_a_source_kill_is_refused_when_its_shard_has_no_other_live_member():
     assert ("kill", "valkey-0", 9) not in handle.calls
 
 
-class _Iptables:
-    def __init__(self):
-        self.calls = []
-
-    def __call__(self, *args):
-        self.calls.append(args)
-        return SimpleNamespace(returncode=0, stderr="")
-
-    def restore(self, text):
-        # iptables-restore's stdin: the rules between *filter and COMMIT, each recorded as a call.
-        for line in text.splitlines()[1:-1]:
-            self(*line.split())
-        return SimpleNamespace(returncode=0, stderr="")
-
-
 def test_a_partition_cuts_the_source_from_the_target_for_its_duration(monkeypatch):
     from valkey_fuzzer.components import network
 
-    iptables = _Iptables()
-    monkeypatch.setattr(network, "run_iptables", iptables)
-    monkeypatch.setattr(network, "run_iptables_restore", iptables.restore)
+    iptables = Iptables().install(monkeypatch)
     monkeypatch.setattr("valkey_fuzzer.components.waves.iptables_supported", lambda: (True, ""))
     removed = []
     monkeypatch.setattr(network, "remove_partition", lambda chain: removed.append(chain))

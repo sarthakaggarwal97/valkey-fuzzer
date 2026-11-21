@@ -12,8 +12,9 @@ import pytest
 import valkey
 
 from tests.fakes import FakeClient, FakeHandle, fake_instances
+from tests.ledger_support import StoreClient, standalone
 from tests.support import VirtualClock, wait_until
-from tests.valkey_experiments_support import fake_context, registration_for, valkey_service
+from tests.valkey_experiments_support import fake_context, spec_for, valkey_service
 from valkey_fuzzer import deadlines
 from valkey_fuzzer.components import instances, polling, processes
 from valkey_fuzzer.components.faults import FAULT_INJECTED
@@ -28,10 +29,8 @@ from valkey_fuzzer.components.ledger import (
     load_ledger,
 )
 from valkey_fuzzer.components.workloads import LEDGER_EVIDENCE, KeyValueWorkload, _Target
-from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.results import Evidence
-from valkey_fuzzer.testing import resolved_spec
 
 
 def _slots(instance):
@@ -234,14 +233,9 @@ def _experiment_oracle(experiment, deployment, inputs):
     return next(component for component in plan.components if component.id == "data")
 
 
-def _component(use, component_id, role, config):
-    spec = ComponentSpec(role=role, use=use, id=component_id, config=config)
-    return resolved_spec(registration_for(use), spec)
-
-
 def _oracle(**config):
     config = {"workload": "writes", "check_replicas": False, **config}
-    return _component("valkey.oracle.ledger", "data", ComponentRole.ORACLE, config)
+    return spec_for("valkey.oracle.ledger", "data", ComponentRole.ORACLE, config)
 
 
 def _crash(**value):
@@ -579,43 +573,6 @@ def test_a_server_rejection_is_not_applied_and_a_lost_reply_is_ambiguous(error, 
     assert ("v" in model.possible["k"]) is (outcome != "error")
 
 
-class _StoreClient:
-    """A primary that stores what it is told and answers WAIT with ``wait_reply``, slowly."""
-
-    def __init__(self, wait_reply=1):
-        self.store, self.wait_reply, self.commands, self.waits_sent_at = {}, wait_reply, [], []
-
-    def set(self, key, value):
-        self.store[key] = value
-        return True
-
-    def delete(self, key):
-        return int(self.store.pop(key, None) is not None)
-
-    def get(self, key):
-        return self.store.get(key)
-
-    def pipeline(self, transaction=False):
-        return SimpleNamespace(set=self.set, execute=lambda: [True] * len(self.store))
-
-    def execute_command(self, *args):
-        self.commands.append(args)
-        self.waits_sent_at.append(time.time())
-        time.sleep(0.01)
-        return self.wait_reply
-
-    def close(self):
-        pass
-
-
-def _standalone(client, primaries=("valkey-0",)):
-    instances = (SimpleNamespace(instance_id="valkey-0", host="127.0.0.1", port=7000),)
-    mode = SimpleNamespace(value="standalone")
-    return SimpleNamespace(
-        mode=mode, instances=instances, primaries=lambda: list(primaries), new_client=lambda *a, **k: client
-    )
-
-
 def test_a_harness_bug_in_the_workload_is_an_error_not_an_ambiguous_write(tmp_path, monkeypatch):
     from valkey_fuzzer.components import workloads
 
@@ -623,13 +580,13 @@ def test_a_harness_bug_in_the_workload_is_an_error_not_an_ambiguous_write(tmp_pa
         raise TypeError("served_by bug")
 
     monkeypatch.setattr(workloads._Target, "served_by", broken)
-    spec = _component(
+    spec = spec_for(
         "valkey.workload.key-value",
         "writes",
         ComponentRole.WORKLOAD,
         {"mutable_keys": 2, "preload_mutable": False, "rate": 500},
     )
-    context = fake_context(_standalone(_StoreClient()), spec, artifact_dir=str(tmp_path))
+    context = fake_context(standalone(StoreClient()), spec, artifact_dir=str(tmp_path))
     workload = KeyValueWorkload()
     workload.start(context, spec)
     wait_until(lambda: not workload._thread.is_alive())
@@ -639,7 +596,7 @@ def test_a_harness_bug_in_the_workload_is_an_error_not_an_ambiguous_write(tmp_pa
 
 @pytest.mark.parametrize(("max_ops", "cancel", "status"), [(40, False, "PASS"), (10**9, True, "ERROR")])
 def test_the_workload_ledger_explains_what_a_correct_server_holds(tmp_path, max_ops, cancel, status):
-    client = _StoreClient()
+    client = StoreClient()
     config = {
         "stable_keys": 3,
         "mutable_keys": 2,
@@ -648,8 +605,8 @@ def test_the_workload_ledger_explains_what_a_correct_server_holds(tmp_path, max_
         "drain_on_stop": True,
         "wait_replicas": 1,
     }
-    spec = _component("valkey.workload.key-value", "writes", ComponentRole.WORKLOAD, config)
-    context = fake_context(_standalone(client), spec, artifact_dir=str(tmp_path))
+    spec = spec_for("valkey.workload.key-value", "writes", ComponentRole.WORKLOAD, config)
+    context = fake_context(standalone(client), spec, artifact_dir=str(tmp_path))
     workload = KeyValueWorkload()
     assert workload.start(context, spec).status.value == "PASS"
     if cancel:
@@ -672,8 +629,8 @@ def test_the_workload_ledger_explains_what_a_correct_server_holds(tmp_path, max_
 
 
 def test_a_workload_whose_worker_did_not_stop_leaves_its_state_to_it(tmp_path):
-    spec = _component("valkey.workload.key-value", "writes", ComponentRole.WORKLOAD, {"mutable_keys": 2, "rate": 500})
-    context = fake_context(_standalone(_StoreClient()), spec, artifact_dir=str(tmp_path))
+    spec = spec_for("valkey.workload.key-value", "writes", ComponentRole.WORKLOAD, {"mutable_keys": 2, "rate": 500})
+    context = fake_context(standalone(StoreClient()), spec, artifact_dir=str(tmp_path))
     workload = KeyValueWorkload()
     workload.start(context, spec)
     thread = workload._thread
@@ -692,7 +649,7 @@ def test_a_workload_whose_worker_did_not_stop_leaves_its_state_to_it(tmp_path):
 def test_a_write_that_reached_no_server_was_not_applied():
     # Mid-failover there may be no reachable primary: nothing was sent, so the write is rejected, not ambiguous.
     workload = KeyValueWorkload()
-    workload._target = _Target(_standalone(_StoreClient(), primaries=()), 1.0)
+    workload._target = _Target(standalone(StoreClient(), primaries=()), 1.0)
     assert workload._execute(1, "set", "k", "v") == "error"
     assert "no reachable primary" in workload._ledger[0]["error"]
 
