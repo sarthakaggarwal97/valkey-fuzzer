@@ -11,14 +11,13 @@ same reverse cleanup. Every step is recorded in a report-safe
 :class:`EnvironmentReport`.
 """
 
-import hashlib
 import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Optional, Union
 
-from .._data import exception_type, freeze_mapping, to_plain_data
+from .._data import exception_type, freeze_mapping, sha256_text, to_plain_data
 from ..fields import require_number, require_text
 from ..references import EnvironmentDependency, collect_environment_references
 from .providers import (
@@ -201,7 +200,7 @@ def _safe_segment(value: str) -> str:
     """A readable, collision-resistant directory name for an arbitrary ID."""
 
     readable = re.sub(r"[^A-Za-z0-9_-]+", "-", value).strip("-_")[:40] or "value"
-    return f"{readable}-{hashlib.sha256(value.encode()).hexdigest()[:12]}"
+    return f"{readable}-{sha256_text(value, 12)}"
 
 
 class EnvironmentProvisioner:

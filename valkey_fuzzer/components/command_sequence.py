@@ -11,7 +11,6 @@ commands on either, and the helpers after :class:`CommandsAction` judge the cand
 
 import base64
 import functools
-import hashlib
 import json
 import math
 import os
@@ -28,7 +27,7 @@ from typing import Any, ClassVar, Optional
 import valkey
 from valkey._parsers.base import SERVER_CLOSED_CONNECTION_ERROR
 
-from valkey_fuzzer._data import canonical_json
+from valkey_fuzzer._data import canonical_json, sha256_json
 from valkey_fuzzer.declarations import Declarations
 from valkey_fuzzer.deployment.local.ports import ephemeral_port_range
 from valkey_fuzzer.deployment.local.queries import parse_info_text
@@ -715,7 +714,7 @@ def _side(replies: Sequence[Mapping[str, Any]], commands: Sequence[Mapping[str, 
         for record in replies
         if commands[record["index"]]["compare"] != "skip"
     ]
-    return {"replies": list(replies), "digest": hashlib.sha256(canonical_json(compared).encode()).hexdigest()}
+    return {"replies": list(replies), "digest": sha256_json(compared)}
 
 
 def _command_text(command: Sequence[Any]) -> str:

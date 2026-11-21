@@ -6,7 +6,6 @@ its parent build with the same arguments, stdin, and files, and comparing their 
 stderr, with the verdicts of ``valkey.action.commands``.
 """
 
-import hashlib
 import os
 import re
 import subprocess
@@ -14,7 +13,7 @@ import time
 from collections.abc import Mapping, Sequence
 from typing import Any, Optional
 
-from valkey_fuzzer._data import canonical_json
+from valkey_fuzzer._data import canonical_json, sha256_json
 from valkey_fuzzer.declarations import Declarations
 from valkey_fuzzer.plan import ComponentSpec, ExecutionPlan
 from valkey_fuzzer.protocols import component_artifact_dir
@@ -346,7 +345,7 @@ class ToolsAction:
                 for index in range(len(side.runs))
                 if runs[index]["compare"] != "skip"
             ]
-            record = {"runs": side.runs, "digest": hashlib.sha256(canonical_json(compared).encode()).hexdigest()}
+            record = {"runs": side.runs, "digest": sha256_json(compared)}
             if side.server is not None and side.server.exited is not None:
                 record["server_exited"] = side.server.exited
             return record

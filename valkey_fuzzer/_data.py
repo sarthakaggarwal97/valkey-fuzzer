@@ -107,6 +107,26 @@ def canonical_json(value: Any) -> str:
     return json.dumps(to_plain_data(value), allow_nan=False, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
+def sha256_text(text: str, length: Optional[int] = None) -> str:
+    """The SHA-256 hex digest of ``text`` as UTF-8 (a lone surrogate as U+FFFD), or its first ``length`` characters."""
+
+    return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:length]
+
+
+def sha256_json(value: Any, length: Optional[int] = None) -> str:
+    """:func:`sha256_text` of the :func:`canonical_json` of ``value``: the digest of data, not of one spelling of it."""
+
+    return sha256_text(canonical_json(value), length)
+
+
+def derived_int(*parts: Any, size: int = 16) -> int:
+    """The first ``size`` bytes of the SHA-256 of ``parts`` (as text, NUL-joined) as a big-endian int: a seed or a
+    draw that is the same in every process, where Python's own hash is not."""
+
+    material = "\0".join(str(part) for part in parts).encode()
+    return int.from_bytes(hashlib.sha256(material).digest()[:size], "big")
+
+
 def file_sha256(path: str) -> Optional[str]:
     """The SHA-256 of a file's contents, or ``None`` when it cannot be read."""
 

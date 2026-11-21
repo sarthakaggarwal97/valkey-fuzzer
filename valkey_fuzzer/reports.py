@@ -17,12 +17,10 @@ without a report folder), created exclusively, so names sort by start time and
 never collide, even between processes.
 """
 
-import hashlib
 import json
 import os
 import shlex
 import tempfile
-import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Optional
@@ -30,15 +28,16 @@ from typing import Any, Optional
 import yaml
 
 from . import __version__
-from ._data import to_plain_data
+from ._data import sha256_text, to_plain_data
 from .catalog import Catalog
+from .clock import utc_iso
 from .coverage import coverage_tuple
 from .hoststate import new_run_folder
 from .plan import ExecutionPlan
 from .provenance import recorded_binary
 from .provenance import reproducer as provenance_reproducer
 from .results import ComponentStatus, RunOutcome
-from .schema import load_yaml, plain_config
+from .schema import load_yaml, load_yaml_mapping, plain_config
 
 # The ``format_version`` of every file the fuzzer writes and reads back (``report.json``, ``plan.json``, a batch's
 # ``summary.json`` and ``batch.json``, ``conform.json``, and a ``trace.jsonl`` header). A reader accepts this
@@ -137,25 +136,27 @@ def write_document(path: str, data: Any, output_format: str = "json") -> None:
     _write_text(path, text, "the report")
 
 
-def read_scenario(path: str) -> str:
-    source = Path(path)
-    if not source.is_file():
-        raise InputError(f"scenario file not found: {path}")
-    try:
-        return source.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise InputError(f"unable to read scenario file {path}: {exc}") from exc
+def _read_text(path: str) -> str:
+    """The text of the file at ``path``; ``InputError`` for a file that is missing or cannot be read."""
 
-
-def load_document(path: str) -> Any:
     source = Path(path)
     if not source.is_file():
         raise InputError(f"file not found: {path}")
     try:
-        text = source.read_text(encoding="utf-8")
+        return source.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise InputError(f"unable to read {path}: {exc}") from exc
-    if source.suffix != ".json":
+
+
+def read_yaml_mapping(path: str) -> Mapping[str, Any]:
+    """The one mapping the YAML file at ``path`` holds: a scenario, a zoo case, a drawn scenario of a batch."""
+
+    return load_yaml_mapping(_read_text(path), source_name=str(path))
+
+
+def load_document(path: str) -> Any:
+    text = _read_text(path)
+    if Path(path).suffix != ".json":
         return load_yaml(text, path)
     # Not as YAML: a YAML 1.1 loader reads a JSON float such as 5e-05 as a string.
     try:
@@ -250,8 +251,7 @@ def shorten(value: Any, limit: int = MAX_VALUE_CHARS) -> str:
     text = value if isinstance(value, str) else json.dumps(value, sort_keys=True, default=str)
     if len(text) <= limit:
         return text
-    digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:12]
-    return f"{text[:limit]}... [{len(text)} chars, sha256 {digest}]"
+    return f"{text[:limit]}... [{len(text)} chars, sha256 {sha256_text(text, 12)}]"
 
 
 def failed_components(outcome: RunOutcome) -> list[dict[str, Any]]:
@@ -333,7 +333,7 @@ def run_report(
             "full_results": "outcome.component_results",
         },
         "conform": to_plain_data(conform) if conform is not None else None,
-        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "generated_at": utc_iso(),
         "scenario": plain_config(scenario) if scenario is not None else None,
         "outcome": outcome.to_data(),
         "coverage": to_plain_data(coverage_tuple(outcome, host_fields)),

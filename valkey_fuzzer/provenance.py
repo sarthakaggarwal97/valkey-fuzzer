@@ -13,7 +13,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from ._data import canonical_json, file_sha256, to_plain_data
+from ._data import file_sha256, sha256_json, to_plain_data
 from .catalog import Catalog, UnknownExperimentError
 from .describe import components_by_role, implementation_name
 from .plan import ExecutionPlan
@@ -99,7 +99,7 @@ def _fuzzer_digest() -> Optional[str]:
 
 
 def _experiment_digest(experiment: Any) -> str:
-    return hashlib.sha256(canonical_json(experiment).encode()).hexdigest()
+    return sha256_json(experiment)
 
 
 def implementation_digest(factory: Any) -> Optional[str]:
@@ -122,7 +122,7 @@ def catalog_digest(catalog: Catalog) -> str:
             for experiment_id, experiment in catalog.experiments.snapshot().items()
         },
     }
-    return hashlib.sha256(canonical_json(material).encode()).hexdigest()
+    return sha256_json(material)
 
 
 def reproducer(catalog: Catalog, plan: ExecutionPlan, outcome: Optional[RunOutcome] = None) -> dict[str, Any]:
@@ -157,7 +157,7 @@ def reproducer(catalog: Catalog, plan: ExecutionPlan, outcome: Optional[RunOutco
             **_implementation(provider.factory),
             "implementation_digest": implementation_digest(provider.factory),
         },
-        "plan_digest": hashlib.sha256(plan.to_json().encode("utf-8")).hexdigest(),
+        "plan_digest": sha256_json(plan),
         "valkey_sha": outcome.valkey_sha if outcome is not None else None,
     }
 

@@ -95,7 +95,6 @@ block fixes, or anything the compiled plan's oracles check::
 """
 
 import copy
-import hashlib
 import math
 import random
 from collections.abc import Mapping, Sequence
@@ -105,7 +104,7 @@ from typing import Any, Callable, Optional
 import yaml
 
 from . import capacity
-from ._data import to_plain_data
+from ._data import derived_int, to_plain_data
 from .catalog import Catalog
 from .compiler import NO_OVERRIDES, Overrides, with_valkey_binary
 from .documents import ABSENT, get_path, merge
@@ -135,9 +134,8 @@ class GeneratorError(ValueError):
 def generator_rng(seed: int, dimension: str, attempt: int, experiment: Optional[str] = None) -> random.Random:
     """The random stream of one dimension of one experiment's attempt (the derivation ``scenario_rng`` uses)."""
 
-    scope = f"{experiment}\0" if experiment else ""
-    material = f"gen\0{seed}\0{scope}{dimension}\0{attempt}".encode()
-    return random.Random(int.from_bytes(hashlib.sha256(material).digest()[:16], "big"))
+    scope = (experiment,) if experiment else ()
+    return random.Random(derived_int("gen", seed, *scope, dimension, attempt))
 
 
 # ---------------------------------------------------------------------------
@@ -849,8 +847,7 @@ def draw_rule(document: Any, rng: random.Random, where: str) -> Any:
 def _chosen(salt: int, key: str, share: float) -> bool:
     """Whether a hook pool's ``key`` joins the scenario whose ``pools.<id>.keys`` stream gave ``salt``."""
 
-    digest = hashlib.sha256(f"{salt}\0{key}".encode()).digest()
-    return int.from_bytes(digest[:8], "big") < share * 2**64
+    return derived_int(salt, key, size=8) < share * 2**64
 
 
 def _rules(document: Any, where: str) -> dict[str, Optional[_Rule]]:

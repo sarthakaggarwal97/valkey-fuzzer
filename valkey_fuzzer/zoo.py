@@ -51,7 +51,8 @@ from .catalog import Catalog
 from .compiler import with_valkey_binary
 from .deployment.local.processes import parse_version_output, version_output
 from .documents import merge
-from .schema import ConfigError, ConfigField, ConfigSchema, load_yaml_mapping
+from .reports import read_yaml_mapping
+from .schema import ConfigError, ConfigField, ConfigSchema
 
 ZOO_DIRECTORY = Path(__file__).resolve().parent.parent / "zoo"
 COMMIT_FILE = "valkey-commit"
@@ -144,7 +145,7 @@ def load_case(directory: Path) -> ZooCase:
     where = f"zoo case {case_id}"
     if not _CASE_ID.match(case_id):
         raise ZooError(f"{where}: the directory name must be lowercase words joined by hyphens")
-    document = load_yaml_mapping((directory / "case.yaml").read_text(encoding="utf-8"), source_name=str(directory))
+    document = read_yaml_mapping(str(directory / "case.yaml"))
     try:
         case = _CASE.resolve(document, "case")
     except ConfigError as exc:
@@ -171,7 +172,7 @@ def load_case(directory: Path) -> ZooCase:
         path = directory / entry["file"]
         if not path.is_file():
             raise ZooError(f"{where}: scenario file {entry['file']} not found")
-        scenario = load_yaml_mapping(path.read_text(encoding="utf-8"), source_name=str(path))
+        scenario = read_yaml_mapping(str(path))
         if "valkey_binary" in (scenario.get("deployment") or {}):
             raise ZooError(f"{where}: {entry['file']} must not set deployment.valkey_binary; the zoo picks the build")
         scenarios.append(ZooScenario(entry["file"], scenario, tuple(entry["fail"])))

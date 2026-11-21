@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from ..capacity import usable_cores
+from ..clock import utc_iso
 from ..deadlines import wait_for
 from ..deployment.local.ports import LOCK_DIRECTORY
 from ..findings import FINDINGS_FILE, STATUSES
@@ -134,7 +135,7 @@ class BatchRunner:
             "profile_timeout_s": expansion.profile_timeout_s,
             "catalog_digest": expansion.catalog_digest,
             "cores": usable_cores(),
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "created_at": utc_iso(),
         }
         # jobs.json first: a folder with batch.json is complete.
         write_document(os.path.join(folder, "jobs.json"), expansion.jobs)

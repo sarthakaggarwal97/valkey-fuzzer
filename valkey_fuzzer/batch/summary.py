@@ -1,10 +1,10 @@
 """The summary: counts, failure signatures with their serial re-runs, the plug-ins' entries, leaks, and the batch's
 status and exit code."""
 
-import time
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+from ..clock import utc_iso
 from ..outcomes import EXIT_INTERRUPTED, exit_code
 from ..reports import FORMAT_VERSION
 from . import hooks
@@ -104,7 +104,7 @@ def summarize(runner: "BatchRunner") -> dict[str, Any]:
         "folder": runner.folder,
         "profile": runner.options.profile,
         "created_at": runner.spec["created_at"],
-        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "updated_at": utc_iso(),
         "complete": complete,
         "status": status,
         "exit_code": exit_code(status) if complete else EXIT_INTERRUPTED,

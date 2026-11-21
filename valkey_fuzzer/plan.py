@@ -5,7 +5,6 @@ providers; nothing here knows an individual experiment, evidence ID, or policy
 type.
 """
 
-import hashlib
 import random
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -13,7 +12,7 @@ from enum import Enum
 from functools import partial
 from typing import Any, Optional
 
-from ._data import canonical_json, freeze_mapping, to_plain_data
+from ._data import canonical_json, derived_int, freeze_mapping, to_plain_data
 from .environment import EnvironmentSpec, PolicySpec
 from .fields import (
     as_tuple,
@@ -331,8 +330,7 @@ def derive_component_seed(seed: int, component_id: str, stream: str = "default")
     require_number(seed, "seed", integer=True)
     require_name(component_id, "component_id")
     require_name(stream, "stream")
-    material = f"{seed}\0{component_id}\0{stream}".encode()
-    return int.from_bytes(hashlib.sha256(material).digest()[:16], "big")
+    return derived_int(seed, component_id, stream)
 
 
 @dataclass(frozen=True)

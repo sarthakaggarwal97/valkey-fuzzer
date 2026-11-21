@@ -25,7 +25,6 @@ tmpfs is mounted under ``<tmp>/valkey-fuzzer-mounts/<owner>/``
 (``mount_parent``).
 """
 
-import hashlib
 import os
 import platform
 import re
@@ -64,12 +63,11 @@ _BINARY_CONFIG = ConfigSchema(
 def describe_binary(path: str) -> dict[str, Any]:
     """Immutable provenance for one binary: digest, version, and git SHA."""
 
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
+    digest = file_sha256(path)
+    if digest is None:
+        raise FileNotFoundError(f"{path} is not a readable file")
     output = version_output(path)
-    return {"sha256": digest.hexdigest(), **parse_version_output(output), "version_output": output.strip()}
+    return {"sha256": digest, **parse_version_output(output), "version_output": output.strip()}
 
 
 def _check_strings(spec: Any, config: Mapping[str, Any]) -> None:
