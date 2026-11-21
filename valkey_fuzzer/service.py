@@ -54,7 +54,7 @@ from .reports import (
     load_document,
     make_report_folder,
     new_report_folder,
-    read_scenario,
+    read_yaml_mapping,
     recorded_run,
     run_report,
     write_document,
@@ -62,7 +62,7 @@ from .reports import (
 )
 from .results import OutcomeStatus, RunOutcome
 from .runner import PreflightError, Runner
-from .schema import load_yaml_mapping, plain_config
+from .schema import plain_config
 from .spec.conform import conform_run, judge_run
 
 # The deadline of a run that names none and has no search-profile budget (seconds).
@@ -98,6 +98,16 @@ def derive_timeout(
 LOCAL_PATH_PROVIDERS = ("valkey.artifact.local-binary", "valkey.artifact.local-module")
 
 
+def _check_artifact_override(name: str, declared: Optional[Mapping[str, Any]], provider_key: str, where: str) -> None:
+    """``InputError`` unless ``declared``, what ``where`` (the scenario, the recorded plan) declares as artifact
+    ``name`` (None for nothing), names a local-binary or local-module provider under ``provider_key``."""
+
+    if declared is None:
+        raise InputError(f"--artifact {name}: the {where} declares no artifact {name!r}")
+    if declared.get(provider_key) not in LOCAL_PATH_PROVIDERS:
+        raise InputError(f"--artifact {name}: artifacts.{name} is not a {' or '.join(LOCAL_PATH_PROVIDERS)} artifact")
+
+
 def with_artifact_paths(scenario: Mapping[str, Any], paths: Mapping[str, str]) -> dict[str, Any]:
     """A copy of ``scenario`` whose local-binary or local-module artifacts named in ``paths`` resolve those paths."""
 
@@ -105,12 +115,7 @@ def with_artifact_paths(scenario: Mapping[str, Any], paths: Mapping[str, str]) -
     overrides = {}
     for name, path in paths.items():
         artifact = declared.get(name) if isinstance(declared, Mapping) else None
-        if not isinstance(artifact, Mapping):
-            raise InputError(f"--artifact {name}: the scenario declares no artifact {name!r}")
-        if artifact.get("use") not in LOCAL_PATH_PROVIDERS:
-            raise InputError(
-                f"--artifact {name}: artifacts.{name} is not a {' or '.join(LOCAL_PATH_PROVIDERS)} artifact"
-            )
+        _check_artifact_override(name, artifact if isinstance(artifact, Mapping) else None, "use", "scenario")
         overrides[name] = {"with": {"path": path}}
     return merge(scenario, {"artifacts": overrides})
 
@@ -129,12 +134,7 @@ def _plan_with_artifact_paths(plan: ExecutionPlan, paths: Mapping[str, str]) -> 
     by_id = {spec["id"]: spec for spec in data["artifacts"]}
     for name, path in paths.items():
         spec = by_id.get(name)
-        if spec is None:
-            raise InputError(f"--artifact {name}: the recorded plan declares no artifact {name!r}")
-        if spec["provider_id"] not in LOCAL_PATH_PROVIDERS:
-            raise InputError(
-                f"--artifact {name}: artifacts.{name} is not a {' or '.join(LOCAL_PATH_PROVIDERS)} artifact"
-            )
+        _check_artifact_override(name, spec, "provider_id", "recorded plan")
         spec["config"] = {**spec["config"], "path": path}
     return ExecutionPlan.from_data(data)
 
@@ -369,7 +369,7 @@ class RunService:
 
         scenario = with_valkey_binary(
             self.catalog,
-            plain_config(load_yaml_mapping(read_scenario(path), source_name=str(path))),
+            plain_config(read_yaml_mapping(path)),
             overrides.binary,
         )
         scenario = with_base_port(with_artifact_paths(scenario, overrides.artifacts), overrides.base_port)
@@ -462,7 +462,7 @@ class RunService:
     def validate(self, path: str, *, overrides: Overrides = NO_OVERRIDES) -> ExecutionPlan:
         """Compile a scenario and check it without provisioning."""
 
-        document = load_yaml_mapping(read_scenario(path), source_name=str(path))
+        document = read_yaml_mapping(path)
         plan = self.compile(with_valkey_binary(self.catalog, document, overrides.binary))
         self.validate_plan(plan)
         return plan

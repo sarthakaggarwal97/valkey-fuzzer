@@ -1,4 +1,5 @@
-"""The run clock: where the harness reads a timestamp it will compare with another.
+"""The run clock: where the harness reads a timestamp it will compare with another, and the wall-clock stamp of
+the files it writes.
 
 An action's or fault's ``applied_at``, ``started_at``, ``completed_at`` and ``ended_at`` are on this clock; the
 report-only fields stay on wall time: an obligation's ``opened_at`` and ``undone_at``, the ``started_at`` and
@@ -20,3 +21,9 @@ def now() -> float:
     """
 
     return time.monotonic() + _OFFSET
+
+
+def utc_iso() -> str:
+    """The wall clock now as ``YYYY-MM-DDTHH:MM:SSZ``: when a report, batch or summary file was written."""
+
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())

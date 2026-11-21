@@ -21,12 +21,11 @@ unreduced scenario first, so a failure that does not reproduce is not
 """
 
 import copy
-import hashlib
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Callable, Optional
 
-from ._data import canonical_json, to_plain_data
+from ._data import sha256_json, to_plain_data
 from .plan import ExecutionPlan
 from .results import RunOutcome
 
@@ -160,7 +159,7 @@ def signature_key(experiment: Optional[str], signature: Mapping[str, Any]) -> st
         material: dict[str, Any] = {"crashes": signature["crashes"]}
     else:
         material = {"experiment": experiment, **{k: v for k, v in signature.items() if k != "path_evidence"}}
-    return hashlib.sha256(canonical_json(material).encode()).hexdigest()[:12]
+    return sha256_json(material, 12)
 
 
 def signature_label(experiment: Optional[str], signature: Mapping[str, Any]) -> str:

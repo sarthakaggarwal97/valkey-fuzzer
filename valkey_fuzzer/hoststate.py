@@ -48,7 +48,6 @@ It also makes the run folders under the shared artifact root
 """
 
 import errno
-import hashlib
 import json
 import os
 import platform
@@ -66,6 +65,7 @@ from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Optional
 
 from . import cgroups
+from ._data import sha256_text
 from .deadlines import wait_for
 from .deployment.local.models import DEFAULT_BASE_DATA_DIR
 
@@ -124,7 +124,7 @@ def process_start(pid: int) -> Optional[str]:
 
 
 def _start_key(started: Optional[str]) -> str:
-    return _UNKNOWN_START if started is None else hashlib.sha256(started.encode()).hexdigest()[:6]
+    return _UNKNOWN_START if started is None else sha256_text(started, 6)
 
 
 @dataclass(frozen=True)
@@ -406,13 +406,13 @@ def server_tag_arguments() -> list[str]:
 def chain_name(label: str) -> str:
     """``VF-<owner>-<hash of label>``: an iptables chain name of at most 26 characters."""
 
-    return f"{CHAIN_PREFIX}{current_owner().token}-{hashlib.sha256(label.encode()).hexdigest()[:8]}"
+    return f"{CHAIN_PREFIX}{current_owner().token}-{sha256_text(label, 8)}"
 
 
 def cgroup_name(label: str) -> str:
     """``vf-<owner>-<hash of label>``: the name of a cgroup leaf this process makes."""
 
-    return f"{CGROUP_PREFIX}{current_owner().token}-{hashlib.sha256(label.encode()).hexdigest()[:8]}"
+    return f"{CGROUP_PREFIX}{current_owner().token}-{sha256_text(label, 8)}"
 
 
 def cgroup_owner(name: str) -> Optional[Owner]:

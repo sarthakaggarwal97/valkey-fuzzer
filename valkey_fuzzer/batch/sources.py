@@ -12,20 +12,13 @@ from typing import Any, Optional
 from .._data import exception_type
 from ..documents import SCENARIO_SECTIONS, set_path
 from ..generator import Exclusion, GeneratorError, opted_in
-from ..ordering import DependencyCycleError
-from ..references import EnvironmentReferenceError
-from ..registry import RegistrationError
-from ..reports import SCENARIO_FILE
-from ..schema import ConfigError, ConfigField, ConfigSchema, ExperimentError, load_yaml_mapping
+from ..reports import SCENARIO_FILE, read_yaml_mapping
+from ..schema import ConfigField, ConfigSchema
 from ..service import RunService
 from .hooks import BatchSource, plugin_job, register_source
 from .jobs import Expansion, ids_per_signature, job_definition
 from .results import read_json, results_of
 from .spec import STATUS_ORDER, BatchError, BatchOptions, absolute
-
-# What the compiler raises for a scenario it rejects; anything else is a bug in it.
-_COMPILE_ERRORS = (ConfigError, ExperimentError, EnvironmentReferenceError, DependencyCycleError, RegistrationError)
-
 
 # -- random -------------------------------------------------------------------
 
@@ -126,8 +119,9 @@ def _matrix_jobs(
             scenario["scenario_id"] = f"{name}-{combo_index}-{replica}"
             try:
                 service.compile(scenario)
-            except _COMPILE_ERRORS as exc:
-                # A combination the experiment does not support is reported, not run.
+            except ValueError as exc:
+                # A combination the experiment does not support is reported, not run: every compile or config
+                # error is a ValueError (:func:`~valkey_fuzzer.generator.generate`); anything else is a bug.
                 expansion.invalid.append(
                     {
                         "case": scenario["scenario_id"],
@@ -191,7 +185,7 @@ def _scenario_jobs(
 ) -> None:
     for path in (item for entry in value for item in _scenario_files(entry)):
         try:
-            scenario = load_yaml_mapping(Path(path).read_text(encoding="utf-8"), source_name=path)
+            scenario = read_yaml_mapping(path)
         except Exception as exc:
             raise BatchError(f"cannot read the scenario {path}: {exc}") from None
         expansion.add(
@@ -245,7 +239,7 @@ def failure_samples(
         drawn = os.path.join(folder, "runs", job_id, SCENARIO_FILE)
         if "generate" in job and os.path.exists(drawn):
             del job["generate"]
-            job["scenario"] = load_yaml_mapping(Path(drawn).read_text(encoding="utf-8"), source_name=drawn)
+            job["scenario"] = read_yaml_mapping(drawn)
         samples.append(job)
     return samples
 
