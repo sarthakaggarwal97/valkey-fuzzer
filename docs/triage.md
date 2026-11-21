@@ -52,7 +52,7 @@ valkey-fuzzer batch --failures soak/20261120T0829 --serial-reruns 1 --out soak/2
 
 A run that passes alone and fails under load is still a finding when the
 failing component is an oracle that judged data (`valkey.oracle.ledger`,
-`valkey.oracle.history`): load changes timing, not correctness. One that
+`valkey.oracle.rdb-snapshot`): load changes timing, not correctness. One that
 fails by a deadline or a `cannot read` is the host's; raise `--timeout` or
 lower `--workers` ([Budgets and timeouts](operations.md#budgets-and-timeouts)).
 
@@ -131,7 +131,7 @@ in the next `--status new` listing.
 | You see | It is | Do |
 | --- | --- | --- |
 | `FAIL` with `crash: true`, or a crash, assertion, or sanitizer report in the server's log or `.stdio.log` | a Valkey bug, unless the binary runs outside its build tree (it cannot find its Lua module and panics at start) | file it |
-| `FAIL` from `valkey.oracle.ledger`, `history`, `rdb-snapshot`, `deployment-state`, or `cluster-election-safety` that replays | a Valkey bug, unless `scenario.yaml` allows the behaviour: `maxmemory` with an evicting policy, `appendfsync no`, a `loss_window_s` above 0 | read the scenario's `server_config` and `inputs` first, then file it |
+| `FAIL` from `valkey.oracle.ledger`, `rdb-snapshot`, `deployment-state`, or `cluster-election-safety` that replays | a Valkey bug, unless `scenario.yaml` allows the behaviour: `maxmemory` with an evicting policy, `appendfsync no`, a `loss_window_s` above 0 | read the scenario's `server_config` and `inputs` first, then file it |
 | `FAIL` from `valkey.oracle.evidence` or a forbidden log pattern | Valkey did what the experiment forbids; check the pattern or rule is not broader than the claim | file it, or narrow the rule |
 | `FAIL` whose verdict is the fuzzer's own expectation being wrong: `0/1 replies matched` on a command the build does not have, a check that misreads a reply, a predicate on the wrong field | a fuzzer false positive | fix it at its source with a test that pins the case, and never file it |
 | `ERROR` | no verdict: `outcome.diagnostics` names the cause (`error`, `missing_required_evidence`, `cleanup_errors`, `abandoned_calls`, `contract_violations`, a leak) | a port in use, a timeout, or a missing need is the host's; anything else is a fuzzer bug to fix as above |
@@ -153,7 +153,7 @@ From a batch, take these from the run folder `runs/<job id>/`:
 | the scenario, as run | `scenario.yaml`, or `minimized.yaml` after a minimize |
 | the server logs | `logs/` in the run folder (a pruned passing run has none; a hand run's are under `/tmp/valkey-fuzzer/logs/`) |
 | the trace, for a cluster or replication run | `components/<observer id>/trace.jsonl` (`valkey.observer.trace`): events and per-node state samples; `conform` in `report.json` when a spec bundle judged it |
-| the write history, for a data oracle | `components/writes/ledger.jsonl` and `preload.jsonl`, `components/history/history.jsonl` |
+| the write ledger, for a data oracle | `components/writes/ledger.jsonl` and `preload.jsonl` |
 | whether it came back | the signature's `serial_reruns.verdict`, or the `replay` result |
 | the versions | `valkey-fuzzer --version`, `valkey-server --version` |
 

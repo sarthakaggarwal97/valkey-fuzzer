@@ -18,7 +18,6 @@ experiment, cluster chaos (failovers with process kills) included.
 | Linux (macOS for most experiments) | `valkey-server` processes, `SIGKILL` and `SIGSTOP`. Root and Linux only for the experiments that change the host (see [Safety](#safety)). | Those experiments report `SKIP_UNSUPPORTED`. |
 | Python 3.10 or later, git | the fuzzer and its install | n/a |
 | A `valkey-server` build | every experiment starts real servers | Build one (below), or pass `--valkey-binary PATH`. |
-| The `porcupine` linearizability checker | These experiments need it: `valkey.aof-durability`, `valkey.cluster-partition`, `valkey.mixed-version-cluster`, `valkey.replication-chaos`, `valkey.replication-degraded-link`, `valkey.replication-full-resync`, `valkey.rolling-upgrade`. One command fetches the prebuilt binary (below); Go 1.21 or later is needed only to build it yourself. | `validate` exits `2`, and a run ends `ERROR` before it starts anything, with `porcupine is not on PATH` and both commands. |
 | Free ports | the quickstart uses 7430 and 7431; generated scenarios use ports from 7000 | The run ends `ERROR` and names the port. |
 | Java 11 or later and `tla2tools.jar` (optional) | only the `spec` commands of the [spec bridge](docs/spec-bridge.md), and a batch's check of its runs against a spec bundle that needs TLC. `pip install` needs neither. | A `spec` command exits `2` and prints the jar's download command. A batch skips a draft bundle's check; a run checked against an approved one ends `ERROR`. |
 
@@ -43,29 +42,9 @@ report `ERROR` instead: `valkey.cluster-election-durability`,
 `valkey.rolling-upgrade`. [Getting started](docs/getting-started.md#choose-a-valkey-binary)
 has the lookup order.
 
-**Get `porcupine`.** After the install (see the Quickstart), fetch the
-checker once per host. It downloads the binary for your platform (Linux or
-macOS, x86_64 or arm64) from the pinned `porcupine-v1.3.1` release of this
-repository over HTTPS, checks its SHA-256 against the sum the fuzzer pins,
-and installs it under `~/.cache/valkey-fuzzer/bin`, where the fuzzer looks
-when `PATH` has none:
-
-```bash
-valkey-fuzzer-fetch-porcupine
-```
-
-Or, with Go 1.21 or later, build it from the checkout onto `PATH`; the Go
-module is vendored, so the build needs no network:
-
-```bash
-mkdir -p "$HOME/.local/bin"
-go -C porcupine build -o "$HOME/.local/bin/porcupine"
-export PATH="$HOME/.local/bin:$PATH"
-```
-
 **Or use the image.** `docker build -t valkey-fuzzer .` from the checkout
-(the [`Dockerfile`](Dockerfile)) holds the fuzzer, Valkey 9.1.3, `porcupine`
-and the faults' tools; `docker run --rm -v "$PWD:/work" valkey-fuzzer run
+(the [`Dockerfile`](Dockerfile)) holds the fuzzer, Valkey 9.1.3 and the
+faults' tools; `docker run --rm -v "$PWD:/work" valkey-fuzzer run
 /work/scenario.yaml` runs a scenario. [Fuzzing a module from its own
 repository](docs/module-repos.md#the-image) says which faults need root.
 
@@ -82,8 +61,7 @@ python -m pip install -e .
 ```
 
 Install in a virtual environment (`python -m venv .venv && . .venv/bin/activate`)
-if your system Python refuses `pip install`. Then get `porcupine` as shown
-above.
+if your system Python refuses `pip install`.
 
 List the installed experiments, then check a scenario without starting any
 servers:
@@ -93,10 +71,10 @@ valkey-fuzzer list experiments
 valkey-fuzzer validate examples/valkey/aof_durability.yaml
 ```
 
-Run it, with `valkey-server` on `PATH` (or add `--valkey-binary PATH`) and
-`porcupine` fetched or on `PATH`. This starts a primary and a replica on ports 7430 and
-7431, writes keys, kills the primary with `SIGKILL`, restarts it from its
-append-only file, and checks that no acknowledged write was lost. It takes
+Run it, with `valkey-server` on `PATH` (or add `--valkey-binary PATH`). This
+starts a primary and a replica on ports 7430 and 7431, writes keys, kills the
+primary with `SIGKILL`, restarts it from its append-only file, and checks that
+no acknowledged write was lost. It takes
 about 20 seconds when a binary is ready. When it has to build Valkey first,
 add about 70 seconds.
 
@@ -229,7 +207,4 @@ which surfaces a change must keep working.
 
 ## License
 
-BSD 3-Clause. See [LICENSE](LICENSE). The `porcupine` checker binaries and
-the module vendored under `porcupine/vendor/` carry the MIT notice of
-[Porcupine](https://github.com/anishathalye/porcupine); see
-[THIRD_PARTY.md](THIRD_PARTY.md).
+BSD 3-Clause. See [LICENSE](LICENSE).

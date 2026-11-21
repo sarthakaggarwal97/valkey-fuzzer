@@ -1,5 +1,5 @@
-# The fuzzer, a pinned Valkey build, the porcupine checker, and the tools the faults need, in one image, so a CI
-# job or a laptop runs an experiment without building anything (docs/module-repos.md).
+# The fuzzer, a pinned Valkey build, and the tools the faults need, in one image, so a CI job or a laptop runs an
+# experiment without building anything (docs/module-repos.md).
 #
 #   docker build -t valkey-fuzzer .                      # Valkey 9.1.3, the version the fuzzer builds itself
 #   docker build --build-arg VALKEY_VERSION=unstable .   # any tag, branch or commit of valkey-io/valkey
@@ -35,26 +35,17 @@ RUN git init -q /src/valkey \
     && ln -s valkey-server /opt/valkey/src/valkey-check-rdb && ln -s valkey-server /opt/valkey/src/valkey-check-aof \
     && git -C /src/valkey rev-parse HEAD > /opt/valkey/COMMIT
 
-# --- The porcupine linearizability checker, which valkey.oracle.history runs from PATH.
-FROM golang:1.23-bookworm AS porcupine
-# A host whose network rewrites TLS (a corporate proxy) builds with --build-arg GOPROXY=direct GOSUMDB=off.
-ARG GOPROXY
-ARG GOSUMDB
-COPY porcupine /src/porcupine
-RUN CGO_ENABLED=0 go -C /src/porcupine build -trimpath -o /out/porcupine
-
 # --- The fuzzer, with what its faults call: iptables (partitions), tc and ip (degradations), libfaketime
 # (clock skew), a C compiler (the syscall fault library is built at run time), mount (tmpfs), ps (sweep).
 FROM ${PYTHON_IMAGE}
 ARG SOURCE_URL=https://github.com/valkey-io/valkey-fuzzer
 LABEL org.opencontainers.image.source="${SOURCE_URL}" \
-      org.opencontainers.image.description="Valkey fuzzer with a pinned Valkey build, porcupine, iptables, tc and libfaketime" \
+      org.opencontainers.image.description="Valkey fuzzer with a pinned Valkey build, iptables, tc and libfaketime" \
       org.opencontainers.image.licenses="BSD-3-Clause"
 RUN apt-get update -q && apt-get install -y -q --no-install-recommends \
         iptables iproute2 libfaketime gcc libc6-dev procps ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=valkey /opt/valkey /opt/valkey
-COPY --from=porcupine /out/porcupine /usr/local/bin/porcupine
 # On PATH through a link, so the fuzzer finds the config.c beside the real binary.
 RUN for tool in valkey-server valkey-cli valkey-benchmark valkey-check-rdb valkey-check-aof; do \
         ln -s "/opt/valkey/src/${tool}" "/usr/local/bin/${tool}"; done

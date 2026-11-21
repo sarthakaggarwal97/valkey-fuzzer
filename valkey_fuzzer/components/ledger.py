@@ -49,7 +49,7 @@ class LedgerModel:
     """Acceptable values per key, derived from what clients observed.
 
     One writer thread issues every operation, so each key has a total order
-    of operations (with ``concurrent``, see the end). Walking it, ``possible[key]`` is the set of values the key
+    of operations. Walking it, ``possible[key]`` is the set of values the key
     may hold at that point:
 
     * an acknowledged write replaces the set with its value, unless it falls
@@ -77,14 +77,6 @@ class LedgerModel:
     and a CLIENT PAUSE WRITE queues writes in order while it serves reads.
     So an acknowledged write ends what the earlier ambiguous ones may do,
     and a read does not.
-
-    With ``concurrent`` (a workload of several clients) operations overlap and
-    the ledger is walked in completion order, which is not the order the
-    server applied them. An acknowledged write then leaves the values of every
-    write that overlaps it too (one that completed before it began is
-    overwritten), and reads are not checked here: ``valkey.oracle.history``
-    checks them, as it orders operations by their overlap. Without overlap
-    this is the model above.
     """
 
     def __init__(
@@ -97,14 +89,8 @@ class LedgerModel:
         history: bool = False,
         wait_confirmed: Optional[int] = None,
         preload_acks: Optional[Mapping[str, tuple]] = None,
-        concurrent: bool = False,
     ):
         self.preload = preload
-        self.concurrent = concurrent
-        # With ``concurrent``, per key: ``(t_start, t_end, value)`` of the writes that may still be the last applied.
-        self._recent: dict[str, list[tuple[float, float, Any]]] = {}
-        if concurrent:
-            ledger = sorted(ledger, key=lambda entry: entry["t_end"])
         self.wait_confirmed = wait_confirmed
         self.unchecked_reads = 0
         self.possible: dict[str, set] = {key: {value} for key, value in preload.items()}
@@ -161,14 +147,12 @@ class LedgerModel:
         if op == "get":
             if outcome != "ok":
                 return
-            if self.concurrent:
-                self.unchecked_reads += 1
-                return
             reply = entry.get("reply")
             if in_window and window_reads == "written":
                 # Under a partition a read may be served by an instance that is
-                # about to lose its writes (no linearizability), so only
-                # require a value that was actually written to this key.
+                # about to lose its writes (so no single order of operations
+                # explains every reply), so only require a value that was
+                # actually written to this key.
                 self.unchecked_reads += 1
                 if reply not in ever:
                     self.read_violations.append(
@@ -193,17 +177,7 @@ class LedgerModel:
             ever.add(_ABSENT)
         if outcome == "error":
             return
-        if self.concurrent:
-            recent = self._recent.get(key, [])
-            if outcome == "ok" and not lossy:
-                # A write that completed before this one began is overwritten; an overlapping one may come after it.
-                recent = [item for item in recent if item[1] > entry["t_start"]]
-            recent.append((entry["t_start"], entry["t_end"], new_value))
-            self._recent[key] = recent
-            if outcome == "ok" and not lossy:
-                self.possible[key] = {item[2] for item in recent}
-                return
-        elif outcome == "ok" and not lossy:
+        if outcome == "ok" and not lossy:
             self.possible[key] = {new_value}
             pending.pop(key, None)
             unsettled.discard(key)
@@ -548,7 +522,6 @@ class LedgerOracle:
             windows, lossy_key, scope_slots, wait_confirmed = loss_policy(config, evidence, handle, summary)
         except LossScopeError as exc:
             return make_result(spec, ComponentStatus.ERROR, f"cannot scope the loss window: {exc}")
-        concurrent = summary.get("clients", 1) > 1
         model = LedgerModel(
             preload,
             ledger,
@@ -557,7 +530,6 @@ class LedgerOracle:
             config["window_reads"],
             wait_confirmed=wait_confirmed,
             preload_acks=preload_acks,
-            concurrent=concurrent,
         )
         keys = model.keys()
 
@@ -586,7 +558,7 @@ class LedgerOracle:
         # is acceptable only because acknowledged writes were allowed to vanish.
         window_losses = []
         if windows:
-            strict = LedgerModel(preload, ledger, [], concurrent=concurrent)
+            strict = LedgerModel(preload, ledger, [])
             window_losses = [
                 key
                 for key in keys

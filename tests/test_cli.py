@@ -17,7 +17,6 @@ from tests.support import sigterm_during
 from tests.valkey_experiments_support import valkey_service
 from valkey_fuzzer import batch, hoststate
 from valkey_fuzzer.commands._common import add_common_options
-from valkey_fuzzer.components import history
 from valkey_fuzzer.deployment.local import config as local_config
 from valkey_fuzzer.hoststate import Owner, current_owner
 from valkey_fuzzer.minimize import failure_signature, signature_key
@@ -589,63 +588,3 @@ def test_a_failed_run_says_where_to_look_and_a_generated_one_also_prints_the_rep
     assert "Reproduce: valkey-fuzzer run --seed 5" in out
     assert f"or, replay this exact run: valkey-fuzzer replay {report}" in out
     assert f"Look at: {report.parent}" in out and "server logs:" in out
-
-
-# ---------------------------------------------------------------------------
-# The porcupine probe: a host without the checker is told before anything is built or started
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def without_porcupine(tmp_path, monkeypatch):
-    """The real host probe of ``valkey.oracle.history`` (conftest stubs it) on a PATH, and with a cache directory,
-    without ``porcupine``."""
-
-    monkeypatch.setattr(history, "probe_host", _REAL_PROBE)
-    empty = tmp_path / "empty-path"
-    empty.mkdir()
-    monkeypatch.setenv("PATH", str(empty))
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "empty-cache"))
-
-
-_REAL_PROBE = history.probe_host  # read at import, before conftest's fixture replaces it
-HISTORY_EXAMPLE = str(EXAMPLES / "aof_durability.yaml")
-
-
-def test_validate_names_the_fetch_and_build_commands_when_porcupine_is_not_installed(without_porcupine, capsys):
-    assert _cli("validate", HISTORY_EXAMPLE) == EXIT_HARNESS_ERROR
-    error = capsys.readouterr().err
-    assert "valkey-fuzzer-fetch-porcupine" in error and "porcupine-v1.3.1" in error
-    assert "go -C porcupine build -o" in error and "Go >= 1.21" in error and "'history'" in error
-
-
-def test_a_run_without_porcupine_is_an_error_before_anything_starts(without_porcupine, tmp_path):
-    report = tmp_path / "report.json"
-    assert _cli("run", HISTORY_EXAMPLE, "--output", report) == EXIT_HARNESS_ERROR
-    document = json.loads(report.read_text())
-    assert document["status"] == "ERROR" and "go -C porcupine build -o" in document["summary"]
-    assert document["outcome"]["diagnostics"]["error"]["phase"] == "preflight"
-
-
-def test_a_scenario_without_the_history_oracle_validates_with_no_porcupine(without_porcupine):
-    assert _cli("validate", EXAMPLE) == 0
-
-
-def _install_checker(path):
-    path.parent.mkdir(parents=True)
-    path.write_text("#!/bin/sh\n")
-    path.chmod(0o755)
-
-
-def test_validate_passes_once_porcupine_is_on_path(without_porcupine, tmp_path, monkeypatch):
-    checker = tmp_path / "bin" / "porcupine"
-    _install_checker(checker)
-    monkeypatch.setenv("PATH", str(checker.parent))
-    assert _cli("validate", HISTORY_EXAMPLE) == 0
-
-
-def test_validate_passes_once_porcupine_is_fetched_into_the_cache(without_porcupine, tmp_path):
-    # The fetch command installs under $XDG_CACHE_HOME/valkey-fuzzer/bin (the fixture's empty-cache), by default
-    # ~/.cache/valkey-fuzzer/bin; PATH still lacks the checker.
-    _install_checker(tmp_path / "empty-cache" / "valkey-fuzzer" / "bin" / "porcupine")
-    assert _cli("validate", HISTORY_EXAMPLE) == 0

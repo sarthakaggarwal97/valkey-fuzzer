@@ -12,8 +12,7 @@ description = "Seeded fault-injection tests for Valkey standalone and cluster de
 readme = "README.md"
 requires-python = ">=3.10"
 license = "BSD-3-Clause"
-# THIRD_PARTY.md: the MIT notice of Porcupine, whose module the sdist vendors under porcupine/vendor/.
-license-files = ["LICENSE", "THIRD_PARTY.md"]
+license-files = ["LICENSE"]
 authors = [
     {name = "valkey-io"}
 ]
@@ -52,8 +51,6 @@ Issues = "https://github.com/valkey-io/valkey-fuzzer/issues"
 
 [project.scripts]
 valkey-fuzzer = "valkey_fuzzer.cli:main"
-# Fetches the prebuilt porcupine checker of the pinned release into ~/.cache/valkey-fuzzer/bin (README, "Get porcupine").
-valkey-fuzzer-fetch-porcupine = "valkey_fuzzer.components.porcupine:main"
 
 # The packages are listed (tests/test_packaging.py keeps the list complete)
 # because the spec bundles under formal/ ship as valkey_fuzzer/formal: a
@@ -82,7 +79,7 @@ version = {attr = "valkey_fuzzer.__version__"}
 [tool.setuptools.package-data]
 valkey_fuzzer = ["py.typed"]
 "valkey_fuzzer.formal" = ["*/*", "*/*/*"]
-"valkey_fuzzer.components" = ["experiments/*.yaml", "fragments/*.yaml", "reply_schemas.json", "porcupine_sha256sums.txt"]
+"valkey_fuzzer.components" = ["experiments/*.yaml", "fragments/*.yaml", "reply_schemas.json"]
 "valkey_fuzzer.deployment.local" = ["syscall_faults.c"]
 
 [tool.pytest.ini_options]

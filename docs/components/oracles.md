@@ -175,12 +175,6 @@ converge on its primary's values. Reads are retried within
 the harness could not read, and [`valkey.oracle.liveness`](#valkeyoracleliveness)
 judges a server that is down.
 
-With a workload of several `clients` the operations overlap and the ledger
-holds them in completion order, not the order the server applied them. The
-oracle then accepts, for a key, the value of every write that overlaps the last
-acknowledged one, and does not check reads (`unchecked_reads` counts them):
-[`valkey.oracle.history`](#valkeyoraclehistory) orders them by overlap.
-
 Any component can also publish `valkey.data.loss-window` evidence `{start,
 end, instance_id?}`, as `valkey.action.replication-chaos` does for a forced
 promotion: writes acknowledged inside `(start, end]` may be lost, with
@@ -225,88 +219,6 @@ defaults (`appendonly yes`, `appendfsync everysec`) included.
 missing than the budget allows, a read returned an unacceptable value, or a
 replica does not converge. Evidence: `valkey.data.ledger-verified`, with
 `wait_confirmed_replicas` and `wait_protected_ops` under `wait_replicas`.
-
-## `valkey.oracle.history`
-
-Checks that the workload's history is linearizable: that every mutable key
-behaves as one register, each operation taking effect at one instant between
-its invocation and its completion. It reads every mutable key once more,
-appends those reads to the ledger of the `ledger` oracle's workload, writes
-the history to `history.jsonl` in its artifact directory, and hands it to
-[Porcupine](https://github.com/anishathalye/porcupine), which checks each
-key's history separately. Beyond the ledger oracle's final read, this
-catches a read that returned a value already overwritten (a stale read
-after a failover or a restart) and an acknowledged write that a read saw and
-that later vanished, through any order of concurrent and indeterminate
-operations.
-
-**Scope of the claim.** What a PASS covers depends on the workload's
-`clients`, which the oracle reads from the workload's evidence and records
-(`clients`). With `clients: 1` (the default) no two operations overlap, so a
-PASS reads "linearizable (single-client history)" and proves "no stale read
-after a failover or a restart" for that one client, which the ledger oracle's
-sequential model finds too. With `clients` above 1, operations on a key
-overlap, Porcupine searches for an order of them, and a PASS reads
-"linearizable (N-client history)". Neither covers replica reads (`READONLY`),
-`WAIT`, or client tracking: the workload reads only the primary, and replica
-reads are not linearizable against it, so they are not part of this history.
-Set `min_clients` to make the oracle `ERROR` when the workload ran fewer
-clients than the scenario needs, and the scenario fail to compile when the
-workload's `clients` is below it.
-
-It judges under the loss policy of the [`valkey.oracle.ledger`](#valkeyoracleledger)
-component named by `ledger` (its loss windows, scope, `window_reads`, and
-`WAIT` protection), so it never flags a loss that policy allows:
-
-- an ambiguous write (a timeout or a lost connection), and an acknowledged
-  write the policy lets be lost, are indeterminate: each may take effect at
-  any point after its invocation, or never; one whose value no checked read
-  returned is left out, as never applying it changes no verdict;
-- a read that returned the value of a write the policy lets be lost is not
-  checked, since the write may be lost after the read; with
-  `window_reads: written`, neither is a read that completed inside a loss
-  window;
-- a rejected write (`error`) is left out: it was not applied;
-- the preload is acknowledged writes on connection 0; stable keys are left
-  to the ledger oracle.
-
-The scenario does not compile when `ledger` is not a `valkey.oracle.ledger`
-component, or when that oracle allows lost writes (`lost_writes_budget`) or
-skips reads (`check_reads: false`), which a history check cannot honor.
-
-| Field | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `ledger` | string | | The `valkey.oracle.ledger` component's `id`; its `workload` and `converge_timeout_s` apply too. |
-| `timeout_s` | number, 1 to 3600 | 300 | How long Porcupine may search. |
-| `min_clients` | integer, 1 to 64 | 1 | The fewest workload `clients` this check is worth; fewer is `ERROR`. |
-
-`FAIL` when a key's history is not linearizable, naming the keys
-(`illegal_keys`) and writing Porcupine's visualization of their histories
-to `illegal.html` (`visualization_path`). `ERROR` when the `porcupine`
-checker is neither on `PATH` nor fetched, the final read keeps failing, the check times out,
-or the history is too large to check: Porcupine's memory grows with the
-square of a key's operation count (about 370 MB for 50,000 operations on one
-key), and the oracle refuses a history whose estimate exceeds 2 GB. Evidence:
-`valkey.data.linearizable`, with the operation, key, indeterminate, and
-unchecked-read counts, `clients`, and `history_path`.
-
-The `porcupine` checker is a small Go program in the repository's
-`porcupine/` directory that wraps the Porcupine library with a register
-model. Once per host, fetch the prebuilt binary of the pinned release into
-`~/.cache/valkey-fuzzer/bin` (its SHA-256 is checked against
-`valkey_fuzzer/components/porcupine_sha256sums.txt`), or build it onto `PATH`
-with Go 1.21 or later:
-
-```bash
-valkey-fuzzer-fetch-porcupine
-go -C porcupine build -o "$HOME/.local/bin/porcupine"
-```
-
-The oracle uses the one on `PATH`, else the fetched one
-([Get porcupine](../getting-started.md#get-porcupine)).
-
-The [`valkey.history`](../scenarios-and-experiments.md#fragments) fragment adds
-it, as `history` with `ledger: data`.
 
 ## `valkey.oracle.rdb-snapshot`
 

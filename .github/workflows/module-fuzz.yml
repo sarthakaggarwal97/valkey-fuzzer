@@ -7,9 +7,9 @@ name: Module Fuzz
 # and fails only on a FAIL: an ERROR (the harness, not the module) is written to the job summary.
 #
 # Two ways to run, one input apart: with `image`, the job runs in the published image (its pinned Valkey, its
-# porcupine, its tools; docs/module-repos.md#the-image), else on the runner, which builds Valkey at
-# `valkey_version` and the porcupine checker itself. A called workflow's github.repository and github.sha are its
-# caller's, so the caller names the fuzzer's own commit in `fuzzer_ref`: the same tag or SHA as its `uses:`.
+# tools; docs/module-repos.md#the-image), else on the runner, which builds Valkey at `valkey_version` itself. A
+# called workflow's github.repository and github.sha are its caller's, so the caller names the fuzzer's own commit
+# in `fuzzer_ref`: the same tag or SHA as its `uses:`.
 on:
   workflow_call:
     inputs:
@@ -162,21 +162,6 @@ jobs:
           # shellcheck disable=SC2086
           make -C /tmp/valkey -j"$(nproc)" ${MAKE_ARGS}
           echo "/tmp/valkey/src" >> "${GITHUB_PATH}"
-
-      - name: Set up Go
-        if: inputs.image == ''
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
-        with:
-          go-version-file: porcupine/go.mod
-          cache: true
-          cache-dependency-path: porcupine/go.sum
-
-      # valkey.oracle.history runs the porcupine linearizability checker from PATH.
-      - name: Build the porcupine checker
-        if: inputs.image == ''
-        run: |
-          go -C porcupine build -o "${RUNNER_TEMP}/bin/porcupine"
-          echo "${RUNNER_TEMP}/bin" >> "${GITHUB_PATH}"
 
       # In the image too: the checkout is the fuzzer the caller pinned, the image's install may be older.
       - name: Install the fuzzer

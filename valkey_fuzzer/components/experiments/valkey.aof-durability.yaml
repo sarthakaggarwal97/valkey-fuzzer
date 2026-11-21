@@ -8,7 +8,7 @@
 # the buffer before every reply, so a crash of the process loses nothing.
 # `persistence-steps` publishes the persistence model's steps from the log
 # (valkey.persistence-steps), and the kill is the model's Crash.
-extends: [valkey.base, valkey.history, valkey.persistence-steps]
+extends: [valkey.base, valkey.persistence-steps]
 id: valkey.aof-durability
 deployment:
   modes: [standalone]

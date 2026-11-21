@@ -1,6 +1,5 @@
 """The first-run docs match the tool: every ``valkey-fuzzer`` command in the README and the getting-started page
-parses with the real parser, both pages give the fetch command and the build command for ``porcupine``, and the
-experiments they say need it are the ones that extend the ``valkey.history`` fragment.
+parses with the real parser, and the experiments the pages say never build Valkey are the ones that probe for it.
 """
 
 import re
@@ -8,15 +7,12 @@ import shlex
 from pathlib import Path
 
 import pytest
-import yaml
 
 from valkey_fuzzer.cli import create_parser
 from valkey_fuzzer.components import experiments
-from valkey_fuzzer.components.porcupine import RELEASE_TAG
 
 ROOT = Path(__file__).resolve().parents[1]
 PAGES = [ROOT / "README.md", ROOT / "docs" / "getting-started.md", ROOT / "docs" / "reading-a-fail.md"]
-EXPERIMENTS = ROOT / "valkey_fuzzer" / "components" / "experiments"
 
 
 def _commands(page: Path) -> list[str]:
@@ -47,31 +43,6 @@ def test_a_documented_command_parses(page, command):
         create_parser().parse_args(words)
     except SystemExit as exit:  # --version and --help exit 0 after printing; a bad command exits 2
         assert exit.code == 0, command
-
-
-@pytest.mark.parametrize("page", [ROOT / "README.md", ROOT / "docs" / "getting-started.md"])
-def test_the_page_gives_the_fetch_command_and_the_build_command(page):
-    text = page.read_text(encoding="utf-8")
-
-    # The common path needs no Go: the fetch of the pinned release's binary, verified by its sum.
-    assert "\nvalkey-fuzzer-fetch-porcupine\n" in text
-    assert f"`{RELEASE_TAG}`" in text and "SHA-256" in text and "~/.cache/valkey-fuzzer/bin" in text
-    # The build is the other way, and Go is named only for it.
-    assert "Go 1.21" in text
-    assert 'go -C porcupine build -o "$HOME/.local/bin/porcupine"' in text
-    assert "GOPROXY" not in text, "the module is vendored: the build needs no proxy"
-
-
-def test_the_experiments_the_pages_say_need_porcupine_are_the_ones_that_do():
-    needing = set()
-    for path in EXPERIMENTS.glob("*.yaml"):
-        document = yaml.safe_load(path.read_text(encoding="utf-8"))
-        if "valkey.history" in (document.get("extends") or []):
-            needing.add(f"valkey.{path.stem.removeprefix('valkey.')}")
-    assert len(needing) == 7
-    for page in (ROOT / "README.md", ROOT / "docs" / "getting-started.md"):
-        text = page.read_text(encoding="utf-8")
-        assert all(f"`{name}`" in text for name in needing), (page.name, needing)
 
 
 def test_the_experiments_the_pages_say_never_build_valkey_are_the_ones_that_probe():

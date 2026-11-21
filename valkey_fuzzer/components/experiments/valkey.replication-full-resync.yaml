@@ -11,7 +11,7 @@
 # a FAIL. `replication-steps` publishes the replication model's steps from
 # the logs, and `replication-trace` samples every node's replication IDs,
 # offsets and data digest (valkey.replication-steps).
-extends: [valkey.base, valkey.history, valkey.replication-steps, valkey.links-up]
+extends: [valkey.base, valkey.replication-steps, valkey.links-up]
 id: valkey.replication-full-resync
 deployment:
   modes: [standalone, cluster]

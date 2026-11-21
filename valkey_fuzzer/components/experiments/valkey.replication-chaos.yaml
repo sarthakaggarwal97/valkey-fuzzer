@@ -14,7 +14,7 @@
 # `replication-steps` publishes the replication model's steps from the logs,
 # and `replication-trace` samples every node's replication IDs, offsets and
 # data digest (valkey.replication-steps).
-extends: [valkey.writes, valkey.history, valkey.command-table, valkey.replication-steps]
+extends: [valkey.writes, valkey.command-table, valkey.replication-steps]
 id: valkey.replication-chaos
 deployment:
   modes: [standalone]

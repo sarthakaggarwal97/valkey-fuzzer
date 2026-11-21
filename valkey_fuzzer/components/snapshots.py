@@ -110,11 +110,6 @@ def _validate_rdb(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -> Non
     for field in ("bgsave", "workload"):
         if config[field] is not None and config[field] not in components:
             raise ConfigError(f"{field} {config[field]!r} is not a component of this plan")
-    if config["workload"] is not None and plain_config(components[config["workload"]].config).get("clients", 1) > 1:
-        raise ConfigError(
-            f"workload {config['workload']!r} has several clients: a snapshot is checked as a cut of one "
-            "client's write order, which concurrent clients do not have"
-        )
     if config["workload"] is not None:
         # The cut check allows no loss: every acknowledged write up to the cut must be in the RDB. A component
         # that can lose acknowledged writes (valkey.oracle.ledger judges those with loss windows) makes a

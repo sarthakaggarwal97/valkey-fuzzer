@@ -3,13 +3,13 @@
 # Afterwards the cluster must converge on one primary per shard with full slot
 # coverage, the old primary must rejoin as a replica, and no acknowledged write
 # may be lost — except writes the isolated primary itself acknowledged inside
-# the partition window (Valkey Cluster is not linearizable under partitions).
-# Writes its successor acknowledged on the majority side must survive.
+# the partition window (Valkey Cluster trades them for availability under a
+# partition). Writes its successor acknowledged on the majority side must survive.
 # The `failover-logged` oracle requires the nodes to log the failure detection
 # and the successor's election.
 #
 # Needs Linux, root, iptables, and deployment.addressing: per_instance_loopback.
-extends: [valkey.base, valkey.history, valkey.command-table]
+extends: [valkey.base, valkey.command-table]
 id: valkey.cluster-partition
 deployment:
   modes: [cluster]
