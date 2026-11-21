@@ -10,7 +10,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.support import component_registration, deployment_identity, deployment_registrations, make_catalog
+from tests.support import (
+    component_registration,
+    deployment_identity,
+    deployment_registrations,
+    make_catalog,
+    wait_until,
+)
 from valkey_fuzzer import deadlines
 from valkey_fuzzer import runner as runner_module
 from valkey_fuzzer.catalog import ComponentRegistry
@@ -561,10 +567,7 @@ def short_grace(monkeypatch):
     monkeypatch.setattr("valkey_fuzzer.deadlines.CANCEL_GRACE_S", 0.1)
     monkeypatch.setattr("valkey_fuzzer.runner._CLEANUP_DISPATCH_S", 0.5)
     yield
-    until = time.monotonic() + 10
-    while deadlines.abandoned_calls() and time.monotonic() < until:
-        time.sleep(0.01)
-    assert not deadlines.abandoned_calls()
+    assert wait_until(lambda: not deadlines.abandoned_calls(), 10)
 
 
 @pytest.mark.parametrize("released_by_cleanup", [True, False])
@@ -727,9 +730,7 @@ def test_ctrl_c_cancels_the_call_in_flight(short_grace, monkeypatch):
     with pytest.raises(KeyboardInterrupt):
         _execute(_plan((_spec(ACTION, "act"),)), (ACTION, Busy), calls=calls, deadline=started + 30)
 
-    until = time.monotonic() + 5
-    while not seen and time.monotonic() < until:
-        time.sleep(0.01)
+    wait_until(lambda: seen)
     assert seen == {"slept": False, "cancelled": True} and calls[-1] == "standalone.cleanup"
     assert time.monotonic() - started < 5
 

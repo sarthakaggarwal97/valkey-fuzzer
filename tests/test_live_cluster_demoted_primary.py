@@ -11,12 +11,12 @@ exists. Run only these with ``pytest -m live -k demoted_primary``.
 """
 
 import signal
-import time
 
 import pytest
 
 from tests.deployment_support import formed_cluster
 from tests.live_support import BINARY, free_port_block
+from tests.support import wait_until
 from valkey_fuzzer.deployment.local.queries import valkey_client
 
 pytestmark = [pytest.mark.live, pytest.mark.slow]
@@ -42,15 +42,6 @@ def _owns_slots(node):
     return len(myself) > 8 and "master" in myself[2]
 
 
-def _wait(predicate, timeout_s):
-    deadline = time.monotonic() + timeout_s
-    while not predicate():
-        if time.monotonic() > deadline:
-            return False
-        time.sleep(0.1)
-    return True
-
-
 def _fail_over_then_kill_the_new_primary(nodes, shard, *, block_first_sync):
     """Fail ``shard`` over to its replica R, wait until the old primary P follows R, SIGKILL R; P and R."""
 
@@ -63,8 +54,10 @@ def _fail_over_then_kill_the_new_primary(nodes, shard, *, block_first_sync):
             client.execute_command("CONFIG", "SET", "requirepass", "first-sync-blocker")
         client.execute_command("CLUSTER", "FAILOVER")
     info = lambda: _query(primary, "INFO")  # noqa: E731
-    assert _wait(lambda: info().get("role") == "slave" and int(info().get("master_port") or 0) == replica.port, 30)
-    assert block_first_sync or _wait(lambda: info().get("master_link_status") == "up", 30), (
+    assert wait_until(
+        lambda: info().get("role") == "slave" and int(info().get("master_port") or 0) == replica.port, 30, 0.1
+    )
+    assert block_first_sync or wait_until(lambda: info().get("master_link_status") == "up", 30, 0.1), (
         "the first sync never finished"
     )
     replica.process.send_signal(signal.SIGKILL)
@@ -77,10 +70,12 @@ def test_a_demoted_primary_takes_its_slots_back_when_its_new_primary_dies_before
     with formed_cluster(3, 1, base_port, valkey_binary=BINARY, base_data_dir=str(tmp_path)) as formed:
         # Control: a demoted primary that synced takes its slots back.
         primary, _ = _fail_over_then_kill_the_new_primary(formed.nodes, 1, block_first_sync=False)
-        assert _wait(lambda: _owns_slots(primary), TAKEOVER_TIMEOUT_S), "the synced old primary did not fail over"
+        assert wait_until(lambda: _owns_slots(primary), TAKEOVER_TIMEOUT_S, 0.1), (
+            "the synced old primary did not fail over"
+        )
 
         primary, replica = _fail_over_then_kill_the_new_primary(formed.nodes, 0, block_first_sync=True)
-        if _wait(lambda: _owns_slots(primary), TAKEOVER_TIMEOUT_S):
+        if wait_until(lambda: _owns_slots(primary), TAKEOVER_TIMEOUT_S, 0.1):
             return  # This Valkey build has the fix.
         with open(primary.log_file, encoding="utf-8", errors="replace") as log:
             refusals = [line.strip() for line in log if REFUSAL in line]

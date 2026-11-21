@@ -11,6 +11,7 @@ from typing import Any, Optional
 from unittest.mock import patch
 
 from valkey_fuzzer.catalog import Catalog, ComponentRegistry, DeploymentProviderRegistry
+from valkey_fuzzer.deadlines import wait_for
 from valkey_fuzzer.declarations import Declarations
 from valkey_fuzzer.environment import (
     EnvironmentProviderRegistration,
@@ -37,6 +38,17 @@ def fake_executable(path, script="") -> Path:
     path.write_text(f"#!/bin/sh\n{script}\n")
     path.chmod(0o755)
     return path
+
+
+def wait_until(predicate, timeout=5.0, interval=0.01) -> bool:
+    """Poll ``predicate`` every ``interval`` seconds of real time until it holds or ``timeout`` seconds pass:
+    whether it held.
+
+    The harness's one wait, :func:`deadlines.wait_for`, under a test's own waits (a thread to finish, a file to
+    appear), so a test with a VirtualClock on ``deadlines`` cannot use it.
+    """
+
+    return wait_for(lambda: (bool(predicate()), None), timeout_s=timeout, interval_s=interval, reason="the test")[0]
 
 
 def component_registration(component_id="example.action.fake", role=None, *, factory=object, **options):

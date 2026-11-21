@@ -47,6 +47,12 @@ def _run_scripts(workflow):
     return [step["run"] for job in workflow["jobs"].values() for step in job.get("steps", ()) if "run" in step]
 
 
+def _summary(batch, **summary):
+    """``batch``'s ``summary.json`` holding ``summary``, as the batch runner writes it."""
+
+    (batch / "summary.json").write_text(json.dumps(summary))
+
+
 def test_pr_fuzzer_keeps_its_reusable_workflow_inputs_and_jobs():
     workflow = _workflow("valkey-pr-fuzzer.yml")
     inputs = workflow["on"]["workflow_call"]["inputs"]
@@ -505,7 +511,7 @@ def test_the_pr_fuzzer_metadata_reads_a_real_run_report(tmp_path):
     )
     write_document(str(folder / "report.json"), valkey_service().run_report(outcome))
     run = {"id": folder.name, "status": "FAIL", "seed": 31, "summary": "x", "report": f"runs/{folder.name}/report.json"}
-    (batch / "summary.json").write_text(json.dumps({"status": "FAIL", "runs": [run]}))
+    _summary(batch, status="FAIL", runs=[run])
 
     metadata = CI.metadata(1, str(batch), "success", "failure")
 
@@ -518,7 +524,7 @@ def test_the_pr_fuzzer_metadata_reads_a_real_run_report(tmp_path):
 
 def test_the_pr_fuzzer_metadata_of_a_run_without_a_report_keeps_the_batch_verdict(tmp_path):
     run = {"id": "s7", "status": "ERROR", "seed": 7, "summary": "WorkerExit: no run report", "report": None}
-    (tmp_path / "summary.json").write_text(json.dumps({"status": "ERROR", "runs": [run]}))
+    _summary(tmp_path, status="ERROR", runs=[run])
 
     metadata = CI.metadata(2, str(tmp_path), "success", "failure")
 
@@ -1138,7 +1144,7 @@ def test_the_pr_batch_drops_the_write_ledgers_of_the_runs_that_passed(tmp_path):
         (batch / "runs" / run_id / "report.json").write_text("{}")
         runs.append({"id": run_id, "status": status, "summary": "x", "report": f"runs/{run_id}/report.json"})
     runs.append({"id": "lost", "status": "PASS", "summary": "x", "report": None})
-    (batch / "summary.json").write_text(json.dumps({"runs": runs}))
+    _summary(batch, runs=runs)
     (env,) = _step_env("fuzzer-pr-batch.yml", "drop-ledgers")
     assert "BATCH_DIR" in env
 
@@ -1177,16 +1183,8 @@ def test_the_batch_summary_lists_every_run_with_its_report_and_the_signatures(tm
     ]
     signatures = [{"count": 1, "label": "FAIL | valkey.cluster-chaos | chaos:FAIL"}]
     conformance = {"replication": {"status": "pass", "approved": True, "counts": {"pass": 3, "unexercised": 1}}}
-    (batch / "summary.json").write_text(
-        json.dumps(
-            {
-                "status": "FAIL",
-                "counts": {"FAIL": 1, "ERROR": 1},
-                "runs": runs,
-                "signatures": signatures,
-                "conformance": conformance,
-            }
-        )
+    _summary(
+        batch, status="FAIL", counts={"FAIL": 1, "ERROR": 1}, runs=runs, signatures=signatures, conformance=conformance
     )
 
     summary = CI.batch_summary("Soak", str(batch), "`valkey-io/valkey` `-` `abc`")

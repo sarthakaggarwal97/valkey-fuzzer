@@ -1407,6 +1407,13 @@ def _check(value, name):
     return value["checks"][name]
 
 
+def _fault_checks(builds, commands, seeds=(1, 2, 3, 4, 5, 6, 7, 8), **options):
+    """``commands`` run with the faults check under each of ``seeds``: ``(result, faults check value)`` per seed."""
+
+    runs = [run(builds, commands, seed=seed, checks={"faults": True}, **options) for seed in seeds]
+    return [(result, _check(value, "faults")) for result, value in runs]
+
+
 def _replicating(digest=b"d1"):
     """Every server's replication caught up, with ``digest`` (a reply, or a function of the server)."""
 
@@ -1861,11 +1868,9 @@ def test_a_sequence_that_changes_persistence_gets_only_reloads(builds, setting):
     # design; a DEBUG RELOAD saves and loads one file whatever the settings.
     _replicating()
     commands = [{"command": ["CONFIG", "SET", *setting]}, *_WRITES]
-    for seed in range(1, 6):
-        result, value = run(builds, commands, seed=seed, checks={"faults": True})
-
+    for result, faults in _fault_checks(builds, commands, range(1, 6)):
         assert result.status.value == "PASS", result.summary
-        assert {item["fault"] for item in _check(value, "faults")["faults"]} == {"reload"}
+        assert {item["fault"] for item in faults["faults"]} == {"reload"}
 
 
 def test_unreplicated_keys_on_a_node_started_with_appendonly_get_only_reloads(builds):
@@ -1874,16 +1879,12 @@ def test_unreplicated_keys_on_a_node_started_with_appendonly_get_only_reloads(bu
     _replicating()
     commands = [{"command": ["DEBUG", "POPULATE", 10]}, *_WRITES]
     kinds = set()
-    for seed in range(1, 9):
-        result, value = run(builds, commands, seed=seed, server_config={"appendonly": "yes"}, checks={"faults": True})
+    for result, faults in _fault_checks(builds, commands, server_config={"appendonly": "yes"}):
         assert result.status.value == "PASS", result.summary
-        kinds |= {item["fault"] for item in _check(value, "faults")["faults"]}
+        kinds |= {item["fault"] for item in faults["faults"]}
     assert kinds == {"reload"}
     # Without appendonly a restart loads the RDB saved at shutdown, so restarts stay.
-    kinds = set()
-    for seed in range(1, 9):
-        _, value = run(builds, commands, seed=seed, checks={"faults": True})
-        kinds |= {item["fault"] for item in _check(value, "faults")["faults"]}
+    kinds = {item["fault"] for _, faults in _fault_checks(builds, commands) for item in faults["faults"]}
     assert kinds == {"reload", "restart"}
 
 
@@ -2063,22 +2064,12 @@ def test_a_sequence_that_writes_unreplicated_keys_persists_them_by_rdb(builds, m
     # AOF came back without them.
     monkeypatch.setattr(checks, "_PERSISTENCE", ({"save": "3600 1"}, {"appendonly": "yes"}))
     commands = [{"command": ["DEBUG", "POPULATE", 10]}, *_WRITES]
-    persistences = set()
     # And one whose AOF would replay RESTOREs without the DEBUG setting they ran under (the walk's test of
     # valkey#5212 replayed).
     _replicating()
-    for seed in range(1, 9):
-        _, value = run(
-            builds,
-            [{"command": ["DEBUG", "SET-SKIP-CHECKSUM-VALIDATION", "1"]}, *_WRITES],
-            seed=seed,
-            checks={"faults": True},
-        )
-        persistences.add(str(_check(value, "faults")["persistence"]))
-    for seed in range(1, 9):
-        _, value = run(builds, commands, seed=seed, checks={"faults": True})
-        persistences.add(str(_check(value, "faults")["persistence"]))
-    assert persistences == {str({"save": "3600 1"})}
+    skipping = [{"command": ["DEBUG", "SET-SKIP-CHECKSUM-VALIDATION", "1"]}, *_WRITES]
+    judged = [*_fault_checks(builds, skipping), *_fault_checks(builds, commands)]
+    assert {str(faults["persistence"]) for _, faults in judged} == {str({"save": "3600 1"})}
 
 
 def test_a_sequence_that_puts_an_aof_in_place_persists_by_rdb_so_no_node_loads_that_aof(builds, monkeypatch):
@@ -2090,10 +2081,7 @@ def test_a_sequence_that_puts_an_aof_in_place_persists_by_rdb_so_no_node_loads_t
         "appendonlydir/appendonly.aof.manifest": "file appendonly.aof.1.incr.aof seq 1 type i\n",
         "appendonlydir/appendonly.aof.1.incr.aof": "*1\r\n$4\r\nINCR\r\n",
     }
-    persistences = set()
-    for seed in range(1, 9):
-        _, value = run(builds, _WRITES, seed=seed, files=files, checks={"faults": True})
-        persistences.add(str(_check(value, "faults")["persistence"]))
+    persistences = {str(faults["persistence"]) for _, faults in _fault_checks(builds, _WRITES, files=files)}
     assert persistences == {str({"save": "3600 1"})}
 
 

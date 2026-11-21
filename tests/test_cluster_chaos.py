@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tests.support import VirtualClock
+from tests.support import VirtualClock, wait_until
 from tests.valkey_experiments_support import (
     chaos_operation,
     evidence_values,
@@ -289,9 +289,8 @@ class _GatedCluster(FakeCluster):
     """Shard 0's failovers finish only once valkey-2, shard 1's primary, is dead."""
 
     def failover(self, shard, **kwargs):
-        deadline = time.monotonic() + 10
-        while shard == 0 and self.alive["valkey-2"] and time.monotonic() < deadline:
-            time.sleep(0.01)
+        if shard == 0:
+            wait_until(lambda: not self.alive["valkey-2"], 10)
         return super().failover(shard, **kwargs)
 
 

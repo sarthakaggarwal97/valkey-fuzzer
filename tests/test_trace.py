@@ -3,13 +3,12 @@ transaction, and the mapping's ``sample:`` section is checked when the bundle lo
 
 import json
 import shutil
-import time
 from pathlib import Path
 
 import pytest
 
 from tests.fakes import FakeClient, FakeHandle, fake_instances
-from tests.support import FORMAL
+from tests.support import FORMAL, wait_until
 from tests.valkey_experiments_support import fake_context, registration_for, rejects_config, resolved, unit_plan
 from valkey_fuzzer.components.trace import TraceObserver
 from valkey_fuzzer.plan import ComponentSpec
@@ -96,9 +95,7 @@ def test_a_round_samples_what_the_mapping_asks_for_in_one_transaction(tmp_path):
     assert observer.start(context, spec).status is ComponentStatus.PASS
     context.event_bus.publish("writes.seeded", source="writes", payload={})
     context.event_bus.publish("replication.promoted", source="log", payload={"instance_id": "valkey-1"})
-    deadline = time.monotonic() + 5
-    while observer._rounds < 2 and time.monotonic() < deadline:
-        time.sleep(0.01)
+    wait_until(lambda: observer._rounds >= 2)
     result = observer.stop(context, spec)
 
     assert result.status is ComponentStatus.PASS, result.summary

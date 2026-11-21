@@ -44,7 +44,7 @@ from valkey_fuzzer.spec import conform
 from valkey_fuzzer.spec.tla import TOOLS_HINT, TlaTools
 
 from .batch_worker_stub import InProcessWorkers
-from .support import ROOT, fake_executable
+from .support import ROOT, fake_executable, wait_until
 from .valkey_experiments_support import valkey_service
 
 STUB = [sys.executable, str(ROOT / "tests" / "batch_worker_stub.py")]
@@ -99,6 +99,20 @@ def _log(runner):
 
 def _results(runner):
     return {path.stem: json.loads(path.read_text()) for path in Path(runner.folder, "results").glob("*.json")}
+
+
+def _interrupted_worker(runner, job, pid):
+    """``workers.json`` as a killed batch leaves it: slot 0's worker, process ``pid``, on ``job``; that worker's owner."""
+
+    owner = InProcessWorkers.owner(pid)
+    worker = {"slot": 0, "job": job, "pid": owner.pid, "owner": owner.token}
+    Path(runner.folder, "workers.json").write_text(json.dumps({"0": worker}))
+    return owner
+
+
+_REPLICATION_PLAN = {
+    "components": [{"use": "valkey.observer.log-trigger", "id": "steps", "config": {"spec": "replication"}}]
+}
 
 
 def _leaked_and_removed(stub):
@@ -391,13 +405,10 @@ def test_a_resumed_batch_sweeps_and_reruns_only_the_job_that_was_running_and_one
     runner.run()
     # As a killed batch leaves it: no result for s1, its worker in workers.json, and what that worker left.
     Path(runner.folder, "results", f"{_id(1)}.json").unlink()
-    owner = InProcessWorkers.owner(5_999_999)
+    owner = _interrupted_worker(runner, _id(1), 5_999_999)
     leftover = Path(runner.folder, "work", "w0", "data", "deployment-left")
     leftover.mkdir(parents=True)
     (leftover / OWNER_FILE).write_text(json.dumps({"owner": owner.token, "pid": owner.pid, "kind": "deployment"}))
-    Path(runner.folder, "workers.json").write_text(
-        json.dumps({"0": {"slot": 0, "job": _id(1), "pid": owner.pid, "owner": owner.token}})
-    )
 
     summary = BatchRunner(runner.folder).run()
 
@@ -415,10 +426,7 @@ def test_a_resume_keeps_the_run_folder_of_a_job_that_finished_before_its_worker_
     runner = _batch(tmp_path, [_random(1)])
     runner.run()
     # Killed between writing the job's result and rewriting workers.json.
-    owner = InProcessWorkers.owner(5_999_998)
-    Path(runner.folder, "workers.json").write_text(
-        json.dumps({"0": {"slot": 0, "job": _id(0), "pid": owner.pid, "owner": owner.token}})
-    )
+    _interrupted_worker(runner, _id(0), 5_999_998)
 
     summary = BatchRunner(runner.folder).run()
 
@@ -460,10 +468,7 @@ def test_a_resume_runs_nothing_on_a_slot_whose_interrupted_job_left_what_the_swe
     runner = _batch(tmp_path, [_random(2)], workers=2)
     runner.run()
     Path(runner.folder, "results", f"{_id(1)}.json").unlink()
-    owner = InProcessWorkers.owner(5_999_997)
-    Path(runner.folder, "workers.json").write_text(
-        json.dumps({"0": {"slot": 0, "job": _id(1), "pid": owner.pid, "owner": owner.token}})
-    )
+    owner = _interrupted_worker(runner, _id(1), 5_999_997)
     resumed = BatchRunner(runner.folder)
     sweep_slot = resumed._sweep
     # A chain a root batch left, swept by a resume that is not root: it would partition slot 0's addresses.
@@ -865,8 +870,7 @@ def test_a_worker_checks_its_run_against_the_bundles_its_plan_names(tmp_path, wo
 
 
 def test_a_run_whose_plan_names_a_bundle_but_whose_worker_wrote_no_conformance_is_an_error(tmp_path, monkeypatch):
-    plan = {"components": [{"use": "valkey.observer.log-trigger", "id": "steps", "config": {"spec": "replication"}}]}
-    report = {"status": "PASS", "outcome": {"plan": plan}}
+    report = {"status": "PASS", "outcome": {"plan": _REPLICATION_PLAN}}
     # The entry says whether the claims are approved, as the worker's would: replication's are a draft.
     assert conform_plugin._conformance(str(tmp_path), report) == {
         "replication": {
@@ -892,10 +896,9 @@ def test_a_run_whose_plan_names_a_bundle_but_whose_worker_wrote_no_conformance_i
 def test_a_run_that_checked_itself_is_not_checked_again_and_its_verdict_stands(tmp_path, monkeypatch):
     # The run's report carries its conform section and the verdict it gave (judge_run): the plug-in takes both as
     # they are, runs no TLC, writes no conform.json, and leaves a run that predates the section to its own path.
-    plan = {"components": [{"use": "valkey.observer.log-trigger", "id": "steps", "config": {"spec": "replication"}}]}
     recorded = {"replication": {"approved": True, **VIOLATED}}
     report = {"status": "FAIL", "summary": "spec conform replication: OneHistoryPerId violated; experiment passed",
-              "outcome": {"plan": plan}, "conform": recorded}  # fmt: skip
+              "outcome": {"plan": _REPLICATION_PLAN}, "conform": recorded}  # fmt: skip
     (tmp_path / "report.json").write_text(json.dumps(report))
     monkeypatch.setattr(conform_plugin, "conform_run", Mock(side_effect=AssertionError("TLC ran twice")))
     conform_plugin._conform(str(tmp_path), 300.0)
@@ -982,8 +985,7 @@ def test_the_conform_tlc_time_limit_is_a_batch_option_named_when_it_stops_a_chec
 def test_a_check_that_does_not_finish_still_writes_why_for_each_bundle(tmp_path, monkeypatch):
     # Otherwise the batch sees only that conform.json is missing, and holds that against an approved bundle's run
     # with no reason it could act on.
-    plan = {"components": [{"use": "valkey.observer.log-trigger", "id": "steps", "config": {"spec": "replication"}}]}
-    (tmp_path / "report.json").write_text(json.dumps({"status": "PASS", "outcome": {"plan": plan}}))
+    (tmp_path / "report.json").write_text(json.dumps({"status": "PASS", "outcome": {"plan": _REPLICATION_PLAN}}))
 
     def broken(folder, tools, unavailable=""):
         raise ValueError("trace.jsonl does not start with a trace header")
@@ -1043,10 +1045,7 @@ def test_a_killed_batch_resumes_without_rerunning_finished_jobs_or_leaving_anyth
     runner, results = _batch(tmp_path, [_random(5)], workers=2), Path(tmp_path, "b", "results")
     script = _DRIVER.format(root=str(ROOT), folder=runner.folder)
     driver = subprocess.Popen([sys.executable, "-c", script], cwd=str(ROOT), start_new_session=True)
-    deadline = time.monotonic() + 60
-    while not (results.exists() and len(list(results.glob("*.json"))) >= 2):
-        assert time.monotonic() < deadline, "timed out"
-        time.sleep(0.1)
+    assert wait_until(lambda: results.exists() and len(list(results.glob("*.json"))) >= 2, 60), "timed out"
     os.kill(driver.pid, kill)
     driver.wait(timeout=60)
     finished = {path.stem for path in results.glob("*.json")}
