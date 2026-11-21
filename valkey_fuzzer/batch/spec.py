@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 from ..deployment.local.config import CLUSTER_BUS_PORT_OFFSET, MAX_TCP_PORT
 from ..deployment.local.ports import ephemeral_overlap
-from ..reports import InputError, read_yaml_mapping
+from ..reports import InputError, format_version_problem, load_document, read_yaml_mapping
 from ..schema import ConfigError, ConfigField, ConfigSchema
 from ..service import CONFORM_TLC_TIMEOUT_S
 from . import hooks
@@ -126,6 +126,19 @@ def normalize_source(source: Any, base_dir: str) -> dict[str, Any]:
     except ConfigError as exc:
         raise BatchError(str(exc)) from None
     return {kind: definition.normalize(settings, base_dir, where)}
+
+
+def read_batch_file(path: str) -> Any:
+    """A batch folder's JSON file; a ``BatchError`` names one that is missing, unreadable, or another fuzzer version's."""
+
+    try:
+        document = load_document(path)
+    except InputError as exc:
+        raise BatchError(f"not a batch folder: {exc}") from None
+    problem = format_version_problem(document, path)
+    if problem is not None:
+        raise BatchError(problem)
+    return document
 
 
 def load_spec(path: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:

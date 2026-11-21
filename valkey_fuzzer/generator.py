@@ -108,7 +108,7 @@ from ._data import derived_int, to_plain_data
 from .catalog import Catalog
 from .compiler import NO_OVERRIDES, Overrides, with_valkey_binary
 from .documents import ABSENT, get_path, merge
-from .fields import is_number
+from .fields import is_number, json_equal
 from .plan import ExecutionPlan, ExperimentSpec
 from .runner import RunnerError
 from .schema import ConfigError, ConfigField, ConfigSchema, ScenarioCompileError
@@ -169,20 +169,10 @@ class Exclusion:
     def matches(self, value: Any) -> bool:
         """Whether ``value`` is the excluded one: a string as written, anything else as YAML reads it."""
 
-        return _same(value, self.value if isinstance(value, str) else self.parsed)
+        return json_equal(value, self.value if isinstance(value, str) else self.parsed)
 
     def __str__(self) -> str:
         return f"{self.path}={self.value}"
-
-
-def _same(value: Any, expected: Any) -> bool:
-    """Equality in the YAML data model: a boolean is never a number or a string."""
-
-    if isinstance(value, bool) or isinstance(expected, bool):
-        return type(value) is type(expected) and value == expected
-    if is_number(value) and is_number(expected):
-        return value == expected
-    return isinstance(value, str) and isinstance(expected, str) and value == expected
 
 
 def _check_path(path: Any, where: str) -> None:
@@ -528,7 +518,7 @@ class Profile:
         if rule.values and path in self.weights:
             table = self.weights[path]
             weights = tuple(
-                next((weight for listed, weight in table if _same(value, listed)), default)
+                next((weight for listed, weight in table if json_equal(value, listed)), default)
                 for value, default in zip(rule.values, rule.weights)
             )
             return replace(rule, weights=weights)
@@ -824,7 +814,8 @@ class GeneratorBlock:
                 return f"holds the excluded {item}"
         for rule in self.reject:
             if all(
-                any(_same(value, expected) for value in _plan_values(plan, path)) for path, expected in rule.items()
+                any(json_equal(value, expected) for value in _plan_values(plan, path))
+                for path, expected in rule.items()
             ):
                 return f"matches the reject rule {rule}"
         return None

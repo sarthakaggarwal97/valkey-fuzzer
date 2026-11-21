@@ -10,13 +10,11 @@ artifact, resource, and policy declarations with their config. Nothing here
 interprets experiment or component IDs, or a provider's deployment document.
 """
 
-import hashlib
-import json
 from collections import Counter
 from collections.abc import Collection
 from typing import Any
 
-from ._data import to_plain_data
+from ._data import sha256_json, to_plain_data
 from .plan import ExecutionPlan
 from .protocols import ComponentRole
 from .results import RunOutcome
@@ -24,7 +22,7 @@ from .results import RunOutcome
 
 def _digest(value: Any) -> str:
     # Plain data only: a set's str() has no fixed order, so a key over it would differ between processes.
-    return hashlib.sha256(json.dumps(value, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+    return sha256_json(value, 16)
 
 
 def static_tuple(plan: ExecutionPlan, host_fields: Collection[str] = ()) -> dict[str, Any]:

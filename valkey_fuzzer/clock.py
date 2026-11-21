@@ -1,5 +1,4 @@
-"""The run clock: where the harness reads a timestamp it will compare with another, and the wall-clock stamp of
-the files it writes.
+"""The run clock: where the harness reads a timestamp it will compare with another, and the stamp of its files.
 
 An action's or fault's ``applied_at``, ``started_at``, ``completed_at`` and ``ended_at`` are on this clock; the
 report-only fields stay on wall time: an obligation's ``opened_at`` and ``undone_at``, the ``started_at`` and
@@ -25,7 +24,6 @@ def now() -> float:
 
 
 def utc_iso(at: Optional[float] = None) -> str:
-    """``at`` (seconds since the epoch; now by default) as ``YYYY-MM-DDTHH:MM:SSZ``: when a report, batch, summary
-    or assurance file was written or started."""
+    """``at`` (seconds since the epoch; now by default) as ``YYYY-MM-DDTHH:MM:SSZ``, the wall-clock stamp of a file."""
 
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(at))

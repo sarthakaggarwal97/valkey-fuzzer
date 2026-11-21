@@ -228,7 +228,7 @@ def test_a_document_holding_what_json_cannot_write_is_an_error_not_its_str(tmp_p
     target = tmp_path / "report.json"
     with pytest.raises(ReportWriteError, match=r"could not write the report to .*report\.json: Object of type set"):
         reports.write_document(str(target), {"keys": {"b", "a"}})
-    with pytest.raises(TypeError, match="not JSON serializable"):
+    with pytest.raises(TypeError, match="cannot convert set to plain data"):
         coverage._digest({"b", "a"})
     assert not target.exists()
     reports.write_document(str(target), {"keys": ["a", "b"]})

@@ -23,7 +23,7 @@ from typing import Any, Optional, TextIO, Union
 import yaml
 
 from ._data import to_plain_data
-from .fields import is_number, located, strict_fields
+from .fields import is_number, json_equal, located, strict_fields
 from .references import EnvironmentKind, EnvironmentReference, collect_environment_references
 
 INPUT_SEGMENT = r"[A-Za-z0-9][A-Za-z0-9_-]*"
@@ -198,20 +198,6 @@ def plain_config(value: Any) -> Any:
     return value
 
 
-def _json_equal(left: Any, right: Any) -> bool:
-    """Equality in the JSON data model (``True`` is not ``1``)."""
-
-    if isinstance(left, bool) or isinstance(right, bool) or left is None or right is None:
-        return type(left) is type(right) and left == right
-    if is_number(left) and is_number(right):
-        return left == right
-    if isinstance(left, Mapping) and isinstance(right, Mapping):
-        return set(left) == set(right) and all(_json_equal(left[key], right[key]) for key in left)
-    if isinstance(left, (list, tuple)) and isinstance(right, (list, tuple)):
-        return len(left) == len(right) and all(_json_equal(a, b) for a, b in zip(left, right))
-    return isinstance(left, str) and isinstance(right, str) and left == right
-
-
 def _type_name(value: Any) -> str:
     return "null" if value is None else type(value).__name__
 
@@ -267,7 +253,7 @@ class ConfigField:
         self.choices = None if choices is None else tuple(choices)
         if self.choices is not None and (
             not self.choices
-            or any(_json_equal(a, b) for index, a in enumerate(self.choices) for b in self.choices[:index])
+            or any(json_equal(a, b) for index, a in enumerate(self.choices) for b in self.choices[:index])
         ):
             raise ValueError("allowed values must be a non-empty list without duplicates")
         for name, bound in (("minimum", minimum), ("maximum", maximum)):
@@ -352,7 +338,7 @@ class ConfigField:
                 raise ConfigError(f"{where} must be {self._describe()}, got {_type_name(value)}")
         if isinstance(value, float) and not math.isfinite(value):
             raise ConfigError(f"{where} must be finite")
-        if self.choices is not None and not any(_json_equal(value, choice) for choice in self.choices):
+        if self.choices is not None and not any(json_equal(value, choice) for choice in self.choices):
             raise ConfigError(f"{where} must be one of {list(self.choices)}, got {value!r}")
         if self.minimum is not None or self.maximum is not None:
             if not is_number(value):

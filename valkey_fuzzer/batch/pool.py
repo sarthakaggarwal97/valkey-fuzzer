@@ -20,12 +20,12 @@ from ..findings import FINDINGS_FILE, STATUSES
 from ..findings import record as record_findings
 from ..hoststate import Owner, open_shared_lock, owner_of, shared_directory, sweep
 from ..provenance import catalog_digest
-from ..reports import FORMAT_VERSION, REPORT_FILE, SCENARIO_FILE, format_version_problem, write_document
+from ..reports import FORMAT_VERSION, REPORT_FILE, SCENARIO_FILE, write_document
 from ..service import DEFAULT_TIMEOUT_S, RunService
 from . import hooks
 from .jobs import Expansion, ids_per_signature, job_definition
-from .results import job_result, read_json, results_of
-from .spec import BatchError, BatchOptions
+from .results import job_result, results_of
+from .spec import BatchError, BatchOptions, read_batch_file
 from .summary import summarize
 
 # A run's own deadline is cooperative; the batch stops its worker this much later
@@ -96,13 +96,10 @@ class BatchRunner:
 
     def __init__(self, folder: str):
         self.folder = os.path.abspath(folder)
-        spec = read_json(os.path.join(self.folder, "batch.json"))
-        problem = format_version_problem(spec, os.path.join(self.folder, "batch.json"))
-        if problem is not None:
-            raise BatchError(problem)
+        spec = read_batch_file(os.path.join(self.folder, "batch.json"))
         self.options = BatchOptions(**spec["options"])
         self.spec = spec
-        self.jobs: list[dict[str, Any]] = read_json(os.path.join(self.folder, "jobs.json"))
+        self.jobs: list[dict[str, Any]] = read_batch_file(os.path.join(self.folder, "jobs.json"))
         self.stop_requested = False
         self._running: dict[int, _Running] = {}
         # Slots whose sweep could not remove a leftover: its ports or addresses may still be taken.
@@ -290,7 +287,7 @@ class BatchRunner:
         path = self._path("workers.json")
         if not os.path.exists(path):
             return
-        for entry in read_json(path).values():
+        for entry in read_batch_file(path).values():
             owner = Owner.parse(entry["owner"])
             if owner is not None and owner.alive():
                 self.log(f"stopping worker {entry['pid']} of {entry['job']}, left running by an interrupted batch")

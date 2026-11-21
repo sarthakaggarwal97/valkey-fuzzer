@@ -186,6 +186,12 @@ def test_excluded_and_rejected_values_never_appear(tmp_path):
     # Strings compare as written, other values as YAML reads them: an unquoted no also excludes false.
     assert Exclusion.parse("inputs.flag=no").matches(False) and not Exclusion.parse("inputs.count=1").matches(True)
     assert Exclusion.parse("inputs.ratio=0.5").matches(0.5) and not Exclusion.parse("server_config.x=no").matches("yes")
+    # A list or mapping value compares item by item, so a rule or exclusion that lists one matches.
+    listed = _runtime(tmp_path / "listed", {"reject": [{"inputs.waves": []}]})
+    with pytest.raises(GeneratorError, match=r"matches the reject rule"):
+        _generate(listed, 1)
+    assert Exclusion.parse("inputs.waves=[a, b]").matches(["a", "b"])
+    assert not Exclusion.parse("inputs.waves=[a]").matches(["a", "b"])
     for text in ("novalue", "other.path=1", "inputs=1", "inputs.x=[unclosed"):
         with pytest.raises(GeneratorError):
             Exclusion.parse(text)

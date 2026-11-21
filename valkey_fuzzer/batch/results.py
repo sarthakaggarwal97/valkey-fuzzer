@@ -1,24 +1,18 @@
 """A finished job's result: its status, failure signature, and what the plug-ins judged and recorded."""
 
-import json
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Optional
 
 from ..minimize import empty_signature, failure_signature, signature_key, signature_label
-from ..reports import REPORT_FILE
+from ..reports import REPORT_FILE, InputError, load_document
 from ..results import RunOutcome
 from . import hooks
 from .spec import worst
 
 # What a worker that could not start its run writes instead of a report.
 ERROR_FILE = "error.json"
-
-
-def read_json(path: str) -> Any:
-    with open(path, encoding="utf-8") as handle:
-        return json.load(handle)
 
 
 def results_of(folder: str) -> dict[str, dict[str, Any]]:
@@ -28,7 +22,7 @@ def results_of(folder: str) -> dict[str, dict[str, Any]]:
     if not os.path.isdir(directory):
         return {}
     return {
-        name[: -len(".json")]: read_json(os.path.join(directory, name))
+        name[: -len(".json")]: load_document(os.path.join(directory, name))
         for name in sorted(os.listdir(directory))
         if name.endswith(".json")
     }
@@ -84,11 +78,11 @@ def job_result(
     error: Optional[dict[str, Any]] = None
     if os.path.exists(report_path):
         try:
-            report = read_json(report_path)
-        except (OSError, ValueError) as exc:
+            report = load_document(report_path)
+        except InputError as exc:
             error = {"type": "UnreadableReport", "message": str(exc), "phase": "batch"}
     elif os.path.exists(os.path.join(run_dir, ERROR_FILE)):
-        error = read_json(os.path.join(run_dir, ERROR_FILE))
+        error = load_document(os.path.join(run_dir, ERROR_FILE))
     if report is None and error is None:
         reason = "it exceeded its deadline" if timed_out else f"the worker exited with code {exit_code}"
         error = {
