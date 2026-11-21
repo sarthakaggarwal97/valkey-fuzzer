@@ -45,13 +45,11 @@ Every property has a live check: the election-safety oracle in the experiments t
 
 ## Run
 
-Needs Java 11 or later and `tla2tools.jar` from
-<https://github.com/tlaplus/tlaplus/releases>. CI uses release v1.7.4
-(TLC 2.19); download and check it with:
+Needs Java 11 or later and `tla2tools.jar`
+([Java and the jar](../../docs/spec-bridge.md#java-and-the-jar) has the
+download and its checksum).
 
 ```bash
-curl -fsSL -o tla2tools.jar https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
-echo "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88  tla2tools.jar" | sha256sum -c -
 valkey-fuzzer spec check cluster-election --tla2tools tla2tools.jar --output assurance.json
 ```
 

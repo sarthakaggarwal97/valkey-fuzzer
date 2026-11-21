@@ -52,9 +52,9 @@ valkey-fuzzer run examples/valkey/clock_skew_expiry.yaml
 ## Fetch a Valkey build
 
 A run that names no `valkey_binary` and finds no `valkey-server` on `PATH`
-uses the build of Valkey 9.1.3 (commit `29173b6`) in the fuzzer's cache,
-`~/.cache/valkey-fuzzer/valkey/29173b67508b2de4c0f0ed551f3b47cf19fc3ca8/`
-(`$XDG_CACHE_HOME/valkey-fuzzer/valkey/<commit>/` when that is set), and
+uses the fuzzer's cached build of Valkey 9.1.3 (commit `29173b6`; the lookup
+order and the cache path are in
+[Choose a Valkey binary](getting-started.md#choose-a-valkey-binary)), and
 makes it on the first run that needs it: about a minute and 280 MB, with git,
 make, a C compiler, and network access, under a lock so parallel workers
 build it once. Make it before the soak instead, so its first job does not

@@ -620,10 +620,8 @@ component's random choices, not timing.
 
 ## Comparing two builds
 
-There is no command for it. Declare both builds as artifacts and give
-`valkey.action.commands` a `compare_with` binary (usually
-`{$ref: artifacts.parent.binary}`): one run sends the same commands to both
-builds and compares every reply. See [components](components/actions.md#valkeyactioncommands).
+There is no command for it: an experiment gives `valkey.action.commands` a
+`compare_with` binary, as [Comparing two builds](scenarios-and-experiments.md#comparing-two-builds) describes.
 
 ## minimize
 

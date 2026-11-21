@@ -132,9 +132,11 @@ end of the load, and which step a line shows depends on their order.
 
 ## Run
 
+Needs Java 11 or later and `tla2tools.jar`
+([Java and the jar](../../docs/spec-bridge.md#java-and-the-jar) has the
+download and its checksum).
+
 ```bash
-curl -fsSL -o tla2tools.jar https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
-echo "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88  tla2tools.jar" | sha256sum -c -
 valkey-fuzzer spec check replication --tla2tools tla2tools.jar --output assurance.json
 valkey-fuzzer spec translate replication --control keep_old_id_on_load --tla2tools tla2tools.jar --out scenarios/
 valkey-fuzzer run scenarios/spec-replication-keep_old_id_on_load.yaml --artifact-dir runs/

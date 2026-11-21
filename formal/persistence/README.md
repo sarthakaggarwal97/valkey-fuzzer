@@ -90,9 +90,11 @@ files' writes with the data set's, which a run does not show in the model's term
 
 ## Run
 
+Needs Java 11 or later and `tla2tools.jar`
+([Java and the jar](../../docs/spec-bridge.md#java-and-the-jar) has the
+download and its checksum).
+
 ```bash
-curl -fsSL -o tla2tools.jar https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
-echo "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88  tla2tools.jar" | sha256sum -c -
 valkey-fuzzer spec check persistence --tla2tools tla2tools.jar --output assurance.json
 valkey-fuzzer spec translate persistence --control manifest_before_base --tla2tools tla2tools.jar --out scenarios/
 valkey-fuzzer run scenarios/spec-persistence-manifest_before_base.yaml --artifact-dir runs/

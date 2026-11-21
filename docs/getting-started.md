@@ -144,19 +144,24 @@ Reproduce: valkey-fuzzer replay /tmp/valkey-fuzzer/runs/20261028T041350.730Z-aof
 Results saved to report.json
 ```
 
-`Status` is the outcome:
+`Status` is the outcome, and the exit code follows it:
 
-| Outcome | Meaning | Exit code |
-| --- | --- | --- |
-| `PASS` | Every required check passed and the run reached the code path it claims to test. | 0 |
-| `FAIL` | An oracle or action observed Valkey do something wrong. | 1 |
-| `ERROR` | No trustworthy verdict: setup, a provider, a timeout, or cleanup failed, or the code path the experiment targets never ran. | 2 |
-| `SKIP_UNSUPPORTED` | The host or the binary lacks a feature this experiment names; nothing was started. | 3 |
+| Outcome | Exit code |
+| --- | --- |
+| `PASS` | 0 |
+| `FAIL` | 1 |
+| `ERROR` | 2 |
+| `SKIP_UNSUPPORTED` | 3 |
 
+`PASS` means every required check passed and the run reached the code path it
+claims to test; `FAIL` is a finding about Valkey; `ERROR` is no trustworthy
+verdict; `SKIP_UNSUPPORTED` means the host or the binary lacks a feature the
+experiment names, and nothing was started.
+[Outcomes and verdicts](contracts.md#outcomes-and-verdicts) has the exact
+meanings and the rules behind them.
 `Summary` says why. A run that missed required evidence names each item
 and the component that should have produced it, for example
 `required evidence was not observed: valkey.rdb.reload-verified from snapshot`.
-[Outcomes and verdicts](contracts.md#outcomes-and-verdicts) has the rules.
 For a `FAIL`, [Reading a FAIL](reading-a-fail.md) shows where its evidence and
 logs are and what to attach to a Valkey issue.
 Add `--verbose` to `run` to print every component's result, its evidence
@@ -250,7 +255,8 @@ valkey-fuzzer minimize report.json --output minimized.yaml
 ```
 
 `minimize` shrinks a failing scenario while it keeps failing the same way. To
-compare two builds, use `compare_with` of `valkey.action.commands`. See the [command-line reference](cli.md).
+compare two builds, see [Comparing two builds](scenarios-and-experiments.md#comparing-two-builds).
+Every command is in the [command-line reference](cli.md).
 
 To write your own experiment, start with
 [Adding tests](extending.md#write-a-data-only-experiment).
@@ -302,5 +308,5 @@ option and file is in [batch](cli.md#batch).
 | `ERROR` with `not a setting the experiment says the build may lack` | The build rejects a setting of the scenario's server config, often a misspelt name or value. Fix the scenario. |
 | `SKIP_UNSUPPORTED` with `requires Linux` or `requires root` | The experiment changes the host; run it on a disposable Linux VM as root. |
 | `experiment '...' is not registered` | The scenario names an experiment that is neither shipped nor in a directory passed with `--experiment-dir`. Check the ID with `valkey-fuzzer list experiments`, or pass the directory that holds it. |
-| `refusing to replay because this environment differs` | See [Replay a run](#replay-a-run). |
+| `Warning: drift from the recorded run: ...` on a replay | The fuzzer, a component, or a binary differs from the recorded run. The replay still ran; see [Replay a run](#replay-a-run). |
 | A run hangs | A component without a deadline is stuck. Rerun with `--timeout SECONDS`; see [Deadlines and cancellation](contracts.md#deadlines-and-cancellation). |

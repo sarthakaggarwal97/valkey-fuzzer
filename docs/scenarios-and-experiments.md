@@ -218,15 +218,12 @@ the owner tag `valkey-fuzzer sweep` finds leftover servers by), `protected-mode`
 
 ### Binaries
 
-The deployment-wide binary is, in order: `valkey_binary` (a path, which must
-exist and be executable, or a command name on `PATH`); `valkey-server` on
-`PATH`; the cached build of the pinned commit of release 9.1.3
-(`~/.cache/valkey-fuzzer/valkey/<commit>/src/valkey-server`, which
-`valkey-fuzzer fetch-valkey` makes ahead of time); otherwise that commit of
-`https://github.com/valkey-io/valkey.git` fetched and built with `make` into
-the cache, under a lock so concurrent runs build it once. `--valkey-binary` on the command line sets
-`valkey_binary`. Every `instance_binaries` entry must name an existing
-binary. The outcome records the server's git SHA, read from
+The deployment-wide binary is `valkey_binary` (a path, which must exist and
+be executable, or a command name on `PATH`); without it, `valkey-server` on
+`PATH`, else the fuzzer's own cached build, in the order
+[Choose a Valkey binary](getting-started.md#choose-a-valkey-binary) gives.
+`--valkey-binary` on the command line sets `valkey_binary`. Every
+`instance_binaries` entry must name an existing binary. The outcome records the server's git SHA, read from
 `valkey-server --version`, as `valkey_sha`, and each instance's binary and its
 SHA-256 under `diagnostics.deployment.instances`.
 
@@ -536,45 +533,6 @@ scenario for each.
 | `valkey.slot-migration-spec` | cluster, primaries ≥ 3, replicas ≥ 1 | | Migrates the slot of a hash tag from its shard to shard 1 under writes to that slot ([`valkey.action.migrate-slots`](components/actions.md#valkeyactionmigrate-slots)), kills the target as it logs its claim and restarts it once its replica is elected; no acknowledged write is lost outside `loss_window_s` of the kill, and the cluster validates. The live counterpart of the [slot migration model](../formal/slot-migration/README.md) (`spec: slot-migration`). |
 | `valkey.snapshot-equivalence` | standalone, cluster | | A fixed number of seeded operations, then a BGSAVE of the quiesced dataset that must reload; records dataset, RDB, and reply digests. |
 
-An experiment can also compare one command sequence across two builds, the
-build under test and its parent, with
-[`valkey.action.commands`](components/actions.md#valkeyactioncommands):
-[`examples/valkey/experiments/commands-compare.yaml`](../examples/valkey/experiments/commands-compare.yaml)
-tests the fix of valkey-io/valkey#4823 that way, and
-[`examples/valkey/commands_compare.yaml`](../examples/valkey/commands_compare.yaml)
-runs it, declaring the parent build as `artifacts.parent` and passing it as the
-`parent` input.
-[`commands-compare-cluster.yaml`](../examples/valkey/experiments/commands-compare-cluster.yaml)
-runs each side on two cluster nodes (valkey-io/valkey#5140), and
-[`commands-compare-restart.yaml`](../examples/valkey/experiments/commands-compare-restart.yaml)
-restarts each server from the config file it rewrote (valkey-io/valkey#5176);
-`commands_compare_cluster.yaml` and `commands_compare_restart.yaml` run them. The action starts both servers itself, so the deployment's
-mode and instances do not matter; a sequence that must run under a fault the
-experiment injects leaves `compare_with` out and runs on the deployment's
-instances instead.
-
-A change to one of Valkey's tools (`valkey-cli`, `valkey-benchmark`,
-`valkey-check-rdb`, `valkey-check-aof`) compares the same way with
-[`valkey.action.tools`](components/actions.md#valkeyactiontools), which runs the tool
-of each build:
-[`examples/valkey/experiments/tools-compare.yaml`](../examples/valkey/experiments/tools-compare.yaml)
-tests the fix of valkey-io/valkey#5177, and
-[`examples/valkey/tools_compare.yaml`](../examples/valkey/tools_compare.yaml)
-runs it.
-
-A change to replication, failover or persistence is tested under a fault, judged
-by oracles rather than by comparing two builds:
-[`examples/valkey/experiments/replica-killed-under-writes.yaml`](../examples/valkey/experiments/replica-killed-under-writes.yaml)
-kills a replica while the `valkey.base` workload writes and restarts it at once,
-and the ledger, deployment-state and liveness oracles check that it resynced
-with no acknowledged write lost;
-[`examples/valkey/replica_killed_under_writes.yaml`](../examples/valkey/replica_killed_under_writes.yaml)
-runs it.
-
-To compare two builds, give `valkey.action.commands` a `compare_with` binary (see
-[components](components/actions.md#valkeyactioncommands)). It runs one command sequence on a
-candidate and a parent server and compares the replies.
-
 In `valkey.replication-chaos` a graceful promotion loses nothing. A forced
 promotion, or the heal's promotion after the primary was killed, may lose
 only writes the old primary acknowledged after the new primary's last sync
@@ -615,6 +573,46 @@ file and its `rename`), `BGREWRITEAOF` 16 (manifest writes, `fdatasync`s and
 `rename`s before the fork and after the rewrite, the child's `fsync` and
 `rename`, and the parent's `rename` of the new base file), and a `nodes.conf`
 save 2 (`write` and `rename`).
+
+### Comparing two builds
+
+There is no command for it. An experiment compares one command sequence
+across two builds, the build under test and its parent, with
+[`valkey.action.commands`](components/actions.md#valkeyactioncommands): declare
+both builds as artifacts and give the action a `compare_with` binary (usually
+`{$ref: artifacts.parent.binary}`); one run sends the same commands to a
+candidate and a parent server and compares every reply.
+[`examples/valkey/experiments/commands-compare.yaml`](../examples/valkey/experiments/commands-compare.yaml)
+tests the fix of valkey-io/valkey#4823 that way, and
+[`examples/valkey/commands_compare.yaml`](../examples/valkey/commands_compare.yaml)
+runs it, declaring the parent build as `artifacts.parent` and passing it as the
+`parent` input.
+[`commands-compare-cluster.yaml`](../examples/valkey/experiments/commands-compare-cluster.yaml)
+runs each side on two cluster nodes (valkey-io/valkey#5140), and
+[`commands-compare-restart.yaml`](../examples/valkey/experiments/commands-compare-restart.yaml)
+restarts each server from the config file it rewrote (valkey-io/valkey#5176);
+`commands_compare_cluster.yaml` and `commands_compare_restart.yaml` run them. The action starts both servers itself, so the deployment's
+mode and instances do not matter; a sequence that must run under a fault the
+experiment injects leaves `compare_with` out and runs on the deployment's
+instances instead.
+
+A change to one of Valkey's tools (`valkey-cli`, `valkey-benchmark`,
+`valkey-check-rdb`, `valkey-check-aof`) compares the same way with
+[`valkey.action.tools`](components/actions.md#valkeyactiontools), which runs the tool
+of each build:
+[`examples/valkey/experiments/tools-compare.yaml`](../examples/valkey/experiments/tools-compare.yaml)
+tests the fix of valkey-io/valkey#5177, and
+[`examples/valkey/tools_compare.yaml`](../examples/valkey/tools_compare.yaml)
+runs it.
+
+A change to replication, failover or persistence is tested under a fault, judged
+by oracles rather than by comparing two builds:
+[`examples/valkey/experiments/replica-killed-under-writes.yaml`](../examples/valkey/experiments/replica-killed-under-writes.yaml)
+kills a replica while the `valkey.base` workload writes and restarts it at once,
+and the ledger, deployment-state and liveness oracles check that it resynced
+with no acknowledged write lost;
+[`examples/valkey/replica_killed_under_writes.yaml`](../examples/valkey/replica_killed_under_writes.yaml)
+runs it.
 
 ## Declaring what may be randomized
 
