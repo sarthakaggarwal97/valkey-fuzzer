@@ -1,5 +1,5 @@
-"""Immutable snapshots of JSON/YAML-safe data, their plain-data and canonical JSON forms, file content digests,
-and the plain-data record of an exception.
+"""Immutable snapshots of JSON/YAML-safe data, their plain-data and canonical JSON forms, the digests and derived
+integers of text and data, file digests and stamps, and the plain-data record of an exception.
 
 Every immutable model freezes its mapping and sequence fields here, and every
 report and plan file is written from :func:`to_plain_data`.
@@ -8,12 +8,13 @@ report and plan file is written from :func:`to_plain_data`.
 import hashlib
 import json
 import math
+import os
 import traceback
 from collections.abc import Mapping, Sequence
 from dataclasses import fields, is_dataclass
 from enum import Enum
 from types import MappingProxyType
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from .references import REFERENCE_DATA_KEY, EnvironmentReference, EnvironmentReferenceError
 
@@ -125,6 +126,14 @@ def derived_int(*parts: Any, size: int = 16) -> int:
 
     material = "\0".join(str(part) for part in parts).encode()
     return int.from_bytes(hashlib.sha256(material).digest()[:size], "big")
+
+
+def file_stamp(path: Union[str, "os.PathLike[str]"]) -> tuple[int, int]:
+    """The modification time (ns) and size of the file at ``path``: a cache key that changes when the file does.
+    Raises ``OSError`` for a file that cannot be stat'ed."""
+
+    stat = os.stat(path)
+    return stat.st_mtime_ns, stat.st_size
 
 
 def file_sha256(path: str) -> Optional[str]:

@@ -7,6 +7,7 @@ report-only fields stay on wall time: an obligation's ``opened_at`` and ``undone
 """
 
 import time
+from typing import Optional
 
 # The wall clock as this process started, less the monotonic clock then.
 _OFFSET = time.time() - time.monotonic()
@@ -23,7 +24,8 @@ def now() -> float:
     return time.monotonic() + _OFFSET
 
 
-def utc_iso() -> str:
-    """The wall clock now as ``YYYY-MM-DDTHH:MM:SSZ``: when a report, batch or summary file was written."""
+def utc_iso(at: Optional[float] = None) -> str:
+    """``at`` (seconds since the epoch; now by default) as ``YYYY-MM-DDTHH:MM:SSZ``: when a report, batch, summary
+    or assurance file was written or started."""
 
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(at))

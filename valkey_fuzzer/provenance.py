@@ -13,7 +13,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from ._data import file_sha256, sha256_json, to_plain_data
+from ._data import file_sha256, file_stamp, sha256_json, to_plain_data
 from .catalog import Catalog, UnknownExperimentError
 from .describe import components_by_role, implementation_name
 from .plan import ExecutionPlan
@@ -62,8 +62,7 @@ def source_digest(packages: Iterable[str]) -> Optional[str]:
 def _stamp(file: Path) -> tuple[Path, int, int]:
     """``file`` with its modification time and size: a cache key that changes when the file does."""
 
-    stat = file.stat()
-    return file, stat.st_mtime_ns, stat.st_size
+    return (file, *file_stamp(file))
 
 
 def _package_stamps(root: Path) -> tuple[tuple[Path, int, int], ...]:
