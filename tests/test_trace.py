@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.deployment_support import cluster_nodes_line, cluster_nodes_text
 from tests.fakes import FakeClient, FakeHandle, fake_instances
 from tests.support import FORMAL, wait_until
 from tests.valkey_experiments_support import fake_context, registration_for, rejects_config, resolved, unit_plan
@@ -54,16 +55,13 @@ class _Client(FakeClient):
 
 class _Handle(FakeHandle):
     def __init__(self, replies, count=2):
-        self.instances = fake_instances(count, shard_id=0, port=lambda n: 7000 + n)
+        super().__init__(fake_instances(count, shard_id=0, port=lambda n: 7000 + n), root="/nonexistent")
         self.replies, self.clients = replies, {}
 
     def new_client(self, node_id, timeout=5.0):
         client = _Client([], self.replies(node_id))
         self.clients.setdefault(node_id, []).append(client)
         return client
-
-    def data_dir(self, node_id):
-        return f"/nonexistent/{node_id}"
 
 
 def _observer(handle, tmp_path, **config):
@@ -154,7 +152,9 @@ def test_the_cluster_parts_group_the_slot_migration_jobs_by_kind(tmp_path):
     def replies(node_id):
         return {
             ("CLUSTER", "INFO"): "cluster_state:ok\r\ncluster_current_epoch:3\r\n",
-            ("CLUSTER", "NODES"): f"{me} 127.0.0.1:7000@17000 myself,master - 0 0 3 connected 0-16383\n",
+            ("CLUSTER", "NODES"): cluster_nodes_text(
+                cluster_nodes_line(me, 7000, "master", epoch=3, slots="0-16383", myself=True)
+            ),
             ("CLUSTER", "GETSLOTMIGRATIONS"): [export, tracking],
         }
 

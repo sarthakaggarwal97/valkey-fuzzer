@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from tests.deployment_support import instance
+from tests.deployment_support import cluster_nodes_line, cluster_nodes_text, instance
 from valkey_fuzzer.deployment.local.cluster_nodes import parse_cluster_nodes
 from valkey_fuzzer.deployment.local.failover import failover_shard
 from valkey_fuzzer.deployment.local.models import LocalDeploymentError
@@ -19,11 +19,13 @@ PORTS = (7000, 7001, 7002)
 def view(epochs=(1, 2, 3), primaries=(0, 1, 2)):
     """A CLUSTER NODES of three shards of one primary each; ``primaries`` are the ones it knows as primary."""
     ranges = ("0-5460", "5461-10922", "10923-16383")
-    lines = []
-    for shard, port in enumerate(PORTS):
-        role = "master" if shard in primaries else "slave"
-        lines.append(f"n{shard} 127.0.0.1:{port}@{port + 10000} {role} - 0 0 {epochs[shard]} connected {ranges[shard]}")
-    return parse_cluster_nodes("\n".join(lines))
+    lines = (
+        cluster_nodes_line(
+            f"n{shard}", port, "master" if shard in primaries else "slave", epoch=epochs[shard], slots=ranges[shard]
+        )
+        for shard, port in enumerate(PORTS)
+    )
+    return parse_cluster_nodes(cluster_nodes_text(*lines))
 
 
 def connection():

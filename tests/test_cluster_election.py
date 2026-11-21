@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from tests.conftest import needs_tlc
+from tests.deployment_support import cluster_nodes_line, cluster_nodes_text
 from tests.fakes import FakeClient, fake_instances
 from tests.fakes import FakeHandle as BaseHandle
 from tests.support import VirtualClock
@@ -48,13 +49,10 @@ class FakeHandle(BaseHandle):
     """Instances valkey-0 up to ``count``; each client answers ``replies`` and records its commands."""
 
     def __init__(self, count=2, replies=lambda node_id: {}, log_dir=""):
-        self.instances = fake_instances(
-            count, shard_id=0, port=lambda n: 7000 + n, cluster_node_id=lambda n: ID[f"valkey-{n}"]
+        super().__init__(
+            fake_instances(count, shard_id=0, port=lambda n: 7000 + n, cluster_node_id=lambda n: ID[f"valkey-{n}"])
         )
         self.replies, self.log_dir, self.commands = replies, log_dir, {}
-
-    def is_alive(self, node_id):
-        return True
 
     def log_file(self, node_id):
         return os.path.join(self.log_dir, f"{node_id}.log")
@@ -264,11 +262,11 @@ def test_the_trace_header_says_why_a_nodes_config_is_missing(tmp_path):
 # valkey.oracle.cluster-election-safety
 # ---------------------------------------------------------------------------
 
-_NODES = (
-    f"{ID['valkey-0']} 127.0.0.1:7000@17000 master - 0 0 3 connected 0-8191\n"
-    f"{ID['valkey-1']} 127.0.0.1:7001@17001 slave {ID['valkey-0']} 0 0 3 connected\n"
-    f"{ID['valkey-2']} 127.0.0.1:7002@17002 master - 0 0 4 connected 8192-16383\n"
-    f"{ID['valkey-3']} 127.0.0.1:7003@17003 slave {ID['valkey-2']} 0 0 4 connected\n"
+_NODES = cluster_nodes_text(
+    cluster_nodes_line(ID["valkey-0"], 7000, "master", epoch=3, slots="0-8191"),
+    cluster_nodes_line(ID["valkey-1"], 7001, "slave", ID["valkey-0"], epoch=3),
+    cluster_nodes_line(ID["valkey-2"], 7002, "master", epoch=4, slots="8192-16383"),
+    cluster_nodes_line(ID["valkey-3"], 7003, "slave", ID["valkey-2"], epoch=4),
 )
 
 
@@ -353,19 +351,21 @@ def test_election_safety_passes_a_majority_win_and_flags_unsaved_votes_outside_s
     assert _safety("sync", disk_vote=5, acks=late).status is ComponentStatus.PASS
     # Two primaries serving the same slots, in one view or by their own claims in two views, are a split; an owner
     # its view flags failed serves nothing.
+    b = cluster_nodes_line("b", 3, "master", epoch=7, slots="101-200")
     views = {
         "valkey-0": {
             "nodes": parse_cluster_nodes(
-                "a 127.0.0.1:1@2 myself,master - 0 0 7 connected 0-100\n"
-                "b 127.0.0.1:3@4 master - 0 0 7 connected 101-200\n"
-                "d 127.0.0.1:5@6 master - 0 0 7 connected 150-160\n"
-                "e 127.0.0.1:7@8 master,fail - 0 0 7 connected 0-10"
+                cluster_nodes_text(
+                    cluster_nodes_line("a", 1, "master", epoch=7, slots="0-100", myself=True),
+                    b,
+                    cluster_nodes_line("d", 5, "master", epoch=7, slots="150-160"),
+                    cluster_nodes_line("e", 7, "master,fail", epoch=7, slots="0-10"),
+                )
             )
         },
         "valkey-2": {
             "nodes": parse_cluster_nodes(
-                "c 127.0.0.1:9@10 myself,master - 0 0 7 connected 50-60\n"
-                "b 127.0.0.1:3@4 master - 0 0 7 connected 101-200"
+                cluster_nodes_text(cluster_nodes_line("c", 9, "master", epoch=7, slots="50-60", myself=True), b)
             )
         },
     }
@@ -527,30 +527,26 @@ def test_views_still_changing_at_the_converge_deadline_are_unread_not_a_disagree
 # ---------------------------------------------------------------------------
 
 
-class _ElectionShard:
+class _ElectionShard(BaseHandle):
     """Soak s100062: primary valkey-1, and valkey-0, a replica whose sync ends ``sync_s`` from now; like Valkey, it wins
     only if its link was up when the primary stopped (and ``elects``)."""
 
+    started = 42.0
+
     def __init__(self, clock, sync_s, elects=True, master_host="127.0.0.1"):
-        self.instances = tuple(
+        super().__init__(
             SimpleNamespace(instance_id=f"valkey-{n}", shard_id=0, host="127.0.0.1", port=11120 + n) for n in (0, 1)
         )
         self.clock, self.synced_at = clock, clock.monotonic() + sync_s
-        self.elects, self.paused_linked, self.signals = elects, None, []
+        self.elects, self.paused_linked = elects, None
         # Where the replica's link leads.
         self.master_host = master_host
-
-    def instance(self, node_id):
-        return next(item for item in self.instances if item.instance_id == node_id)
-
-    def is_alive(self, node_id):
-        return True
 
     def refresh_roles(self):
         return {}
 
     def send_signal(self, node_id, signum):
-        self.signals.append((node_id, signum))
+        super().send_signal(node_id, signum)
         if self.paused_linked is None:
             self.paused_linked = self.clock.monotonic() >= self.synced_at
 
@@ -565,18 +561,6 @@ class _ElectionShard:
             "master_link_status": link,
         }
         return client
-
-    def wait_exit(self, node_id, timeout=10.0):
-        return True
-
-    def restart(self, node_id, **options):
-        self.restarted = node_id
-
-    def started_at(self, node_id):
-        return 42.0
-
-    def data_dir(self, node_id):
-        return os.path.join(self.data_root, node_id)
 
     def view(self, handle, node_id, timeout=2.0):
         won = self.elects and bool(self.paused_linked) and node_id == "valkey-0"
@@ -651,7 +635,7 @@ def test_an_election_whose_nodes_do_not_answer_is_no_verdict(clock, unanswered, 
 
 def test_a_killed_primary_is_a_crash_the_safety_oracle_and_spec_conform_see(clock, tmp_path):
     shard = _ElectionShard(clock, 0.0)
-    shard.data_root = str(tmp_path)
+    shard.root = str(tmp_path)
     (tmp_path / "valkey-1").mkdir()
     (tmp_path / "valkey-1" / "nodes.conf").write_text("vars currentEpoch 6 lastVoteEpoch 5\n")
     spec = resolved(
@@ -667,12 +651,12 @@ def test_a_killed_primary_is_a_crash_the_safety_oracle_and_spec_conform_see(cloc
     assert {"target": "valkey-1", "signal": "SIGKILL", "applied": True}.items() <= dict(injected.payload).items()
     assert injected.payload["disk_vars_at_kill"] == {"currentEpoch": 6, "lastVoteEpoch": 5}
     (crash,) = [item.value for item in result.evidence if item.evidence_id == FAULT_INJECTED]
-    assert crash["restart_spawned_at"] == 42.0 and shard.restarted == "valkey-1"
+    assert crash["restart_spawned_at"] == 42.0 and shard.restarted == ["valkey-1"]
 
 
 def _kill_primary(clock, tmp_path, shard_type=None, **config):
     shard = (shard_type or _ElectionShard)(clock, 0.0)
-    shard.data_root = str(tmp_path)
+    shard.root = str(tmp_path)
     (tmp_path / "valkey-1").mkdir()
     (tmp_path / "valkey-1" / "nodes.conf").write_text("vars currentEpoch 6 lastVoteEpoch 5\n")
     config = {"shard": 0, "trigger": "kill_primary", "timeout_s": 2, "settle_s": 0.1, "wait_synced": False, **config}
@@ -689,7 +673,7 @@ class _SavesAtTheKill(_ElectionShard):
 
     def send_signal(self, node_id, signum):
         super().send_signal(node_id, signum)
-        with open(os.path.join(self.data_root, node_id, "nodes.conf"), "w") as conf:
+        with open(os.path.join(self.root, node_id, "nodes.conf"), "w") as conf:
             conf.write("vars currentEpoch 7 lastVoteEpoch 7\n")
 
 

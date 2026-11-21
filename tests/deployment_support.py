@@ -1,15 +1,17 @@
 """Builders shared by the local deployment tests."""
 
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
+from valkey.crc import key_slot
 
 from tests.live_support import BINARY
-from valkey_fuzzer.deployment.local.cluster_nodes import parse_cluster_nodes
+from valkey_fuzzer.deployment.local.cluster_nodes import parse_cluster_nodes, parse_slot_ranges
 from valkey_fuzzer.deployment.local.formation import Formation
 from valkey_fuzzer.deployment.local.models import DeploymentConfig, DeploymentMode, InstanceInfo
 from valkey_fuzzer.deployment.local.planner import plan_deployment
@@ -18,7 +20,8 @@ from valkey_fuzzer.deployment.local.queries import parse_info_text, parse_replic
 from valkey_fuzzer.deployment.local.topology import DeploymentConnection, TopologyNode
 from valkey_fuzzer.deployment.local.validation.snapshot import Snapshot
 
-PROCESSES = "valkey_fuzzer.deployment.local.processes"
+LOCAL = "valkey_fuzzer.deployment.local."
+PROCESSES = f"{LOCAL}processes"
 
 
 def instance(
@@ -67,6 +70,34 @@ def node_row(
         marked_fail=status == "failed",
         **fields,
     )
+
+
+def cluster_nodes_line(
+    node_id: str,
+    port: int,
+    flags: str = "master",
+    primary_id: str = "-",
+    epoch: int = 1,
+    link: str = "connected",
+    slots: str = "",
+    *,
+    myself: bool = False,
+    bus_port: Optional[int] = None,
+    ping: int = 0,
+    pong: int = 0,
+) -> str:
+    """One line of CLUSTER NODES for the node at 127.0.0.1:``port``, its fields as Valkey prints them: ``flags``
+    (``master``, ``slave``, ``master,fail``, ``master,fail?``; ``myself`` prefixes ``myself,``), its primary's node
+    ID or ``-``, ping sent and pong received, config epoch, link state, and ``slots`` as the tokens after it
+    (``0-5460 5462-10922 [5461->-b]``). The bus port is ``port + 10000`` unless given."""
+    bus_port = port + 10000 if bus_port is None else bus_port
+    flags = f"myself,{flags}" if myself else flags
+    return f"{node_id} 127.0.0.1:{port}@{bus_port} {flags} {primary_id} {ping} {pong} {epoch} {link} {slots}".rstrip()
+
+
+def cluster_nodes_text(*lines: str) -> str:
+    """The text of CLUSTER NODES: ``lines`` (each a :func:`cluster_nodes_line`), every one ended by a newline."""
+    return "".join(f"{line}\n" for line in lines)
 
 
 def deployment_view(*rows: TopologyNode, mode: DeploymentMode = DeploymentMode.CLUSTER) -> Mock:
@@ -173,55 +204,159 @@ def migrated_connection() -> DeploymentConnection:
     return DeploymentConnection(instances=planned_cluster_instances(), deployment_id="seed-38")
 
 
-class FakeCluster:
-    """Valkey servers for ``valkey.Valkey`` to connect to: a formed cluster of primaries and their replicas.
+class FakeDeployment:
+    """Valkey servers for ``valkey.Valkey`` to connect to: a formed cluster of primaries and their replicas,
+    healthy until a test breaks it.
 
-    ``nodes`` maps each port to ``(node_id, primary port or None, slots)``. Every
-    node answers PING, INFO replication, CLUSTER INFO, and CLUSTER NODES as a
-    healthy cluster does, and ``reads`` counts each port's commands.
+    ``nodes`` maps each port to ``(node_id, primary port or None, slots)``, the shards numbered in the order of
+    their primaries. Every node answers PING, INFO, CLUSTER INFO, CLUSTER NODES, CLUSTER FAILOVER (the replica
+    asked takes its shard over), READONLY, GET, SET and pipelined GETs as its role does; ``reads`` counts each
+    port's commands. ``shards(mode)`` is the deployment the state check runs against. A test breaks it with
+    ``dead`` nodes (their peers flag them failed) and ``refusing`` nodes, which do not connect; ``down`` replicas,
+    whose links are down; ``offset``, a replica's offset (a list: one per INFO, the last standing); ``wrong``, the
+    value a (port, key)'s GET gives instead; ``epoch_seen_by``, the shard a port alone sees one epoch ahead;
+    ``promotes`` False, a CLUSTER FAILOVER without effect; ``cluster_client`` False, no cluster client.
     """
 
-    def __init__(self, nodes: dict[int, tuple[str, Optional[int], str]]):
-        self.nodes = nodes
-        self.reads: dict[tuple[int, str], int] = {}
+    RANGES = ((0, 5460), (5461, 10922), (10923, 16383))
 
-    def _cluster_nodes(self, me: int) -> str:
+    def __init__(self, nodes: dict[int, tuple[str, Optional[int], str]], *, cluster: bool = True):
+        self.nodes, self.cluster, self.reads = nodes, cluster, {}
+        self.data, self.wrong, self.down, self.dead, self.refusing = {}, {}, set(), set(), set()
+        self.offset, self.epoch_seen_by, self.promotes, self.cluster_client = {}, {}, True, True
+
+    @classmethod
+    def shards(cls, mode: str) -> "FakeDeployment":
+        """Shards of a primary and a replica on ports 7000..: three in a cluster, one standalone."""
+        cluster = mode == "cluster"
+        nodes = {}
+        for shard in range(3 if cluster else 1):
+            primary = 7000 + 2 * shard
+            nodes[primary] = (f"n{primary - 7000}", None, "{}-{}".format(*cls.RANGES[shard]) if cluster else "")
+            nodes[primary + 1] = (f"n{primary + 1 - 7000}", primary, "")
+        return cls(nodes, cluster=cluster)
+
+    @property
+    def primary(self) -> dict[int, int]:
+        """Each shard's primary port."""
+        return dict(enumerate(port for port, (_, primary, _) in self.nodes.items() if primary is None))
+
+    def shard(self, port: int) -> int:
+        _, primary, _ = self.nodes[port]
+        return next(shard for shard, owner in self.primary.items() if owner == (port if primary is None else primary))
+
+    def shard_of(self, key: str) -> int:
+        """The shard whose primary owns ``key``'s slot (0 standalone)."""
+        slot = key_slot(key.encode())
+        return next(
+            self.shard(port)
+            for port, (_, primary, slots) in self.nodes.items()
+            if primary is None
+            and (not self.cluster or any(lo <= slot <= hi for lo, hi in parse_slot_ranges(slots.split())))
+        )
+
+    def instances(self, logs: Path) -> list[InstanceInfo]:
+        """The planned instances, valkey-0.. by port, logging under ``logs``."""
+        infos = []
+        for port, (node_id, primary, slots) in self.nodes.items():
+            name = f"valkey-{port - 7000}"
+            fields: dict[str, Any] = {"shard_id": self.shard(port), "cluster_node_id": node_id, "log_file": str(logs / f"{name}.log")}  # fmt: skip
+            if primary is not None:
+                fields["primary_id"] = f"valkey-{primary - 7000}"
+            elif slots:
+                fields["slot_start"], fields["slot_end"] = parse_slot_ranges(slots.split())[0]
+            infos.append(instance(name, "primary" if primary is None else "replica", port, **fields))
+        return infos
+
+    def info(self, port: int) -> dict[str, Any]:
+        _, primary, _ = self.nodes[port]
+        # A list of offsets is read one per INFO, the last one standing.
+        offset = self.offset.get(port, 100)
+        offset = (offset.pop(0) if len(offset) > 1 else offset[0]) if isinstance(offset, list) else offset
+        if primary is None:
+            replicas = sum(other == port for _, other, _ in self.nodes.values())
+            return {"role": "master", "connected_slaves": replicas, "master_repl_offset": 100, "cluster_enabled": 1,
+                    "slave_repl_offset": offset}  # fmt: skip
+        link = "down" if port in self.down else "up"
+        return {"role": "slave", "master_host": "127.0.0.1", "master_port": primary, "master_link_status": link,
+                "master_last_io_seconds_ago": 0, "master_sync_in_progress": 0, "slave_repl_offset": offset,
+                "master_repl_offset": 100}  # fmt: skip
+
+    def cluster_nodes(self, me: int) -> str:
+        """CLUSTER NODES as ``me`` sees it."""
         lines = []
         for port, (node_id, primary, slots) in self.nodes.items():
-            flags = ("myself," if port == me else "") + ("slave" if primary else "master")
-            primary_id = self.nodes[primary][0] if primary else "-"
-            lines.append(
-                f"{node_id} 127.0.0.1:{port}@{port + 10000} {flags} {primary_id} 0 0 1 connected {slots}".rstrip()
-            )
-        return "\n".join(lines) + "\n"
+            shard, dead = self.shard(port), port in self.dead
+            flags = ("master" if primary is None else "slave") + (",fail" if dead else "")
+            epoch = shard + 1 + (primary is None and self.epoch_seen_by.get(me) == shard)
+            primary_id = "-" if primary is None else self.nodes[primary][0]
+            link = "disconnected" if dead else "connected"
+            lines.append(cluster_nodes_line(node_id, port, flags, primary_id, epoch, link, slots, myself=port == me))
+        return cluster_nodes_text(*lines)
+
+    def promote(self, port: int) -> None:
+        """CLUSTER FAILOVER on the replica at ``port``: it takes its primary's slots and the primary follows it."""
+        # shortcut: the shard's other replicas keep following the old primary; repoint them when a test has two.
+        node_id, old, _ = self.nodes[port]
+        old_id, _, slots = self.nodes[old]
+        self.nodes[port], self.nodes[old] = (node_id, None, slots), (old_id, port, "")
+
+    def get(self, port: int, key: str) -> Any:
+        return self.wrong.get((port, key), self.data.get(key))
+
+    def set(self, key: str, value: Any) -> bool:
+        self.data[key] = value
+        return True
 
     def client(self, host: str = "127.0.0.1", port: int = 0, **kwargs: Any) -> Mock:
-        cluster = self
+        """The ``valkey.Valkey`` of the node at ``port``, which ``dead`` and ``refusing`` nodes refuse."""
+        if port in self.dead | self.refusing:
+            raise ConnectionError(port)
 
         def count(what: str) -> None:
-            cluster.reads[(port, what)] = cluster.reads.get((port, what), 0) + 1
+            self.reads[(port, what)] = self.reads.get((port, what), 0) + 1
 
         def info(section: str = "") -> dict[str, Any]:
             count(f"INFO {section}")
-            _, primary, _ = cluster.nodes[port]
-            if primary:
-                return {"role": "slave", "master_host": "127.0.0.1", "master_port": primary, "master_link_status": "up",
-                        "master_last_io_seconds_ago": 0, "master_sync_in_progress": 0, "slave_repl_offset": 100,
-                        "master_repl_offset": 100}  # fmt: skip
-            replicas = sum(other == port for _, other, _ in cluster.nodes.values())
-            return {"role": "master", "connected_slaves": replicas, "master_repl_offset": 100}
+            return self.info(port)
 
-        def execute_command(*args: Any) -> Any:
+        def command(*args: Any) -> Any:
             count(" ".join(str(arg) for arg in args[:2]))
+            if args[:2] == ("CLUSTER", "FAILOVER") and self.promotes:
+                self.promote(port)
             if args[:2] == ("CLUSTER", "NODES"):
-                return cluster._cluster_nodes(port)
+                return self.cluster_nodes(port)
             if args[:2] == ("CLUSTER", "INFO"):
-                return "cluster_state:ok\r\ncluster_slots_assigned:16384\r\ncluster_known_nodes:6\r\n"
-            raise AssertionError(f"unexpected command {args}")
+                return f"cluster_state:ok\r\ncluster_slots_assigned:16384\r\ncluster_known_nodes:{len(self.nodes)}\r\n"
+            return "OK"
 
-        client = Mock(info=Mock(side_effect=info), execute_command=Mock(side_effect=execute_command))
-        client.ping.return_value = True
-        return client
+        server = fake_client(replies=command, read=lambda key: self.get(port, key))
+        server.info.side_effect = info
+        server.ping.return_value = True
+        server.get.side_effect, server.set.side_effect = lambda key: self.get(port, key), self.set
+        server.__enter__, server.__exit__ = Mock(return_value=server), Mock(return_value=False)
+        return server
+
+    def serving(self) -> ExitStack:
+        """Route ``valkey.Valkey`` to ``client`` and ``valkey.ValkeyCluster`` to a client whose pipeline routes
+        each key to its primary (as ValkeyCluster's does), with no sync wait."""
+
+        def cluster_client(**kwargs: Any) -> Mock:
+            if not self.cluster_client:
+                raise ConnectionError("no cluster client")
+            client = fake_client(read=lambda key: self.get(self.primary[self.shard_of(key)], key))
+            client.set = self.set
+            return client
+
+        stack = ExitStack()
+        stack.enter_context(
+            patch.multiple("valkey", Valkey=Mock(side_effect=self.client), ValkeyCluster=cluster_client)
+        )
+        preload = Mock()
+        preload.pipeline.return_value.execute.return_value = []
+        stack.enter_context(patch(f"{LOCAL}service.ValkeyCluster", Mock(return_value=preload)))
+        stack.enter_context(patch(f"{LOCAL}validation.check.SYNC_WAIT_S", 0))
+        return stack
 
 
 def snapshot_of(
@@ -238,7 +373,7 @@ def snapshot_of(
     views = {port: parse_cluster_nodes(text) for port, text in (cluster_nodes or {}).items()}
     for port, primary_id in (primaries or {}).items():
         row = next(row for row in rows if row.port == port)
-        views[port] = parse_cluster_nodes(f"{row.node_id} 127.0.0.1:{port}@1 myself,slave {primary_id} 0 0 1 connected")
+        views[port] = parse_cluster_nodes(cluster_nodes_line(row.node_id, port, "slave", primary_id, myself=True))
     return Snapshot(
         mode=mode,
         instances=list(instances),

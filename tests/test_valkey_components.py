@@ -2,7 +2,6 @@
 actions, faults, and oracles against fake deployments."""
 
 import os
-import signal
 import sys
 import threading
 import time
@@ -13,6 +12,7 @@ from valkey.exceptions import ConnectionError as ValkeyConnectionError
 from valkey.exceptions import DataError, ResponseError
 
 from tests import fakes
+from tests.deployment_support import cluster_nodes_line, cluster_nodes_text
 from tests.support import VirtualClock, fake_executable
 from tests.valkey_experiments_support import (
     evidence_values,
@@ -161,15 +161,18 @@ class FakeClient(fakes.FakeClient):
 
 
 class FakeHandle(fakes.FakeHandle):
-    """A primary valkey-0 and replicas of one shard; a stopped instance stays down until ``restart``."""
+    """A primary valkey-0 and replicas of one shard, each with its own pid; a stopped instance stays down until
+    ``restart``."""
+
+    started = 5.0
 
     def __init__(self, instances=("valkey-0", "valkey-1"), log_dir=None):
-        self.instances = tuple(
+        super().__init__(
             SimpleNamespace(instance_id=node_id, role="replica" if index else "primary", pid=1000 + index, shard_id=0)
             for index, node_id in enumerate(instances)
         )
         self.mode = SimpleNamespace(value="standalone")
-        self.log_dir, self.clients, self.alive, self.restarted = log_dir, {}, dict.fromkeys(instances, True), []
+        self.log_dir, self.clients = log_dir, {}
 
     def pid(self, node_id):
         return self.instance(node_id).pid
@@ -182,22 +185,6 @@ class FakeHandle(fakes.FakeHandle):
 
     def new_client(self, node_id, timeout=5.0, decode_responses=True):
         return self.clients.setdefault(node_id, FakeClient())
-
-    def send_signal(self, node_id, signum):
-        self.alive[node_id] = signum in (signal.SIGSTOP, signal.SIGCONT)
-
-    def is_alive(self, node_id):
-        return self.alive[node_id]
-
-    def wait_exit(self, node_id, timeout=10):
-        return True
-
-    def restart(self, node_id, **options):
-        self.alive[node_id] = True
-        self.restarted.append(node_id)
-
-    def started_at(self, node_id):
-        return 5.0
 
     def failover(self, shard, force, timeout, rng):
         return True
@@ -1103,7 +1090,9 @@ class _StringsClient(FakeClient):
 
     def execute_command(self, *args):
         assert args == ("CLUSTER", "NODES")
-        return f"{'a' * 40} 127.0.0.1:7000@17000 myself,master - 0 0 1 connected {self.slot_tokens}\n".encode()
+        return cluster_nodes_text(
+            cluster_nodes_line("a" * 40, 7000, "master", slots=self.slot_tokens, myself=True)
+        ).encode()
 
 
 @pytest.mark.parametrize(

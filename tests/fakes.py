@@ -1,6 +1,8 @@
 """Test doubles shared by the unit tests: a client that is a context manager and records commands, and a deployment handle that answers
-the role and instance questions from its ``instances``."""
+the role and instance questions from its ``instances`` and stands in for their processes."""
 
+import os
+import signal
 from types import SimpleNamespace
 
 
@@ -49,9 +51,19 @@ def fake_instances(count, role=lambda n: "replica" if n else "primary", **fields
 
 class FakeHandle:
     """A deployment handle whose ``instances`` (each with an ``instance_id`` and a ``role``) say who is a primary
-    and who a replica; a subclass overrides ``roles`` when roles change."""
+    and who a replica, and whose processes are stand-ins: every pid is ``process_id``, every start was at
+    ``started``, a data directory is under ``root``. ``alive`` says which instances run: ``send_signal`` records
+    ``(instance_id, signum)`` in ``signals`` and a SIGKILL or SIGTERM stops the instance until ``restart``
+    (recorded in ``restarted``) starts it again. A subclass overrides ``roles`` when roles change, and
+    ``send_signal`` when it stands in for a deployment that raises ``ProcessLookupError`` for a stopped process."""
 
-    instances = ()
+    process_id = 4242
+    started = 0.0
+
+    def __init__(self, instances=(), root=""):
+        self.instances = tuple(instances)
+        self.alive = dict.fromkeys((node.instance_id for node in self.instances), True)
+        self.root, self.signals, self.restarted = root, [], []
 
     def roles(self):
         return {node.instance_id: node.role for node in self.instances}
@@ -64,3 +76,27 @@ class FakeHandle:
 
     def instance(self, instance_id):
         return next(node for node in self.instances if node.instance_id == instance_id)
+
+    def pid(self, instance_id):
+        return self.process_id
+
+    def is_alive(self, instance_id):
+        return self.alive[instance_id]
+
+    def wait_exit(self, instance_id, timeout=10.0):
+        return not self.alive[instance_id]
+
+    def send_signal(self, instance_id, signum):
+        self.signals.append((instance_id, signum))
+        if signum in (signal.SIGKILL, signal.SIGTERM):
+            self.alive[instance_id] = False
+
+    def restart(self, instance_id, wait_ready=True, ready_timeout=30.0):
+        self.alive[instance_id] = True
+        self.restarted.append(instance_id)
+
+    def started_at(self, instance_id):
+        return self.started
+
+    def data_dir(self, instance_id):
+        return os.path.join(self.root, instance_id)

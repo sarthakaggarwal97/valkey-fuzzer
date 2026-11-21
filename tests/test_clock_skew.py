@@ -56,8 +56,9 @@ class _Handle(FakeHandle):
     """valkey-0 (the primary) and valkey-1, each with a timestamp file under ``root``, started 100 s ago."""
 
     def __init__(self, root, faked=True, clock_faults=True):
-        self.instances = fake_instances(2)
-        self.root, self.faked, self.clock_faults = str(root), faked, clock_faults
+        super().__init__(fake_instances(2), str(root))
+        self.faked, self.clock_faults = faked, clock_faults
+        # The run clock reads as wall time, so a wall-clock start is a run-clock start too.
         self.started = time.time() - 100.0
 
     def clock_fault_file(self, instance_id):
@@ -68,13 +69,6 @@ class _Handle(FakeHandle):
         if not os.path.exists(path):
             clock_faults.write_timestamp(path, clock_faults.REAL_TIME)
         return path
-
-    def pid(self, instance_id):
-        return 4242
-
-    def started_at(self, instance_id):
-        # The run clock reads as wall time, so a wall-clock start is a run-clock start too.
-        return self.started
 
     def new_client(self, instance_id, timeout=5.0):
         return _Clock(self.clock_fault_file(instance_id), self.started, self.faked)

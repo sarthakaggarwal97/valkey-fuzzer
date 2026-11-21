@@ -1,7 +1,6 @@
 """The local deployment's state checks and failovers: a PASS case each, and a FAIL case per way to wrongly pass."""
 
 import random
-from contextlib import ExitStack
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -13,8 +12,10 @@ from valkey.exceptions import ResponseError
 from tests.deployment_support import (
     MIGRATED_SLOTS,
     MIGRATED_TOPOLOGY,
-    FakeCluster,
+    FakeDeployment,
     client_context,
+    cluster_nodes_line,
+    cluster_nodes_text,
     deployment_view,
     fake_client,
     instance,
@@ -142,18 +143,20 @@ def test_cluster_status_needs_a_quorum_of_slot_owners_agreeing_on_an_acceptable_
     assert message is None or message in result.error_message
 
 
-_SHARDS = (
-    "a 127.0.0.1:7000@17000 {}master - 0 0 1 connected 0-8191\nb 127.0.0.1:7001@17001 {}master{} - 0 0 2 {} 8192-{}"
-)
+def _shards(me, b_flags="master", b_link="connected", b_last=16383):
+    """Two shards, a owning 0-8191 and b the rest, as ``me`` sees them; ``b_flags``, ``b_link`` and ``b_last`` are
+    b's flags, link state and last slot in that view."""
+    return cluster_nodes_text(
+        cluster_nodes_line("a", 7000, "master", slots="0-8191", myself=me == "a"),
+        cluster_nodes_line("b", 7001, b_flags, epoch=2, link=b_link, slots=f"8192-{b_last}", myself=me == "b"),
+    )
 
 
 @pytest.mark.parametrize("stopped", [False, True])
 def test_every_slot_must_be_covered_in_every_live_view_unless_its_whole_shard_was_stopped(stopped):
     views = {
-        7000: _SHARDS.format(
-            "myself,", "", ",fail" if stopped else "", "disconnected" if stopped else "connected", 16383
-        ),
-        7001: _SHARDS.format("", "myself,", "", "connected", 16000),  # misses slots node a sees covered
+        7000: _shards("a", "master,fail" if stopped else "master", "disconnected" if stopped else "connected"),
+        7001: _shards("b", b_last=16000),  # misses slots node a sees covered
     }
     rows = [node_row("a", 7000), node_row("b", 7001, shard_id=1, status="failed" if stopped else "connected")]
     kills = ({"127.0.0.1:7001"}, {1}) if stopped else ((), ())
@@ -215,12 +218,11 @@ def test_a_shard_emptied_by_kills_that_each_left_it_a_member_is_not_excused_as_s
 
 
 def _view(me, replica_of="a", epoch_b=2, c_primary=False):
-    flag = {node: "myself," if node == me else "" for node in "abc"}
-    c_role = "master -" if c_primary else f"slave {replica_of}"
-    return (
-        f"a 127.0.0.1:7000@17000 {flag['a']}master - 0 0 1 connected 0-8191\n"
-        f"b 127.0.0.1:7001@17001 {flag['b']}master - 0 0 {epoch_b} connected 8192-16383\n"
-        f"c 127.0.0.1:7002@17002 {flag['c']}{c_role} 0 0 1 connected"
+    c_flags, c_primary_id = ("master", "-") if c_primary else ("slave", replica_of)
+    return cluster_nodes_text(
+        cluster_nodes_line("a", 7000, "master", slots="0-8191", myself=me == "a"),
+        cluster_nodes_line("b", 7001, "master", epoch=epoch_b, slots="8192-16383", myself=me == "b"),
+        cluster_nodes_line("c", 7002, c_flags, c_primary_id, myself=me == "c"),
     )
 
 
@@ -286,12 +288,20 @@ def test_views_that_disagree_are_retried_only_with_allow_transient_inconsistency
 @pytest.mark.parametrize("split", [False, True])
 def test_a_view_a_gossip_round_behind_a_failover_is_retried_but_two_primaries_serving_a_slot_are_a_split_brain(split):
     # Node b has not yet heard that c replaced the stopped a: it still gives a (flagged failed) slots 0-8191.
-    a_line = "a 127.0.0.1:7000@17000 master,fail - 0 0 1 disconnected"
-    c_owns = "c 127.0.0.1:7002@17002 {}master - 0 0 3 connected 0-8191"
+    def a_line(slots):
+        return cluster_nodes_line("a", 7000, "master,fail", link="disconnected", slots=slots)
+
     views = {
-        7001: f"{a_line} 0-8191\nb 127.0.0.1:7001@17001 myself,master - 0 0 2 connected 8192-16383\n"
-        "c 127.0.0.1:7002@17002 slave a 0 0 1 connected",
-        7002: f"{a_line}\nb 127.0.0.1:7001@17001 master - 0 0 2 connected 8192-16383\n{c_owns.format('myself,')}",
+        7001: cluster_nodes_text(
+            a_line("0-8191"),
+            cluster_nodes_line("b", 7001, "master", epoch=2, slots="8192-16383", myself=True),
+            cluster_nodes_line("c", 7002, "slave", "a"),
+        ),
+        7002: cluster_nodes_text(
+            a_line(""),
+            cluster_nodes_line("b", 7001, "master", epoch=2, slots="8192-16383"),
+            cluster_nodes_line("c", 7002, "master", epoch=3, slots="0-8191", myself=True),
+        ),
     }
     if split:  # b claims c's slots in its own view
         views[7001] = views[7001].replace("8192-16383", "0-16383")
@@ -359,23 +369,28 @@ def test_read_keys_pipelines_a_thousand_gets_at_a_time_after_one_readonly():
 
 def test_the_exported_split_slots_finds_both_kinds_of_split_and_ignores_a_failed_owner():
     # In x's view a (failed) and c both own 0-9 and c and d both own 20-29; y and z each claim 40-49 as their own.
+    x_line = cluster_nodes_line("x", 1, "slave", "c", epoch=3, myself=True)
     x = parse_cluster_nodes(
-        "x 127.0.0.1:1@2 myself,slave c 0 0 3 connected\n"
-        "a 127.0.0.1:3@4 master,fail - 0 0 1 disconnected 0-9\n"
-        "c 127.0.0.1:5@6 master - 0 0 3 connected 0-9 20-29\n"
-        "d 127.0.0.1:7@8 master - 0 0 4 connected 20-29 [30->-c]"
+        cluster_nodes_text(
+            x_line,
+            cluster_nodes_line("a", 3, "master,fail", link="disconnected", slots="0-9"),
+            cluster_nodes_line("c", 5, "master", epoch=3, slots="0-9 20-29"),
+            cluster_nodes_line("d", 7, "master", epoch=4, slots="20-29 [30->-c]"),
+        )
     )
-    y = parse_cluster_nodes("y 127.0.0.1:9@10 myself,master - 0 0 5 connected 40-49")
-    z = parse_cluster_nodes("z 127.0.0.1:11@12 myself,master - 0 0 6 connected 45")
+    y = parse_cluster_nodes(cluster_nodes_line("y", 9, "master", epoch=5, slots="40-49", myself=True))
+    z = parse_cluster_nodes(cluster_nodes_line("z", 11, "master", epoch=6, slots="45", myself=True))
 
     split = split_slots({"valkey-0": x, "valkey-1": y, "valkey-2": z})
 
     assert split == {**{slot: {"c", "d"} for slot in range(20, 30)}, 45: {"y", "z"}}
     assert split_slots({"valkey-0": x[:3]}) == {}, "a primary its view flags failed serves nothing"
     suspected = parse_cluster_nodes(
-        "x 127.0.0.1:1@2 myself,slave c 0 0 3 connected\n"
-        "a 127.0.0.1:3@4 master,fail? - 0 0 1 connected 0-9\n"
-        "c 127.0.0.1:5@6 master - 0 0 3 connected 5"
+        cluster_nodes_text(
+            x_line,
+            cluster_nodes_line("a", 3, "master,fail?", slots="0-9"),
+            cluster_nodes_line("c", 5, "master", epoch=3, slots="5"),
+        )
     )
     assert split_slots({"valkey-0": suspected}) == {5: {"a", "c"}}, "a suspected primary still serves"
 
@@ -384,12 +399,11 @@ def test_a_split_slot_range_and_a_migrating_slot_marker_are_judged_as_ranges():
     # Slot 5461 moved from a to b, splitting a's range around it. While it was in flight a's own line carried the
     # migrating marker and b's the importing one: a marker is no slot its node owns, and no two views disagree.
     def view(me):
-        flag = {node: "myself," if node == me else "" for node in "ab"}
-        return (
-            f"a 127.0.0.1:7000@17000 {flag['a']}master - 0 0 1 connected 0-5460 5462-10922"
-            f"{' [5461->-b]' if me == 'a' else ''}\n"
-            f"b 127.0.0.1:7001@17001 {flag['b']}master - 0 0 2 connected 5461 10923-16383"
-            f"{' [5461-<-a]' if me == 'b' else ''}"
+        a_slots = "0-5460 5462-10922" + (" [5461->-b]" if me == "a" else "")
+        b_slots = "5461 10923-16383" + (" [5461-<-a]" if me == "b" else "")
+        return cluster_nodes_text(
+            cluster_nodes_line("a", 7000, "master", slots=a_slots, myself=me == "a"),
+            cluster_nodes_line("b", 7001, "master", epoch=2, slots=b_slots, myself=me == "b"),
         )
 
     views = {7000: view("a"), 7001: view("b")}
@@ -998,8 +1012,10 @@ def test_a_primary_only_one_node_suspects_still_gets_the_failover():
     # The viewer flags the primary fail? (PFAIL): no quorum of primaries agreed, so Valkey fails nothing over by
     # itself, and the replica has to be sent CLUSTER FAILOVER.
     topology = parse_cluster_nodes(
-        "p 127.0.0.1:7000@17000 master,fail? - 0 0 1 disconnected 0-16383\n"
-        "r 127.0.0.1:7001@17001 myself,slave p 0 0 1 connected"
+        cluster_nodes_text(
+            cluster_nodes_line("p", 7000, "master,fail?", link="disconnected", slots="0-16383"),
+            cluster_nodes_line("r", 7001, "slave", "p", myself=True),
+        )
     )
     connection = DeploymentConnection(
         [instance("valkey-0", port=7000, slot_start=0, slot_end=16383), instance("valkey-1", "replica", port=7001)],
@@ -1108,101 +1124,6 @@ def test_shards_and_failovers_follow_the_live_topology_not_the_plan():
     assert sent == [7002, 7005, 7010]
 
 
-class FakeDeployment:
-    """Servers on ports 7000.. in shards of a primary and a replica (three in a cluster, one standalone) that answer
-    what the checks and failovers ask: INFO, CLUSTER INFO/NODES/FAILOVER, READONLY, GET, SET, and pipelines."""
-
-    RANGES = ((0, 5460), (5461, 10922), (10923, 16383))
-
-    def __init__(self, mode):
-        self.cluster = mode == "cluster"
-        self.primary = {shard: 7000 + 2 * shard for shard in range(3 if self.cluster else 1)}
-        self.data, self.wrong, self.down, self.dead, self.epoch_seen_by = {}, {}, set(), set(), {}
-        self.cluster_client, self.promotes, self.offset, self.refusing = True, True, {}, set()
-
-    def instances(self, logs):
-        def info(i):
-            slots = dict(zip(("slot_start", "slot_end"), self.RANGES[i // 2])) if self.cluster and i % 2 == 0 else {}
-            fields = {"shard_id": i // 2, "cluster_node_id": f"n{i}", "log_file": str(logs / f"valkey-{i}.log")}
-            fields.update({"primary_id": f"valkey-{i - 1}"} if i % 2 else {})
-            return instance(f"valkey-{i}", "replica" if i % 2 else "primary", 7000 + i, **fields, **slots)
-
-        return [info(i) for i in range(2 * len(self.primary))]
-
-    def info(self, port):
-        primary = self.primary[(port - 7000) // 2]
-        if port == primary:
-            return {"role": "master", "connected_slaves": 1, "master_repl_offset": 100, "cluster_enabled": 1}
-        link = "down" if port in self.down else "up"
-        return {"role": "slave", "master_host": "127.0.0.1", "master_port": primary, "master_link_status": link}
-
-    def nodes(self, me):
-        lines = []
-        for port in range(7000, 7000 + 2 * len(self.primary)):
-            shard = (port - 7000) // 2
-            primary = port == self.primary[shard]
-            flags = ("myself," if port == me else "") + ("master" if primary else "slave")
-            flags += ",fail - 0 0 {} disconnected" if port in self.dead else " - 0 0 {} connected"
-            epoch = shard + 1 + (primary and self.epoch_seen_by.get(me) == shard)
-            slots = "{}-{}".format(*self.RANGES[shard]) if primary else ""
-            flags = flags.replace("-", "-" if primary else f"n{self.primary[shard] - 7000}", 1).format(epoch)
-            lines.append(f"n{port - 7000} 127.0.0.1:{port}@{port + 10000} {flags} {slots}")
-        return "\n".join(lines)
-
-    def get(self, port, key):
-        return self.wrong.get((port, key), self.data.get(key))
-
-    def set(self, key, value):
-        self.data[key] = value
-        return True
-
-    def server(self, host=None, port=None, **kwargs):
-        if port in self.dead | self.refusing:
-            raise ConnectionError(port)
-
-        def command(*args):
-            if args[:2] == ("CLUSTER", "FAILOVER") and self.promotes:
-                self.primary[(port - 7000) // 2] = port
-            replies = {
-                ("CLUSTER", "INFO"): f"cluster_state:ok\r\ncluster_known_nodes:{2 * len(self.primary)}\r\n",
-                ("CLUSTER", "NODES"): self.nodes(port),
-            }
-            return replies.get(args[:2], "OK")
-
-        # A list of offsets is read one per INFO, the last one standing.
-        offset = self.offset.get(port, 100)
-        offset = (offset.pop(0) if len(offset) > 1 else offset[0]) if isinstance(offset, list) else offset
-        info = {**self.info(port), "slave_repl_offset": offset}
-        server = fake_client(info, command, lambda key: self.get(port, key))
-        server.get.side_effect, server.set.side_effect = lambda key: self.get(port, key), self.set
-        server.__enter__, server.__exit__ = Mock(return_value=server), Mock(return_value=False)
-        return server
-
-    def serving(self):
-        def cluster_client(**kwargs):
-            if not self.cluster_client:
-                raise ConnectionError("no cluster client")
-            primary_of = lambda key: self.primary[self.shard_of(key)]  # noqa: E731
-            # Its pipeline routes each key to its primary, as ValkeyCluster's does.
-            client = fake_client(read=lambda key: self.get(primary_of(key), key))
-            client.set = self.set
-            return client
-
-        stack = ExitStack()
-        stack.enter_context(
-            patch.multiple("valkey", Valkey=Mock(side_effect=self.server), ValkeyCluster=cluster_client)
-        )
-        preload = Mock()
-        preload.pipeline.return_value.execute.return_value = []
-        stack.enter_context(patch(f"{LOCAL}service.ValkeyCluster", Mock(return_value=preload)))
-        stack.enter_context(patch(f"{CHECK}.SYNC_WAIT_S", 0))
-        return stack
-
-    def shard_of(self, key):
-        slot = key_slot(key.encode())
-        return next(shard for shard, (lo, hi) in enumerate(self.RANGES) if lo <= slot <= hi) if self.cluster else 0
-
-
 @pytest.mark.parametrize(
     ("mode", "fault", "failed"),
     [
@@ -1234,7 +1155,7 @@ class FakeDeployment:
 )
 def test_every_check_runs_against_the_deployment_and_names_what_broke(tmp_path, clock, mode, fault, failed):
     # A lagging replica is re-read until the snapshot's query timeout, and a failover polls until it settles.
-    fake = FakeDeployment(mode)
+    fake = FakeDeployment.shards(mode)
     config = DeploymentConfig(mode=DeploymentMode(mode), primaries=len(fake.primary), replicas_per_primary=1)
     instances = fake.instances(tmp_path)
     service = ValkeyDeploymentService(Mock(), LocalDeployment("d", config, instances))
@@ -1329,7 +1250,9 @@ def test_a_check_that_breaks_judges_nothing_unless_another_saw_valkey_fail(other
 def test_one_validation_reads_each_node_once():
     # Every check judges one moment: the topology is read once (every answering node is asked, for the view a
     # majority agrees on), and each node's own CLUSTER NODES once.
-    fake = FakeCluster({port: (f"n{port - 7000}", port - 3 if port > 7002 else None, "") for port in range(7000, 7006)})
+    fake = FakeDeployment(
+        {port: (f"n{port - 7000}", port - 3 if port > 7002 else None, "") for port in range(7000, 7006)}
+    )
     for port, slots in zip(range(7000, 7003), ("0-5460", "5461-10922", "10923-16383")):
         fake.nodes[port] = (fake.nodes[port][0], None, slots)
     infos = [instance(f"valkey-{port - 7000}", "replica" if port > 7002 else "primary", port) for port in fake.nodes]

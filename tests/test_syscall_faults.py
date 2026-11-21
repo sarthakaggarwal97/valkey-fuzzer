@@ -266,10 +266,10 @@ def test_a_deployment_with_syscall_faults_starts_its_servers_under_the_library(t
 class _Handle(FakeHandle):
     """Two instances; the syscall fault directory is under ``root``; the process dies once the library kills."""
 
+    started = 123.0
+
     def __init__(self, root):
-        self.root = root
-        self.instances = fake_instances(2, port=lambda n: 7000 + n, bus_port=lambda n: 17000 + n)
-        self.alive, self.restarts = True, 0
+        super().__init__(fake_instances(2, port=lambda n: 7000 + n, bus_port=lambda n: 17000 + n), root)
 
     def syscall_fault_dir(self, instance_id):
         path = os.path.join(self.root, instance_id, "syscall-faults")
@@ -278,25 +278,6 @@ class _Handle(FakeHandle):
 
     def data_dir(self, instance_id):
         return os.path.join(self.root, instance_id, "data")
-
-    def pid(self, instance_id):
-        return 4242
-
-    def started_at(self, instance_id):
-        return 123.0
-
-    def is_alive(self, instance_id):
-        return self.alive
-
-    def send_signal(self, instance_id, signum):
-        pass
-
-    def wait_exit(self, instance_id, timeout=10.0):
-        return not self.alive
-
-    def restart(self, instance_id, wait_ready=True, ready_timeout=30.0):
-        self.restarts += 1
-        self.alive = True
 
 
 def _library_acts(handle, instance_id, fault_id, at, action="kill"):
@@ -309,7 +290,7 @@ def _library_acts(handle, instance_id, fault_id, at, action="kill"):
             log.write(json.dumps(line) + "\n")
     os.replace(os.path.join(rules, f"{fault_id}.rule"), os.path.join(rules, f"{fault_id}.fired"))
     if action == "kill":
-        handle.alive = False
+        handle.alive[instance_id] = False
 
 
 def _fault(handle, **config):
@@ -334,7 +315,7 @@ def test_a_kill_lands_when_the_library_acts_and_the_fault_restarts_the_instance(
     assert result.status is ComponentStatus.PASS, result.summary
     record = evidence_values(result.evidence, FAULT_INJECTED)[0]
     assert record["call"] == "write" and record["calls_matched"] == 2 and record["applied_at"] == 1000.5
-    assert record["restarted"] and record["restart_spawned_at"] == 123.0 and handle.restarts == 1
+    assert record["restarted"] and record["restart_spawned_at"] == 123.0 and handle.restarted == ["valkey-1"]
 
 
 def test_a_rule_that_never_acts_is_removed_and_leaves_the_run_untested(tmp_path):
@@ -346,7 +327,7 @@ def test_a_rule_that_never_acts_is_removed_and_leaves_the_run_untested(tmp_path)
     result = fault.recover(context, spec)
     assert result.status is ComponentStatus.ERROR
     assert "the rule never acted on valkey-0: 0 matching call(s), nth 1" in result.summary
-    assert not rule.exists() and handle.restarts == 0
+    assert not rule.exists() and handle.restarted == []
 
 
 def test_a_delay_or_fail_lands_without_a_restart(tmp_path):
@@ -357,7 +338,7 @@ def test_a_delay_or_fail_lands_without_a_restart(tmp_path):
     assert wait_until(lambda: context.event_bus.committed_history("crash.injected"))
     result = fault.recover(context, spec)
     assert result.status is ComponentStatus.PASS, result.summary
-    assert handle.restarts == 0 and not context.event_bus.committed_history("crash.recovered")
+    assert handle.restarted == [] and not context.event_bus.committed_history("crash.recovered")
 
 
 _ON = {"syscall_faults": True}
@@ -389,8 +370,9 @@ class _BenchmarkHandle(FakeHandle):
     records its arguments and exits at once the first time, then runs until killed."""
 
     def __init__(self, root):
-        self.root = root
-        self.instances = fake_instances(2, host="127.0.0.1", port=lambda n: 7000 + n, bus_port=lambda n: 17000 + n)
+        super().__init__(
+            fake_instances(2, host="127.0.0.1", port=lambda n: 7000 + n, bus_port=lambda n: 17000 + n), root
+        )
         os.makedirs(os.path.join(root, "bin"))
         script = os.path.join(root, "bin", "valkey-benchmark")
         with open(script, "w") as out:

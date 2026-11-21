@@ -29,6 +29,7 @@ from tests.command_sequence_support import (
     fake_open_raw_connection,
     nodes_of,
 )
+from tests.deployment_support import cluster_nodes_line, cluster_nodes_text
 from tests.support import fake_executable
 from tests.valkey_experiments_support import registration_for, rejects_config, resolved, unit_plan
 from valkey_fuzzer import deadlines
@@ -1392,15 +1393,16 @@ def test_variants_leave_cluster_nodes_gossip_times_and_epoch_alone(builds, port,
     # The walk's test of valkey-io/valkey#2429 (fuzzer#107): CLUSTER NODES reports each node's ping-sent,
     # pong-recv and config epoch, wall-clock times and an epoch of the cluster's formation, never the same
     # between two independently formed clusters; the announced port must still agree.
+    def line(shown, ping=0, pong=0, epoch=0):
+        node = cluster_nodes_line("0" * 40, shown, "master", epoch=epoch, slots="0-16383", myself=True, bus_port=17000, ping=ping, pong=pong)  # fmt: skip
+        return cluster_nodes_text(node).encode()
+
     def nodes(server):
         ping, pong, epoch = (1794174096996, 1794174096796, 1) if _encodings_off(server) else (0, 1794174084994, 0)
-        shown = port if _encodings_off(server) else 21212
-        return f"{'0' * 40} 127.0.0.1:{shown}@17000 myself,master - {ping} {pong} {epoch} connected 0-16383\n".encode()
+        return line(port if _encodings_off(server) else 21212, ping, pong, epoch)
 
     BUILDS[builds["candidate"]].replies = {("CLUSTER", "NODES"): nodes}
-    BUILDS[builds["parent"]].replies = {
-        ("CLUSTER", "NODES"): f"{'0' * 40} 127.0.0.1:7000@17000 myself,master - 0 0 0 connected 0-16383\n".encode()
-    }
+    BUILDS[builds["parent"]].replies = {("CLUSTER", "NODES"): line(7000)}
     result, _ = run(builds, [{"command": ["CLUSTER", "NODES"], "expect_difference": True}], checks={"variants": True})
 
     assert result.status.value == status, result.summary
@@ -1898,7 +1900,7 @@ def test_a_cluster_nodes_data_is_judged_only_while_it_owns_the_same_slots(builds
 
     def nodes(server):
         slots = "0-8191" if moved and server.shut_downs else "0-16383"
-        return f"{server.id} 127.0.0.1:1@2 myself,master - 0 0 1 connected {slots}\n".encode()
+        return cluster_nodes_text(cluster_nodes_line(server.id, 1, "master", slots=slots, myself=True)).encode()
 
     for build in BUILDS.values():
         build.replies[("INFO", "keyspace")] = _PERSISTENT
@@ -1920,8 +1922,8 @@ def test_a_cluster_nodes_data_is_not_judged_when_its_slots_move_while_its_digest
     _replicating(lambda server: b"d2" if server.shut_downs else b"d1")
 
     def nodes(server):
-        slots = " 0-8000" if server.sent.count(digest) >= 2 else ""
-        return f"{server.id} 127.0.0.1:1@2 myself,master - 0 0 1 connected{slots}\n".encode()
+        slots = "0-8000" if server.sent.count(digest) >= 2 else ""
+        return cluster_nodes_text(cluster_nodes_line(server.id, 1, "master", slots=slots, myself=True)).encode()
 
     for build in BUILDS.values():
         build.replies[("INFO", "keyspace")] = _PERSISTENT
