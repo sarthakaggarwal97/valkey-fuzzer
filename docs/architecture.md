@@ -320,28 +320,22 @@ touches nothing else. `provision`:
 
 1. **plans the instances** (`valkey-N`, roles, shards, slot ranges, ports,
    addresses, layered server config) and applies the startup overlays; each
-   instance starts with `DEFAULT_SERVER_CONFIG` (`appendonly yes`,
-   `appendfsync everysec`, `save ""`, `maxmemory 500mb`, `loglevel notice`,
-   `crash-memcheck-enabled no`, `enable-debug-assert yes`,
-   and in cluster mode `cluster-node-timeout 1000` and
-   `sanitize-dump-payload yes`, and in cluster mode `cluster-node-timeout 1000` and
-   `cluster-require-full-coverage no`) under that config, exactly the
-   effective config the plan records;
+   instance starts with `DEFAULT_SERVER_CONFIG` (the defaults listed in
+   [Server configuration](scenarios-and-experiments.md#server-configuration))
+   under that config, exactly the effective config the plan records;
 2. **checks every planned port** right after planning, before resolving
    binaries: every client port and, in cluster mode, cluster bus port. If any
    is in use, it names every busy port and its instance and starts nothing, so
    a server it did not start never receives commands such as
    `CLUSTER RESET HARD`. The check repeats, for all of them, right before
    the instances are spawned, and for one instance before it restarts;
-3. **resolves the binary**: the configured `valkey_binary`, `valkey-server`
-   on `PATH`, or the pinned commit of release 9.1.3 in the cache
-   (`~/.cache/valkey-fuzzer/valkey/<commit>/src/valkey-server`), fetched
-   from `valkey-io/valkey` by its commit (so a moved tag changes nothing) and
-   built with `make -j` aside and moved into place when it is not there yet,
-   under a lock so concurrent runs build it once, within 30 minutes and the
-   run's deadline (`valkey-fuzzer fetch-valkey` does the same ahead of time). Every
-   `instance_binaries` entry is resolved to an absolute path, and the git SHA
-   is read from `valkey-server --version`;
+3. **resolves the binary**, in the order
+   [Choose a Valkey binary](getting-started.md#choose-a-valkey-binary) gives;
+   a build it has to make goes through `make -j` aside and is moved into
+   place, under a lock so concurrent runs build it once, within 30 minutes
+   and the run's deadline (`valkey-fuzzer fetch-valkey` does the same ahead
+   of time). Every `instance_binaries` entry is resolved to an absolute path,
+   and the git SHA is read from `valkey-server --version`;
 4. **starts every instance** and waits up to 30 seconds for each to answer
    `PING`, checking that the `process_id` it reports is the process it
    started. An instance that exits or does not answer fails the provision,
@@ -551,8 +545,8 @@ them.
   setting check it before the run with `valkey.capability.build-probe`.
 - **Multiple hosts.** Every instance runs on the local host.
 - **Object-store, proxy, and sidecar providers.**
-- **Hermetic replay.** Replay checks provenance and refuses on drift, but it
-  runs with what is installed and cannot reproduce timing.
+- **Hermetic replay.** Replay checks provenance and warns on drift (it never
+  refuses), but it runs with what is installed and cannot reproduce timing.
 
 ## When to grow the core
 

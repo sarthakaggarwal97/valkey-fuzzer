@@ -8,6 +8,7 @@ run shows, for the bundles that have such a check
 are steps of the model ([The transition check](#the-transition-check)). It
 does not prove that Valkey implements the model.
 
+- [Java and the jar](#java-and-the-jar)
 - [What a PASS covers](#what-a-pass-covers)
 - [Bundles](#bundles)
 - [spec check](#spec-check)
@@ -20,11 +21,21 @@ does not prove that Valkey implements the model.
 - [Writing a bundle](#writing-a-bundle)
 - [Onboarding a protocol with data only](#onboarding-a-protocol-with-data-only)
 
+## Java and the jar
+
 All three tools need Java 11 or later and `tla2tools.jar` (pass
-`--tla2tools`, or set `TLA2TOOLS_JAR`; CI pins v1.7.4 with TLC 2.19),
-except `conform` of a bundle that gives TLC nothing to evaluate (every
-property `conform: excluded`, and no targets): it then runs without them,
-and reports its [transition check](#the-transition-check) as not checked.
+`--tla2tools`, or set `TLA2TOOLS_JAR`). CI pins release v1.7.4 (TLC 2.19)
+from <https://github.com/tlaplus/tlaplus/releases>; download and check it
+with:
+
+```bash
+curl -fsSL -o tla2tools.jar https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
+echo "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88  tla2tools.jar" | sha256sum -c -
+```
+
+Only `conform` of a bundle that gives TLC nothing to evaluate (every
+property `conform: excluded`, and no targets) runs without them, and it then
+reports its [transition check](#the-transition-check) as not checked.
 Nothing else needs them:
 `pip install` brings no Java, and `run`, `validate` and `batch` work
 without them, including the shipped experiments that name a bundle
