@@ -3,11 +3,11 @@ which replies it holds to Valkey's reply schemas and how the reply-schema oracle
 experiments turn it on."""
 
 import random
-import time
 from types import SimpleNamespace
 
 import pytest
 
+from tests.support import wait_until
 from tests.test_replication_durability import _component
 from tests.valkey_experiments_support import fake_context, registration_for, rejects_config, unit_plan, valkey_service
 from valkey_fuzzer.components import command_table
@@ -223,9 +223,7 @@ def _run(tmp_path, monkeypatch, server, handle=None, commands=300, **config):
     workload = CommandTableWorkload()
     started = workload.start(context, spec)
     assert started.status.value == "PASS", started.summary
-    deadline = time.monotonic() + 10
-    while workload._thread and sum(workload._outcomes.values()) < commands and time.monotonic() < deadline:
-        time.sleep(0.01)
+    wait_until(lambda: not workload._thread or sum(workload._outcomes.values()) >= commands, 10)
     result = workload.stop(context, spec)
     return result, plain_config(result.evidence[0].value) if result.evidence else None
 

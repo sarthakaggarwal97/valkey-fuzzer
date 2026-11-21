@@ -17,6 +17,7 @@ import time
 import pytest
 
 from tests.fakes import FakeHandle, fake_instances
+from tests.support import wait_until
 from tests.valkey_experiments_support import (
     evidence_values,
     fake_context,
@@ -316,13 +317,6 @@ def _fault(handle, **config):
     return injected_fault(SyscallFault, "valkey.fault.syscall", handle, component_id="crash", **config)
 
 
-def _wait(predicate, timeout=5.0):
-    deadline = time.monotonic() + timeout
-    while not predicate():
-        assert time.monotonic() < deadline, "timed out"
-        time.sleep(0.01)
-
-
 def test_a_kill_lands_when_the_library_acts_and_the_fault_restarts_the_instance(tmp_path):
     handle = _Handle(str(tmp_path))
     context, spec, fault = _fault(handle, instance="valkey-1", path="nodes.conf.tmp-*", nth=2)
@@ -333,7 +327,7 @@ def test_a_kill_lands_when_the_library_acts_and_the_fault_restarts_the_instance(
     )
     assert not context.event_bus.committed_history("crash.injected"), "armed, not landed"
     _library_acts(handle, "valkey-1", "crash", at=1000.5)
-    _wait(lambda: context.event_bus.committed_history("crash.recovered"))
+    assert wait_until(lambda: context.event_bus.committed_history("crash.recovered"))
     (injected,) = context.event_bus.committed_history("crash.injected")
     assert injected.payload["applied_at"] == 1000.5 and injected.payload["signal"] == "SIGKILL"
     result = fault.recover(context, spec)
@@ -360,7 +354,7 @@ def test_a_delay_or_fail_lands_without_a_restart(tmp_path):
     context, spec, fault = _fault(handle, instance="valkey-0", action="delay", delay_ms=5)
     context.event_bus.publish("go", source="test")
     _library_acts(handle, "valkey-0", "crash", at=7.0, action="delay")
-    _wait(lambda: context.event_bus.committed_history("crash.injected"))
+    assert wait_until(lambda: context.event_bus.committed_history("crash.injected"))
     result = fault.recover(context, spec)
     assert result.status is ComponentStatus.PASS, result.summary
     assert handle.restarts == 0 and not context.event_bus.committed_history("crash.recovered")
@@ -425,7 +419,7 @@ def test_the_benchmark_workload_loads_each_target_with_its_build_and_starts_one_
     context = fake_context(handle)
     workload = BenchmarkWorkload()
     assert workload.start(context, spec).status is ComponentStatus.PASS
-    _wait(lambda: (tmp_path / "args").exists() and len((tmp_path / "args").read_text().splitlines()) == 4)
+    assert wait_until(lambda: (tmp_path / "args").exists() and len((tmp_path / "args").read_text().splitlines()) == 4)
     # Tagged like a server, in argv[0], so a sweep finds a benchmark the harness left behind.
     assert all(server_owner(" ".join(process.args)) == current_owner() for process in workload._processes.values())
     result = workload.stop(context, spec)

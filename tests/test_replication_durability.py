@@ -12,7 +12,7 @@ import pytest
 import valkey
 
 from tests.fakes import FakeClient, FakeHandle, fake_instances
-from tests.support import VirtualClock
+from tests.support import VirtualClock, wait_until
 from tests.valkey_experiments_support import fake_context, registration_for, valkey_service
 from valkey_fuzzer import deadlines
 from valkey_fuzzer.components import instances, polling, processes
@@ -632,9 +632,7 @@ def test_a_harness_bug_in_the_workload_is_an_error_not_an_ambiguous_write(tmp_pa
     context = fake_context(_standalone(_StoreClient()), spec, artifact_dir=str(tmp_path))
     workload = KeyValueWorkload()
     workload.start(context, spec)
-    deadline = time.monotonic() + 5
-    while workload._thread.is_alive() and time.monotonic() < deadline:
-        time.sleep(0.01)
+    wait_until(lambda: not workload._thread.is_alive())
     result = workload.stop(context, spec)
     assert result.status.value == "ERROR" and "TypeError: served_by bug" in result.summary, result.summary
 

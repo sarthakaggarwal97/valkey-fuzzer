@@ -24,7 +24,7 @@ from tests.deployment_support import (
     instance,
     process_manager,
 )
-from tests.support import VirtualClock, fake_executable
+from tests.support import VirtualClock, fake_executable, wait_until
 from valkey_fuzzer import deadlines
 from valkey_fuzzer.commands.run import cleanup_logs
 from valkey_fuzzer.components.capabilities import resolve_binary
@@ -486,10 +486,7 @@ def test_a_server_killed_at_cleanup_takes_the_child_it_forked_along():
     try:
         processes.kill_server(server)
         assert server.wait(timeout=10) == -signal.SIGKILL
-        deadline = time.monotonic() + 10
-        while not _exited(child) and time.monotonic() < deadline:
-            time.sleep(0.02)
-        assert _exited(child)
+        assert wait_until(lambda: _exited(child), 10)
     finally:
         server.kill()
         server.wait()

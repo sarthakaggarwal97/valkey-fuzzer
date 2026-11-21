@@ -106,6 +106,12 @@ class _Migration:
         return self.states[0] in ("success", "failed", "cancelled")
 
 
+def _fake_views():
+    """``slot_migration.read_view`` answered by the fake cluster's ``view``."""
+
+    return patch.object(slot_migration, "read_view", lambda handle, instance_id, timeout=2.0: handle.view(instance_id))
+
+
 class FakeMigrationCluster:
     """Three shards of a primary and a replica (valkey-0/1, valkey-2/3, valkey-4/5) on per-instance addresses.
 
@@ -348,7 +354,7 @@ def run_chaos(handle, waves, *, seed=7, time_scale=1.0, **config):
     context = FakeContext(
         spec, services={"valkey.deployment": handle}, deployment_mode="cluster", seed=seed, time_scale=time_scale
     )
-    with patch.object(slot_migration, "read_view", lambda handle, instance_id, timeout=2.0: handle.view(instance_id)):
+    with _fake_views():
         return SlotMigrationChaosAction().run(context, spec), context
 
 
@@ -405,7 +411,7 @@ def test_a_key_with_braces_but_no_hash_tag_cannot_be_seeded():
 
 def test_without_a_shard_a_slot_goes_round_the_shards():
     handle = FakeMigrationCluster()
-    with patch.object(slot_migration, "read_view", lambda handle, instance_id, timeout=2.0: handle.view(instance_id)):
+    with _fake_views():
         first = migration_endpoints(handle, "{s}", None)
         assert (first["slot"], first["source"], first["target"]) == (SLOT, "valkey-0", "valkey-2")
         handle.moved[SLOT] = 2
@@ -619,7 +625,7 @@ def test_a_bundle_event_on_an_endpoint_shows_the_phase_ahead_of_the_next_job_rea
 
     thread = threading.Thread(target=paused_line)
     thread.start()
-    with patch.object(slot_migration, "read_view", lambda handle, instance_id, timeout=2.0: handle.view(instance_id)):
+    with _fake_views():
         result = SlotMigrationChaosAction().run(context, spec)
     thread.join()
     assert result.status is ComponentStatus.PASS, result.summary
@@ -813,7 +819,7 @@ def test_the_experiment_runs_its_default_waves_and_validates_the_cluster_at_the_
     # delay, the follow's polls) are divided here as FakeContext(time_scale=) divides the other tests'.
     sleep = runner._Context.sleep
     with (
-        patch.object(slot_migration, "read_view", lambda handle, instance_id, timeout=2.0: handle.view(instance_id)),
+        _fake_views(),
         patch.object(runner._Context, "sleep", lambda self, seconds: sleep(self, seconds / TIME_SCALE)),
     ):
         outcome = run_experiment(

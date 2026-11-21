@@ -73,6 +73,13 @@ def clock(monkeypatch):
     return VirtualClock().install(monkeypatch, check_module, snapshot, failover, deadlines)
 
 
+def _log_file(path, *lines):
+    """``path`` as a server log of ``lines``, each a notice; its path as a string."""
+
+    path.write_text("".join(f"1:M 29 Oct 2026 00:00:00.000 * {line}\n" for line in lines))
+    return str(path)
+
+
 def _only(*checks, **config):
     return StateValidationConfig(**{f"check_{name}": name in checks for name in CHECKS}, **config)
 
@@ -709,8 +716,7 @@ def test_cluster_test_keys_cover_every_primary_and_each_replica_needs_one():
 )
 def test_a_lost_election_is_a_warning_but_an_election_for_epoch_0_is_an_error(tmp_path, line, severity):
     def node(name, role, text):
-        (tmp_path / name).write_text(f"1:S 29 Oct 2026 00:00:00.000 * {text}\n")
-        return LogNode(name, name, None, role, 0, str(tmp_path / name))
+        return LogNode(name, name, None, role, 0, _log_file(tmp_path / name, text))
 
     nodes = [node("v1", "primary", "Failover election won (epoch 7)."), node("v2", "replica", line)]
     findings = check_logs(nodes, {0}, (), ()).findings
@@ -732,10 +738,8 @@ def test_a_lost_election_is_a_warning_but_an_election_for_epoch_0_is_an_error(tm
     ids=["long-run", "earlier-stop"],
 )
 def test_failure_detection_is_the_watchers_last_word_about_a_stopped_node(tmp_path, lines, severity):
-    (tmp_path / "v0").write_text("".join(f"1:M 29 Oct 2026 00:00:00.000 * {line}\n" for line in lines))
-    (tmp_path / "v1").write_text("")
-    nodes = [LogNode("v0", "a:0", "n0", "primary", 0, str(tmp_path / "v0")),
-             LogNode("v1", "a:1", "n1", "replica", 0, str(tmp_path / "v1"))]  # fmt: skip
+    nodes = [LogNode("v0", "a:0", "n0", "primary", 0, _log_file(tmp_path / "v0", *lines)),
+             LogNode("v1", "a:1", "n1", "replica", 0, _log_file(tmp_path / "v1"))]  # fmt: skip
 
     findings = check_logs(nodes, set(), {"a:1"}, ()).findings
 
@@ -745,13 +749,10 @@ def test_failure_detection_is_the_watchers_last_word_about_a_stopped_node(tmp_pa
 def test_failure_detection_counts_every_watcher_including_stopped_ones_and_the_fail_message(tmp_path):
     # n2 reached quorum on n1, then was killed itself and detected by n0; n0 only heard of n1 by FAIL message
     # (cluster_legacy.c logs "Marking node ... as failing" on the node that reached quorum alone).
-    def write(name, *lines):
-        (tmp_path / name).write_text("".join(f"1:M 29 Oct 2026 00:00:00.000 * {line}\n" for line in lines))
-
     n2_failing = "Marking node n2 (127.0.0.1) as failing (quorum reached)."
-    write("v0", "FAIL message received from n2 (127.0.0.1) about n1 (127.0.0.1)", n2_failing)
-    write("v1")
-    write("v2", "Marking node n1 (127.0.0.1) as failing (quorum reached).")
+    _log_file(tmp_path / "v0", "FAIL message received from n2 (127.0.0.1) about n1 (127.0.0.1)", n2_failing)
+    _log_file(tmp_path / "v1")
+    _log_file(tmp_path / "v2", "Marking node n1 (127.0.0.1) as failing (quorum reached).")
     nodes = [
         LogNode(f"v{index}", f"a:{index}", f"n{index}", "primary", index, str(tmp_path / f"v{index}"))
         for index in range(3)
@@ -760,15 +761,13 @@ def test_failure_detection_counts_every_watcher_including_stopped_ones_and_the_f
         result = check_logs(nodes, set(), stopped, ())
         assert result.success and not result.findings, result.findings
     # n2's own quorum line still counts after n2 was stopped: its log outlives it.
-    write("v0", n2_failing)
+    _log_file(tmp_path / "v0", n2_failing)
     assert check_logs(nodes, set(), {"a:1", "a:2"}, ()).success
 
 
 def test_the_log_check_counts_only_the_shards_it_examined(tmp_path):
-    (tmp_path / "v0").write_text("1:M 29 Oct 2026 00:00:00.000 * Failover election won (epoch 7).\n")
-    (tmp_path / "v1").write_text("")
-    nodes = [LogNode("v0", "a:0", "n0", "primary", 0, str(tmp_path / "v0")),
-             LogNode("v1", "a:1", "n1", "replica", 1, str(tmp_path / "v1"))]  # fmt: skip
+    nodes = [LogNode("v0", "a:0", "n0", "primary", 0, _log_file(tmp_path / "v0", "Failover election won (epoch 7).")),
+             LogNode("v1", "a:1", "n1", "replica", 1, _log_file(tmp_path / "v1"))]  # fmt: skip
 
     # Shard 1 only lost a replica, and shard 5 has no live member: only shard 0's logs are read.
     result = check_logs(nodes, {0, 5}, {"a:1"}, ())
@@ -778,9 +777,8 @@ def test_the_log_check_counts_only_the_shards_it_examined(tmp_path):
 def test_the_log_check_groups_nodes_by_their_live_shard(tmp_path):
     # valkey-1 was planned in shard 0 but migrated to shard 1's primary: a failover of shard 1 reads its log.
     def info(index, role, planned_shard, line):
-        log_file = tmp_path / f"valkey-{index}.log"
-        log_file.write_text(f"1:S 29 Oct 2026 00:00:00.000 * {line}\n")
-        fields = {"shard_id": planned_shard, "cluster_node_id": f"n{index}", "log_file": str(log_file)}
+        log_file = _log_file(tmp_path / f"valkey-{index}.log", line)
+        fields = {"shard_id": planned_shard, "cluster_node_id": f"n{index}", "log_file": log_file}
         info = instance(f"valkey-{index}", role, index + 1, **fields)
         # No server runs, so none counts as one that did not answer: only the logs are judged.
         info.process.poll.return_value = 0
@@ -1263,7 +1261,7 @@ def test_every_check_runs_against_the_deployment_and_names_what_broke(tmp_path, 
         if fault in ("stopped", "undetected"):
             check.mark_stopped("valkey-3", "replica")
         if fault == "stopped":
-            (tmp_path / "valkey-0.log").write_text("1:M 29 Oct 2026 * Marking node n3 as failing (quorum reached).\n")
+            _log_file(tmp_path / "valkey-0.log", "Marking node n3 as failing (quorum reached).")
         summary = check.validate([])
 
         assert summary["failed_checks"] == failed, summary["error_messages"]
