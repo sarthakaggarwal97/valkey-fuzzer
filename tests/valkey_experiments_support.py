@@ -167,3 +167,20 @@ def validation_result(*failed_checks, critical=False, inconclusive=False):
         "error_messages": [f"{check} broke" for check in failed_checks],
         "checks": {},
     }
+
+
+def command_docs_reply(docs):
+    """What COMMAND DOCS answers over RESP2 for ``docs`` (name -> doc): a map as RESP2 sends one,
+    ``[key, value, ...]``, each doc's ``arguments`` maps and ``subcommands`` docs flat too."""
+
+    def flat(mapping):
+        items = []
+        for key, value in mapping.items():
+            if key == "arguments":
+                value = [flat(item) for item in value]
+            elif key == "subcommands":
+                value = command_docs_reply(value)
+            items += [key, value]
+        return items
+
+    return flat({name: flat(doc) for name, doc in docs.items()})

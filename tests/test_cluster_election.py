@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.conform_support import ELECTION_OBSERVATIONS, ID, write_trace
 from tests.conftest import needs_tlc
 from tests.deployment_support import cluster_nodes_line, cluster_nodes_text
 from tests.fakes import FakeClient, fake_instances
@@ -34,8 +35,6 @@ from valkey_fuzzer.results import ComponentStatus, Evidence
 from valkey_fuzzer.schema import plain_config
 from valkey_fuzzer.spec.bundle import load_bundle, load_spec_mapping
 from valkey_fuzzer.spec.conform import collect_runs
-
-ID = {name: name[-1] * 40 for name in ("valkey-0", "valkey-1", "valkey-2", "valkey-3")}
 
 
 @pytest.fixture
@@ -781,10 +780,6 @@ def _trace(tmp_path, save_behavior="sync", disk_vote=0, second_winner=False):
     def event(t, name, **payload):
         return {"kind": "event", "t": t, "sequence": int(t * 10), "name": name, "payload": payload}
 
-    def observation(node, role, slots):
-        return {"kind": "observation", "t": 0.1, "round": 1, "node": node, "role": role, "slots": slots,
-                "current_epoch": 8, "disk": {"currentEpoch": 8, "lastVoteEpoch": 0}}  # fmt: skip
-
     def granted(t, voter, candidate):
         return event(t, "cluster.vote.granted", instance_id=voter, candidate=ID[candidate], epoch=9)
 
@@ -794,11 +789,7 @@ def _trace(tmp_path, save_behavior="sync", disk_vote=0, second_winner=False):
     # The save that wrote the vote wrote the epoch it was cast in: nodes.conf holds both vars of one save.
     killed = {"currentEpoch": 9 if disk_vote else 8, "lastVoteEpoch": disk_vote}
     records = [
-        {"kind": "header", "scenario_id": "unit", "seed": 1, "nodes": nodes},
-        observation("valkey-0", "primary", [[0, 8191]]),
-        observation("valkey-3", "primary", [[8192, 16383]]),
-        observation("valkey-1", "replica", []),
-        observation("valkey-2", "replica", []),
+        *ELECTION_OBSERVATIONS,
         event(1.0, "cluster.election.started", instance_id="valkey-1", epoch=9),
         event(1.1, "cluster.election.started", instance_id="valkey-2", epoch=9),
         granted(1.2, "valkey-0", "valkey-1"),
@@ -815,10 +806,8 @@ def _trace(tmp_path, save_behavior="sync", disk_vote=0, second_winner=False):
             acked(3.1, "valkey-3", "valkey-2"),
             event(3.2, "cluster.election.won", instance_id="valkey-2", epoch=9),
         ]
-    path = tmp_path / "trace.jsonl"
-    path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
     bundle = load_bundle("cluster-election")
-    (run,) = collect_runs([str(path)])
+    (run,) = collect_runs([write_trace(tmp_path / "trace.jsonl", records, nodes=nodes)])
     return bundle, run
 
 

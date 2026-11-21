@@ -33,24 +33,15 @@ from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.results import make_evidence
 
 from .live_support import BINARY
-from .support import ROOT, fake_executable
+from .support import CONFIG_SPACE_FIXTURE, ROOT, stand_in_build
 
-FIXTURE = Path(__file__).parent / "fixtures" / "config_space"
 INT_MAX, LLONG_MAX = 2**31 - 1, 2**63 - 1
 
 
 def _table():
-    return parse_config_table((FIXTURE / "config.c").read_text(), [(FIXTURE / "server.h").read_text()])
-
-
-def stand_in_build(directory: Path) -> str:
-    """A build tree whose ``src`` holds the fixture's config.c beside a ``valkey-server``; its binary's path."""
-
-    source = directory / "src"
-    source.mkdir(parents=True)
-    for name in ("config.c", "server.h"):
-        shutil.copy(FIXTURE / name, source / name)
-    return str(fake_executable(source / "valkey-server"))
+    return parse_config_table(
+        (CONFIG_SPACE_FIXTURE / "config.c").read_text(), [(CONFIG_SPACE_FIXTURE / "server.h").read_text()]
+    )
 
 
 def test_the_table_holds_every_entry_with_its_type_flags_bounds_and_default():

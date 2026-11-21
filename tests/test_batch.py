@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import pytest
 import yaml
@@ -34,7 +34,6 @@ from valkey_fuzzer.batch import (
     results,
     worker,
 )
-from valkey_fuzzer.cli import main
 from valkey_fuzzer.commands import batch as batch_command
 from valkey_fuzzer.deployment.local import ports
 from valkey_fuzzer.hoststate import OWNER_FILE, sweep
@@ -44,10 +43,13 @@ from valkey_fuzzer.spec import conform
 from valkey_fuzzer.spec.tla import TOOLS_HINT, TlaTools
 
 from .batch_worker_stub import InProcessWorkers
+from .conftest import cli
 from .support import ROOT, fake_executable, wait_until
 from .valkey_experiments_support import valkey_service
 
 STUB = [sys.executable, str(ROOT / "tests" / "batch_worker_stub.py")]
+EXAMPLES = ROOT / "examples"
+EXPERIMENTS = EXAMPLES / "experiments"
 SNAPSHOT = "valkey.snapshot-equivalence"
 EXCLUDES = ["server_config.io-threads=4", "server_config.repl-diskless-load=swapdb"]
 
@@ -385,14 +387,12 @@ def test_the_findings_option_is_a_path_the_command_and_a_spec_make_absolute(tmp_
     spec = tmp_path / "batch.yaml"
     random = {"experiments": [SNAPSHOT], "seeds": 1, "first_seed": 0, "excludes": EXCLUDES}
     spec.write_text(yaml.safe_dump({"port_base": 12000, "findings": "soak/all.json", "sources": [{"random": random}]}))
-    with patch("sys.argv", ["valkey-fuzzer", "batch", str(spec), "--out", "b"]):
-        assert main() == 0
+    assert cli("batch", spec, "--out", "b") == 0
     assert json.loads(Path(tmp_path, "b", "batch.json").read_text())["options"]["findings"] == str(
         tmp_path / "soak" / "all.json"
     )
     assert (tmp_path / "soak" / "all.json").exists()
-    with patch("sys.argv", ["valkey-fuzzer", "batch", str(spec), "--out", "c", "--findings", "other.json"]):
-        assert main() == 0
+    assert cli("batch", spec, "--out", "c", "--findings", "other.json") == 0
     assert json.loads(Path(tmp_path, "c", "batch.json").read_text())["options"]["findings"] == str(
         tmp_path / "other.json"
     )
@@ -721,8 +721,7 @@ def test_the_command_runs_a_batch_and_exits_with_its_worst_result(tmp_path, work
     ]
 
     def run(*argv):
-        with patch("sys.argv", ["valkey-fuzzer", "batch", *argv]):
-            return main()
+        return cli("batch", *argv)
 
     assert run(*common, "--dry-run") == 0 and _id(1) in capsys.readouterr().out
     assert run(*common, "--out", str(tmp_path / "ok"), "--workers", "2") == 0
@@ -1080,8 +1079,7 @@ def test_a_resume_refuses_every_option_but_workers_and_allow_unsupported(tmp_pat
     # --dry-run would run the jobs.
     runner = _batch(tmp_path, [_random(2)])
     for option in RESUME_REFUSES:
-        with patch("sys.argv", ["valkey-fuzzer", "batch", "--resume", runner.folder, *option]):
-            assert main() == 2, option
+        assert cli("batch", "--resume", runner.folder, *option) == 2, option
         assert "--resume takes only --workers and --allow-unsupported" in capsys.readouterr().err, option
     assert stub.runs() == []
 
@@ -1105,13 +1103,10 @@ def test_a_resume_refuses_random_jobs_that_the_installed_code_would_draw_differe
     runner = _batch(tmp_path, [_random(2)])
     with monkeypatch.context() as changed:
         changed.setattr("valkey_fuzzer.provenance.source_digest", lambda packages: "changed")
-        with patch("sys.argv", ["valkey-fuzzer", "batch", "--resume", runner.folder]):
-            assert main() == 2
+        assert cli("batch", "--resume", runner.folder) == 2
     assert stub.runs() == []
     assert "would draw other scenarios" in capsys.readouterr().err
-    resume = ["valkey-fuzzer", "batch", "--resume", runner.folder, "--workers", "2"]
-    with patch("sys.argv", resume):
-        assert main() == 0
+    assert cli("batch", "--resume", runner.folder, "--workers", "2") == 0
     assert len(stub.runs()) == 2
 
 
@@ -1331,3 +1326,27 @@ def test_a_workers_deadline_covers_the_plug_ins_after_run_steps(tmp_path, worker
     # The conformance plug-in's budget is the batch's conform_tlc_timeout_s, the bound it gives TLC.
     expected = 100 + 1234 + 77 + max(pool.DEADLINE_GRACE_S, 25)
     assert item.deadline - item.started == pytest.approx(expected)
+
+
+# A smoke run is not an experiment's PASS: the batch counts it apart and says so.
+def test_a_batch_counts_smoke_runs_apart_and_prints_them(tmp_path, workers, stub, capsys):
+    sources = [normalize_source({"scenarios": [str(EXAMPLES / "standalone_scenario.yaml")]}, "/")]
+    runner = _batch(tmp_path, sources, experiment_directories=(str(EXPERIMENTS),))
+    summary = runner.run()
+
+    assert summary["counts"] == {} and summary["smoke"] == {"PASS": 1}
+    assert summary["runs"][0]["mode"] == "smoke" and summary["cores"] > 0
+    batch_command._print_summary(summary)
+    out = capsys.readouterr().out
+    assert "Smoke runs (lifecycle only, no coverage claim): {'PASS': 1}" in out
+    assert "Cores per run:" in out
+
+
+def test_a_batch_summary_names_the_seed_and_attempt_of_a_failure(tmp_path, workers, stub, capsys):
+    stub.behave(**{"0": "fail:data"})
+    runner = _batch(tmp_path, [_random(1)])
+    summary = runner.run()
+    (run,) = summary["runs"]
+    assert run["seed"] == 0 and run["attempt"] is not None and run["mode"] == "experiment"
+    batch_command._print_summary(summary)
+    assert f"(seed 0, attempt {run['attempt']})" in capsys.readouterr().out

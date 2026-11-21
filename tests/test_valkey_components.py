@@ -1160,8 +1160,8 @@ def test_the_digest_oracle_needs_a_primary_and_never_fails_valkey_for_a_read_it_
     ("role", "emitted", "status", "summary"),
     [
         ("action", 2, OutcomeStatus.PASS, ""),
-        # Missing path evidence means the run did not reach what it tests, whatever its source.
-        ("action", 1, OutcomeStatus.ERROR, "required evidence was not observed: tests.path from info"),
+        # Missing path evidence is ERROR unless a check failed (tests/test_runner.py, tests/test_verdict.py); here,
+        # that a workload's evidence counts as a source, and what the summary names.
         ("workload", 0, OutcomeStatus.ERROR, "required evidence was not observed: tests.path from info"),
     ],
 )  # fmt: skip

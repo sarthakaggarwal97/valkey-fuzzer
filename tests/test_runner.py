@@ -12,8 +12,9 @@ import pytest
 
 from tests.support import (
     component_registration,
-    deployment_identity,
     deployment_registrations,
+    experiment_plan,
+    fake_component,
     make_catalog,
     wait_until,
 )
@@ -22,7 +23,7 @@ from valkey_fuzzer import runner as runner_module
 from valkey_fuzzer.catalog import ComponentRegistry
 from valkey_fuzzer.declarations import Declarations, EvidenceDeclaration
 from valkey_fuzzer.minimize import failure_signature
-from valkey_fuzzer.plan import ComponentSpec, EvidenceRequirement, ExecutionPlan, ExperimentSpec, RunMode
+from valkey_fuzzer.plan import EvidenceRequirement
 from valkey_fuzzer.protocols import ComponentRole, component_artifact_dir
 from valkey_fuzzer.results import ComponentResult, ComponentStatus, Evidence, OutcomeStatus
 from valkey_fuzzer.runner import PreflightError, Runner, RunnerError
@@ -89,42 +90,19 @@ def _execute(plan, *entries, calls=None, provider=None, executor=None, **options
     return Runner(make_catalog(registry, providers), **(executor or {})).run(plan, **options)
 
 
-def _spec(role, component_id, *, required=True, depends_on=(), timeout_s=None):
-    use = f"tests.{role.value}.fake"
-    return ComponentSpec(use, component_id, role, required=required, depends_on=depends_on, timeout_s=timeout_s)
-
-
-def _plan(components, *, deployment_mode="standalone", **requirements):
-    experiment = ExperimentSpec(
-        experiment_id="tests.feature",
-        mode=RunMode.EXPERIMENT if requirements.get("required_evidence") else RunMode.SMOKE,
-        deployment_modes=("standalone", "cluster"),
-        components=tuple(components),
-        **requirements,
-    )
-    return ExecutionPlan.from_experiment(
-        experiment,
-        scenario_id="runner-test",
-        seed=7,
-        deployment_mode=deployment_mode,
-        deployment_provider=deployment_identity(),
-        deployment={"mode": deployment_mode},
-    )
-
-
 def test_what_runs_beside_the_actions_starts_before_them_unless_it_depends_on_one():
     """A workload declared after the actions (a default fragment's, such as config-churn) still runs beside them;
     one that depends on an action waits for it."""
 
     components = (
-        _spec(ACTION, "first"),
-        _spec(ACTION, "second"),
-        _spec(OBSERVER, "after-first", depends_on=("first",)),
-        _spec(FAULT, "fault"),
-        _spec(ORACLE, "check"),
-        _spec(WORKLOAD, "late"),
+        fake_component(ACTION, "first"),
+        fake_component(ACTION, "second"),
+        fake_component(OBSERVER, "after-first", depends_on=("first",)),
+        fake_component(FAULT, "fault"),
+        fake_component(ORACLE, "check"),
+        fake_component(WORKLOAD, "late"),
     )
-    plan = _plan(components)
+    plan = experiment_plan(components)
     assert [item.id for item in plan.ordered_components] == [
         "fault", "late", "first", "after-first", "second", "check"
     ]  # fmt: skip
@@ -134,14 +112,14 @@ def test_what_runs_beside_the_actions_starts_before_them_unless_it_depends_on_on
 def test_every_role_runs_in_dependency_order_on_any_deployment_mode(mode, tmp_path):
     calls, seen, folders = [], [], []
     components = (
-        _spec(ACTION, "act", depends_on=("inject",)),
-        _spec(ORACLE, "check", depends_on=("act",)),
-        _spec(FAULT, "inject", depends_on=("load",)),
-        _spec(WORKLOAD, "load", depends_on=("observe",)),
-        _spec(OBSERVER, "observe", depends_on=("probe",)),
-        _spec(CAPABILITY, "probe"),
+        fake_component(ACTION, "act", depends_on=("inject",)),
+        fake_component(ORACLE, "check", depends_on=("act",)),
+        fake_component(FAULT, "inject", depends_on=("load",)),
+        fake_component(WORKLOAD, "load", depends_on=("observe",)),
+        fake_component(OBSERVER, "observe", depends_on=("probe",)),
+        fake_component(CAPABILITY, "probe"),
     )
-    plan = _plan(
+    plan = experiment_plan(
         components,
         deployment_mode=mode,
         required_events=("deployment.ready", "validation.completed"),
@@ -233,8 +211,9 @@ OracleError = "runner execution failed during oracle.evaluate: RunnerError: orac
 def test_component_results_decide_the_verdict(components, status, summary, provisioned):
     calls = []
     script = {component_id: (item_status, cleanup) for _, component_id, item_status, cleanup, _, _ in components}
-    plan = _plan(
-        _spec(role, name, depends_on=after, required=required) for role, name, _, _, after, required in components
+    plan = experiment_plan(
+        fake_component(role, name, depends_on=after, required=required)
+        for role, name, _, _, after, required in components
     )
     roles = dict.fromkeys(role for role, *_ in components)
 
@@ -257,7 +236,9 @@ def test_an_oracle_that_raises_does_not_stop_the_oracles_after_it(liveness):
                 raise RuntimeError("cannot read the dataset")
             return ComponentResult(spec.id, liveness, "the server is dead" if liveness is FAIL else "alive")
 
-    outcome = _execute(_plan((_spec(ORACLE, "data"), _spec(ORACLE, "liveness"))), (ORACLE, Oracles))
+    outcome = _execute(
+        experiment_plan((fake_component(ORACLE, "data"), fake_component(ORACLE, "liveness"))), (ORACLE, Oracles)
+    )
 
     results = {result.component_id: result for result in outcome.component_results}
     assert results["data"].status is ERR and results["liveness"].status is liveness
@@ -278,7 +259,7 @@ def test_a_runs_error_names_where_it_was_raised():
         def run(self, context, spec):
             return [][0]
 
-    outcome = _execute(_plan((_spec(ACTION, "act"),)), (ACTION, Actions))
+    outcome = _execute(experiment_plan((fake_component(ACTION, "act"),)), (ACTION, Actions))
 
     assert outcome.status is OutcomeStatus.ERROR
     assert outcome.summary == "runner execution failed during action.run: IndexError: list index out of range"
@@ -298,7 +279,9 @@ def test_missing_required_events_or_evidence_make_a_run_error_unless_a_check_fai
     requirements, diagnostic, expected, check
 ):
     # The run did not reach what it tests; a FAIL an oracle found anyway stands, and the missing item stays listed.
-    plan = _plan((_spec(ACTION, "act"), _spec(ORACLE, "check", depends_on=("act",))), **requirements)
+    plan = experiment_plan(
+        (fake_component(ACTION, "act"), fake_component(ORACLE, "check", depends_on=("act",))), **requirements
+    )
     outcome = _execute(plan, (ACTION, _Component), (ORACLE, lambda: _Component(status=check)))
 
     assert outcome.status is (OutcomeStatus.FAIL if check is FAIL else OutcomeStatus.ERROR), outcome.summary
@@ -308,8 +291,8 @@ def test_missing_required_events_or_evidence_make_a_run_error_unless_a_check_fai
 @pytest.mark.parametrize("error", [RuntimeError("cannot start"), KeyboardInterrupt("stop now"), "hang"])
 def test_a_raising_or_hung_component_tears_down_what_started_and_an_interrupt_is_reraised(error):
     calls, seen = [], {}
-    act = _spec(ACTION, "act", depends_on=("observe",), timeout_s=0.2 if error == "hang" else None)
-    plan = _plan((_spec(OBSERVER, "observe"), act))
+    act = fake_component(ACTION, "act", depends_on=("observe",), timeout_s=0.2 if error == "hang" else None)
+    plan = experiment_plan((fake_component(OBSERVER, "observe"), act))
     acts = _Component(calls, error=None if error == "hang" else error, hang=seen if error == "hang" else None)
     started = time.monotonic()
 
@@ -361,7 +344,7 @@ EXECUTOR_ERROR, DEADLINE_ERROR = (
 )  # fmt: skip
 def test_a_broken_component_or_an_expired_deadline_is_an_error(factory, options, error_type, phase):
     calls = []
-    outcome = _execute(_plan((_spec(ACTION, "act"),)), (ACTION, factory), calls=calls, **options)
+    outcome = _execute(experiment_plan((fake_component(ACTION, "act"),)), (ACTION, factory), calls=calls, **options)
 
     assert outcome.status is OutcomeStatus.ERROR
     error = outcome.diagnostics["error"]
@@ -373,16 +356,22 @@ def test_a_rejected_deployment_or_requirement_raises_before_anything_is_created_
     calls = []
     provider = _provider(calls, validate=ValueError("deployment document is invalid"))
     with pytest.raises(PreflightError, match="deployment document is invalid") as raised:
-        _execute(_plan((_spec(ACTION, "act"),)), (ACTION, lambda: calls.append("factory")), provider=provider)
+        _execute(
+            experiment_plan((fake_component(ACTION, "act"),)),
+            (ACTION, lambda: calls.append("factory")),
+            provider=provider,
+        )
     assert isinstance(raised.value.__cause__, ValueError)
     assert calls == ["standalone.validate"]
     with pytest.raises(RunnerError, match=r"'never\.declared' is not published"):
-        _execute(_plan((_spec(ACTION, "act"),), required_events=("never.declared",)), (ACTION, _Component))
+        _execute(
+            experiment_plan((fake_component(ACTION, "act"),), required_events=("never.declared",)), (ACTION, _Component)
+        )
 
 
 def test_a_failed_plan_check_is_a_runner_error_that_names_the_field():
     with pytest.raises(PreflightError, match="is not registered") as raised:
-        _execute(_plan((_spec(ACTION, "act"),)))
+        _execute(experiment_plan((fake_component(ACTION, "act"),)))
     cause = raised.value.__cause__
     assert type(cause) is RunnerError and cause.path == "components.act.use"
 
@@ -413,12 +402,16 @@ def test_a_host_probes_skip_comes_before_a_components_own_refusal_which_stands_w
     # The experiment's host-probe says SKIP_UNSUPPORTED (what the host lacks) before the fault's own probe can
     # make the run an ERROR; a scenario without the host-probe still gets the fault's refusal, naming the component.
     calls = []
-    outcome = _execute_with_a_probed_fault(_plan((_spec(CAPABILITY, "host"), _spec(FAULT, "skew"))), calls, SKIP)
+    outcome = _execute_with_a_probed_fault(
+        experiment_plan((fake_component(CAPABILITY, "host"), fake_component(FAULT, "skew"))), calls, SKIP
+    )
     assert outcome.status is OutcomeStatus.SKIP_UNSUPPORTED, outcome.summary
     assert outcome.summary == "required capability 'host' is unsupported: host probe"
     assert "skew.registration-probe" not in calls and "standalone.provision" not in calls
     calls = []
-    outcome = _execute_with_a_probed_fault(_plan((_spec(CAPABILITY, "host"), _spec(FAULT, "skew"))), calls, PASS)
+    outcome = _execute_with_a_probed_fault(
+        experiment_plan((fake_component(CAPABILITY, "host"), fake_component(FAULT, "skew"))), calls, PASS
+    )
     assert outcome.status is OutcomeStatus.ERROR, outcome.summary
     assert (
         "component 'skew' (tests.fault.fake) cannot run on this host: libfaketime is not installed" in outcome.summary
@@ -426,7 +419,7 @@ def test_a_host_probes_skip_comes_before_a_components_own_refusal_which_stands_w
     assert outcome.diagnostics["error"]["phase"] == "preflight" and "standalone.provision" not in calls
     assert calls.index("host.probe") < calls.index("skew.registration-probe")
     calls = []
-    outcome = _execute_with_a_probed_fault(_plan((_spec(FAULT, "skew"),)), calls, PASS)
+    outcome = _execute_with_a_probed_fault(experiment_plan((fake_component(FAULT, "skew"),)), calls, PASS)
     assert outcome.status is OutcomeStatus.ERROR and "cannot run on this host" in outcome.summary
     assert "standalone.provision" not in calls
 
@@ -442,7 +435,7 @@ def test_a_failed_provision_is_rolled_back_and_a_failed_rollback_does_not_hide_i
     )
     if provision == "invalid":
         provider.provision = lambda context: calls.append("standalone.provision")  # returns None, not a deployment
-    outcome = _execute(_plan((_spec(ACTION, "act"),)), (ACTION, _Component), provider=provider)
+    outcome = _execute(experiment_plan((fake_component(ACTION, "act"),)), (ACTION, _Component), provider=provider)
 
     assert outcome.status is OutcomeStatus.ERROR
     assert calls == ["standalone.validate", "standalone.provision", "standalone.rollback"]
@@ -493,8 +486,8 @@ def test_a_crash_the_post_mortem_finds_in_a_failed_run_is_its_verdict(failed, lo
         return {"valkey-0": (logs, f"{logs}.stdio")}
 
     provider.log_files = log_files
-    oracles = (_spec(ORACLE, "data"),) if failed == "oracle" else ()
-    plan = _plan((_spec(ACTION, "act"), *oracles, _spec(ORACLE, "liveness")))
+    oracles = (fake_component(ORACLE, "data"),) if failed == "oracle" else ()
+    plan = experiment_plan((fake_component(ACTION, "act"), *oracles, fake_component(ORACLE, "liveness")))
     action = _Component(calls, error=RuntimeError("restart of valkey-0 failed") if failed == "action" else None)
 
     outcome = _execute(plan, (ACTION, lambda: action), (ORACLE, lambda: _Judges(calls)), provider=provider)
@@ -528,7 +521,9 @@ def test_a_crash_an_action_found_stands_when_the_run_fails_after_it():
                 spec.id, FAIL, "valkey-0 crashed", diagnostics={"crashes": {"valkey-0": "x"}}, crash=True
             )
 
-    outcome = _execute(_plan((_spec(ACTION, "crash"), _spec(ACTION, "after"))), (ACTION, Actions))
+    outcome = _execute(
+        experiment_plan((fake_component(ACTION, "crash"), fake_component(ACTION, "after"))), (ACTION, Actions)
+    )
 
     assert outcome.status is OutcomeStatus.FAIL and outcome.summary.startswith(f"{TRUSTED}: crash")
     assert outcome.diagnostics["error"]["phase"] == "action.run"
@@ -551,7 +546,7 @@ def test_a_crash_any_component_reports_is_a_finding_and_a_capability_crash_ends_
 
         start = probe
 
-    plan = _plan((_spec(role, "probe"), _spec(ORACLE, "check")))
+    plan = experiment_plan((fake_component(role, "probe"), fake_component(ORACLE, "check")))
     outcome = _execute(plan, (role, Crashing), (ORACLE, lambda: _Component(calls)), calls=calls)
 
     assert outcome.status is (OutcomeStatus.FAIL if crash else OutcomeStatus.ERROR), outcome.summary
@@ -591,14 +586,18 @@ def test_teardown_waits_for_a_timed_out_start_or_reports_it_and_refuses_later_ru
         provider.cleanup = lambda context, deployment: gate.set()
 
     try:
-        outcome = _execute(_plan((_spec(WORKLOAD, "tmpfs", timeout_s=0.2),)), (WORKLOAD, StartsLate), provider=provider)
+        outcome = _execute(
+            experiment_plan((fake_component(WORKLOAD, "tmpfs", timeout_s=0.2),)),
+            (WORKLOAD, StartsLate),
+            provider=provider,
+        )
         assert outcome.status is OutcomeStatus.ERROR
         if not released_by_cleanup:
             (error,) = [item for item in outcome.diagnostics["cleanup_errors"] if item["owner"] == "tmpfs"]
             assert "not torn down" in error["exception"]["message"]
             abandoned = ({"scenario_id": "runner-test", "call": "component 'tmpfs' start"},)
             assert outcome.diagnostics["abandoned_calls"] == abandoned
-            refused = _execute(_plan((_spec(ACTION, "act"),)), (ACTION, _Component))
+            refused = _execute(experiment_plan((fake_component(ACTION, "act"),)), (ACTION, _Component))
             assert (
                 refused.summary.startswith("refused to start") and refused.diagnostics["abandoned_calls"] == abandoned
             )
@@ -610,7 +609,9 @@ def test_teardown_waits_for_a_timed_out_start_or_reports_it_and_refuses_later_ru
     if released_by_cleanup:
         assert created == [], "the late start's resource was never released"
         assert "abandoned_calls" not in outcome.diagnostics
-    assert _execute(_plan((_spec(ACTION, "act"),)), (ACTION, _Component)).status is OutcomeStatus.PASS
+    assert (
+        _execute(experiment_plan((fake_component(ACTION, "act"),)), (ACTION, _Component)).status is OutcomeStatus.PASS
+    )
 
 
 @pytest.mark.parametrize("wait", ["cleanup", "rollback", "teardown"])
@@ -631,7 +632,9 @@ def test_a_hung_cleanup_rollback_or_teardown_is_cut_and_the_run_ends_in_error(sh
     started = time.monotonic()
     try:
         # Neither the component (no timeout_s) nor the run (no deadline) bounds the wait: only the watchdog does.
-        outcome = _execute(_plan((_spec(WORKLOAD, "load"),)), (WORKLOAD, HangsOnStop), provider=provider)
+        outcome = _execute(
+            experiment_plan((fake_component(WORKLOAD, "load"),)), (WORKLOAD, HangsOnStop), provider=provider
+        )
     finally:
         gate.set()
     assert time.monotonic() - started < 15
@@ -653,7 +656,7 @@ def test_a_blocking_subscriber_cannot_hang_the_run_past_its_deadline(short_grace
             return ComponentResult(spec.id, PASS, "subscribed")
 
     started = time.monotonic()
-    plan = _plan((_spec(WORKLOAD, "load"), _spec(ACTION, "act", depends_on=("load",))))
+    plan = experiment_plan((fake_component(WORKLOAD, "load"), fake_component(ACTION, "act", depends_on=("load",))))
     try:
         outcome = _execute(
             plan, (WORKLOAD, lambda: Subscribes(calls)), (ACTION, _Component), calls=calls, deadline=started + 0.5
@@ -676,11 +679,11 @@ def test_a_component_whose_start_never_ran_is_not_torn_down(monkeypatch):
             context.event_bus.subscribe("first.completed", lambda _: offset.__setitem__(0, 1000.0))
             return ComponentResult(spec.id, PASS, "watching")
 
-    plan = _plan(
+    plan = experiment_plan(
         (
-            _spec(OBSERVER, "watch"),
-            _spec(WORKLOAD, "first", depends_on=("watch",)),
-            _spec(WORKLOAD, "second", depends_on=("first",)),
+            fake_component(OBSERVER, "watch"),
+            fake_component(WORKLOAD, "first", depends_on=("watch",)),
+            fake_component(WORKLOAD, "second", depends_on=("first",)),
         )
     )
     outcome = _execute(
@@ -728,7 +731,7 @@ def test_ctrl_c_cancels_the_call_in_flight(short_grace, monkeypatch):
     monkeypatch.setattr(deadlines.ComponentCall, "join", join)
     started = time.monotonic()
     with pytest.raises(KeyboardInterrupt):
-        _execute(_plan((_spec(ACTION, "act"),)), (ACTION, Busy), calls=calls, deadline=started + 30)
+        _execute(experiment_plan((fake_component(ACTION, "act"),)), (ACTION, Busy), calls=calls, deadline=started + 30)
 
     wait_until(lambda: seen)
     assert seen == {"slept": False, "cancelled": True} and calls[-1] == "standalone.cleanup"
@@ -768,7 +771,12 @@ def test_ctrl_c_during_a_start_defers_its_teardown_until_the_start_returns(short
     monkeypatch.setattr(deadlines.ComponentCall, "join", join)
     try:
         with pytest.raises(KeyboardInterrupt):
-            _execute(_plan((_spec(FAULT, "f"),)), (FAULT, Injects), provider=provider, deadline=time.monotonic() + 30)
+            _execute(
+                experiment_plan((fake_component(FAULT, "f"),)),
+                (FAULT, Injects),
+                provider=provider,
+                deadline=time.monotonic() + 30,
+            )
     finally:
         gate.set()
     assert calls[-3:] == ["standalone.cleanup", "f.inject returned", "f.recover"]
@@ -790,7 +798,9 @@ def test_a_thread_a_call_starts_under_a_copy_of_its_context_shares_its_cancellat
             return ComponentResult(spec.id, PASS, "done")
 
     started = time.monotonic()
-    outcome = _execute(_plan((_spec(ACTION, "act", timeout_s=0.2),)), (ACTION, Pooled), deadline=started + 30)
+    outcome = _execute(
+        experiment_plan((fake_component(ACTION, "act", timeout_s=0.2),)), (ACTION, Pooled), deadline=started + 30
+    )
 
     assert outcome.status is OutcomeStatus.ERROR and "abandoned_calls" not in outcome.diagnostics
     assert seen == {"slept": False, "cancelled": True} and time.monotonic() - started < 5
@@ -820,7 +830,7 @@ def _crashing_workload(stop):
 )
 def test_a_crash_survives_a_stop_that_does_not_pass(stop):
     calls = []
-    plan = _plan((_spec(WORKLOAD, "load"), _spec(ORACLE, "check")))
+    plan = experiment_plan((fake_component(WORKLOAD, "load"), fake_component(ORACLE, "check")))
     outcome = _execute(
         plan, (WORKLOAD, lambda: _crashing_workload(stop)), (ORACLE, lambda: _Component(calls)), calls=calls
     )
@@ -843,7 +853,7 @@ def test_a_crash_from_a_fault_inject_survives_a_failing_recover():
             raise RuntimeError("recover blew up")
 
     calls = []
-    plan = _plan((_spec(FAULT, "fault"), _spec(ORACLE, "check")))
+    plan = experiment_plan((fake_component(FAULT, "fault"), fake_component(ORACLE, "check")))
     outcome = _execute(plan, (FAULT, Fault), (ORACLE, lambda: _Component(calls)), calls=calls)
 
     assert outcome.status is OutcomeStatus.FAIL and "standalone.cleanup" in calls
@@ -857,21 +867,23 @@ def test_a_failing_obligation_release_does_not_skip_the_deployment_cleanup(monke
         raise RuntimeError("sweep blew up")
 
     monkeypatch.setattr(runner_module._Execution, "release_obligations", lambda self, final=False: sweep(self))
-    outcome = _execute(_plan((_spec(ORACLE, "check"),)), (ORACLE, lambda: _Component(calls)), calls=calls)
+    outcome = _execute(
+        experiment_plan((fake_component(ORACLE, "check"),)), (ORACLE, lambda: _Component(calls)), calls=calls
+    )
 
     assert "standalone.cleanup" in calls and outcome.status is OutcomeStatus.ERROR
     assert {error["phase"] for error in outcome.diagnostics["cleanup_errors"]} == {"release obligations"}
 
 
 def test_a_crash_of_an_optional_component_is_a_finding():
-    plan = _plan((_spec(WORKLOAD, "load", required=False), _spec(ORACLE, "check")))
+    plan = experiment_plan((fake_component(WORKLOAD, "load", required=False), fake_component(ORACLE, "check")))
     outcome = _execute(plan, (WORKLOAD, lambda: _crashing_workload(PASS)), (ORACLE, _Component))
 
     assert outcome.status is OutcomeStatus.FAIL and "load" in outcome.summary
 
 
 def test_an_oracle_that_is_not_required_is_rejected_when_the_plan_is_checked():
-    plan = _plan((_spec(ORACLE, "liveness", required=False),))
+    plan = experiment_plan((fake_component(ORACLE, "liveness", required=False),))
 
     with pytest.raises(PreflightError, match="oracle 'liveness' is not required"):
         _execute(plan, (ORACLE, _Component))
@@ -884,7 +896,9 @@ def test_an_independent_fail_stands_over_a_later_components_raise():
                 return ComponentResult(spec.id, FAIL, "acknowledged write lost")
             raise RuntimeError("a2 blew up")
 
-    plan = _plan((_spec(ACTION, "a1"), _spec(ACTION, "a2"), _spec(ORACLE, "judge")))
+    plan = experiment_plan(
+        (fake_component(ACTION, "a1"), fake_component(ACTION, "a2"), fake_component(ORACLE, "judge"))
+    )
     outcome = _execute(plan, (ACTION, Actions), (ORACLE, _Component))
 
     assert outcome.status is OutcomeStatus.FAIL, outcome.summary
@@ -898,7 +912,7 @@ def test_a_fail_that_depends_on_the_component_that_raised_is_still_an_error():
                 raise RuntimeError("a1 blew up")
             return ComponentResult(spec.id, FAIL, "failed after a1")
 
-    plan = _plan((_spec(ACTION, "a1"), _spec(ACTION, "a2", depends_on=("a1",))))
+    plan = experiment_plan((fake_component(ACTION, "a1"), fake_component(ACTION, "a2", depends_on=("a1",))))
     assert _execute(plan, (ACTION, Actions)).status is OutcomeStatus.ERROR
 
 
@@ -916,7 +930,7 @@ def test_a_result_returned_just_past_the_deadline_is_kept(status, monkeypatch):
         return result
 
     monkeypatch.setattr(runner_module._Execution, "watch", late)
-    outcome = _execute(_plan((_spec(ACTION, "act", timeout_s=0.1),)), (ACTION, Actions))
+    outcome = _execute(experiment_plan((fake_component(ACTION, "act", timeout_s=0.1),)), (ACTION, Actions))
 
     act = outcome.component_results[0]
     assert act.status is status and act.diagnostics["overran_deadline"] is True
@@ -928,7 +942,7 @@ def test_an_interrupt_after_a_crash_carries_the_outcome_that_found_it():
         def run(self, context, spec, evidence=()):
             raise KeyboardInterrupt("stop now")
 
-    plan = _plan((_spec(WORKLOAD, "load"), _spec(ACTION, "act")))
+    plan = experiment_plan((fake_component(WORKLOAD, "load"), fake_component(ACTION, "act")))
     with pytest.raises(KeyboardInterrupt) as caught:
         _execute(plan, (WORKLOAD, lambda: _crashing_workload(PASS)), (ACTION, Actions))
 
@@ -941,6 +955,6 @@ def test_an_interrupt_without_a_finding_carries_an_error_outcome():
             raise KeyboardInterrupt("stop now")
 
     with pytest.raises(KeyboardInterrupt) as caught:
-        _execute(_plan((_spec(ACTION, "act"),)), (ACTION, Actions))
+        _execute(experiment_plan((fake_component(ACTION, "act"),)), (ACTION, Actions))
 
     assert caught.value.partial_outcome.status is OutcomeStatus.ERROR

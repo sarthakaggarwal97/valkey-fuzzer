@@ -14,6 +14,7 @@ from unittest.mock import Mock, call, patch
 
 import pytest
 
+from tests import support
 from tests.deployment_support import (
     MIGRATED_TOPOLOGY,
     client_context,
@@ -38,7 +39,7 @@ from valkey_fuzzer.deployment.local.service import VALKEY_DEPLOYMENT_SERVICE, Va
 from valkey_fuzzer.deployment.local.topology import TopologyNode
 from valkey_fuzzer.deployment.local.validation.replication import _recorded_primary
 from valkey_fuzzer.deployment.local.validation.snapshot import Snapshot
-from valkey_fuzzer.plan import DeploymentProviderIdentity, ExecutionPlan, RunMode
+from valkey_fuzzer.plan import DeploymentProviderIdentity, ExecutionPlan
 from valkey_fuzzer.protocols import ProvisionedDeployment
 
 PROVIDER = "valkey_fuzzer.deployment.local.provider"
@@ -46,15 +47,13 @@ SERVICE = "valkey_fuzzer.deployment.local.service"
 
 
 def make_plan(**deployment) -> ExecutionPlan:
-    return ExecutionPlan(
-        scenario_id="local",
-        experiment_id="tests.local",
+    """A smoke plan for the local provider with ``deployment`` (standalone unless it says); seed 17."""
+
+    return support.make_plan(
         seed=17,
         deployment_mode=deployment.get("mode", "standalone"),
-        components=(),
         deployment_provider=DeploymentProviderIdentity(provider_id=LOCAL_DEPLOYMENT_PROVIDER_ID),
         deployment={"mode": "standalone", **deployment},
-        mode=RunMode.SMOKE,
     )
 
 

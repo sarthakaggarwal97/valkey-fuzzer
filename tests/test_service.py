@@ -8,7 +8,14 @@ from pathlib import Path
 
 import pytest
 
-from tests.support import EXAMPLES, component_registration, deployment_registrations, fake_executable, make_plan
+from tests.support import (
+    EXAMPLES,
+    component_registration,
+    deployment_registration,
+    deployment_registrations,
+    fake_executable,
+    make_plan,
+)
 from valkey_fuzzer import hoststate, provenance
 from valkey_fuzzer._data import file_sha256
 from valkey_fuzzer.catalog import (
@@ -161,7 +168,7 @@ def test_build_catalog_registers_the_local_deployment_providers_unless_the_calle
     # The local deployment's providers, one per mode; a caller's providers take their place, the components stay.
     local = "valkey-fuzzer.deployment.local"
     assert catalog.deployment_providers.registered_ids == (("cluster", local), ("standalone", local))
-    own = build_catalog(deployment_providers=(_deployment(),))
+    own = build_catalog(deployment_providers=(deployment_registration(deployment_mode="example-mode"),))
     assert own.deployment_providers.registered_ids == (("example-mode", "example.deployment.fake"),)
     assert "valkey.action.sleep" in own.components.registered_ids
 
@@ -211,14 +218,14 @@ def test_a_catalog_with_a_conflict_or_a_malformed_document_is_never_built(tmp_pa
         _service(*sorted({path.parent for path in tmp_path.glob("*/*.yaml")}), deployment_providers=())
 
 
-def _deployment(provider_id="example.deployment.fake", factory=object):
-    return DeploymentProviderRegistration(deployment_mode="example-mode", provider_id=provider_id, factory=factory)
-
-
 def test_a_scenario_picks_one_of_several_providers_of_its_mode_and_replay_keeps_that_one():
     calls, local_calls = [], []
-    local = _deployment(factory=lambda: FakeDeploymentProvider(calls=local_calls))
-    docker = _deployment("example.deployment.docker", lambda: FakeDeploymentProvider(calls=calls))
+    local = deployment_registration(
+        factory=lambda: FakeDeploymentProvider(calls=local_calls), deployment_mode="example-mode"
+    )
+    docker = deployment_registration(
+        "example.deployment.docker", lambda: FakeDeploymentProvider(calls=calls), deployment_mode="example-mode"
+    )
     experiment = ExperimentSpec("example.choice", mode=RunMode.SMOKE, deployment_modes=("example-mode",), components=())
     scenario = {"scenario_id": "choice", "seed": 7, "experiment": {"id": "example.choice"}}
     service = _service_of(experiments=(experiment,), deployment_providers=(local, docker))

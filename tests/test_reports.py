@@ -11,10 +11,10 @@ from unittest.mock import Mock, patch
 import pytest
 import yaml
 
-from tests.conform_support import approved_register, register_service, scenario_file, stub_tlc
-from tests.support import EXAMPLES, make_plan, recorded_report
-from valkey_fuzzer import __version__, coverage, provenance, reports
-from valkey_fuzzer.cli import main
+from tests.conform_support import register_copy, register_service, scenario_file, stub_tlc
+from tests.conftest import cli
+from tests.support import EXAMPLES, make_plan, recorded_report, version_message
+from valkey_fuzzer import coverage, provenance, reports
 from valkey_fuzzer.compiler import Overrides
 from valkey_fuzzer.minimize import failure_signature, same_failure
 from valkey_fuzzer.reports import InputError, ReportWriteError, export_scenario, write_plan
@@ -44,11 +44,9 @@ def test_a_run_whose_requested_output_cannot_be_written_does_not_succeed(
     (tmp_path / "file").write_text("")
     if "REPORT" in argv:
         report = str(tmp_path / "recorded.json")
-        with patch("sys.argv", ["valkey-fuzzer", "run", EXAMPLE, "--output", report]):
-            main()
+        cli("run", EXAMPLE, "--output", report)
         argv = [report if item == "REPORT" else item for item in argv]
-    with patch("sys.argv", ["valkey-fuzzer", *argv, str(tmp_path / "file" / "out")]):
-        assert main() == code
+    assert cli(*argv, tmp_path / "file" / "out") == code
     assert "could not" in capsys.readouterr().err
 
 
@@ -288,7 +286,7 @@ def _register_report(tmp_path, monkeypatch, bundle, *, lost, name="r"):
 
 
 def test_a_run_naming_a_spec_bundle_checks_itself_and_its_report_carries_what_conform_found(tmp_path, monkeypatch):
-    bundle = approved_register(tmp_path, monkeypatch)
+    bundle = register_copy(tmp_path, monkeypatch, approved=True)
     stub_tlc(monkeypatch)
     service, record, report = _register_report(tmp_path, monkeypatch, bundle, lost=True)
     # The section comes with the reading aids, and every old key stays.
@@ -330,14 +328,14 @@ def test_a_run_naming_a_spec_bundle_checks_itself_and_its_report_carries_what_co
 def test_a_drafts_violation_is_recorded_and_a_missing_tlc_errors_an_approved_bundles_run(tmp_path, monkeypatch):
     stub_tlc(monkeypatch)
     # The register bundle ships as a draft: its violation is in the report, never in the verdict.
-    draft = approved_register(tmp_path, monkeypatch, approved=False)
+    draft = register_copy(tmp_path, monkeypatch)
     _, record, report = _register_report(tmp_path, monkeypatch, draft, lost=True, name="draft")
     assert (report["status"], report["summary"], report["failed_components"]) == ("PASS", "experiment passed", [])
     assert report["conform"]["register"]["approved"] is False and report["conform"]["register"]["status"] == "fail"
     assert report["conform"]["register"]["violated"] == ["AckedDurable"]
     assert record.outcome.component_results == ()
     # Without TLC, an approved bundle's claims cannot decide the run, so it is an ERROR saying what is missing.
-    bundle = approved_register(tmp_path / "approved", monkeypatch)
+    bundle = register_copy(tmp_path / "approved", monkeypatch, approved=True)
     monkeypatch.setattr(tla.TlaTools, "locate", Mock(side_effect=TlaError("tla2tools.jar not found: get it")))
     _, record, report = _register_report(tmp_path, monkeypatch, bundle, lost=False, name="no-tlc")
     assert (report["status"], record.outcome.status) == ("ERROR", OutcomeStatus.ERROR)
@@ -412,13 +410,6 @@ def _versioned(version):
     return edit
 
 
-def _version_message(path, version):
-    return (
-        f"{path} has format_version {version!r}, which an older or newer valkey-fuzzer wrote; "
-        f"this one ({__version__}) reads format_version 1"
-    )
-
-
 @pytest.mark.parametrize("version", [0, 2, "1"])
 def test_replay_and_minimize_refuse_a_report_of_another_format_version_and_name_both(
     service, canned_runs, tmp_path, version
@@ -427,7 +418,7 @@ def test_replay_and_minimize_refuse_a_report_of_another_format_version_and_name_
     path = recorded_report(service, tmp_path, edit=_versioned(version))
     with pytest.raises(InputError) as replay:
         service.prepare_replay(path)
-    assert str(replay.value) == _version_message(path, version)
+    assert str(replay.value) == version_message(path, version)
     with pytest.raises(InputError) as minimize:
         service.prepare_minimization(path)
     assert str(minimize.value) == str(replay.value)
@@ -456,7 +447,6 @@ def test_plan_json_carries_the_format_version_and_replays_only_at_this_one(servi
     plan_path.write_text(json.dumps(written))
     with pytest.raises(InputError) as raised:
         service.prepare_replay(str(plan_path))
-    assert str(raised.value) == _version_message(str(plan_path), 2)
+    assert str(raised.value) == version_message(plan_path, 2)
     # The CLI reports it as an input error.
-    with patch("sys.argv", ["valkey-fuzzer", "replay", str(plan_path)]):
-        assert main() == 64
+    assert cli("replay", plan_path) == 64

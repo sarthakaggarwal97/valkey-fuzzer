@@ -1,14 +1,13 @@
 """Search profiles: they change how an experiment's legal space is sampled, never what is legal or checked."""
 
 import json
-from unittest.mock import patch
 
 import pytest
 
-from valkey_fuzzer.cli import main
 from valkey_fuzzer.generator import GeneratorError, Profile, _Rule, find_profile, generate, opted_in
 from valkey_fuzzer.protocols import ComponentRole
 
+from .conftest import cli
 from .generator_support import generator_service
 
 pytestmark = pytest.mark.usefixtures("report_root")
@@ -74,16 +73,11 @@ def test_an_edge_heavy_profile_draws_more_edges_and_changes_no_experiments_oracl
         assert _generate(experiment, 3, adversarial).scenario == profiled.scenario, "a profile draw is reproducible"
 
 
-def _main(*argv):
-    with patch("sys.argv", ["valkey-fuzzer", *argv]):
-        return main()
-
-
 def test_run_records_the_profile_and_prints_how_to_reproduce_it(tmp_path, canned_runs, capsys):
-    assert _main("run", "--seed", "4", "--experiment", "valkey.aof-durability", "--profile", "pr-quick") == 0
+    assert cli("run", "--seed", "4", "--experiment", "valkey.aof-durability", "--profile", "pr-quick") == 0
     (report,) = (tmp_path / "valkey-fuzzer" / "runs").glob("*/report.json")
     assert json.loads(report.read_text())["reproducer"]["generated"]["profile"] == "pr-quick"
     out = capsys.readouterr().out
     assert "Reproduce: valkey-fuzzer run --seed 4 --experiment valkey.aof-durability --profile pr-quick" in out
-    assert _main("run", "--seed", "4", "--experiment", "valkey.aof-durability", "--profile", "fast") == 2
+    assert cli("run", "--seed", "4", "--experiment", "valkey.aof-durability", "--profile", "fast") == 2
     assert "no such search profile 'fast'; installed: ['adversarial'" in capsys.readouterr().err

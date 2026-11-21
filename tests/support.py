@@ -3,6 +3,7 @@
 import copy
 import json
 import os
+import shutil
 import signal
 import time
 from pathlib import Path
@@ -10,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any, Optional
 from unittest.mock import patch
 
+from valkey_fuzzer import __version__
 from valkey_fuzzer.catalog import Catalog, ComponentRegistry, DeploymentProviderRegistry
 from valkey_fuzzer.deadlines import wait_for
 from valkey_fuzzer.declarations import Declarations
@@ -19,7 +21,7 @@ from valkey_fuzzer.environment import (
     EnvironmentResult,
     SupportDecision,
 )
-from valkey_fuzzer.plan import DeploymentProviderIdentity, ExecutionPlan, RunMode
+from valkey_fuzzer.plan import ComponentSpec, DeploymentProviderIdentity, ExecutionPlan, ExperimentSpec, RunMode
 from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.registrations import ComponentRegistration, DeploymentProviderRegistration
 
@@ -28,6 +30,7 @@ FAKE_DEPLOYMENT_PROVIDER = "tests.deployment.fake"
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES = ROOT / "examples"
 FORMAL = ROOT / "formal"
+CONFIG_SPACE_FIXTURE = ROOT / "tests" / "fixtures" / "config_space"
 
 
 def fake_executable(path, script="") -> Path:
@@ -57,6 +60,60 @@ def component_registration(component_id="example.action.fake", role=None, *, fac
     role = role or ComponentRole(component_id.split(".")[1])
     options.setdefault("declares", Declarations())
     return ComponentRegistration(component_id=component_id, role=role, factory=factory, **options)
+
+
+def deployment_registration(provider_id="example.deployment.fake", factory=object, *, deployment_mode="standalone"):
+    """A registration of ``provider_id`` for ``deployment_mode``."""
+
+    return DeploymentProviderRegistration(deployment_mode=deployment_mode, provider_id=provider_id, factory=factory)
+
+
+def fake_component(role, component_id, *, required=True, depends_on=(), timeout_s=None) -> ComponentSpec:
+    """A spec of the fake component of ``role`` (``tests.<role>.fake``) as ``component_id``."""
+
+    use = f"tests.{role.value}.fake"
+    return ComponentSpec(use, component_id, role, required=required, depends_on=depends_on, timeout_s=timeout_s)
+
+
+def experiment_plan(components, *, deployment_mode="standalone", **requirements) -> ExecutionPlan:
+    """A plan of ``components`` from an experiment that runs standalone or cluster, with ``requirements``
+    (``required_events``, ``required_evidence``): in experiment mode when it requires evidence, else smoke."""
+
+    experiment = ExperimentSpec(
+        experiment_id="tests.feature",
+        mode=RunMode.EXPERIMENT if requirements.get("required_evidence") else RunMode.SMOKE,
+        deployment_modes=("standalone", "cluster"),
+        components=tuple(components),
+        **requirements,
+    )
+    return ExecutionPlan.from_experiment(
+        experiment,
+        scenario_id="runner-test",
+        seed=7,
+        deployment_mode=deployment_mode,
+        deployment_provider=deployment_identity(),
+        deployment={"mode": deployment_mode},
+    )
+
+
+def stand_in_build(directory: Path) -> str:
+    """A build tree whose ``src`` holds the config_space fixture's config.c beside a ``valkey-server``; its binary's
+    path."""
+
+    source = directory / "src"
+    source.mkdir(parents=True)
+    for name in ("config.c", "server.h"):
+        shutil.copy(CONFIG_SPACE_FIXTURE / name, source / name)
+    return str(fake_executable(source / "valkey-server"))
+
+
+def version_message(path, version) -> str:
+    """The error a file of another ``format_version`` gets: it names ``path`` and both versions."""
+
+    return (
+        f"{path} has format_version {version!r}, which an older or newer valkey-fuzzer wrote; "
+        f"this one ({__version__}) reads format_version 1"
+    )
 
 
 def deployment_identity() -> DeploymentProviderIdentity:

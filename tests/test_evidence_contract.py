@@ -12,9 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from tests.support import make_plan
+from tests.support import component_registration
 from tests.valkey_experiments_support import fake_context, resolved
-from valkey_fuzzer import verdict
 from valkey_fuzzer.compiler import ScenarioCompileError
 from valkey_fuzzer.components import actions
 from valkey_fuzzer.declarations import Declarations, EvidenceDeclaration
@@ -87,20 +86,17 @@ class Checker:
         return make_result(spec, ComponentStatus.PASS, "checked")
 
 
-def _registration(component_id, factory, declares=None, **kwargs):
-    role = ComponentRole(component_id.split(".")[1])
-    return ComponentRegistration(component_id, role, factory, declares=declares or Declarations(), **kwargs)
-
-
 REGISTRATIONS = (
-    _registration(
+    component_registration(
         "tests.action.emit",
-        Emitter,
-        Declarations(events={"{id}.ping": ConfigSchema({"n": ConfigField(int)})}, evidence={"tests.count": COUNT}),
+        factory=Emitter,
+        declares=Declarations(
+            events={"{id}.ping": ConfigSchema({"n": ConfigField(int)})}, evidence={"tests.count": COUNT}
+        ),
         config=ConfigSchema({"mode": ConfigField(str)}),
     ),
-    _registration("tests.observer.watch", Watcher),
-    _registration("tests.oracle.check", Checker),
+    component_registration("tests.observer.watch", factory=Watcher),
+    component_registration("tests.oracle.check", factory=Checker),
 )
 
 
@@ -204,99 +200,6 @@ def test_strict_mode_fails_a_component_that_breaks_its_declarations(monkeypatch,
     checked.violations.clear()
 
 
-def _decide(components, results, *, invoked=None, crash=(), **state):
-    """The verdict on ``results`` (ID -> status) of a plan of ``components`` (ID -> (role, required, depends_on));
-    the FAILs of the components named in ``crash`` report a crash, and ``state`` sets the other run state
-    (``required_events`` and ``required_evidence`` go to the plan)."""
-
-    specs = tuple(
-        ComponentSpec(f"tests.{role}.{name}", name, role, required=required, depends_on=depends_on)
-        for name, (role, required, depends_on) in components.items()
-    )
-    requirements = {key: state.pop(key) for key in ("required_events", "required_evidence") if key in state}
-    mode = RunMode.EXPERIMENT if requirements.get("required_evidence") else RunMode.SMOKE
-    plan = make_plan(mode=mode, components=specs, **requirements)
-    by_id = {spec.id: spec for spec in specs}
-    return verdict.decide(
-        verdict.RunState(
-            plan=plan,
-            results={
-                name: make_result(by_id[name], status, "ran", crash=name in crash) for name, status in results.items()
-            },
-            invoked=set(results) if invoked is None else invoked,
-            evidence=(),
-            committed=lambda name: (),
-            **state,
-        )
-    )
-
-
-PASSED, FAILED, SKIPPED = ComponentStatus.PASS, ComponentStatus.FAIL, ComponentStatus.SKIP
-LOOK = {"look": ("observer", True, ()), "act": ("action", True, ()), "check": ("oracle", True, ())}
-
-
-@pytest.mark.parametrize(
-    "requirements",
-    [
-        pytest.param({"required_events": ("tests.vote.granted",)}, id="event"),
-        pytest.param({"required_evidence": (EvidenceRequirement("tests.vote-logged", "look"),)}, id="evidence"),
-    ],
-)
-@pytest.mark.parametrize(
-    ("results", "status"),
-    [
-        pytest.param({"look": PASSED, "act": PASSED, "check": PASSED}, "ERROR", id="nothing-failed"),
-        pytest.param({"look": PASSED, "act": PASSED, "check": FAILED}, "FAIL", id="an-oracle-failed-anyway"),
-        pytest.param({"look": PASSED, "act": FAILED, "check": PASSED}, "FAIL", id="an-action-failed-anyway"),
-    ],
-)
-def test_missing_path_evidence_is_an_error_unless_a_check_failed(requirements, results, status):
-    # Missing path evidence or a missing required event means the run did not test what it claims; a FAIL an
-    # oracle or action found anyway still stands, and the missing item stays in the diagnostics.
-    decision = _decide(LOOK, results, **requirements)
-
-    assert decision.status.value == status, decision.summary
-    key = "missing_required_events" if "required_events" in requirements else "missing_required_evidence"
-    assert decision.diagnostics[key]
-    if status == "ERROR":
-        assert "the run did not reach what it tests" in decision.summary
-
-
-TORN_DOWN = {"setup": ("fault", True, ()), "act": ("action", True, ()), "check": ("oracle", True, ())}
-_OBLIGATION = {"owner": "setup", "kind": "network.partition", "target": "valkey-0", "undone_at": 1.0}
-
-
-@pytest.mark.parametrize(
-    "unclean",
-    [
-        pytest.param({"teardown_failed": True}, id="a-teardown-failed"),
-        pytest.param({"open_obligations": ({**_OBLIGATION, "undone_by": "runner"},)}, id="the-runner-undid-a-change"),
-    ],
-)
-@pytest.mark.parametrize(
-    ("results", "crash", "status"),
-    [
-        pytest.param({"setup": PASSED, "act": PASSED, "check": FAILED}, (), "ERROR", id="an-oracle-fail-is-untrusted"),
-        pytest.param({"setup": PASSED, "act": PASSED, "check": FAILED}, ("check",), "FAIL", id="a-crash-stands"),
-        pytest.param({"setup": PASSED, "act": FAILED, "check": PASSED}, (), "FAIL", id="an-action-fail-stands"),
-        pytest.param({"setup": PASSED, "act": PASSED, "check": PASSED}, (), "ERROR", id="nothing-failed"),
-    ],
-)
-def test_oracles_judge_only_a_cleanly_torn_down_run(unclean, results, crash, status):
-    decision = _decide(TORN_DOWN, results, crash=crash, **unclean)
-
-    assert decision.status.value == status, decision.summary
-    if results["check"] is FAILED and not crash:
-        assert decision.diagnostics["untrusted_component_failures"] == ("check",)
-
-
-def test_an_oracle_fail_after_a_cleanup_that_followed_it_stands():
-    # A deployment cleanup after the oracles cannot change what they saw.
-    decision = _decide(TORN_DOWN, {"setup": PASSED, "act": PASSED, "check": FAILED}, cleanup_failed=True)
-    assert decision.status is OutcomeStatus.FAIL, decision.summary
-    assert _decide(TORN_DOWN, dict.fromkeys(TORN_DOWN, PASSED), cleanup_failed=True).status is OutcomeStatus.ERROR
-
-
 # The testing kit holds a component a test calls directly to the same contract.
 @pytest.mark.parametrize("mode", ["undeclared-event", "malformed-evidence", "lifecycle-event"])
 def test_fake_context_holds_a_component_it_calls_to_its_declarations(mode):
@@ -323,19 +226,3 @@ def test_the_testing_kit_removes_the_temporary_folders_it_makes(tmp_path, monkey
     del context
     gc.collect()
     assert list(tmp_path.iterdir()) == []
-
-
-@pytest.mark.parametrize(
-    ("role", "depends", "status"),
-    [
-        pytest.param("fault", True, "ERROR", id="a-fault-it-waited-for-never-fired"),
-        pytest.param("workload", True, "ERROR", id="its-workload-stopped"),
-        pytest.param("observer", True, "ERROR", id="its-observer-failed"),
-        pytest.param("fault", False, "FAIL", id="a-failure-that-does-not-depend-on-the-fault"),
-    ],
-)
-def test_a_failure_that_depends_on_a_component_that_could_not_do_its_part_is_untrusted(role, depends, status):
-    # The action waits for the effect of "setup"; a crash found before a fault fired does not depend on it.
-    components = {"setup": (role, True, ()), "wait": ("action", True, ("setup",) if depends else ())}
-    decision = _decide(components, {"setup": ComponentStatus.ERROR, "wait": FAILED})
-    assert decision.status.value == status, decision.summary

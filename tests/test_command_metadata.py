@@ -21,8 +21,8 @@ from tests.command_sequence_support import (
     nodes_of,
 )
 from tests.support import fake_executable
-from tests.test_command_table import _flat
 from tests.valkey_experiments_support import (
+    command_docs_reply,
     fake_context,
     rejects_config,
     resolved,
@@ -112,7 +112,7 @@ class Commands(dict):
         self.entries, self.cluster = list(entries), cluster
         self.flags = {entry[0].upper(): entry[2] for entry in entries}
         self.answers, self.getkeys = dict(answers or {}), dict(getkeys or {})
-        self.docs = _flat({name: _flat(doc) for name, doc in (docs or {}).items()})
+        self.docs = command_docs_reply(docs or {})
         self.state = dict.fromkeys(("digest", "offset", "aof", "expired_keys", "expired_fields", "volatile"), 0)
 
     def write(self, **moved):

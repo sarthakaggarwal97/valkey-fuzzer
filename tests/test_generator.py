@@ -21,7 +21,7 @@ from valkey_fuzzer.schema import ScenarioCompileError
 from valkey_fuzzer.service import RunService
 
 from .generator_support import CLUSTER_EXPERIMENT, SMALL_CLUSTER_SEEDS, generate_scenario, generator_service
-from .test_config_space import stand_in_build
+from .support import stand_in_build
 from .valkey_experiments_support import experiment_directory, experiment_runtime
 
 NO_ZSTD = (Exclusion.parse("server_config.rdbcompression=zstd"),)

@@ -14,12 +14,21 @@ from unittest.mock import Mock
 
 import pytest
 
-from tests.conform_support import approved_register, register_service, scenario_file
+from tests.conform_support import (
+    ELECTION_OBSERVATIONS,
+    ID,
+    edit,
+    events,
+    register_copy,
+    register_service,
+    scenario_file,
+    write_register_trace,
+    write_trace,
+)
 from tests.conftest import TLA_JAR as JAR
 from tests.conftest import cli, needs_tlc
-from tests.support import FORMAL, fake_executable
+from tests.support import FORMAL, fake_executable, version_message
 from tests.valkey_experiments_support import valkey_service
-from valkey_fuzzer import __version__
 from valkey_fuzzer.cli import create_parser
 from valkey_fuzzer.commands import spec as spec_command
 from valkey_fuzzer.commands._common import add_common_options
@@ -47,7 +56,6 @@ BUNDLE = FIXTURES / "register"
 CONTROL = BUNDLE / "negative-controls" / "ack-before-save.cfg"
 COUNTEREXAMPLE = FIXTURES / "register-ack-before-save.out"
 ELECTION = FORMAL / "cluster-election"
-ID = {name: name[-1] * 40 for name in ("valkey-0", "valkey-1", "valkey-2", "valkey-3")}
 
 
 @pytest.fixture(autouse=True)
@@ -59,22 +67,6 @@ def _register_on_the_spec_path(monkeypatch):
 
 def _tools():
     return TlaTools.locate(JAR, workers="1")
-
-
-def _copy(tmp_path, monkeypatch=None):
-    """A copy of the register bundle; with ``monkeypatch``, the copy is the one its protocol name finds."""
-
-    target = tmp_path / "register"
-    shutil.copytree(BUNDLE, target)
-    if monkeypatch is not None:
-        monkeypatch.setenv("VALKEY_FUZZER_SPEC_PATH", str(tmp_path))
-    return target
-
-
-def _edit(path, old, new):
-    text = path.read_text()
-    assert old in text, (path, old)
-    path.write_text(text.replace(old, new))
 
 
 def _cli(*argv):
@@ -417,11 +409,11 @@ def test_check_reports_the_tools_and_strict_refuses_an_unknown_jar(tmp_path, mon
     ],
 )
 def test_a_malformed_bundle_is_rejected(tmp_path, path, old, new, message):
-    bundle = _copy(tmp_path)
+    bundle = register_copy(tmp_path)
     if old is None:
         shutil.copy(CONTROL, bundle / path)
     else:
-        _edit(bundle / path, old, new)
+        edit(bundle / path, old, new)
     with pytest.raises(SpecBundleError, match=message.replace("$", r"\$").replace("[", r"\[").replace("(", r"\(")):
         load_bundle(str(bundle))
 
@@ -441,7 +433,7 @@ MUTANT = (BUNDLE / "model.tla").read_text().replace("MODULE model", "MODULE ack-
     ],
 )
 def test_a_mutated_control_must_check_the_models_own_property(tmp_path, module, error):
-    bundle = _copy(tmp_path)
+    bundle = register_copy(tmp_path)
     (bundle / "negative-controls" / "ack-before-save.tla").write_text(module)
     if error is None:
         assert load_bundle(str(bundle)).controls[0].module == "negative-controls/ack-before-save.tla"
@@ -451,7 +443,7 @@ def test_a_mutated_control_must_check_the_models_own_property(tmp_path, module, 
 
 
 def test_a_mapping_broken_after_it_was_read_is_refused_not_served_from_the_cache(tmp_path):
-    bundle = _copy(tmp_path)
+    bundle = register_copy(tmp_path)
     first = load_spec_mapping(str(bundle))
     assert load_spec_mapping(str(bundle)) is first
     (bundle / "mapping.yaml").write_text("evidence: [", encoding="utf-8")
@@ -605,8 +597,8 @@ def test_translate_refuses_what_the_experiment_cannot_run(tmp_path, monkeypatch)
         _translate(trace=later)
     # A mapped fault the counterexample does not take would still fire in the scenario, which then
     # does not follow the counterexample.
-    bundle = _copy(tmp_path / "unused", monkeypatch)
-    _edit(
+    bundle = register_copy(tmp_path / "unused", monkeypatch)
+    edit(
         bundle / "mapping.yaml",
         "component: crash}\n",
         "component: crash}\n    - {action: Save, after: acked, component: crash}\n",
@@ -614,9 +606,9 @@ def test_translate_refuses_what_the_experiment_cannot_run(tmp_path, monkeypatch)
     with pytest.raises(TranslateError, match="has no Save step, but the experiment's fault component crash would"):
         _translate(bundle)
     # Known-bad: the mapping names a fault component the experiment does not have, or a component that is no fault.
-    bundle = _copy(tmp_path, monkeypatch)
+    bundle = register_copy(tmp_path, monkeypatch)
     for old, component in (("crash", "kill"), ("kill", "writes")):
-        _edit(bundle / "mapping.yaml", f", component: {old}}}", f", component: {component}}}")
+        edit(bundle / "mapping.yaml", f", component: {old}}}", f", component: {component}}}")
         with pytest.raises(TranslateError, match=rf"toy\.register has no fault component {component}"):
             _translate(bundle)
 
@@ -630,25 +622,25 @@ def _searchable(tmp_path, monkeypatch):
     """A register copy the search has more to find in: a target (a crash after an acknowledged write), a second
     boolean constant the model does not read (SaveOnAck), and a second safe config that sets it FALSE."""
 
-    bundle = _copy(tmp_path, monkeypatch)
-    _edit(
+    bundle = register_copy(tmp_path, monkeypatch)
+    edit(
         bundle / "model.tla",
         "    SyncBeforeAck,  \\*",
         "    SaveOnAck,  \\* unread: a second boolean to flip\n    SyncBeforeAck,  \\*",
     )
-    _edit(
+    edit(
         bundle / "model.tla",
         "AckedDurable == acked <= mem\n",
         "AckedDurable == acked <= mem\n\nAckedThenCrashed == acked > 0 /\\ crashes > 0\n",
     )
-    _edit(
+    edit(
         bundle / "claims.yaml",
         "assumptions:",
         "targets:\n  - {name: AckedThenCrashed, meaning: A crash after an acknowledged write.}\nassumptions:",
     )
-    _edit(bundle / "mapping.yaml", "constants:\n", 'constants:\n  SaveOnAck: {value: "TRUE"}\n')
+    edit(bundle / "mapping.yaml", "constants:\n", 'constants:\n  SaveOnAck: {value: "TRUE"}\n')
     for config in ("model.cfg", "negative-controls/ack-before-save.cfg"):
-        _edit(bundle / config, "    MaxValue = 3\n", "    SaveOnAck = TRUE\n    MaxValue = 3\n")
+        edit(bundle / config, "    MaxValue = 3\n", "    SaveOnAck = TRUE\n    MaxValue = 3\n")
     (bundle / "other.cfg").write_text(
         (bundle / "model.cfg").read_text().replace("SaveOnAck = TRUE", "SaveOnAck = FALSE")
     )
@@ -1064,23 +1056,13 @@ def test_translate_searches_the_register_with_tlc(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _run(tmp_path, name, *, appendonly="yes", loaded=1, crash_source="crash", keys=1):
-    """A register run as its experiment records it: ``keys`` writes acknowledged at once, a crash, and the reload's
-    key count."""
+def _run(tmp_path, name, *, appendonly="yes", **knobs):
+    """A register run as its experiment records it (``keys`` writes acknowledged at once, a crash, and the reload's
+    key count ``loaded``), under the input ``appendonly``."""
 
-    events = [
-        ("writes.seeded", "writes", {"keys": keys}),
-        ("crash.injected", crash_source, {"signal": "SIGKILL", "applied": True, "target": "valkey-0"}),
-        ("crash.recovered", "crash", {}),
-        ("register.loaded", "reload-log", {"keys": loaded, "instance_id": "valkey-0"}),
-    ]
-    records = [{"kind": "header", "scenario_id": name, "seed": 1, "inputs": {"appendonly": appendonly}, "nodes": {}}]
-    records += [
-        {"kind": "event", "t": float(t), "name": e, "source": s, "payload": p} for t, (e, s, p) in enumerate(events, 1)
-    ]
-    path = tmp_path / f"{name}.jsonl"
-    path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
-    return str(path)
+    return write_register_trace(
+        tmp_path / f"{name}.jsonl", scenario_id=name, inputs={"appendonly": appendonly}, **knobs
+    )
 
 
 def test_conform_rebuilds_the_observed_states_from_the_mapped_component_only(tmp_path):
@@ -1127,8 +1109,8 @@ def test_conform_errors_on_a_run_with_a_mapped_record_it_could_not_apply(tmp_pat
     [(True, True), (False, False), ("false", False), ("TRUE", True), ("no", None), (1, None)],
 )
 def test_conform_reads_a_bool_field_as_written_not_by_truthiness(tmp_path, value, typed):
-    bundle = _copy(tmp_path)
-    _edit(bundle / "mapping.yaml", "fields: {keys: int}\n    action: Ack", "fields: {keys: bool}\n    action: Ack")
+    bundle = register_copy(tmp_path)
+    edit(bundle / "mapping.yaml", "fields: {keys: int}\n    action: Ack", "fields: {keys: bool}\n    action: Ack")
     observed = ObservedRun(load_bundle(str(bundle)).mapping, collect_runs([_run(tmp_path, "run")])[0])
     evidence = observed.mapping.evidence["acked"]
     record = {"kind": "event", "name": "writes.seeded", "source": "writes", "payload": {"keys": value}}
@@ -1168,9 +1150,8 @@ def test_conform_reads_every_run_folder_and_reports_the_unreadable_ones(tmp_path
     assert "report.json is not a readable run report" in collected["corrupt"].problem
     assert "no report.json and no trace" in collected["empty"].problem
     assert "trace.jsonl" in collected["truncated"].problem
-    version = f"has format_version 2, which an older or newer valkey-fuzzer wrote; this one ({__version__}) reads"
-    assert collected["newer-report"].problem == f"{newer_report} {version} format_version 1"
-    assert collected["newer-trace"].problem == f"{newer_trace}: {newer_trace} {version} format_version 1"
+    assert collected["newer-report"].problem == version_message(newer_report, 2)
+    assert collected["newer-trace"].problem == f"{newer_trace}: {version_message(newer_trace, 2)}"
     result = check_run(load_bundle(str(BUNDLE)), collected["corrupt"], TlaTools(jar="unused"))
     assert (result["status"], result["error"], result["states"]) == ("error", collected["corrupt"].problem, 0)
     # A trace named on its own is refused outright.
@@ -1226,7 +1207,7 @@ def test_conform_folder_without_tlc_is_an_error_for_an_approved_bundle_and_a_ski
     draft = {"approved": False, "status": "skipped", "reason": "no java"}
     assert conform_folder(run, None, "no java") == {"register": draft}
     # An approved bundle's claims decide the run, so a check that could not run must not let it pass.
-    _edit(_copy(tmp_path, monkeypatch) / "claims.yaml", "status: draft", "status: approved\napproved_by: someone")
+    register_copy(tmp_path, monkeypatch, approved=True)
     approved = {"approved": True, "status": "error", "error": "no java"}
     assert conform_folder(run, None, "no java") == {"register": approved}
 
@@ -1250,11 +1231,6 @@ def test_conform_needs_no_tools_for_a_bundle_tlc_has_nothing_to_evaluate(tmp_pat
     assert _main("conform", str(BUNDLE), run) == 2 and "Error: tla2tools.jar not found" in capsys.readouterr().err
 
 
-ELECTION_OBSERVATIONS = [
-    {"kind": "observation", "t": 0.1, "round": 1, "node": node, "role": role, "slots": slots, "current_epoch": 8,
-     "disk": {"currentEpoch": 8, "lastVoteEpoch": 0}}
-    for node, role, slots in (("valkey-0", "primary", [[0, 8191]]), ("valkey-3", "primary", [[8192, 16383]]), ("valkey-1", "replica", []), ("valkey-2", "replica", []))
-]  # fmt: skip
 ELECTION_EVENTS = [
     ("cluster.election.started", {"instance_id": "valkey-1", "epoch": 9}),
     ("cluster.election.started", {"instance_id": "valkey-2", "epoch": 9}),
@@ -1268,17 +1244,12 @@ ELECTION_EVENTS = [
 ]  # fmt: skip
 
 
-def _election_run(tmp_path, events, times=None):
-    """An election run's trace under best-effort: the observations, then ``events`` at ``times`` (or 0.1 s apart)."""
+def _election_run(tmp_path, pairs, times=None):
+    """An election run under best-effort replayed: the observations, then the ``pairs`` of event name and payload
+    at ``times`` (or 0.1 s apart)."""
 
-    nodes = {name: {"node_id": ID[name], "config": {"cluster-config-save-behavior": "best-effort"}} for name in ID}
-    records = [{"kind": "header", "scenario_id": "unit", "seed": 1, "nodes": nodes}, *ELECTION_OBSERVATIONS]
-    for index, (name, payload) in enumerate(events):
-        t = times[index] if times else 1 + index / 10
-        records.append({"kind": "event", "t": t, "sequence": 10 + index, "name": name, "payload": payload})
-    path = tmp_path / "trace.jsonl"
-    path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
-    observed = ObservedRun(load_bundle("cluster-election").mapping, collect_runs([str(path)])[0])
+    path = _election_trace(tmp_path, pairs, times=times)
+    observed = ObservedRun(load_bundle("cluster-election").mapping, collect_runs([path])[0])
     observed.replay()
     return observed
 
@@ -1325,10 +1296,8 @@ def test_a_config_constant_is_unknown_while_a_nodes_setting_is_and_no_known_one_
     assert derive_constants(register, {}, {"appendonly": "yes"})[0]["SyncBeforeAck"] == "TRUE"
     # spec conform, which judges the run under the constants, stops on an unknown one and names the node.
     nodes = {n: {"node_id": ID[n], "config": {} if n == "valkey-1" else sync} for n in ID}
-    records = [{"kind": "header", "scenario_id": "unit", "seed": 1, "nodes": nodes}, *ELECTION_OBSERVATIONS]
-    path = tmp_path / "trace.jsonl"
-    path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
-    observed = ObservedRun(mapping, collect_runs([str(path)])[0])
+    path = write_trace(tmp_path / "trace.jsonl", ELECTION_OBSERVATIONS, nodes=nodes)
+    observed = ObservedRun(mapping, collect_runs([path])[0])
     observed.replay()
     with pytest.raises(TlaError, match=r"constant PersistBeforeAck needs .* the setting of valkey-1 is unknown"):
         observed.constants()
@@ -1438,18 +1407,13 @@ def test_conform_fails_a_lost_acknowledged_write_only_inside_the_claim(tmp_path)
 # ---------------------------------------------------------------------------
 
 
-def _election_trace(tmp_path, events, behavior="best-effort", name="unit"):
-    """An election run's trace file: the observations, then ``events`` 0.1 s apart."""
+def _election_trace(tmp_path, pairs, behavior="best-effort", name="unit", times=None):
+    """An election run's trace file: the observations, then the ``pairs`` of event name and payload at ``times``
+    (or 0.1 s apart), numbered from 10."""
 
     nodes = {n: {"node_id": ID[n], "config": {"cluster-config-save-behavior": behavior}} for n in ID}
-    records = [{"kind": "header", "scenario_id": name, "seed": 1, "nodes": nodes}, *ELECTION_OBSERVATIONS]
-    for index, (event, payload) in enumerate(events):
-        records.append(
-            {"kind": "event", "t": 1 + index / 10, "sequence": 10 + index, "name": event, "payload": payload}
-        )
-    path = tmp_path / f"{name}.jsonl"
-    path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
-    return str(path)
+    return write_trace(tmp_path / f"{name}.jsonl", [*ELECTION_OBSERVATIONS, *events(pairs, first=10, times=times)],
+                       nodes=nodes, scenario_id=name)  # fmt: skip
 
 
 # The election without the kill: every vote is saved, both ACKs arrive, the candidate wins.
@@ -1458,12 +1422,12 @@ DENIED = ("cluster.vote.denied", {"instance_id": "valkey-0", "candidate": ID["va
 
 
 def test_claims_take_the_transition_checks_knobs(tmp_path):
-    bundle = _copy(tmp_path)
+    bundle = register_copy(tmp_path)
     claims = load_bundle(str(bundle)).claims
     assert (claims.max_unobserved_steps, claims.transitions_excluded) == (1, None)
-    _edit(bundle / "claims.yaml", "status: draft\n", "status: draft\nmax_unobserved_steps: 0\n")
+    edit(bundle / "claims.yaml", "status: draft\n", "status: draft\nmax_unobserved_steps: 0\n")
     assert load_bundle(str(bundle)).claims.max_unobserved_steps == 0
-    _edit(bundle / "claims.yaml", "max_unobserved_steps: 0\n", "transitions: {excluded: no roles in the lines}\n")
+    edit(bundle / "claims.yaml", "max_unobserved_steps: 0\n", "transitions: {excluded: no roles in the lines}\n")
     assert load_bundle(str(bundle)).claims.transitions_excluded == "no roles in the lines"
     for index, (field, message) in enumerate(
         (
@@ -1473,8 +1437,8 @@ def test_claims_take_the_transition_checks_knobs(tmp_path):
             ("transitions: {reason: x}", "transitions"),
         )
     ):
-        broken = _copy(tmp_path / f"broken{index}")
-        _edit(broken / "claims.yaml", "status: draft\n", f"status: draft\n{field}\n")
+        broken = register_copy(tmp_path / f"broken{index}")
+        edit(broken / "claims.yaml", "status: draft\n", f"status: draft\n{field}\n")
         with pytest.raises(SpecBundleError, match=message):
             load_bundle(str(broken))
 
@@ -1596,11 +1560,11 @@ def test_check_run_reports_the_transitions_tlc_explained(tmp_path, monkeypatch):
     assert check_run(bundle, run, tools)["transitions"]["first_violation"]["index"] == 2
     # Without the check, or without TLC, or excluded by the claims.
     assert "transitions" not in check_run(bundle, run, tools, transitions=False)
-    excluded = _copy(tmp_path)
-    _edit(excluded / "claims.yaml", "conform: true\n", "conform: {excluded: not on observed states}\n")
+    excluded = register_copy(tmp_path)
+    edit(excluded / "claims.yaml", "conform: true\n", "conform: {excluded: not on observed states}\n")
     unchecked = check_run(load_bundle(str(excluded)), run, None)
     assert unchecked["transitions"] == {"checked": 0, "holds": None, "skipped": conform.TRANSITIONS_UNCHECKED}
-    _edit(excluded / "claims.yaml", "status: draft\n", "status: draft\ntransitions: {excluded: no roles}\n")
+    edit(excluded / "claims.yaml", "status: draft\n", "status: draft\ntransitions: {excluded: no roles}\n")
     assert check_run(load_bundle(str(excluded)), run, None)["transitions"] == {
         "checked": 0,
         "holds": None,
@@ -1620,8 +1584,8 @@ def test_conform_folder_without_tlc_errors_an_approved_bundle_whose_transitions_
     monkeypatch.setenv("VALKEY_FUZZER_SPEC_PATH", str(tmp_path))
     # A replication whose properties need no TLC and whose constants need no trace header: with the transition
     # check excluded, checked without tools.
-    _edit(bundle / "claims.yaml", "    conform: true\n", "    conform: {excluded: needs two nodes' samples}\n")
-    _edit(
+    edit(bundle / "claims.yaml", "    conform: true\n", "    conform: {excluded: needs two nodes' samples}\n")
+    edit(
         bundle / "mapping.yaml",
         '  DualChannel: {config: dual-channel-replication-enabled, equals: "yes"}',
         '  DualChannel: {value: "FALSE"}',
@@ -1631,7 +1595,7 @@ def test_conform_folder_without_tlc_errors_an_approved_bundle_whose_transitions_
     (bundle / "claims.yaml").write_text(text[: text.index("# conform's transition check")])
     draft = conform_folder(run, None, "no java")["replication"]
     assert draft["status"] == "pass" and draft["transitions"]["skipped"] == conform.TRANSITIONS_UNCHECKED
-    _edit(bundle / "claims.yaml", "status: draft", "status: approved\napproved_by: someone")
+    edit(bundle / "claims.yaml", "status: draft", "status: approved\napproved_by: someone")
     assert conform_folder(run, None, "no java")["replication"] == {
         "approved": True,
         "status": "error",
@@ -1688,11 +1652,11 @@ def test_conform_checks_that_the_models_actions_explain_the_observed_steps(tmp_p
 @pytest.mark.slow
 def test_conform_allows_the_mappings_count_of_unobservable_steps_between_records(tmp_path):
     # Valkey saves before it acknowledges: the Ack needs one unobservable Save between the write and the ACK.
-    bundle = _copy(tmp_path)
+    bundle = register_copy(tmp_path)
     saved = collect_runs([_run(tmp_path, "saved")])[0]
     result = check_run(load_bundle(str(bundle)), saved, _tools())
     assert result["transitions"]["holds"] and result["transitions"]["max_unobserved_steps"] == 1
-    _edit(bundle / "claims.yaml", "status: draft\n", "status: draft\nmax_unobserved_steps: 0\n")
+    edit(bundle / "claims.yaml", "status: draft\n", "status: draft\nmax_unobserved_steps: 0\n")
     result = check_run(load_bundle(str(bundle)), saved, _tools())
     violation = result["transitions"]["first_violation"]
     assert result["status"] == "fail" and (violation["from"]["why"], violation["to"]["why"]) == ("Write", "Ack")
@@ -1741,19 +1705,19 @@ def test_conform_takes_the_quorum_from_the_ack_lines(tmp_path):
     ],
 )  # fmt: skip
 def test_a_mapping_constant_from_a_records_field_names_an_int_field_of_one_evidence(tmp_path, spec, message):
-    bundle = _copy(tmp_path)
-    _edit(bundle / "mapping.yaml", "MaxCrashes: {max_of: [crashes], at_least: 1}", f"MaxCrashes: {spec}")
+    bundle = register_copy(tmp_path)
+    edit(bundle / "mapping.yaml", "MaxCrashes: {max_of: [crashes], at_least: 1}", f"MaxCrashes: {spec}")
     if message is None:
         assert load_spec_mapping(str(bundle)).constants["MaxCrashes"]["field"] == {"evidence": "loaded", "name": "keys"}
         return
     with pytest.raises(SpecBundleError, match=re.escape(message)):
         load_spec_mapping(str(bundle))
-    _edit(
+    edit(
         bundle / "mapping.yaml",
         "fields: {keys: int}\n    updates:\n      - {set: mem",
         "fields: {keys: str}\n    updates:\n      - {set: mem",
     )
-    _edit(bundle / "mapping.yaml", f"MaxCrashes: {spec}", "MaxCrashes: {field: {evidence: loaded, name: keys}}")
+    edit(bundle / "mapping.yaml", f"MaxCrashes: {spec}", "MaxCrashes: {field: {evidence: loaded, name: keys}}")
     with pytest.raises(SpecBundleError, match=r"MaxCrashes\.field must name an int field"):
         load_spec_mapping(str(bundle))
 
@@ -1790,14 +1754,8 @@ def _two_elections_trace(tmp_path, quorum, name):
         n: {"node_id": TWO_ELECTIONS_IDS[n], "config": {"cluster-config-save-behavior": "sync"}}
         for n in TWO_ELECTIONS_IDS
     }
-    records = [{"kind": "header", "scenario_id": name, "seed": 1, "nodes": nodes}, *TWO_ELECTIONS_OBSERVATIONS]
-    for index, (event, payload) in enumerate(_with_quorum(TWO_ELECTIONS, quorum)):
-        records.append(
-            {"kind": "event", "t": 1 + index / 10, "sequence": 10 + index, "name": event, "payload": payload}
-        )
-    path = tmp_path / f"{name}.jsonl"
-    path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
-    return str(path)
+    records = [*TWO_ELECTIONS_OBSERVATIONS, *events(_with_quorum(TWO_ELECTIONS, quorum), first=10)]
+    return write_trace(tmp_path / f"{name}.jsonl", records, nodes=nodes, scenario_id=name)
 
 
 @needs_tlc
@@ -1823,8 +1781,8 @@ def test_conform_holds_a_second_election_won_with_valkeys_quorum(tmp_path):
 
 
 def test_check_rejects_a_module_outside_the_standard_ones_before_running_sany(tmp_path, monkeypatch):
-    bundle = _copy(tmp_path, monkeypatch)
-    _edit(bundle / "model.tla", "EXTENDS Naturals", "EXTENDS Naturals, Helpers")
+    bundle = register_copy(tmp_path, monkeypatch)
+    edit(bundle / "model.tla", "EXTENDS Naturals", "EXTENDS Naturals, Helpers")
     jar = tmp_path / "tla2tools.jar"
     jar.write_bytes(b"not a jar: these checks fail before any tool runs")
     report = check_bundle(str(bundle), TlaTools(jar=str(jar)))
@@ -1926,7 +1884,7 @@ def test_check_passes_the_toy_bundle_only_where_its_protocol_name_finds_it(tmp_p
     assert report["gates"]["approved_claim"]["status"] == "skip"
     assert report["bundle"] == "register" and "protocol" not in report and str(BUNDLE) not in json.dumps(report)
     # Known-bad: a copy elsewhere would compile its experiment against the fixture's mapping.
-    copy = _copy(tmp_path)
+    copy = register_copy(tmp_path)
     gate = check_bundle(str(copy), _tools())["gates"]["experiment"]
     assert gate["status"] == "fail" and "does not resolve to this bundle" in gate["error"]
     # A draft claim cannot become a required check.
@@ -1965,8 +1923,8 @@ def test_check_passes_the_toy_bundle_only_where_its_protocol_name_finds_it(tmp_p
     ],
 )
 def test_check_fails_a_broken_bundle(tmp_path, monkeypatch, path, old, new, gate):
-    bundle = _copy(tmp_path, monkeypatch)
-    _edit(bundle / path, old, new)
+    bundle = register_copy(tmp_path, monkeypatch)
+    edit(bundle / path, old, new)
     report = check_bundle(str(bundle), _tools())
     gate, _, expected = gate.partition(": ")
     assert report["status"] == "fail" and report["gates"][gate]["status"] == "fail", json.dumps(report["gates"][gate])
@@ -1981,7 +1939,7 @@ def test_check_fails_a_broken_bundle(tmp_path, monkeypatch, path, old, new, gate
 @pytest.mark.slow
 def test_check_runs_the_configs_of_a_subdirectory_that_raise_a_bound(tmp_path, monkeypatch):
     # nightly/ holds the bounds PR CI cannot afford: --configs nightly checks them instead of the bundle's own.
-    bundle = _copy(tmp_path, monkeypatch)
+    bundle = register_copy(tmp_path, monkeypatch)
     nightly = bundle / "nightly"
     nightly.mkdir()
     (nightly / "model.cfg").write_text((bundle / "model.cfg").read_text().replace("MaxValue = 3", "MaxValue = 4"))
@@ -1999,7 +1957,7 @@ def test_check_runs_the_configs_of_a_subdirectory_that_raise_a_bound(tmp_path, m
         "integer bound"
     ]
     # The bundle's own configs are still held to the exact bound, and a bundle without the directory has none.
-    _edit(bundle / "model.cfg", "MaxValue = 3", "MaxValue = 4")
+    edit(bundle / "model.cfg", "MaxValue = 3", "MaxValue = 4")
     problems = check_bundle(str(bundle), _tools())["gates"]["claims_checked"]["problems"]
     assert problems == ["bound MaxValue = 3, but model.cfg sets '4'"]
     report = check_bundle(str(bundle), _tools(), configs="weekly")
@@ -2021,9 +1979,9 @@ def test_every_mapped_log_pattern_matches_a_line_valkey_logged(name):
 
 
 def test_check_fails_a_log_pattern_that_matches_no_line_of_the_sample_log(tmp_path):
-    bundle = _copy(tmp_path)
+    bundle = register_copy(tmp_path)
     # Deliberately broken: a wording Valkey does not log. Without this gate the rule would simply never fire.
-    _edit(bundle / "mapping.yaml", "keys loaded:", "keys loaded now:")
+    edit(bundle / "mapping.yaml", "keys loaded:", "keys loaded now:")
     gate = log_patterns_gate(load_bundle(str(bundle)))
     assert gate["status"] == "fail" and gate["matched"] == {"loaded": 0}
     assert gate["error"].startswith("1 log pattern(s) match no line of sample.log: loaded;")
@@ -2032,14 +1990,14 @@ def test_check_fails_a_log_pattern_that_matches_no_line_of_the_sample_log(tmp_pa
     gate = log_patterns_gate(load_bundle(str(bundle)))
     assert gate["status"] == "fail" and "cannot read sample.log" in gate["error"] and "loaded" in gate["error"]
     # A mapping with no log pattern has nothing to check.
-    _edit(bundle / "mapping.yaml", "    log: 'Done loading RDB, keys loaded now: (?P<keys>\\d+)'\n", "")
+    edit(bundle / "mapping.yaml", "    log: 'Done loading RDB, keys loaded now: (?P<keys>\\d+)'\n", "")
     assert log_patterns_gate(load_bundle(str(bundle))) == {"status": "pass", "note": "mapping.yaml maps no log pattern"}
 
 
 def test_a_plan_pins_the_mapping_its_spec_components_read(tmp_path, monkeypatch):
     # The log trigger reads its pattern from mapping.yaml, and the plan must say which mapping: otherwise a
     # changed pattern that never matches turns into missing required evidence (a FAIL) with the same plan.
-    bundle = _copy(tmp_path, monkeypatch)
+    bundle = register_copy(tmp_path, monkeypatch)
     service = bundle_service(load_bundle(str(bundle)))
     scenario = {
         "scenario_id": "pin",
@@ -2051,7 +2009,7 @@ def test_a_plan_pins_the_mapping_its_spec_components_read(tmp_path, monkeypatch)
     (trigger,) = [component for component in plan.components if component.use == "valkey.observer.log-trigger"]
     assert trigger.config["spec_sha256"] == load_spec_mapping("register").sha256
 
-    _edit(bundle / "mapping.yaml", "keys loaded:", "keys loaded now:")
+    edit(bundle / "mapping.yaml", "keys loaded:", "keys loaded now:")
     assert service.compile(scenario).to_json() != plan.to_json()
     with pytest.raises(Exception, match=r"spec 'register': .*mapping\.yaml has sha256 \w+, but the plan was compiled"):
         service.validate_plan(plan)
@@ -2062,7 +2020,7 @@ def test_a_plan_pins_the_mapping_its_spec_components_read(tmp_path, monkeypatch)
 def test_a_run_checks_itself_against_its_bundle_with_tlc(tmp_path, monkeypatch):
     # The same check as `spec conform register RUN`, run as the report is written: TLC on the run's trace, under the
     # service's conform_tlc_timeout_s, its result in the report and, for the approved claims, in the verdict.
-    bundle = approved_register(tmp_path, monkeypatch)
+    bundle = register_copy(tmp_path, monkeypatch, approved=True)
     service = register_service(tmp_path, monkeypatch, bundle, lost=True)
     prepared = service.prepare_run(scenario_file(tmp_path))
     record = service.execute(prepared.plan, scenario=prepared.scenario, report_dir=str(tmp_path / "run"))
