@@ -13,12 +13,6 @@ concurrency:
   group: tests-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  # The tla2tools.jar that tla-model-check.yml pins: the server tests, the spec
-  # bridge's live test, and the conform half of the election test need it.
-  TLA_TOOLS_VERSION: v1.7.4
-  TLA_TOOLS_SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
-
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -32,17 +26,11 @@ jobs:
       with:
         persist-credentials: false
 
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+    - name: Set up Python ${{ matrix.python-version }} and install project
+      uses: ./.github/actions/setup-fuzzer
       with:
         python-version: ${{ matrix.python-version }}
-        cache: pip
-        cache-dependency-path: pyproject.toml
-
-    - name: Install project
-      run: |
-        python -m pip install --upgrade pip
-        python -m pip install -e '.[dev]'
+        extras: dev
 
     # tests/test_packaging.py builds the sdist and the wheel and checks what they ship (the spec bundles among it).
     - name: Run unit tests
@@ -62,50 +50,30 @@ jobs:
       with:
         persist-credentials: false
 
-    - name: Set up Python
-      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+    - name: Set up Python and install project
+      uses: ./.github/actions/setup-fuzzer
       with:
         python-version: '3.12'
-        cache: pip
-        cache-dependency-path: pyproject.toml
+        extras: dev
 
-    # The build takes about 90 s and changes only with the pinned commit. The whole tree is kept, not only
-    # src/valkey-server: the config table is read from the config.c beside the binary (components/config_space.py).
-    - name: Restore the Valkey build
-      id: valkey-build
-      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      with:
-        path: /tmp/valkey
-        key: valkey-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('zoo/valkey-commit') }}
+    - name: Read the pinned Valkey commit
+      id: pin
+      run: echo "sha=$(tr -d '[:space:]' < zoo/valkey-commit)" >> "$GITHUB_OUTPUT"
 
+    # The build takes about 90 s and changes only with the pinned commit, so it is cached on that file.
     - name: Build Valkey at the pinned commit
-      if: steps.valkey-build.outputs.cache-hit != 'true'
-      run: |
-        git init --quiet /tmp/valkey
-        git -C /tmp/valkey fetch --quiet --depth 1 https://github.com/valkey-io/valkey.git "$(tr -d '[:space:]' < zoo/valkey-commit)"
-        git -C /tmp/valkey checkout --quiet FETCH_HEAD
-        make -C /tmp/valkey -j"$(nproc)"
+      uses: ./.github/actions/build-valkey
+      with:
+        ref: ${{ steps.pin.outputs.sha }}
+        path: /tmp/valkey
+        cache-key: valkey-build-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('zoo/valkey-commit') }}
 
     - name: Put Valkey on PATH
       run: echo "/tmp/valkey/src" >> "$GITHUB_PATH"
 
-    - name: Install project
-      run: |
-        python -m pip install --upgrade pip
-        python -m pip install -e '.[dev]'
-
-    - name: Set up Java
-      uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
-      with:
-        distribution: temurin
-        java-version: '17'
-
-    - name: Download tla2tools.jar
-      shell: bash
-      run: |
-        curl -fsSL --retry 3 -o "${RUNNER_TEMP}/tla2tools.jar" \
-          "https://github.com/tlaplus/tlaplus/releases/download/${TLA_TOOLS_VERSION}/tla2tools.jar"
-        echo "${TLA_TOOLS_SHA256}  ${RUNNER_TEMP}/tla2tools.jar" | sha256sum -c -
+    # The server tests, the spec bridge's live test, and the conform half of the election test need TLC.
+    - name: Set up Java and tla2tools.jar
+      uses: ./.github/actions/tla-tools
 
     - name: Run server tests
       env:

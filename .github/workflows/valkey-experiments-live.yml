@@ -18,12 +18,6 @@ concurrency:
   group: valkey-experiments-live-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  # The tla2tools.jar that tla-model-check.yml pins: the spec bridge's live test
-  # and the conform half of the election test need it.
-  TLA_TOOLS_VERSION: v1.7.4
-  TLA_TOOLS_SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
-
 jobs:
   valkey-experiments-live:
     # The schedule runs only in the repositories that own it; any repository can dispatch it.
@@ -37,22 +31,23 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      - name: Set up Python and install project
+        uses: ./.github/actions/setup-fuzzer
         with:
           python-version: '3.11'
-          cache: pip
-          cache-dependency-path: pyproject.toml
+          extras: dev
 
       - name: Build Valkey unstable
-        run: |
-          git clone --depth 1 https://github.com/valkey-io/valkey.git /tmp/valkey-unstable
-          make -C /tmp/valkey-unstable -j"$(nproc)"
+        uses: ./.github/actions/build-valkey
+        with:
+          ref: unstable
+          path: /tmp/valkey-unstable
 
       # 8.1 is a release branch that moves only on patch releases, so its build (about 90 s) is kept between
       # nights, keyed on the branch's tip: a new tip builds once, then every night restores it. The whole tree is
       # kept, as test.yml keeps its pinned build. The cache is saved right after the build, not in a post step,
-      # so a night whose experiments fail still saves it.
+      # so a night whose experiments fail still saves it; that is why this site does not use the build-valkey
+      # action, whose cache saves only when the job succeeds.
       - name: Resolve the tip of Valkey 8.1
         id: valkey-8-1
         run: |
@@ -84,27 +79,13 @@ jobs:
           path: /tmp/valkey-8.1
           key: ${{ steps.valkey-8-1-build.outputs.cache-primary-key }}
 
-      - name: Install project
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e '.[dev]'
-
       # valkey.fault.clock-skew preloads libfaketime; without the package its live test skips.
       - name: Install libfaketime
         run: sudo apt-get update && sudo apt-get install -y libfaketime
 
-      - name: Set up Java
-        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Download tla2tools.jar
-        shell: bash
-        run: |
-          curl -fsSL --retry 3 -o "${RUNNER_TEMP}/tla2tools.jar" \
-            "https://github.com/tlaplus/tlaplus/releases/download/${TLA_TOOLS_VERSION}/tla2tools.jar"
-          echo "${TLA_TOOLS_SHA256}  ${RUNNER_TEMP}/tla2tools.jar" | sha256sum -c -
+      # The spec bridge's live test and the conform half of the election test need TLC.
+      - name: Set up Java and tla2tools.jar
+        uses: ./.github/actions/tla-tools
 
       - name: Run Valkey experiments live
         env:

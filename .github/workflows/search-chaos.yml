@@ -46,12 +46,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      - name: Set up Python and install the fuzzer
+        uses: ./.github/actions/setup-fuzzer
         with:
           python-version: '3.11'
-          cache: pip
-          cache-dependency-path: pyproject.toml
 
       - name: Install the build tools and valkey-search's dependencies
         run: |
@@ -62,9 +60,11 @@ jobs:
           sudo dpkg -i /tmp/deps.deb
 
       - name: Build Valkey unstable with ASan
-        run: |
-          git clone --depth 1 https://github.com/valkey-io/valkey.git /tmp/valkey
-          make -C /tmp/valkey -j"$(nproc)" BUILD_ZSTD=yes CC=clang OPT=-O1 SANITIZER=address
+        uses: ./.github/actions/build-valkey
+        with:
+          ref: unstable
+          path: /tmp/valkey
+          make-args: BUILD_ZSTD=yes CC=clang OPT=-O1 SANITIZER=address
 
       - name: Build valkey-search main
         run: |
@@ -72,10 +72,8 @@ jobs:
           cd /tmp/valkey-search && ./build.sh
           ls -la .build-release/libsearch.so
 
-      - name: Install the fuzzer and write the experiment
+      - name: Write the experiment
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e .
           python .github/scripts/module_chaos.py /tmp/search-chaos/experiments
           printf '%s\n' 'deployment:' '  server_config:' \
             '    loadmodule: /tmp/valkey-search/.build-release/libsearch.so' \

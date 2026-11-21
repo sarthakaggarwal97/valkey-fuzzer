@@ -34,6 +34,11 @@ jobs:
         # file (with -fno-sanitize-recover it aborts on the first race at startup). 32-bit is left out until its
         # build is sorted: `make 32bit` stops on a missing 32-bit googletest, which the fuzzer does not use.
         build: [ubsan, defrag]
+        include:
+          - build: ubsan
+            make-args: BUILD_ZSTD=yes CC=clang OPT=-O1 SANITIZER=undefined
+          - build: defrag
+            make-args: BUILD_ZSTD=yes CC=clang OPT=-O1 SANITIZER=address DEBUG_FORCE_DEFRAG=yes USE_JEMALLOC=no
     env:
       BATCH_DIR: /tmp/valkey-builds/batch
       # allocator_may_return_null is Valkey's own test harness's setting: a command that expects an allocation to
@@ -46,36 +51,25 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      - name: Set up Python and install the fuzzer
+        uses: ./.github/actions/setup-fuzzer
         with:
           python-version: '3.11'
-          cache: pip
-          cache-dependency-path: pyproject.toml
+
+      - name: Install the build tools
+        run: sudo apt-get update -q && sudo apt-get install -y -q clang libzstd-dev
 
       - name: Build Valkey unstable
-        env:
-          BUILD: ${{ matrix.build }}
-        run: |
-          git clone --depth 1 https://github.com/valkey-io/valkey.git /tmp/valkey
-          sudo apt-get update -q
-          case "${BUILD}" in
-            ubsan)
-              sudo apt-get install -y -q clang libzstd-dev
-              make -C /tmp/valkey -j"$(nproc)" BUILD_ZSTD=yes CC=clang OPT=-O1 SANITIZER=undefined ;;
-            defrag)
-              sudo apt-get install -y -q clang libzstd-dev
-              make -C /tmp/valkey -j"$(nproc)" BUILD_ZSTD=yes CC=clang OPT=-O1 SANITIZER=address \
-                DEBUG_FORCE_DEFRAG=yes USE_JEMALLOC=no ;;
-          esac
-          /tmp/valkey/src/valkey-server --version
+        uses: ./.github/actions/build-valkey
+        with:
+          ref: unstable
+          path: /tmp/valkey
+          make-args: ${{ matrix.make-args }}
 
-      - name: Install the fuzzer
+      - name: Write the batch's base file
         env:
           BUILD: ${{ matrix.build }}
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e .
           mkdir -p /tmp/valkey-builds
           # The defrag build defragments in every run, from the first byte of fragmentation.
           if [ "${BUILD}" = defrag ]; then

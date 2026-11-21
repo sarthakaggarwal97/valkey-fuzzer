@@ -142,10 +142,6 @@ concurrency:
   group: fuzzer-pr-batch-${{ inputs.request_id || github.run_id }}
   cancel-in-progress: false
 
-env:
-  TLA_TOOLS_VERSION: v1.7.4
-  TLA_TOOLS_SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
-
 jobs:
   batch:
     runs-on: ubuntu-latest
@@ -169,30 +165,14 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      - name: Set up Python and install valkey-fuzzer
+        uses: ./.github/actions/setup-fuzzer
         with:
           python-version: '3.11'
-          cache: pip
-          cache-dependency-path: pyproject.toml
-
-      - name: Install valkey-fuzzer
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e .
 
       # The batch checks each run against the spec bundles its plan names; TLC needs java and the jar.
-      - name: Set up Java
-        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Download tla2tools.jar
-        run: |
-          curl -fsSL --retry 3 -o "${RUNNER_TEMP}/tla2tools.jar" \
-            "https://github.com/tlaplus/tlaplus/releases/download/${TLA_TOOLS_VERSION}/tla2tools.jar"
-          echo "${TLA_TOOLS_SHA256}  ${RUNNER_TEMP}/tla2tools.jar" | sha256sum -c -
+      - name: Set up Java and tla2tools.jar
+        uses: ./.github/actions/tla-tools
 
       # Inputs reach the scripts only through the environment, never the shell.
       - name: Check the inputs and write the scenarios and bundles

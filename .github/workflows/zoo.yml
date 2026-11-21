@@ -33,17 +33,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      - name: Set up Python and install project
+        uses: ./.github/actions/setup-fuzzer
         with:
           python-version: '3.12'
-          cache: pip
-          cache-dependency-path: pyproject.toml
-
-      - name: Install project
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e '.[dev]'
+          extras: dev
 
       # The clean build at zoo/valkey-commit and one patched build per case.
       - name: Build the zoo
