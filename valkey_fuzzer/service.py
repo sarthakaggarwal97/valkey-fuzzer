@@ -99,8 +99,7 @@ LOCAL_PATH_PROVIDERS = ("valkey.artifact.local-binary", "valkey.artifact.local-m
 
 
 def _check_artifact_override(name: str, declared: Optional[Mapping[str, Any]], provider_key: str, where: str) -> None:
-    """``InputError`` unless ``declared``, what ``where`` (the scenario, the recorded plan) declares as artifact
-    ``name`` (None for nothing), names a local-binary or local-module provider under ``provider_key``."""
+    """``InputError`` unless ``declared`` (artifact ``name`` of ``where``; None for none) names a local-path provider."""
 
     if declared is None:
         raise InputError(f"--artifact {name}: the {where} declares no artifact {name!r}")

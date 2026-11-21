@@ -67,6 +67,20 @@ def is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
+def json_equal(left: Any, right: Any) -> bool:
+    """Equality in the JSON data model: ``True`` is not ``1``, ``1`` is ``1.0``, a mapping or list item by item."""
+
+    if isinstance(left, bool) or isinstance(right, bool) or left is None or right is None:
+        return type(left) is type(right) and left == right
+    if is_number(left) and is_number(right):
+        return left == right
+    if isinstance(left, Mapping) and isinstance(right, Mapping):
+        return set(left) == set(right) and all(json_equal(left[key], right[key]) for key in left)
+    if isinstance(left, (list, tuple)) and isinstance(right, (list, tuple)):
+        return len(left) == len(right) and all(json_equal(a, b) for a, b in zip(left, right))
+    return isinstance(left, str) and isinstance(right, str) and left == right
+
+
 def require_number(
     value: Any,
     field_name: str,

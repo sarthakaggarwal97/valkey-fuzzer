@@ -17,11 +17,12 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Optional
 
 from ..minimize import verdict_clauses
-from ..reports import FORMAT_VERSION, format_version_problem, write_document
+from ..reports import FORMAT_VERSION, InputError, format_version_problem, load_document, write_document
 from ..spec.bundle import SpecBundleError, load_bundle
 from ..spec.conform import (
     CHECKED_RUN_STATUSES,
     CONFORM_TIMEOUT_OPTION,
+    bundle_approved,
     conform_run,
     describe,
     plan_bundles,
@@ -29,7 +30,7 @@ from ..spec.conform import (
     violated_claims,
 )
 from .hooks import BatchPlugin
-from .results import Verdict, read_json
+from .results import Verdict
 from .spec import BatchError, BatchOptions, worst
 
 if TYPE_CHECKING:
@@ -55,8 +56,8 @@ def _conform(report_dir: str, timeout_s: float) -> None:
     (:func:`~valkey_fuzzer.spec.conform.conform_run`)."""
 
     try:
-        report = read_json(os.path.join(report_dir, "report.json"))
-    except (OSError, ValueError):
+        report = load_document(os.path.join(report_dir, "report.json"))
+    except InputError:
         report = None
     results = _recorded(report)
     if results is None:
@@ -81,8 +82,8 @@ def _conformance(run_dir: str, report: Optional[Mapping[str, Any]]) -> dict[str,
     path = os.path.join(run_dir, CONFORMANCE_FILE)
     if os.path.exists(path):
         try:
-            written = read_json(path)
-        except (OSError, ValueError) as exc:
+            written = load_document(path)
+        except InputError as exc:
             problem = f"{CONFORMANCE_FILE} cannot be read: {exc}"
         else:
             problem = format_version_problem(written, path)
@@ -93,17 +94,9 @@ def _conformance(run_dir: str, report: Optional[Mapping[str, Any]]) -> dict[str,
     if report is None or report.get("status") not in CHECKED_RUN_STATUSES:
         return {}
     plan = (report.get("outcome") or {}).get("plan") or {}
-    return {name: {"status": "error", "error": problem, "approved": _approved(name)} for name in plan_bundles(plan)}
-
-
-def _approved(name: str) -> bool:
-    """Whether the claims of spec bundle ``name`` are approved. A bundle that does not load counts as approved:
-    the plan named it, and nothing says its claims are a draft, so the run is not passed over its check."""
-
-    try:
-        return load_bundle(name).claims.status == "approved"
-    except SpecBundleError:
-        return True
+    return {
+        name: {"status": "error", "error": problem, "approved": bundle_approved(name)} for name in plan_bundles(plan)
+    }
 
 
 class ConformancePlugin(BatchPlugin):

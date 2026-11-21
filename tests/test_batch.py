@@ -505,6 +505,14 @@ def test_a_batch_removes_what_dead_fuzzers_left_on_the_host_before_its_first_job
     assert "removed 1 leftover(s) of dead fuzzer processes: chain VF-1-000000-00000000" in _log(runner)
 
 
+def test_a_report_that_is_not_json_is_an_unreadable_report_error(tmp_path):
+    job = {"id": "j", "source": "scenarios", "scenario": {"seed": 1, "experiment": {"id": SNAPSHOT}}}
+    (tmp_path / "report.json").write_text("{not json")
+    result = batch.job_result(job, str(tmp_path), exit_code=1, timed_out=False, leaks=[], extra={})
+    assert result["status"] == "ERROR" and result["signature"]["error_type"] == "UnreadableReport"
+    assert "is not valid JSON" in result["summary"]
+
+
 def test_a_report_the_batch_cannot_read_is_an_error_but_a_bug_in_its_signature_is_raised(tmp_path, monkeypatch):
     job = {"id": "j", "source": "scenarios", "scenario": {"seed": 1, "experiment": {"id": SNAPSHOT}}}
     report = {"status": "FAIL", "summary": "lost keys", "outcome": {"status": "FAIL", "plan": {"seed": "x"}}}
@@ -872,10 +880,15 @@ def test_a_run_whose_plan_names_a_bundle_but_whose_worker_wrote_no_conformance_i
     assert conform_plugin._conformance(str(tmp_path), {**report, "status": "ERROR"}) == {}
     (tmp_path / "conform.json").write_text("{")
     assert "conform.json cannot be read" in conform_plugin._conformance(str(tmp_path), report)["replication"]["error"]
+    # A report.json the plug-in cannot read is a run without one: checked now, nothing recorded for no bundle.
+    (tmp_path / "report.json").write_text("{")
+    monkeypatch.setattr(conform_plugin, "conform_run", lambda folder, timeout_s: {})
+    conform_plugin._conform(str(tmp_path), 300.0)
+    assert (tmp_path / "conform.json").read_text() == "{"
     # A bundle that does not load is held against the run: nothing says its claims are a draft.
-    assert conform_plugin._approved("no-such-bundle") is True
-    monkeypatch.setattr(conform_plugin, "load_bundle", lambda name: Mock(claims=Mock(status="approved")))
-    assert conform_plugin._approved("replication") is True
+    assert conform.bundle_approved("no-such-bundle") is True
+    monkeypatch.setattr(conform, "load_bundle", lambda name: Mock(claims=Mock(status="approved")))
+    assert conform.bundle_approved("replication") is True
 
 
 def test_a_run_that_checked_itself_is_not_checked_again_and_its_verdict_stands(tmp_path, monkeypatch):
@@ -921,7 +934,7 @@ def test_a_missing_conformance_is_held_against_the_run_only_for_approved_claims(
     assert draft["conformance"]["replication"]["approved"] is False
     assert "no conform.json" in draft["conformance"]["replication"]["error"]
 
-    monkeypatch.setattr(conform_plugin, "_approved", lambda name: True)
+    monkeypatch.setattr(conform_plugin, "bundle_approved", lambda name: True)
     runner = _batch(tmp_path, [_random(1, experiments=[REPLICATION])], name="approved")
     runner.run()
     (approved,) = _results(runner).values()
@@ -936,7 +949,7 @@ def test_a_conform_entry_that_does_not_say_its_claims_are_approved_is_read_as_a_
     # Only an explicit approval decides a run: an entry without the flag (another writer's) is reported, even
     # though the bundle's claims are approved.
     monkeypatch.setattr(conform, "conform_folder", lambda folder, tools, unavailable="": {"replication": VIOLATED})
-    monkeypatch.setattr(conform_plugin, "_approved", lambda name: True)
+    monkeypatch.setattr(conform_plugin, "bundle_approved", lambda name: True)
     runner = _batch(tmp_path, [_random(1, experiments=[REPLICATION])])
     runner.run()
     (result,) = _results(runner).values()

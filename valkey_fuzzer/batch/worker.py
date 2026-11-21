@@ -12,11 +12,11 @@ from ..generator import Exclusion
 from ..hoststate import interrupt_on_sigterm
 from ..outcomes import EXIT_HARNESS_ERROR, EXIT_INTERRUPTED, exit_code, print_outcome
 from ..plan import ExecutionPlan
-from ..reports import write_document
+from ..reports import load_document, write_document
 from ..service import PreparedRun, RunService
 from ..spec.conform import CONFORM_TIMEOUT_OPTION
 from . import hooks
-from .results import ERROR_FILE, read_json
+from .results import ERROR_FILE
 from .spec import PORT_BLOCK, BatchError
 
 
@@ -29,7 +29,7 @@ def _check_port_block(plan: ExecutionPlan) -> None:
 def run_worker(task_path: str) -> int:
     """Run the job in ``task_path`` in its report folder; the exit code is the run's (2 when it cannot start)."""
 
-    task = read_json(task_path)
+    task = load_document(task_path)
     job, report_dir = task["job"], task["report_dir"]
     isolation = {
         "deployment": {

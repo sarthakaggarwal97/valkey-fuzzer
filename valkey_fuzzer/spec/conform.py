@@ -57,7 +57,7 @@ from typing import Any, Optional
 
 from .._data import error_record, jsonable
 from ..documents import ABSENT, get_path
-from ..reports import format_version_problem
+from ..reports import InputError, format_version_problem, load_document
 from ..results import ComponentResult, ComponentStatus, OutcomeStatus, RunOutcome
 from .bundle import (
     MODEL_FILE,
@@ -156,9 +156,8 @@ def _run_report(path: str) -> Optional[dict[str, Any]]:
     """The content of a report.json that is a run report, else None."""
 
     try:
-        with open(path, encoding="utf-8") as handle:
-            report = json.load(handle)
-    except (OSError, ValueError):
+        report = load_document(path)
+    except InputError:
         return None
     if isinstance(report, dict) and isinstance(report.get("outcome"), dict) and "plan" in report["outcome"]:
         return report

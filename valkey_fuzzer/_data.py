@@ -115,22 +115,20 @@ def sha256_text(text: str, length: Optional[int] = None) -> str:
 
 
 def sha256_json(value: Any, length: Optional[int] = None) -> str:
-    """:func:`sha256_text` of the :func:`canonical_json` of ``value``: the digest of data, not of one spelling of it."""
+    """:func:`sha256_text` of the :func:`canonical_json` of ``value``: the digest of data, not of one spelling."""
 
     return sha256_text(canonical_json(value), length)
 
 
 def derived_int(*parts: Any, size: int = 16) -> int:
-    """The first ``size`` bytes of the SHA-256 of ``parts`` (as text, NUL-joined) as a big-endian int: a seed or a
-    draw that is the same in every process, where Python's own hash is not."""
+    """The first ``size`` bytes of the SHA-256 of ``parts`` (as text, NUL-joined) as an int: a process-stable seed or draw."""
 
     material = "\0".join(str(part) for part in parts).encode()
     return int.from_bytes(hashlib.sha256(material).digest()[:size], "big")
 
 
 def file_stamp(path: Union[str, "os.PathLike[str]"]) -> tuple[int, int]:
-    """The modification time (ns) and size of the file at ``path``: a cache key that changes when the file does.
-    Raises ``OSError`` for a file that cannot be stat'ed."""
+    """The modification time (ns) and size of the file at ``path`` (``OSError`` when it cannot be stat'ed): a cache key."""
 
     stat = os.stat(path)
     return stat.st_mtime_ns, stat.st_size

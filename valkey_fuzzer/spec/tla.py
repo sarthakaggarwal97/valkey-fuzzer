@@ -483,9 +483,7 @@ class TlaTools:
     def sha256(self) -> str:
         """The jar's SHA-256: ``digest`` once :meth:`probed`, else hashed now."""
 
-        if self.digest is not None:
-            return self.digest
-        digest = file_sha256(self.jar)
+        digest = self.digest or file_sha256(self.jar)
         if digest is None:
             raise TlaError(f"cannot read {self.jar}; {TOOLS_HINT}")
         return digest

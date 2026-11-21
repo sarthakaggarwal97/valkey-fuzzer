@@ -17,8 +17,8 @@ from ..schema import ConfigField, ConfigSchema
 from ..service import RunService
 from .hooks import BatchSource, plugin_job, register_source
 from .jobs import Expansion, ids_per_signature, job_definition
-from .results import read_json, results_of
-from .spec import STATUS_ORDER, BatchError, BatchOptions, absolute
+from .results import results_of
+from .spec import STATUS_ORDER, BatchError, BatchOptions, absolute, read_batch_file
 
 # -- random -------------------------------------------------------------------
 
@@ -227,7 +227,7 @@ def failure_samples(
     scenario draws again. A plug-in's runs (the zoo's) are left out: their failures are expected.
     """
 
-    jobs = {job["id"]: job for job in read_json(os.path.join(folder, "jobs.json"))}
+    jobs = {job["id"]: job for job in read_batch_file(os.path.join(folder, "jobs.json"))}
     picked = ids_per_signature(
         results_of(folder).values(),
         lambda result: result["status"] in statuses and result["id"] in jobs and not plugin_job(jobs[result["id"]]),
