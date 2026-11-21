@@ -3,12 +3,12 @@
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Optional
 
 from ..deployment.local.config import CLUSTER_BUS_PORT_OFFSET, MAX_TCP_PORT
 from ..deployment.local.ports import ephemeral_overlap
-from ..schema import ConfigError, ConfigField, ConfigSchema, load_yaml_mapping
+from ..reports import InputError, read_yaml_mapping
+from ..schema import ConfigError, ConfigField, ConfigSchema
 from ..service import CONFORM_TLC_TIMEOUT_S
 from . import hooks
 
@@ -131,10 +131,9 @@ def normalize_source(source: Any, base_dir: str) -> dict[str, Any]:
 def load_spec(path: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """A batch spec file's options (``batch_id``, ``profile``, ...) and its normalized sources."""
 
-    document = load_yaml_mapping(Path(path).read_text(encoding="utf-8"), source_name=path)
     try:
-        document = _SPEC.resolve(document, "batch spec")
-    except ConfigError as exc:
+        document = _SPEC.resolve(read_yaml_mapping(path), "batch spec")
+    except (InputError, ConfigError) as exc:
         raise BatchError(str(exc)) from None
     base_dir = os.path.dirname(os.path.abspath(path))
     sources = document.pop("sources", None) or []

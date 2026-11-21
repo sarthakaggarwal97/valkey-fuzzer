@@ -8,7 +8,6 @@ plain Python: integers, booleans, strings (:class:`str`), model values
 """
 
 import functools
-import hashlib
 import json
 import os
 import re
@@ -20,6 +19,8 @@ import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Optional
+
+from .._data import file_sha256, file_stamp
 
 # TLC's exit codes (tlc2.output.EC.ExitStatus).
 TLC_OK = 0
@@ -461,8 +462,7 @@ class TlaTools:
         a jar that is no release in :data:`TLA_TOOLS_RELEASES` with ``strict``, and a warning without.
         """
 
-        stat = os.stat(self.jar)
-        version, json_trace, digest = _probe(self.java, self.jar, stat.st_mtime_ns, stat.st_size)
+        version, json_trace, digest = _probe(self.java, self.jar, *file_stamp(self.jar))
         if version_key(version) < version_key(MIN_TLC_VERSION):
             raise TlaError(
                 f"TLC {version} in {self.jar} is older than {MIN_TLC_VERSION}, the oldest the spec bridge runs; "
@@ -485,8 +485,10 @@ class TlaTools:
 
         if self.digest is not None:
             return self.digest
-        with open(self.jar, "rb") as handle:
-            return hashlib.sha256(handle.read()).hexdigest()
+        digest = file_sha256(self.jar)
+        if digest is None:
+            raise TlaError(f"cannot read {self.jar}; {TOOLS_HINT}")
+        return digest
 
     def identity(self) -> dict[str, Any]:
         """The jar by name, digest, and the release the digest belongs to (None for an unknown jar), and what the

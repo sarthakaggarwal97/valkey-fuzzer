@@ -42,6 +42,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import Any, Callable, Optional
 
+from ..clock import utc_iso
 from .bundle import (
     MODEL_FILE,
     SAMPLE_LOG_FILE,
@@ -210,7 +211,7 @@ def check_bundle(
         "kind": "spec-assurance",
         "bundle": reference,
         "scope": SCOPE,
-        "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started)),
+        "started_at": utc_iso(started),
         "tools": {**tools.identity(), **({"warnings": list(tools.warnings)} if tools.warnings else {})},
         "timeout_s": tools.timeout_s,
         "gates": {},

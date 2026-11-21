@@ -10,6 +10,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from enum import Enum
 from typing import Any, Optional
 
+from ..._data import file_stamp
+
 logger = logging.getLogger(__name__)
 
 # A server option, or a module's: <module>.<name>, which the server takes at start once it loaded the module.
@@ -193,8 +195,7 @@ def _config_probe(binary: str, name: str, value: str) -> str:
     and names it, so the bad port after a config it takes is the one named."""
 
     path = shutil.which(binary) or binary
-    stat = os.stat(path)
-    return _probe_output(os.path.realpath(path), stat.st_mtime_ns, stat.st_size, name, value)
+    return _probe_output(os.path.realpath(path), *file_stamp(path), name, value)
 
 
 @functools.cache

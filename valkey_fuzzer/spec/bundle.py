@@ -23,7 +23,6 @@ it does not run any TLA+ tool (see :mod:`valkey_fuzzer.spec.check`).
 import copy
 import fnmatch
 import functools
-import hashlib
 import os
 import re
 from collections.abc import Mapping, Sequence
@@ -33,6 +32,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Optional, Union
 
+from .._data import file_stamp, sha256_text
 from ..documents import ABSENT, get_path
 from ..schema import ConfigError, ConfigField, ConfigSchema, load_yaml_mapping
 from . import tla
@@ -1015,14 +1015,10 @@ def _read(path: Path) -> str:
 def _stamps(path: Path, *names: str) -> tuple[tuple[int, int], ...]:
     """The modification time and size of each of the bundle files ``names``: a cache key that changes when they do."""
 
-    stamps = []
-    for name in names:
-        try:
-            stat = (path / name).stat()
-        except OSError as exc:
-            raise SpecBundleError(f"cannot read {path / name}: {exc}") from exc
-        stamps.append((stat.st_mtime_ns, stat.st_size))
-    return tuple(stamps)
+    try:
+        return tuple(file_stamp(path / name) for name in names)
+    except OSError as exc:
+        raise SpecBundleError(f"cannot read {path}: {exc}") from exc
 
 
 def load_spec_mapping(reference: str) -> SpecMapping:
@@ -1069,7 +1065,7 @@ def _mapping(path: Path, model_text: str) -> SpecMapping:
         document,
         tla.symbols(model_text),
         path=str(path / MAPPING_FILE),
-        sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        sha256=sha256_text(text),
     )
 
 
