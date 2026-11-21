@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests.test_replication_durability import _component
-from tests.valkey_experiments_support import fake_context, registration_for, unit_plan, valkey_service
+from tests.valkey_experiments_support import fake_context, registration_for, rejects_config, unit_plan, valkey_service
 from valkey_fuzzer.components import command_table
 from valkey_fuzzer.components.command_table import (
     EVIDENCE,
@@ -23,7 +23,7 @@ from valkey_fuzzer.components.reply_schemas import reply_schemas
 from valkey_fuzzer.generator import generate
 from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import ComponentRole
-from valkey_fuzzer.schema import ConfigError, plain_config
+from valkey_fuzzer.schema import plain_config
 
 
 def _flat(mapping):
@@ -416,16 +416,13 @@ def test_the_reply_schema_oracle_passes_matching_replies_and_cannot_judge_withou
 def test_the_reply_schema_oracle_names_a_command_table_workload_of_its_plan():
     workload = ComponentSpec(role=ComponentRole.WORKLOAD, use="valkey.workload.command-table", id="commands")
     writes = ComponentSpec(role=ComponentRole.WORKLOAD, use="valkey.workload.key-value", id="writes")
-    registration = registration_for("valkey.oracle.reply-schema")
-
-    def oracle(workload_id):
-        config = {"workload": workload_id}
-        return ComponentSpec(role=ComponentRole.ORACLE, use="valkey.oracle.reply-schema", id="schemas", config=config)
-
-    registration.resolve_config(oracle("commands"), unit_plan((workload, writes, oracle("commands"))))
+    oracle = ComponentSpec(
+        role=ComponentRole.ORACLE, use="valkey.oracle.reply-schema", id="schemas", config={"workload": "commands"}
+    )
+    registration_for(oracle.use).resolve_config(oracle, unit_plan((workload, writes, oracle)))
     for other in ("writes", "missing"):
-        with pytest.raises(ConfigError, match=f"workload '{other}' is not a valkey.workload.command-table"):
-            registration.resolve_config(oracle(other), unit_plan((workload, writes, oracle(other))))
+        match = f"workload '{other}' is not a valkey.workload.command-table"
+        rejects_config(oracle.use, {"workload": other}, match, workload, writes)
 
 
 def test_a_queued_commands_reply_is_its_item_of_the_execs_reply(tmp_path, monkeypatch):

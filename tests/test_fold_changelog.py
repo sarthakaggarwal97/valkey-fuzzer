@@ -3,12 +3,13 @@
 import shutil
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "fold_changelog.py"
-README = Path(__file__).resolve().parents[1] / "changelog.d" / "README.md"
+from tests.support import ROOT
+
+SCRIPT = ROOT / "scripts" / "fold_changelog.py"
+README = ROOT / "changelog.d" / "README.md"
 
 
 def _fold(tmp_path, *args):

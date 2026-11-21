@@ -12,7 +12,7 @@ import pytest
 import yaml
 
 from tests.conform_support import approved_register, register_service, scenario_file, stub_tlc
-from tests.support import make_plan, recorded_report
+from tests.support import EXAMPLES, make_plan, recorded_report
 from valkey_fuzzer import __version__, coverage, provenance, reports
 from valkey_fuzzer.cli import main
 from valkey_fuzzer.compiler import Overrides
@@ -23,7 +23,7 @@ from valkey_fuzzer.spec import conform, tla
 from valkey_fuzzer.spec.tla import TlaError
 
 GENERATED = ["--seed", "9", "--experiment", "valkey.cluster-chaos"]
-EXAMPLE = str(Path(__file__).resolve().parents[1] / "examples" / "valkey" / "snapshot_equivalence.yaml")
+EXAMPLE = str(EXAMPLES / "valkey" / "snapshot_equivalence.yaml")
 
 
 @pytest.mark.usefixtures("report_root")

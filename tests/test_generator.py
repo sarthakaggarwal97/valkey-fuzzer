@@ -22,7 +22,7 @@ from valkey_fuzzer.service import RunService
 
 from .generator_support import CLUSTER_EXPERIMENT, SMALL_CLUSTER_SEEDS, generate_scenario, generator_service
 from .test_config_space import stand_in_build
-from .valkey_experiments_support import valkey_service
+from .valkey_experiments_support import experiment_directory, experiment_runtime
 
 NO_ZSTD = (Exclusion.parse("server_config.rdbcompression=zstd"),)
 EXPERIMENTS = sorted(spec.experiment_id for spec in experiments())
@@ -43,9 +43,7 @@ _INPUTS = {
 def _runtime(tmp_path, generator, *, inputs=_INPUTS, hooks=None, **experiment):
     document = {"extends": ["valkey.writes"], "id": "tests.random", "deployment": {"modes": ["standalone", "cluster"]},
                 "metadata": {} if generator is None else {"generator": generator}, "inputs": inputs, **experiment}  # fmt: skip
-    directory = tmp_path / "experiments"
-    directory.mkdir(parents=True, exist_ok=True)
-    (directory / "tests.random.yaml").write_text(yaml.safe_dump(document))
+    directory = experiment_directory(tmp_path, document)
     registrations = tuple(
         GeneratorRegistration(f"tests.generator.{name}", hook) for name, hook in (hooks or {}).items()
     )
@@ -142,8 +140,7 @@ def test_values_the_compiler_or_the_preflight_refuse_are_never_emitted(tmp_path)
     document["metadata"]["generator"] = {
         "inputs": {**dict.fromkeys(fixed, "fixed"), "loss_window_s": {"values": [0, 5]}}
     }
-    (tmp_path / "variant.yaml").write_text(yaml.safe_dump(document))
-    aof = valkey_service(experiment_directories=(str(tmp_path),))
+    aof = experiment_runtime(tmp_path, document)
     pool = {
         "server_config": ["tests.pool"],
         "pools": {"tests.pool": {"maxmemory-policy": ["noeviction", ["a", ["b"]]]}},

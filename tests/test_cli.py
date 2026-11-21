@@ -13,7 +13,7 @@ import pytest
 import yaml
 
 from tests.conftest import cli as _cli
-from tests.support import sigterm_during
+from tests.support import EXAMPLES, fake_executable, sigterm_during
 from tests.valkey_experiments_support import valkey_service
 from valkey_fuzzer import batch, hoststate
 from valkey_fuzzer.commands._common import add_common_options
@@ -25,8 +25,7 @@ from valkey_fuzzer.reports import SCENARIO_FILE
 from valkey_fuzzer.results import OutcomeStatus, RunOutcome
 from valkey_fuzzer.runner import PreflightError
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "valkey"
-EXAMPLE = str(EXAMPLES / "snapshot_equivalence.yaml")
+EXAMPLE = str(EXAMPLES / "valkey" / "snapshot_equivalence.yaml")
 
 pytestmark = pytest.mark.usefixtures("report_root")
 
@@ -263,7 +262,7 @@ def test_replay_checks_a_binary_an_environment_provider_supplies_after_the_run(t
     instance = {"instance_id": "valkey-0", "binary": "/opt/valkey"}
     canned_runs.diagnostics = lambda plan: {"deployment": {"instances": [{**instance, "binary_sha256": next(digests)}]}}
     report = tmp_path / "report.json"
-    assert _cli("run", EXAMPLES / "mixed_version_cluster.yaml", "--output", report) == 0
+    assert _cli("run", EXAMPLES / "valkey" / "mixed_version_cluster.yaml", "--output", report) == 0
     assert _cli("replay", report) == 0
 
 
@@ -283,7 +282,7 @@ def test_replay_on_a_drifted_binary_exits_with_the_runs_verdict_and_records_the_
     instance = {"instance_id": "valkey-0", "binary": "/opt/valkey"}
     canned_runs.diagnostics = lambda plan: {"deployment": {"instances": [{**instance, "binary_sha256": next(digests)}]}}
     report = tmp_path / "report.json"
-    assert _cli("run", EXAMPLES / "mixed_version_cluster.yaml", "--output", report) == 0
+    assert _cli("run", EXAMPLES / "valkey" / "mixed_version_cluster.yaml", "--output", report) == 0
     canned_runs.status = status
     replayed = tmp_path / "replay.json"
     assert _cli("replay", report, "--output", replayed) == code
@@ -377,8 +376,7 @@ def test_a_command_that_returns_no_exit_code_is_a_harness_error_not_a_silent_suc
 def test_replay_compares_the_valkey_binary_digest_and_a_chosen_binary_is_no_drift(tmp_path, canned_runs):
     binary, other = tmp_path / "valkey-server", tmp_path / "candidate-server"
     for path in (binary, other):
-        path.write_bytes(path.name.encode())
-        path.chmod(0o755)
+        fake_executable(path, path.name)
 
     def digests(plan):
         path = plan.deployment["valkey_binary"]

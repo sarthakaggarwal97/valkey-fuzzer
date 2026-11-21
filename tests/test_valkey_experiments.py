@@ -4,7 +4,6 @@ only ever sees a tmpfs that a write would reach."""
 import os
 import re
 import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -15,8 +14,6 @@ from valkey_fuzzer.components.providers import ENVIRONMENT_PROVIDERS, LocalBinar
 from valkey_fuzzer.deployment.local.models import LocalDeploymentError
 from valkey_fuzzer.plan import RunMode
 from valkey_fuzzer.schema import ScenarioCompileError
-
-REPOSITORY = Path(__file__).resolve().parents[1]
 
 
 def _missing_library():

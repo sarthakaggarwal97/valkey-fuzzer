@@ -21,6 +21,7 @@ from tests.deployment_support import (
     planned_cluster_instances,
     process_manager,
 )
+from tests.support import fake_executable
 from valkey_fuzzer.deadlines import WaitInterruptedError
 from valkey_fuzzer.deployment.local.cluster_nodes import parse_cluster_nodes
 from valkey_fuzzer.deployment.local.formation import Formation
@@ -272,9 +273,7 @@ def test_the_service_controls_each_instances_process_and_follows_failovers(tmp_p
     process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     nodes = [instance(pid=process.pid, log_file="/tmp/l0"), instance("valkey-1", "replica", 7001)]
     nodes[0].process = process
-    binary = tmp_path / "valkey-server"
-    binary.write_text("#!/bin/sh\n")
-    binary.chmod(0o755)
+    binary = fake_executable(tmp_path / "valkey-server")
     config = DeploymentConfig(primaries=1, replicas_per_primary=1, mode=DeploymentMode.STANDALONE, valkey_binary="/x")
     handle = ValkeyDeploymentService(Mock(), LocalDeployment("d", config, nodes))
     try:

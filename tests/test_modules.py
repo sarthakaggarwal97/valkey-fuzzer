@@ -11,6 +11,7 @@ from typing import ClassVar
 
 import pytest
 
+from tests.support import fake_executable
 from tests.test_valkey_components import FakeHandle, _spec
 from tests.valkey_experiments_support import evidence_values, fake_context, resolved, unit_plan, valkey_service
 from valkey_fuzzer.components import capabilities, providers, snapshots
@@ -315,9 +316,7 @@ class _ModuleProbeServer:
 def test_the_build_probe_checks_commands_on_the_server_the_deployment_config_starts(
     monkeypatch, tmp_path, loadmodule, deployment_config, status, summary
 ):
-    binary = tmp_path / "valkey-server"
-    binary.write_bytes(b"")
-    binary.chmod(0o755)
+    binary = fake_executable(tmp_path / "valkey-server")
     monkeypatch.setattr(capabilities, "PrivateServer", _ModuleProbeServer)
     server_config = {} if loadmodule is None else {"loadmodule": loadmodule}
     plan = unit_plan(document={"mode": "standalone", "valkey_binary": str(binary), "server_config": server_config})

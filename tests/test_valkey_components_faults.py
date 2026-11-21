@@ -12,7 +12,7 @@ import pytest
 
 from tests.fakes import FakeClient, FakeHandle, fake_instances
 from tests.support import VirtualClock
-from tests.valkey_experiments_support import fake_context, registration_for, resolved, unit_plan
+from tests.valkey_experiments_support import fake_context, registration_for, rejects_config, resolved, unit_plan
 from valkey_fuzzer import hoststate
 from valkey_fuzzer.components import capabilities, network, processes, providers, storage
 from valkey_fuzzer.components.faults import FAULT_INJECTED, HeldFault, ProcessSignalFault
@@ -20,7 +20,6 @@ from valkey_fuzzer.components.ledger import fault_records
 from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.results import ComponentStatus, Evidence
-from valkey_fuzzer.schema import ConfigError
 
 
 class Iptables:
@@ -709,10 +708,7 @@ _FO0 = {"op": "failover", "shard": 0}
 def test_bad_component_configs_fail_to_compile(use, role, config, mode, document, message):
     if role == "fault":
         config = {"when_event": "go", **config}
-    spec = ComponentSpec(role=ComponentRole(role), use=use, id="subject", config=config)
-    plan = unit_plan((spec,), deployment_mode=mode, document={"mode": mode, **document})
-    with pytest.raises(ConfigError, match=message):
-        registration_for(use).resolve_config(spec, plan)
+    rejects_config(use, config, message, deployment_mode=mode, document={"mode": mode, **document})
 
 
 @pytest.mark.parametrize(

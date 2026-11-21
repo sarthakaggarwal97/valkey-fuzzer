@@ -8,10 +8,10 @@ from pathlib import Path
 
 import pytest
 
+from tests.support import ROOT
 from valkey_fuzzer.cli import create_parser
 from valkey_fuzzer.components import experiments
 
-ROOT = Path(__file__).resolve().parents[1]
 PAGES = [ROOT / "README.md", ROOT / "docs" / "getting-started.md", ROOT / "docs" / "reading-a-fail.md"]
 
 

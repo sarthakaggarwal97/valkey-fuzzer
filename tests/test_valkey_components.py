@@ -13,8 +13,15 @@ from valkey.exceptions import ConnectionError as ValkeyConnectionError
 from valkey.exceptions import DataError, ResponseError
 
 from tests import fakes
-from tests.support import VirtualClock
-from tests.valkey_experiments_support import evidence_values, fake_context, registration_for, resolved, unit_plan
+from tests.support import VirtualClock, fake_executable
+from tests.valkey_experiments_support import (
+    evidence_values,
+    fake_context,
+    registration_for,
+    rejects_config,
+    resolved,
+    unit_plan,
+)
 from valkey_fuzzer import deadlines
 from valkey_fuzzer.catalog import load_experiment_yaml
 from valkey_fuzzer.compiler import ScenarioCompileError
@@ -30,7 +37,7 @@ from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.references import EnvironmentKind, EnvironmentReference
 from valkey_fuzzer.registrations import ComponentRegistration
 from valkey_fuzzer.results import ComponentStatus, Evidence, make_result
-from valkey_fuzzer.schema import ConfigError, ConfigField
+from valkey_fuzzer.schema import ConfigField
 from valkey_fuzzer.testing import OutcomeStatus, run_experiment
 
 _DISK = EnvironmentReference(EnvironmentKind.RESOURCE, "disk", "path")
@@ -108,15 +115,15 @@ _FORCED = {"extra": (_component("valkey.action.failover", "failover", force=True
     ],
 )  # fmt: skip
 def test_a_bad_component_config_fails_to_compile(component_id, config, options, error):
-    spec = _component(component_id, "subject", **config)
-    plan = unit_plan(
-        (spec, *options.get("extra", ())),
+    rejects_config(
+        component_id,
+        config,
+        error,
+        *options.get("extra", ()),
         deployment_mode=options.get("mode", "standalone"),
         document=options.get("document"),
         resources=options.get("resources", ()),
     )
-    with pytest.raises(ConfigError, match=error):
-        registration_for(component_id).resolve_config(spec, plan)
 
 
 @pytest.mark.parametrize(
@@ -1206,9 +1213,9 @@ def test_missing_required_evidence_makes_a_run_error(tmp_path, role, emitted, st
 def test_a_private_server_that_writes_more_than_a_pipe_holds_still_exits(tmp_path):
     from valkey_fuzzer.components.server import PrivateServer
 
-    chatty = tmp_path / "chatty-server"
-    chatty.write_text("#!/bin/sh\nhead -c 1048576 /dev/zero | tr '\\0' x\necho 'FATAL CONFIG FILE ERROR'\nexit 1\n")
-    chatty.chmod(0o755)
+    chatty = fake_executable(
+        tmp_path / "chatty-server", "head -c 1048576 /dev/zero | tr '\\0' x\necho 'FATAL CONFIG FILE ERROR'\nexit 1"
+    )
     server = PrivateServer(str(chatty), timeout_s=5)
     try:
         output = server.start()

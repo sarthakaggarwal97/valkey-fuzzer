@@ -7,7 +7,6 @@ from types import SimpleNamespace
 
 import pytest
 import valkey
-import yaml
 
 from valkey_fuzzer.batch import signature_key, signature_label
 from valkey_fuzzer.components import capabilities, command_sequence
@@ -19,7 +18,8 @@ from valkey_fuzzer.results import ComponentResult, ComponentStatus, Evidence, Ou
 from valkey_fuzzer.testing import FakeContext
 
 from .live_support import BINARY, explain, free_base_port
-from .valkey_experiments_support import fake_context, resolved, valkey_service
+from .support import fake_executable
+from .valkey_experiments_support import experiment_runtime, fake_context, resolved
 
 CRASHES = Path(__file__).resolve().parent / "fixtures" / "crashes"
 ASSERTION = "bgiteration.c:2699 'wasAdded' is not true"
@@ -296,9 +296,7 @@ def _fake_server(path, real_start, *, real=None):
         other = f'exec {real} "$@"'
     else:
         other = r'''case " $* " in *" --port -1 "*) echo ">>> 'port \"-1\"'"; exit 1;; esac; echo "v=9.1.0 sha=0:0"'''
-    path.write_text(f'#!/bin/sh\ncase " $* " in *" --logfile "*) {real_start};; esac\n{other}\n')
-    path.chmod(0o755)
-    return str(path)
+    return str(fake_executable(path, f'case " $* " in *" --logfile "*) {real_start};; esac\n{other}'))
 
 
 _IDLE = {"use": "valkey.action.sleep", "id": "idle", "config": {"seconds": 0}}
@@ -308,16 +306,13 @@ def _run_crash_experiment(tmp_path, binary, first=_IDLE):
     """A run of an experiment of the component ``first`` (by default one that does nothing) and then the liveness
     oracle, on a standalone deployment of ``binary``."""
 
-    directory = tmp_path / "experiments"
-    directory.mkdir(parents=True)
     experiment = {
         "id": "tests.crash-before-ready",
         "mode": "smoke",
         "deployment": {"modes": ["standalone"]},
         "components": [first, {"use": "valkey.oracle.liveness", "id": "liveness"}],
     }
-    (directory / "tests.crash-before-ready.yaml").write_text(yaml.safe_dump(experiment))
-    runtime = valkey_service(experiment_directories=(str(directory),), artifact_dir=str(tmp_path / "artifacts"))
+    runtime = experiment_runtime(tmp_path, experiment)
     scenario = {
         "scenario_id": "crash-before-ready",
         "seed": 7,
@@ -519,11 +514,10 @@ def test_a_compared_build_that_crashes_when_the_commands_action_starts_it_is_a_c
 def test_a_run_whose_commands_action_finds_its_compared_build_crashing_fails_with_the_crash(tmp_path):
     # The deployment's instances run the real build; the compared build crashes on a private server's start
     # (one on a Unix socket), before any command.
-    parent = tmp_path / "parent-server"
-    parent.write_text(
-        f'#!/bin/sh\ncase " $* " in *" --unixsocket "*) echo "{OVERFLOW}" >&2; exit 1;; esac\nexec {BINARY} "$@"\n'
+    parent = fake_executable(
+        tmp_path / "parent-server",
+        f'case " $* " in *" --unixsocket "*) echo "{OVERFLOW}" >&2; exit 1;; esac\nexec {BINARY} "$@"',
     )
-    parent.chmod(0o755)
     action = {"use": "valkey.action.commands", "id": "prefetch", "config": {"compare_with": str(parent), "commands": [
         {"command": ["SET", "k", "v"], "expect": {"equals": "OK"}}
     ]}}  # fmt: skip

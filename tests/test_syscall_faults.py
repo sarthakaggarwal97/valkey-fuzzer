@@ -21,9 +21,8 @@ from tests.valkey_experiments_support import (
     evidence_values,
     fake_context,
     injected_fault,
-    registration_for,
+    rejects_config,
     resolved,
-    unit_plan,
 )
 from valkey_fuzzer.components.faults import FAULT_INJECTED
 from valkey_fuzzer.components.syscall_faults import SyscallFault, read_calls, rule_text
@@ -35,7 +34,6 @@ from valkey_fuzzer.hoststate import current_owner, server_owner
 from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.results import ComponentStatus
-from valkey_fuzzer.schema import ConfigError
 
 needs_cc = pytest.mark.skipif(not shutil.which(os.environ.get("CC") or "cc"), reason="needs a C compiler")
 
@@ -383,12 +381,8 @@ _ON = {"syscall_faults": True}
     ],
 )
 def test_bad_syscall_fault_configs_fail_to_compile(config, document, message):
-    spec = ComponentSpec(
-        role=ComponentRole.FAULT, use="valkey.fault.syscall", id="f", config={"when_event": "x", **config}
-    )
-    plan = unit_plan((spec,), document={"mode": "standalone", **document})
-    with pytest.raises(ConfigError, match=message):
-        registration_for("valkey.fault.syscall").resolve_config(spec, plan)
+    config = {"when_event": "x", **config}
+    rejects_config("valkey.fault.syscall", config, message, document={"mode": "standalone", **document})
 
 
 def test_a_rule_names_only_the_fields_its_action_uses():

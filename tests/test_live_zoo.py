@@ -6,7 +6,6 @@ into. Takes minutes per case; ``pytest -m live -k zoo``.
 
 import json
 import os
-from pathlib import Path
 
 import pytest
 
@@ -22,7 +21,6 @@ if not BUILDS:
     pytest.skip("set VALKEY_ZOO_BUILDS to the directory zoo/build.sh built into", allow_module_level=True)
 
 COMMIT, CASES = load_zoo()
-ROOT = Path(__file__).resolve().parent.parent
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case.case_id)

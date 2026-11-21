@@ -7,12 +7,12 @@ import sys
 import pytest
 
 from tests.test_command_sequence import BUILDS, SERVERS, Build, FakeServer, fake_open_raw_connection
-from tests.valkey_experiments_support import registration_for, resolved, unit_plan
+from tests.valkey_experiments_support import registration_for, rejects_config, resolved, unit_plan
 from valkey_fuzzer._data import to_plain_data
 from valkey_fuzzer.components import command_sequence, tools
 from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import ComponentRole
-from valkey_fuzzer.schema import ConfigError, load_yaml
+from valkey_fuzzer.schema import load_yaml
 from valkey_fuzzer.testing import FakeContext
 
 # Each argument is a step: out:<text>, err:<text>, label (the build's), cwd, stdin, env:<name>,
@@ -370,11 +370,7 @@ def test_an_older_builds_tools_are_found_by_its_servers_prefix(builds):
     ],
 )
 def test_a_bad_config_fails_to_compile(config, error):
-    spec = ComponentSpec(
-        role=ComponentRole.ACTION, use="valkey.action.tools", id="tools", config={"compare_with": "/p", **config}
-    )
-    with pytest.raises(ConfigError, match=error):
-        registration_for("valkey.action.tools").resolve_config(spec, unit_plan((spec,)))
+    rejects_config("valkey.action.tools", {"compare_with": "/p", **config}, error)
 
 
 def test_a_yaml_binary_file_and_a_placeholder_argument_load_as_written():

@@ -37,6 +37,13 @@ from valkey_fuzzer.spec.conform import collect_runs
 ID = {name: name[-1] * 40 for name in ("valkey-0", "valkey-1", "valkey-2", "valkey-3")}
 
 
+@pytest.fixture
+def clock(monkeypatch):
+    """Time that passes only as the code under test waits: retries and timeouts take no real time."""
+
+    return VirtualClock().install(monkeypatch, cluster_election, instances, polling, deadlines, processes)
+
+
 class FakeHandle(BaseHandle):
     """Instances valkey-0 up to ``count``; each client answers ``replies`` and records its commands."""
 
@@ -482,8 +489,7 @@ def test_election_safety_claims_vote_once_and_one_winner_only_where_the_model_do
     assert short.status is ComponentStatus.FAIL and set(short.diagnostics["violations"]) == {"win_without_quorum"}
 
 
-def test_views_still_changing_at_the_converge_deadline_are_unread_not_a_disagreement(monkeypatch):
-    clock = VirtualClock().install(monkeypatch, polling, deadlines)
+def test_views_still_changing_at_the_converge_deadline_are_unread_not_a_disagreement(clock):
     reads = []
 
     def settling(node_id):
@@ -591,9 +597,8 @@ class _ElectionShard:
     ids=["waits-for-the-sync", "no-winner-fails", "never-synced-is-no-verdict", "linked-to-another-host"],
 )  # fmt: skip
 def test_a_paused_primary_election_starts_only_once_a_replica_is_linked(
-    monkeypatch, sync_s, elects, master_host, status, summary
+    clock, sync_s, elects, master_host, status, summary
 ):
-    clock = VirtualClock().install(monkeypatch, cluster_election, instances, polling, deadlines, processes)
     shard = _ElectionShard(clock, sync_s, elects, master_host)
     config = {
         "shard": 0,
@@ -625,8 +630,7 @@ def test_a_paused_primary_election_starts_only_once_a_replica_is_linked(
     ],
     ids=["primary-unread", "replica-unread", "candidate-unread-at-timeout"],
 )
-def test_an_election_whose_nodes_do_not_answer_is_no_verdict(monkeypatch, unanswered, phase, status, summary):
-    clock = VirtualClock().install(monkeypatch, cluster_election, instances, polling, deadlines, processes)
+def test_an_election_whose_nodes_do_not_answer_is_no_verdict(clock, unanswered, phase, status, summary):
     shard = _ElectionShard(clock, 0.0, elects=False)
     config = {"shard": 0, "trigger": "pause_primary", "pause_s": 1.0, "timeout_s": 2, "wait_synced": False}
     spec = resolved(
@@ -645,8 +649,7 @@ def test_an_election_whose_nodes_do_not_answer_is_no_verdict(monkeypatch, unansw
     assert bool(shard.signals) is (phase == "after"), "nothing is paused before the shard was seen"
 
 
-def test_a_killed_primary_is_a_crash_the_safety_oracle_and_spec_conform_see(monkeypatch, tmp_path):
-    clock = VirtualClock().install(monkeypatch, cluster_election, instances, polling, deadlines, processes)
+def test_a_killed_primary_is_a_crash_the_safety_oracle_and_spec_conform_see(clock, tmp_path):
     shard = _ElectionShard(clock, 0.0)
     shard.data_root = str(tmp_path)
     (tmp_path / "valkey-1").mkdir()
@@ -667,8 +670,7 @@ def test_a_killed_primary_is_a_crash_the_safety_oracle_and_spec_conform_see(monk
     assert crash["restart_spawned_at"] == 42.0 and shard.restarted == "valkey-1"
 
 
-def _kill_primary(monkeypatch, tmp_path, shard_type=None, **config):
-    clock = VirtualClock().install(monkeypatch, cluster_election, instances, polling, deadlines, processes)
+def _kill_primary(clock, tmp_path, shard_type=None, **config):
     shard = (shard_type or _ElectionShard)(clock, 0.0)
     shard.data_root = str(tmp_path)
     (tmp_path / "valkey-1").mkdir()
@@ -691,9 +693,9 @@ class _SavesAtTheKill(_ElectionShard):
             conf.write("vars currentEpoch 7 lastVoteEpoch 7\n")
 
 
-def test_a_killed_primarys_disk_vars_are_read_once_it_exited(monkeypatch, tmp_path):
+def test_a_killed_primarys_disk_vars_are_read_once_it_exited(clock, tmp_path):
     # Read before the kill, the vote saved between the read and the kill looked unsaved to the safety oracle.
-    result, context, _ = _kill_primary(monkeypatch, tmp_path, _SavesAtTheKill)
+    result, context, _ = _kill_primary(clock, tmp_path, _SavesAtTheKill)
     (injected,) = context.event_bus.committed_history("election.injected")
     assert injected.payload["disk_vars_at_kill"] == {"currentEpoch": 7, "lastVoteEpoch": 7}, result.summary
 
@@ -709,14 +711,13 @@ class _NeverExits(_ElectionShard):
         return False
 
 
-def test_an_election_whose_trigger_never_took_effect_is_no_verdict(monkeypatch, tmp_path):
-    result, _, _ = _kill_primary(monkeypatch, tmp_path, _NeverExits, restart_killed=False)
+def test_an_election_whose_trigger_never_took_effect_is_no_verdict(monkeypatch, clock, tmp_path):
+    result, _, _ = _kill_primary(clock, tmp_path, _NeverExits, restart_killed=False)
     assert result.status is ComponentStatus.ERROR and "valkey-1 did not exit after SIGKILL" in result.summary, (
         result.summary
     )
 
     # Every CLUSTER FAILOVER FORCE went unanswered.
-    clock = VirtualClock().install(monkeypatch, cluster_election, instances, polling, deadlines, processes)
     shard = _ElectionShard(clock, 0.0, elects=False)
     spec = resolved(
         ComponentSpec(role=ComponentRole.ACTION, use="valkey.action.cluster-election", id="election",
@@ -732,11 +733,10 @@ def test_an_election_whose_trigger_never_took_effect_is_no_verdict(monkeypatch, 
 
 
 @pytest.mark.parametrize(("split_reads", "status"), [(3, "PASS"), (1000, "ERROR")])
-def test_an_old_primary_that_still_claims_its_slots_is_given_until_the_timeout(monkeypatch, split_reads, status):
+def test_an_old_primary_that_still_claims_its_slots_is_given_until_the_timeout(clock, split_reads, status):
     # A voter restarted from its nodes.conf claims the slots it owned there until gossip of the newer config
     # reaches it: two slot owners for a while is Valkey converging. Still two at the timeout, the election never
     # started, so the action has nothing to judge (ERROR); the oracles judge the shard.
-    clock = VirtualClock().install(monkeypatch, cluster_election, instances, polling, deadlines, processes)
     shard = _ElectionShard(clock, 0.0)
     reads = []
 
@@ -772,8 +772,7 @@ def test_the_election_experiment_checks_every_kill_it_can_make():
     assert killers == {"kill-voter", "first-election", "second-election"} <= set(safety.config["crash_faults"])
 
 
-def test_a_shard_without_a_live_replica_starts_no_election(monkeypatch):
-    clock = VirtualClock().install(monkeypatch, cluster_election, instances, polling, deadlines, processes)
+def test_a_shard_without_a_live_replica_starts_no_election(monkeypatch, clock):
     shard = _ElectionShard(clock, 0.0)
     spec = resolved(
         ComponentSpec(role=ComponentRole.ACTION, use="valkey.action.cluster-election", id="election",

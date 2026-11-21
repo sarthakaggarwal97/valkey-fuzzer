@@ -9,11 +9,11 @@ compat row across builds an older build (``VALKEY_FUZZER_OLD_BINARY``).
 """
 
 import os
-from pathlib import Path
 
 import pytest
 
 from tests.live_support import BINARY, OLD_BINARY, check, evidence, needs_old_binary, run_scenario, scenario
+from tests.support import EXAMPLES
 from tests.valkey_experiments_support import registration_for, valkey_service
 from valkey_fuzzer._data import to_plain_data
 from valkey_fuzzer.components import command_sequence
@@ -31,7 +31,7 @@ PARENT = os.environ.get("VALKEY_FUZZER_LSET_PARENT_BINARY")
 needs_lset_builds = pytest.mark.skipif(
     not (FIX and PARENT), reason="set VALKEY_FUZZER_LSET_FIX_BINARY and VALKEY_FUZZER_LSET_PARENT_BINARY"
 )
-EXAMPLE_EXPERIMENTS = Path(__file__).resolve().parents[1] / "examples" / "valkey" / "experiments"
+EXAMPLE_EXPERIMENTS = EXAMPLES / "valkey" / "experiments"
 
 LSET = [
     {"command": ["RPUSH", "l", "a", "b", "c"], "expect": {"equals": 3}},

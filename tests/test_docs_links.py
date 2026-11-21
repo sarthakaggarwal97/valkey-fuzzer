@@ -9,7 +9,8 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+from tests.support import ROOT
+
 MARKDOWN = sorted(
     path
     for path in ROOT.rglob("*.md")

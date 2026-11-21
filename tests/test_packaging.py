@@ -13,11 +13,11 @@ from pathlib import Path
 import pytest
 from setuptools import find_packages
 
+from tests.support import ROOT
 from valkey_fuzzer import __version__
 from valkey_fuzzer.cli import create_parser
 from valkey_fuzzer.spec.bundle import SpecBundleError, find_bundle
 
-ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
 

@@ -1,15 +1,13 @@
 """Every shipped example (each distinct batch scenario) compiles and passes preflight,
 and the run service example script validates one."""
 
-from pathlib import Path
-
 import pytest
 import yaml
 
+from tests.support import EXAMPLES
 from tests.valkey_experiments_support import valkey_service
 from valkey_fuzzer.batch import BatchOptions, expand, load_spec
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 DOCUMENTS = sorted([*EXAMPLES.glob("*.yaml"), *(EXAMPLES / "valkey").glob("*.yaml")])
 
 

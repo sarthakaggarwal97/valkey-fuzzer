@@ -24,7 +24,7 @@ from tests.deployment_support import (
     instance,
     process_manager,
 )
-from tests.support import VirtualClock
+from tests.support import VirtualClock, fake_executable
 from valkey_fuzzer import deadlines
 from valkey_fuzzer.commands.run import cleanup_logs
 from valkey_fuzzer.components.capabilities import resolve_binary
@@ -38,6 +38,13 @@ from valkey_fuzzer.deployment.local.ports import PortUnavailableError
 from valkey_fuzzer.deployment.local.processes import VALKEY_SOURCE_SHA, InstanceIdentityError, installed_valkey_binary
 from valkey_fuzzer.deployment.local.queries import parse_info_text, valkey_client
 from valkey_fuzzer.deployment.local.server_config import DEFAULT_MAXMEMORY, arguments_for_build
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    """Time that passes only as the code under test waits: retries and timeouts take no real time."""
+
+    return VirtualClock().install(monkeypatch, deadlines)
 
 
 def _running(pid):
@@ -70,18 +77,15 @@ def test_the_instance_command_carries_the_mode_the_config_and_the_address(mode):
 def test_a_build_starts_without_an_unobservable_config_it_lacks_and_with_another_value_for_one_it_refuses(tmp_path):
     # A build that lacks io-threads-always-active and has no jemalloc defrag hints, answering the config probe as
     # Valkey does: it names the first directive it rejects, else the bad port after the probed one.
-    binary = tmp_path / "valkey-server"
-    binary.write_text(
-        r"""#!/bin/sh
-case "$1 $2" in
+    binary = fake_executable(
+        tmp_path / "valkey-server",
+        r"""case "$1 $2" in
   "--io-threads-always-active "*) echo ">>> 'io-threads-always-active \"$2\"'"; echo "Bad directive";;
   "--activedefrag yes") echo ">>> 'activedefrag \"yes\"'"; echo "-DISABLED Active defragmentation";;
   *) echo ">>> 'port \"-1\"'";;
 esac
-exit 1
-"""
+exit 1""",
     )
-    binary.chmod(0o755)
     config = {"io-threads-always-active": "yes", "activedefrag": "yes", "io-threads": "4", "lfu-log-factor": "20"}
     command = process_manager(valkey_binary=str(binary)).build_instance_command(7000, "/d", "/l", config)
     # A config that is not unobservable stays as written, so a build that refuses it does not start.
@@ -94,17 +98,14 @@ exit 1
 
 def test_a_build_older_than_the_debug_assertions_starts_without_them(tmp_path):
     # Valkey 7.2 answers the config probe for enable-debug-assert (8.0's) with "Bad directive".
-    binary = tmp_path / "valkey-server"
-    binary.write_text(
-        r"""#!/bin/sh
-case "$1" in
+    binary = fake_executable(
+        tmp_path / "valkey-server",
+        r"""case "$1" in
   --enable-debug-assert) echo ">>> 'enable-debug-assert \"$2\"'"; echo "Bad directive";;
   *) echo ">>> 'port \"-1\"'";;
 esac
-exit 1
-"""
+exit 1""",
     )
-    binary.chmod(0o755)
     arguments = ["--crash-memcheck-enabled", "no", "--enable-debug-assert", "yes"]
     assert arguments_for_build(str(binary), arguments) == ["--crash-memcheck-enabled", "no"]
 
@@ -167,9 +168,7 @@ def test_a_server_that_exits_before_its_first_ping_is_reported_with_its_exit_cod
 
 
 def test_binaries_must_exist(tmp_path):
-    binary = tmp_path / "valkey-server"
-    binary.write_text("#!/bin/sh\n")
-    binary.chmod(0o755)
+    binary = fake_executable(tmp_path / "valkey-server")
     replica_binary = {"replica": str(tmp_path / "missing")}
     manager = process_manager(
         tmp_path, valkey_binary=str(binary), replicas_per_primary=1, instance_binaries=replica_binary
@@ -364,8 +363,7 @@ def test_a_fetch_that_checks_out_another_commit_than_asked_is_refused(tmp_path):
     assert sorted(item.name for item in (tmp_path / "cache").iterdir()) == [".lock", f"{VALKEY_SOURCE_SHA}.build.log"]
 
 
-def test_spawn_and_formation_waits_end_at_the_runs_deadline(tmp_path, monkeypatch):
-    VirtualClock().install(monkeypatch, deadlines)
+def test_spawn_and_formation_waits_end_at_the_runs_deadline(tmp_path, clock):
     cancelled = Mock(deadline=None, **{"sleep.return_value": False})
     manager = process_manager(tmp_path)
     with (
@@ -417,9 +415,8 @@ def test_a_spawned_or_restarted_server_is_ready_the_moment_it_answers_and_is_ask
     assert [item.args[0] for item in context.sleep.call_args_list] == sleeps
 
 
-def test_a_private_servers_start_wait_ends_with_its_call(monkeypatch):
+def test_a_private_servers_start_wait_ends_with_its_call(clock):
     # A cancelled run waited out the private server's own timeout (F30, 15 s here): its wait is the harness's.
-    VirtualClock().install(monkeypatch, deadlines)
     never_answers = Mock(**{"poll.return_value": None})
     server = PrivateServer("/usr/bin/valkey-server", timeout_s=15.0)
     try:
@@ -757,9 +754,8 @@ def test_formation_points_each_replica_at_the_primary_and_resets_only_its_own_se
         formation.reset_cluster_state([primary])
 
 
-def test_cluster_reset_waits_until_each_node_knows_only_itself_and_no_slot(monkeypatch):
+def test_cluster_reset_waits_until_each_node_knows_only_itself_and_no_slot(clock):
     # The reset is done when CLUSTER RESET HARD returns: the poll replaces a fixed 1 s pause (F22).
-    clock = VirtualClock().install(monkeypatch, deadlines)
     nodes = [instance(f"valkey-{n}", port=7000 + n) for n in range(2)]
 
     def client(port, infos):
@@ -804,12 +800,11 @@ def test_a_cluster_is_formed_only_once_every_node_sees_each_replica_of_its_prima
     assert formation._replica_view_problem(nodes) == "valkey-0 does not yet see valkey-1 as a replica of valkey-0"
 
 
-def test_slot_verification_outlasts_a_failing_slot_window_a_loaded_host_stretches(monkeypatch):
+def test_slot_verification_outlasts_a_failing_slot_window_a_loaded_host_stretches(clock):
     """valkey #3438 under a soak's load: every slot was assigned, yet the first node kept reporting slots
     failing past the old 20 s wait (cluster-node-timeout 1000 marks a slow peer down), so provisioning failed
     a cluster that was healthy seconds later."""
 
-    clock = VirtualClock().install(monkeypatch, deadlines)
     primary = instance("valkey-0", slot_start=0, slot_end=cluster_nodes.HASH_SLOTS - 1)
     failing = "cluster_state:ok\r\ncluster_slots_assigned:16384\r\ncluster_slots_fail:5460\r\n"
     healthy = "cluster_state:ok\r\ncluster_slots_assigned:16384\r\ncluster_slots_fail:0\r\n"
@@ -838,12 +833,11 @@ def test_slot_verification_outlasts_a_failing_slot_window_a_loaded_host_stretche
         formation.assign_and_verify_slots([primary])
 
 
-def test_the_health_wait_outlasts_a_fail_state_window_a_loaded_host_stretches(monkeypatch):
+def test_the_health_wait_outlasts_a_fail_state_window_a_loaded_host_stretches(clock):
     """valkey #3438 under a soak's load: slots were assigned and the replicas synced, yet one node kept
     reporting cluster_state fail past the old 30 s health wait (cluster-node-timeout 1000 marks a slow peer
     down), so provisioning failed a cluster that was healthy seconds later."""
 
-    clock = VirtualClock().install(monkeypatch, deadlines)
     last_slot = cluster_nodes.HASH_SLOTS - 1
     nodes = [
         instance("valkey-0", slot_start=0, slot_end=last_slot, cluster_node_id="n0"),
@@ -883,12 +877,11 @@ def test_the_health_wait_outlasts_a_fail_state_window_a_loaded_host_stretches(mo
         formed(cleared_at=float("inf"))
 
 
-def test_cluster_meet_outlasts_a_convergence_window_a_loaded_host_stretches(monkeypatch):
+def test_cluster_meet_outlasts_a_convergence_window_a_loaded_host_stretches(clock):
     """valkey @3eb8314be6af under a soak's load: 6 nodes had not all learned of each other within the old 30 s
     meet wait (the cluster bus gossips slowly on a loaded host), so provisioning failed a cluster that
     converged seconds later."""
 
-    clock = VirtualClock().install(monkeypatch, deadlines)
     nodes = [instance(f"valkey-{n}", port=7000 + n, cluster_node_id=f"n{n}") for n in range(2)]
 
     def client(cleared_at):
@@ -917,11 +910,10 @@ def test_cluster_meet_outlasts_a_convergence_window_a_loaded_host_stretches(monk
         met(cleared_at=float("inf"))
 
 
-def test_each_replica_link_seen_up_counts_although_another_replicas_info_times_out(monkeypatch):
+def test_each_replica_link_seen_up_counts_although_another_replicas_info_times_out(clock):
     """84 instances at load 400: every link was up 6 s in, yet one slow INFO failed each round of the old
     all-replicas poll, so provisioning never passed."""
 
-    clock = VirtualClock().install(monkeypatch, deadlines)
     replicas = [instance(f"valkey-{n}", "replica", 7000 + n, primary_id="valkey-0") for n in (1, 2)]
     down = {**_replica_info(), "master_link_status": "down"}
     clients = {"valkey-1": Mock(), "valkey-2": Mock()}

@@ -13,7 +13,14 @@ from pathlib import Path
 import pytest
 
 from tests.fakes import FakeHandle, fake_instances
-from tests.valkey_experiments_support import evidence_values, injected_fault, registration_for, resolved, unit_plan
+from tests.valkey_experiments_support import (
+    evidence_values,
+    injected_fault,
+    registration_for,
+    rejects_config,
+    resolved,
+    unit_plan,
+)
 from valkey_fuzzer import cgroups, hoststate
 from valkey_fuzzer.components import capabilities
 from valkey_fuzzer.components.faults import FAULT_INJECTED
@@ -21,7 +28,6 @@ from valkey_fuzzer.components.resource_pressure import ResourcePressureFault, cp
 from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.results import ComponentStatus
-from valkey_fuzzer.schema import ConfigError
 
 REAL_DELEGATED = cgroups.delegated
 OWN = "/user.slice/user-1000.slice/user@1000.service/app.slice/run-u7.scope"
@@ -304,9 +310,4 @@ def test_the_sweep_removes_the_leaves_of_a_fuzzer_that_died_and_leaves_live_ones
     ],
 )
 def test_bad_resource_pressure_configs_fail_to_compile(config, message):
-    spec = ComponentSpec(
-        role=ComponentRole.FAULT, use="valkey.fault.resource-pressure", id="f", config={"when_event": "x", **config}
-    )
-    plan = unit_plan((spec,), document={"mode": "standalone"})
-    with pytest.raises(ConfigError, match=message):
-        registration_for("valkey.fault.resource-pressure").resolve_config(spec, plan)
+    rejects_config("valkey.fault.resource-pressure", {"when_event": "x", **config}, message)

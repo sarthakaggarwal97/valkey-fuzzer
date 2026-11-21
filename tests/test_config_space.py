@@ -33,8 +33,8 @@ from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.results import make_evidence
 
 from .live_support import BINARY
+from .support import ROOT, fake_executable
 
-ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = Path(__file__).parent / "fixtures" / "config_space"
 INT_MAX, LLONG_MAX = 2**31 - 1, 2**63 - 1
 
@@ -50,10 +50,7 @@ def stand_in_build(directory: Path) -> str:
     source.mkdir(parents=True)
     for name in ("config.c", "server.h"):
         shutil.copy(FIXTURE / name, source / name)
-    binary = source / "valkey-server"
-    binary.write_text("#!/bin/sh\n")
-    binary.chmod(0o755)
-    return str(binary)
+    return str(fake_executable(source / "valkey-server"))
 
 
 def test_the_table_holds_every_entry_with_its_type_flags_bounds_and_default():
