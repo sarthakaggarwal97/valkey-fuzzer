@@ -8,8 +8,14 @@ from types import SimpleNamespace
 import pytest
 
 from tests.support import wait_until
-from tests.test_replication_durability import _component
-from tests.valkey_experiments_support import fake_context, registration_for, rejects_config, unit_plan, valkey_service
+from tests.valkey_experiments_support import (
+    fake_context,
+    registration_for,
+    rejects_config,
+    spec_for,
+    unit_plan,
+    valkey_service,
+)
 from valkey_fuzzer.components import command_table
 from valkey_fuzzer.components.command_table import (
     EVIDENCE,
@@ -218,7 +224,7 @@ def _handle(mode="standalone", primaries=("valkey-0",), instances=1):
 
 def _run(tmp_path, monkeypatch, server, handle=None, commands=300, **config):
     monkeypatch.setattr(command_table, "open_raw_connection", server.open)
-    spec = _component("valkey.workload.command-table", "commands", ComponentRole.WORKLOAD, {"rate": 5000, **config})
+    spec = spec_for("valkey.workload.command-table", "commands", ComponentRole.WORKLOAD, {"rate": 5000, **config})
     context = fake_context(handle or _handle(), spec, artifact_dir=str(tmp_path))
     workload = CommandTableWorkload()
     started = workload.start(context, spec)
@@ -287,7 +293,7 @@ def test_rate_0_sends_nothing_and_a_table_that_cannot_be_read_is_an_error(tmp_pa
     assert result.status.value == "PASS" and not server.opened and summary["sent"] == 0
 
     monkeypatch.setattr(command_table, "open_raw_connection", server.open)
-    spec = _component("valkey.workload.command-table", "commands", ComponentRole.WORKLOAD, {})
+    spec = spec_for("valkey.workload.command-table", "commands", ComponentRole.WORKLOAD, {})
     context = fake_context(_handle(primaries=()), spec, artifact_dir=str(tmp_path))
     result = CommandTableWorkload().start(context, spec)
     assert result.status.value == "ERROR" and "no reachable primary" in result.summary
@@ -385,7 +391,7 @@ def test_a_reply_that_does_not_match_its_schema_is_recorded_once_for_its_command
         assert get["problem"].startswith("reply matches none of the 2 alternatives (reply is not of type string: 5")
         assert found["SCAN", resp]["problem"] == 'reply is not of type array: {"cursor":"0"}'
 
-    spec = _component("valkey.oracle.reply-schema", "reply-schemas", ComponentRole.ORACLE, {"workload": "commands"})
+    spec = spec_for("valkey.oracle.reply-schema", "reply-schemas", ComponentRole.ORACLE, {"workload": "commands"})
     judged = ReplySchemaOracle().evaluate(fake_context(_handle(), spec), spec, result.evidence)
     assert judged.status.value == "FAIL"
     assert judged.summary == "; ".join(
@@ -400,12 +406,12 @@ def test_the_reply_schema_oracle_passes_matching_replies_and_cannot_judge_withou
     server = _Server()
     server.reply = _valkey(server)
     result, summary = _run(tmp_path, monkeypatch, server)
-    spec = _component("valkey.oracle.reply-schema", "reply-schemas", ComponentRole.ORACLE, {"workload": "commands"})
+    spec = spec_for("valkey.oracle.reply-schema", "reply-schemas", ComponentRole.ORACLE, {"workload": "commands"})
     context = fake_context(_handle(), spec)
     judged = ReplySchemaOracle().evaluate(context, spec, result.evidence)
     assert judged.status.value == "PASS"
     assert judged.summary == f"{summary['validated']} replies match their commands' reply schemas"
-    other = _component("valkey.oracle.reply-schema", "reply-schemas", ComponentRole.ORACLE, {"workload": "writes"})
+    other = spec_for("valkey.oracle.reply-schema", "reply-schemas", ComponentRole.ORACLE, {"workload": "writes"})
     for evidence, oracle in (((), spec), (result.evidence, other)):
         judged = ReplySchemaOracle().evaluate(context, oracle, evidence)
         assert judged.status.value == "ERROR" and "no valkey.workload.command-table evidence" in judged.summary

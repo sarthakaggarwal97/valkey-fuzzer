@@ -34,7 +34,7 @@ def failed(*checks, critical=False, inconclusive=False):
     return validation_result(*checks, critical=critical, inconclusive=inconclusive)
 
 
-class FakeCluster:
+class FakeChaosCluster:
     """Shards of a primary and ``replicas`` replicas, and its own state check: kills stop nodes, failovers return
     ``failovers[shard]`` (default True), and validations the next of ``results`` (default a pass)."""
 
@@ -232,7 +232,7 @@ def test_kills_never_empty_a_live_shard_or_break_the_primary_quorum(planned, liv
 
 
 def test_kills_then_failovers_validate_each_wave_with_the_stopped_nodes():
-    handle = FakeCluster(replicas=2)
+    handle = FakeChaosCluster(replicas=2)
     waves = [
         [
             kill("replica", signal="SIGTERM"),
@@ -260,7 +260,7 @@ def test_kills_then_failovers_validate_each_wave_with_the_stopped_nodes():
     assert len(context.event_bus.committed_history("chaos.instance-killed")) == 3
     assert len(context.event_bus.committed_history("chaos.wave-validated")) == 2
 
-    handle = FakeCluster(replicas=2)
+    handle = FakeChaosCluster(replicas=2)
     assert run_chaos(handle, waves=[[failover(0), kill("any", after=0)]])[0].status is ComponentStatus.PASS
     assert [call[0] for call in handle.calls] == ["failover", "kill"]
 
@@ -268,7 +268,7 @@ def test_kills_then_failovers_validate_each_wave_with_the_stopped_nodes():
 def test_a_failover_failure_is_excused_only_by_interfering_chaos():
     # Shard 0's own replica, killed before its failover finished.
     waves = [[kill("valkey-1"), failover(0, delay_s=0.05)]]
-    result, _ = run_chaos(FakeCluster(replicas=2, failovers={0: False}), waves=waves)
+    result, _ = run_chaos(FakeChaosCluster(replicas=2, failovers={0: False}), waves=waves)
     assert result.status is ComponentStatus.PASS, result.summary
     assert chaos_operation(result, "1.1")["excused_by"] == [
         {"instance_id": "valkey-1", "operation": "1.0", "reason": "same shard"}
@@ -279,13 +279,13 @@ def test_a_failover_failure_is_excused_only_by_interfering_chaos():
         [failover(0), kill("valkey-1", after=0)],
         [kill("valkey-4"), failover(0, delay_s=0.05)],
     ):
-        result, _ = run_chaos(FakeCluster(replicas=2, failovers={0: False}), waves=[wave])
+        result, _ = run_chaos(FakeChaosCluster(replicas=2, failovers={0: False}), waves=[wave])
         assert result.status is ComponentStatus.FAIL and "failed without an interfering operation" in result.summary
         records = evidence(result, "valkey.chaos.schedule")["operations"]
         assert next(op for op in records if op["op"] == "failover")["excused_by"] == []
 
 
-class _GatedCluster(FakeCluster):
+class _GatedCluster(FakeChaosCluster):
     """Shard 0's failovers finish only once valkey-2, shard 1's primary, is dead."""
 
     def failover(self, shard, **kwargs):
@@ -305,21 +305,21 @@ def test_a_primary_kill_excuses_failovers_only_in_its_own_wave():
 
 
 def _exited_by_itself():
-    handle = FakeCluster(replicas=2)
+    handle = FakeChaosCluster(replicas=2)
     handle.alive["valkey-1"] = False  # exited on its own, but still in the live view
     handle.live_instances = lambda skip_instances=(): [dict(vars(node)) for node in handle.instances]
     return handle
 
 
 def _unseedable():
-    handle = FakeCluster()
+    handle = FakeChaosCluster()
     handle.seed_error = "no keys"
     return handle
 
 
 def _primaries_drop_out():
     """By kill time every primary has dropped out of the live view: each replica is its shard's last member."""
-    handle, calls = FakeCluster(), []
+    handle, calls = FakeChaosCluster(), []
     live = handle.live_instances
     handle.live_instances = lambda skip_instances=(): calls.append(1) or [
         n for n in live() if len(calls) == 1 or n["role"] == "replica"
@@ -333,30 +333,30 @@ _TWICE = [[kill("valkey-1"), failover(1)], [kill("valkey-1"), failover(1)]]
 @pytest.mark.parametrize(
     ("handle", "waves", "status", "summary", "records"),
     [
-        (lambda: FakeCluster(replicas=2, kill_error=PermissionError("denied")), [[kill("replica"), failover(0)]],
+        (lambda: FakeChaosCluster(replicas=2, kill_error=PermissionError("denied")), [[kill("replica"), failover(0)]],
          "ERROR", "kill 1.0 was not injected: PermissionError: denied", {}),
-        (lambda: FakeCluster(results=[failed("replication")]), None, "FAIL", "wave 1 validation failed (replication)", {}),
+        (lambda: FakeChaosCluster(results=[failed("replication")]), None, "FAIL", "wave 1 validation failed (replication)", {}),
         # The harness did not see what Valkey did with the failover.
-        (lambda: FakeCluster(failovers={0: RuntimeError("boom")}), None, "ERROR",
+        (lambda: FakeChaosCluster(failovers={0: RuntimeError("boom")}), None, "ERROR",
          "failover 1.0 could not be observed: RuntimeError: boom", {"1.0": ("error", "RuntimeError: boom")}),
         (_exited_by_itself, [[kill("valkey-1"), failover(0)]], "FAIL", "valkey-1 exited before it was killed", {}),
         (_unseedable, None, "ERROR", "could not start: RuntimeError:", {}),
         # Kills that never landed must not PASS: a target gone, a role with no live member, a kill the safety
         # rules blocked, and a kill that became unsafe by the time it was due.
-        (FakeCluster, _TWICE, "ERROR", "wave 2 kill 2.0 had no target", {"2.0": ("missing", "no live valkey-1 to kill")}),
-        (lambda: FakeCluster().hide(lambda node: node["role"] == "replica"), [[kill("replica"), failover(0)]],
+        (FakeChaosCluster, _TWICE, "ERROR", "wave 2 kill 2.0 had no target", {"2.0": ("missing", "no live valkey-1 to kill")}),
+        (lambda: FakeChaosCluster().hide(lambda node: node["role"] == "replica"), [[kill("replica"), failover(0)]],
          "ERROR", "had no target", {"1.0": ("missing", "no live replica to kill")}),
-        (lambda: FakeCluster(results=[PASSED, failed("replication")]), _TWICE, "FAIL",
+        (lambda: FakeChaosCluster(results=[PASSED, failed("replication")]), _TWICE, "FAIL",
          "wave 2 validation failed (replication)", {"2.0": ("missing", "no live valkey-1 to kill")}),
-        (lambda: FakeCluster().hide(lambda node: node["instance_id"] == "valkey-1"), [[kill("valkey-0"), failover(1)]],
+        (lambda: FakeChaosCluster().hide(lambda node: node["instance_id"] == "valkey-1"), [[kill("valkey-0"), failover(1)]],
          "SKIP", "skipped by the safety rules", {"1.0": ("skipped", "no shard-safe target")}),
         (_primaries_drop_out, [[failover(0), kill("replica", after=0)]], "SKIP", "",
          {"1.1": ("skipped", "no longer shard-safe")}),
         # A wave whose kill the safety rules blocked is no chaos wave, and the summary says so.
-        (FakeCluster, [[kill(["valkey-0", "valkey-1"]), failover(1)]] * 2, "PASS",
+        (FakeChaosCluster, [[kill(["valkey-0", "valkey-1"]), failover(1)]] * 2, "PASS",
          "1 planned operation(s) skipped by the safety rules (['2.0'])", {"2.0": ("skipped", "no shard-safe target")}),
         # A later wave the safety rules refused whole leaves the run tested by its earlier waves.
-        (FakeCluster, [[kill(["valkey-0", "valkey-1"]), failover(1)], [kill(["valkey-0", "valkey-1"])]], "PASS",
+        (FakeChaosCluster, [[kill(["valkey-0", "valkey-1"]), failover(1)], [kill(["valkey-0", "valkey-1"])]], "PASS",
          "1 planned operation(s) skipped by the safety rules (['2.0'])", {"2.0": ("skipped", "no shard-safe target")}),
     ],
     ids=["kill-not-sent", "wave-validation-failed", "failover-raised", "exited-by-itself", "seeding-failed",
@@ -371,14 +371,14 @@ def test_chaos_runs_that_did_not_establish_their_faults_do_not_pass(handle, wave
 
 
 def test_a_failover_with_nothing_to_fail_over_is_skipped_not_failed():
-    result, _ = run_chaos(FakeCluster(failovers={0: None}), waves=[[failover(0)]])
+    result, _ = run_chaos(FakeChaosCluster(failovers={0: None}), waves=[[failover(0)]])
     assert result.status is ComponentStatus.SKIP and "no planned fault was injected" in result.summary, result.summary
     record = chaos_operation(result, "1.0")
     assert record["success"] is False and "stopped whole on purpose" in record["skipped"]
 
 
 def test_a_failover_that_raised_after_a_kill_in_its_shard_is_excused():
-    handle = FakeCluster(replicas=2, failovers={0: RuntimeError("boom")})
+    handle = FakeChaosCluster(replicas=2, failovers={0: RuntimeError("boom")})
     result, _ = run_chaos(handle, waves=[[kill("valkey-1"), failover(0, after=0)]])
     assert result.status is ComponentStatus.PASS, result.summary
     assert chaos_operation(result, "1.1")["excused_by"] == [
@@ -391,7 +391,7 @@ def test_a_kill_target_that_never_exits_fails_only_when_valkey_could_have_refuse
     # Valkey drops a SIGTERM it cannot act on (its shutdown save failed); nothing refuses a SIGKILL.
     clock = VirtualClock().install(monkeypatch, processes)
 
-    class Unkillable(FakeCluster):
+    class Unkillable(FakeChaosCluster):
         def send_signal(self, node_id, signum):
             self.calls.append(("kill", node_id, signum))
 
@@ -407,14 +407,14 @@ def test_a_kill_target_that_never_exits_fails_only_when_valkey_could_have_refuse
 @pytest.mark.parametrize(("validation", "results"), [({}, [failed("slot_coverage", critical=True)]),
                                                     ({"blocking_on_failure": True}, [failed("replication")])])  # fmt: skip
 def test_critical_or_blocking_failures_halt_after_the_wave(validation, results):
-    handle = FakeCluster(replicas=2, results=results)
+    handle = FakeChaosCluster(replicas=2, results=results)
     result, _ = run_chaos(handle, waves=[[failover(0)], [failover(0)]], validation=validation)
     schedule = evidence(result, "valkey.chaos.schedule")
     assert result.status is ComponentStatus.FAIL
     assert (schedule["halted_after_wave"], schedule["not_run"], len(handle.validations)) == (1, 1, 1)
 
 
-class _SlowPromotion(FakeCluster):
+class _SlowPromotion(FakeChaosCluster):
     """A failover's promotion becomes visible only when it settles (gossip lags the election)."""
 
     def failover(self, shard, *, force=False, timeout=60.0, stopped_instances=(), paused_instances=(), rng=None):
@@ -486,7 +486,7 @@ def test_final_validation_uses_the_recorded_kills_keys_and_failovers_and_fails_w
         "kills": [{"instance_id": "valkey-3", "role": "replica", "shard": 2, "success": True},
                   {"instance_id": "valkey-5", "role": "x", "shard": 2, "success": False}],
     }  # fmt: skip
-    handle = FakeCluster()
+    handle = FakeChaosCluster()
     observed = (
         _evidence("valkey.chaos.schedule", schedule),
         _evidence("valkey.chaos.test-keys", {"keys": {"k": "v"}}),
@@ -499,34 +499,34 @@ def test_final_validation_uses_the_recorded_kills_keys_and_failovers_and_fails_w
     assert [op["index"] for op in handle.validations[0]["operations"]] == ["1.0"]
 
     # No chaos action ran: no kills, no data check, and no log check (no operations to look for).
-    handle = FakeCluster(results=[failed("roles")])
+    handle = FakeChaosCluster(results=[failed("roles")])
     result = validate(handle)
     assert (result.status, result.summary) == (ComponentStatus.FAIL, "roles broke")
     assert handle.config.check_data_consistency is False and handle.validations[0]["operations"] is None
     assert list(result.diagnostics["notes"]) == ["data consistency not checked: no test keys were recorded"]
-    result = validate(FakeCluster(results=[{**failed("slot_coverage"), "error_messages": []}]))
+    result = validate(FakeChaosCluster(results=[{**failed("slot_coverage"), "error_messages": []}]))
     assert (result.status, result.summary) == (ComponentStatus.FAIL, "failed checks: slot_coverage")
 
     # An instance a fault stopped on purpose is no unexpected failure, as for liveness; one still running is.
-    handle = FakeCluster()
+    handle = FakeChaosCluster()
     handle.alive["valkey-3"] = False
     down = (_evidence("valkey.instances.expected-down", {"instances": ["valkey-3", "valkey-1"]}),)
     assert validate(handle, down).status is ComponentStatus.PASS
     assert handle.stopped == [("valkey-3", "replica", None)]
 
     # A validation config the deployment rejects leaves the run unjudged.
-    handle = FakeCluster()
+    handle = FakeChaosCluster()
     handle.state_check = lambda validation, seed=None: (_ for _ in ()).throw(ValueError("no such check"))
     result = validate(handle, validation={"check_logs": False})
     assert (result.status, result.summary) == (ComponentStatus.ERROR, "invalid validation config: no such check")
 
     # A validation that never saw the deployment (a node did not answer, its budget ran out) judges nothing.
-    result = validate(FakeCluster(results=[failed("unanswered", inconclusive=True)]))
+    result = validate(FakeChaosCluster(results=[failed("unanswered", inconclusive=True)]))
     assert (result.status, result.summary) == (ComponentStatus.ERROR, "unanswered broke")
 
 
 def test_liveness_accepts_expected_down_nodes_but_still_scans_their_logs(tmp_path):
-    handle = FakeCluster(shards=1, log_dir=str(tmp_path))
+    handle = FakeChaosCluster(shards=1, log_dir=str(tmp_path))
     handle.alive["valkey-1"] = False
     spec = resolved(ComponentSpec(role=ComponentRole.ORACLE, use="valkey.oracle.liveness", id="liveness"))
     context = FakeContext(services={"valkey.deployment": handle}, deployment_mode="cluster")
@@ -542,7 +542,7 @@ def test_liveness_accepts_expected_down_nodes_but_still_scans_their_logs(tmp_pat
 
 @pytest.mark.parametrize("wave_fails", [False, True])
 def test_the_cluster_chaos_experiment_passes_or_fails_with_its_waves_and_always_validates(tmp_path, wave_fails):
-    handle = FakeCluster(log_dir=str(tmp_path), results=[failed("view_consistency")] if wave_fails else ())
+    handle = FakeChaosCluster(log_dir=str(tmp_path), results=[failed("view_consistency")] if wave_fails else ())
     outcome = run_experiment(
         valkey_experiment("valkey.cluster-chaos"),
         component_registrations(),
@@ -565,13 +565,13 @@ def test_a_replica_that_has_not_synced_is_no_survivor_of_its_shard():
     # The cluster-chaos soak (seed 620078145): a replica migrated to an orphaned primary, which was killed before
     # the replica's first sync; the replica, counted as the shard's survivor, won its election with offset 0 and
     # the shard's data was lost.
-    handle = FakeCluster()
+    handle = FakeChaosCluster()
     handle.unsynced.add("valkey-1")
     result, _ = run_chaos(handle, waves=[[kill("valkey-0"), failover(1)]])
     assert chaos_operation(result, "1.0")["skipped"] == "no shard-safe target", result.summary
     assert ("kill", "valkey-0", signal.SIGKILL) not in handle.calls
     # Killing the unsynced replica itself takes nothing of the shard's data.
-    handle = FakeCluster()
+    handle = FakeChaosCluster()
     handle.unsynced.add("valkey-1")
     result, _ = run_chaos(handle, waves=[[kill("valkey-1"), failover(1)]])
     assert chaos_operation(result, "1.0").get("skipped") is None, result.summary
@@ -580,7 +580,7 @@ def test_a_replica_that_has_not_synced_is_no_survivor_of_its_shard():
 def test_a_replica_whose_primary_was_killed_still_holds_its_shard():
     # The soak after 015af13: a replica whose primary a wave killed has its link down but all of the shard's data;
     # counted as unsynced, the next kill took it too, and the shard's slots stayed on stopped nodes.
-    handle = FakeCluster()
+    handle = FakeChaosCluster()
     handle.link_down.add("valkey-1")
     handle.alive["valkey-0"] = False
     result, _ = run_chaos(handle, waves=[[kill("valkey-1"), failover(1)]])

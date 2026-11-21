@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.network_fakes import Tc
 from valkey_fuzzer import hoststate
 from valkey_fuzzer.cli import create_parser
 from valkey_fuzzer.deployment.local import processes
@@ -406,8 +407,6 @@ def test_chains_and_mounts_of_gone_owners_are_removed_only_as_root(host, tmp_pat
     monkeypatch.setattr(hoststate, "run_iptables", iptables)
     # A dead run's netem device, with its two lo filters at pref 10000, and a live run's at pref 10007; another
     # tool's u32 filter at 49152; lo's ingress qdisc, which the fuzzer added (the marker says so).
-    from tests.test_valkey_components_faults import Tc
-
     tc = Tc(ingress=True, taken=(49152,))
     dead_device, live_device = f"vf{DEAD.pid:06x}{DEAD.start}0", hoststate.netem_device_name(0)
     for device, pref, block in ((dead_device, 10000, 0), (live_device, 10007, 1)):

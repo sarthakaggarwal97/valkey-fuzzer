@@ -12,8 +12,8 @@ import pytest
 import valkey
 
 from tests.fakes import FakeHandle, fake_instances
+from tests.network_fakes import Iptables, Tc
 from tests.support import VirtualClock
-from tests.test_valkey_components_faults import Iptables, Tc
 from tests.valkey_experiments_support import (
     chaos_operation,
     chaos_schedule,
