@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from tests.test_command_sequence import BUILDS, SERVERS, Build, FakeServer, fake_open_raw_connection
+from tests.command_sequence_support import BUILDS, SERVERS, Build, FakeServer, fake_open_raw_connection
 from tests.valkey_experiments_support import registration_for, rejects_config, resolved, unit_plan
 from valkey_fuzzer._data import to_plain_data
 from valkey_fuzzer.components import command_sequence, tools
