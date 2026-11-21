@@ -377,9 +377,9 @@ def normalize(text: str) -> str:
 # Running the tools
 # ---------------------------------------------------------------------------
 
-# The tla2tools.jar release CI pins (TLA_TOOLS_VERSION in the workflows; tests/test_ci_workflows.py keeps them
-# equal). The base install needs neither java nor the jar: only the spec commands and a batch's conform step do,
-# and this is what they say without them.
+# The tla2tools.jar release CI pins (TLA_TOOLS_VERSION in .github/actions/tla-tools/action.yml;
+# tests/test_ci_workflows.py keeps them equal). The base install needs neither java nor the jar: only the spec
+# commands and a batch's conform step do, and this is what they say without them.
 TLA_TOOLS_VERSION = "v1.7.4"
 TLA_TOOLS_URL = f"https://github.com/tlaplus/tlaplus/releases/download/{TLA_TOOLS_VERSION}/tla2tools.jar"
 TOOLS_HINT = (
@@ -387,8 +387,8 @@ TOOLS_HINT = (
     f"Get the jar CI pins with: curl -fsSL -o tla2tools.jar {TLA_TOOLS_URL}"
 )
 # The release jars the bridge knows, by the SHA-256 of the release asset (https://github.com/tlaplus/tlaplus/releases):
-# the one CI pins (TLA_TOOLS_SHA256 in the workflows; tests/test_ci_workflows.py keeps it equal to this) and v1.8.0,
-# the first release whose TLC dumps a counterexample as JSON (-dumpTrace json). A jar with another digest runs,
+# the one CI pins (TLA_TOOLS_SHA256 in the tla-tools action; tests/test_ci_workflows.py keeps it equal to this) and
+# v1.8.0, the first release whose TLC dumps a counterexample as JSON (-dumpTrace json). A jar with another digest runs,
 # with a warning (an error with --strict): its TLC may print what the bridge reads differently.
 TLA_TOOLS_RELEASES = {
     "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88": "v1.7.4",

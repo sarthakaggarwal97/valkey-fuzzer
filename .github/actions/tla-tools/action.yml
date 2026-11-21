@@ -1,0 +1,27 @@
+name: TLA+ tools
+description: >-
+  Java 17 and the tla2tools.jar release CI pins, checked against its SHA-256, at $RUNNER_TEMP/tla2tools.jar; a step
+  that needs it sets TLA2TOOLS_JAR to that path, or passes it with --tla2tools.
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Java
+      uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+      with:
+        distribution: temurin
+        java-version: '17'
+
+    - name: Download tla2tools.jar
+      shell: bash
+      env:
+        # tla2tools.jar from https://github.com/tlaplus/tlaplus/releases (TLC 2.19). Update the version and the
+        # SHA-256 of the release asset together, here and in valkey_fuzzer/spec/tla.py: the version (the download
+        # hint the spec commands print without the jar) and the SHA-256 in TLA_TOOLS_RELEASES (`spec check --strict`
+        # refuses a jar it does not know). tests/test_ci_workflows.py keeps the two equal.
+        TLA_TOOLS_VERSION: v1.7.4
+        TLA_TOOLS_SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
+      run: |
+        curl -fsSL --retry 3 -o "${RUNNER_TEMP}/tla2tools.jar" \
+          "https://github.com/tlaplus/tlaplus/releases/download/${TLA_TOOLS_VERSION}/tla2tools.jar"
+        echo "${TLA_TOOLS_SHA256}  ${RUNNER_TEMP}/tla2tools.jar" | sha256sum -c -

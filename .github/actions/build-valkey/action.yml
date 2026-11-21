@@ -1,0 +1,50 @@
+name: Build Valkey
+description: >-
+  valkey-io/valkey at a ref, fetched shallow and built with make into a directory. The whole tree is kept, not only
+  src/valkey-server: the config table is read from the config.c beside the binary (components/config_space.py). With
+  a cache key the tree is restored from the cache and, after a build, saved when the job succeeds; a branch that moves
+  (unstable) takes no key, since a cache keyed on its name would freeze its first build.
+
+inputs:
+  ref:
+    description: The branch, tag or commit of valkey-io/valkey to build
+    required: true
+  path:
+    description: The directory to fetch and build in
+    required: true
+  make-args:
+    description: Arguments added to make (SANITIZER=address CC=clang)
+    required: false
+    default: ""
+  cache-key:
+    description: The key the built tree is cached under; empty builds every time
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Restore the Valkey build
+      if: inputs.cache-key != ''
+      id: cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ inputs.path }}
+        key: ${{ inputs.cache-key }}
+
+    # A tag or branch and a commit SHA are fetched the same way.
+    - name: Build Valkey
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        REF: ${{ inputs.ref }}
+        BUILD_DIR: ${{ inputs.path }}
+        MAKE_ARGS: ${{ inputs.make-args }}
+      run: |
+        git init --quiet "${BUILD_DIR}"
+        git -C "${BUILD_DIR}" fetch --quiet --depth 1 https://github.com/valkey-io/valkey.git "${REF}"
+        git -C "${BUILD_DIR}" checkout --quiet FETCH_HEAD
+        # The make arguments are words (SANITIZER=address CC=clang), so they are not quoted.
+        # shellcheck disable=SC2086
+        make -C "${BUILD_DIR}" -j"$(nproc)" ${MAKE_ARGS}
+        "${BUILD_DIR}/src/valkey-server" --version

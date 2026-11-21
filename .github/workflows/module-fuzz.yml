@@ -147,21 +147,18 @@ jobs:
           cache-dependency-path: pyproject.toml
 
       # About 90 s, not cached: a branch (unstable) moves, and a cache keyed on its name would freeze its first
-      # build. The whole tree is kept, not only src/valkey-server: the config table is read from the config.c beside
-      # the binary. A tag or branch and a commit SHA are fetched the same way.
+      # build. The action is the fuzzer checkout's, at the ref the caller pinned.
       - name: Build Valkey
         if: inputs.image == ''
-        env:
-          VALKEY_VERSION: ${{ inputs.valkey_version }}
-          MAKE_ARGS: ${{ inputs.valkey_make_args }}
-        run: |
-          git init --quiet /tmp/valkey
-          git -C /tmp/valkey fetch --quiet --depth 1 https://github.com/valkey-io/valkey.git "${VALKEY_VERSION}"
-          git -C /tmp/valkey checkout --quiet FETCH_HEAD
-          # The make arguments are words (SANITIZER=address CC=clang), so they are not quoted.
-          # shellcheck disable=SC2086
-          make -C /tmp/valkey -j"$(nproc)" ${MAKE_ARGS}
-          echo "/tmp/valkey/src" >> "${GITHUB_PATH}"
+        uses: ./.github/actions/build-valkey
+        with:
+          ref: ${{ inputs.valkey_version }}
+          path: /tmp/valkey
+          make-args: ${{ inputs.valkey_make_args }}
+
+      - name: Put Valkey on PATH
+        if: inputs.image == ''
+        run: echo "/tmp/valkey/src" >> "${GITHUB_PATH}"
 
       # In the image too: the checkout is the fuzzer the caller pinned, the image's install may be older.
       - name: Install the fuzzer

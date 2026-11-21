@@ -67,6 +67,23 @@ def test_pr_fuzzer_keeps_its_reusable_workflow_inputs_and_jobs():
 
 
 WORKFLOW_NAMES = sorted(path.name for path in WORKFLOWS.glob("*.yml"))
+ACTIONS = ROOT / ".github" / "actions"
+ACTION_NAMES = sorted(path.parent.name for path in ACTIONS.glob("*/action.yml"))
+# The workflows and the composite actions they use, as paths under .github: what the step-level guards read.
+GITHUB_FILES = sorted([f"workflows/{name}" for name in WORKFLOW_NAMES] + [f"actions/{name}/action.yml" for name in ACTION_NAMES])  # fmt: skip
+
+
+def _action(name):
+    return yaml.safe_load((ACTIONS / name / "action.yml").read_text(encoding="utf-8"))
+
+
+def _steps(name):
+    """Every step of the workflow or composite action at ``.github/<name>``."""
+
+    document = yaml.safe_load((ROOT / ".github" / name).read_text(encoding="utf-8"))
+    if "runs" in document:
+        return document["runs"]["steps"]
+    return [step for job in document["jobs"].values() for step in job.get("steps", ())]
 
 
 def _fuzzer_commands(name):
@@ -142,10 +159,67 @@ def test_every_file_a_workflow_names_exists(name):
         assert (ROOT / path).exists(), f"{name} references missing {path}"
 
 
-@pytest.mark.parametrize("name", WORKFLOW_NAMES)
-def test_every_workflow_pins_its_actions_to_a_commit(name):
-    for action in re.findall(r"^\s*(?:-\s+)?uses:\s*(\S.*)$", (WORKFLOWS / name).read_text(), re.M):
+@pytest.mark.parametrize("name", GITHUB_FILES)
+def test_every_workflow_and_action_pins_its_actions_to_a_commit(name):
+    for action in re.findall(r"^\s*(?:-\s+)?uses:\s*(\S.*)$", (ROOT / ".github" / name).read_text(), re.M):
         assert action.startswith("./") or re.fullmatch(r"[\w.-]+/[\w./-]+@[0-9a-f]{40} # v\d+(\.\d+)*", action), action
+
+
+@pytest.mark.parametrize("name", WORKFLOW_NAMES)
+def test_every_composite_action_a_workflow_uses_exists_and_follows_a_checkout_of_the_fuzzer(name):
+    # A local action is read from the workspace, so the fuzzer must be checked out there (not under a path) first.
+    for job_name, job in _workflow(name)["jobs"].items():
+        checked_out = False
+        for step in job.get("steps", ()):
+            uses = step.get("uses", "")
+            if uses.startswith("actions/checkout@") and "path" not in step.get("with", {}):
+                checked_out = True
+            if uses.startswith("./"):
+                assert (ROOT / uses / "action.yml").is_file(), (name, job_name, uses)
+                assert checked_out, (name, job_name, step.get("name"))
+
+
+@pytest.mark.parametrize("name", WORKFLOW_NAMES)
+def test_every_workflow_sets_up_python_and_installs_the_project_through_the_one_action(name):
+    # lint installs ruff alone and release the packaging tools; module-fuzz installs into the image's Python too, so
+    # it keeps a plain install after its own setup-python. Every other workflow takes both from setup-fuzzer.
+    own_install = ("lint.yml", "module-fuzz.yml", "release.yml")
+    for step in _steps(f"workflows/{name}"):
+        if step.get("uses", "").startswith("actions/setup-python@"):
+            assert name in own_install, (name, step.get("name"))
+        assert "pip install -e" not in step.get("run", ""), (name, step.get("name"))
+
+
+@pytest.mark.parametrize(("extras", "requirement"), [("", "."), ("dev", ".[dev]")])
+def test_the_setup_fuzzer_action_installs_the_project_with_the_extras_asked_for(tmp_path, extras, requirement):
+    setup, install = _action("setup-fuzzer")["runs"]["steps"]
+    assert setup["uses"].startswith("actions/setup-python@")
+    assert setup["with"]["python-version"] == "${{ inputs.python-version }}"
+    assert install["env"] == {"EXTRAS": "${{ inputs.extras }}"}
+    # The install line, with a python that prints its arguments standing in for the interpreter.
+    python = tmp_path / "python"
+    python.write_text('#!/bin/sh\necho "$@"\n')
+    python.chmod(0o755)
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", install["run"]],
+        env={**os.environ, "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}", "EXTRAS": extras},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.splitlines() == ["-m pip install --upgrade pip", f"-m pip install -e {requirement}"]
+
+
+def test_the_build_valkey_action_restores_a_keyed_build_and_builds_only_on_a_miss():
+    restore, build = _action("build-valkey")["runs"]["steps"]
+    assert restore["uses"].startswith("actions/cache@") and restore["if"] == "inputs.cache-key != ''"
+    assert restore["with"] == {"path": "${{ inputs.path }}", "key": "${{ inputs.cache-key }}"}
+    # A skipped restore has no cache-hit output, so a build without a key always builds.
+    assert build["if"] == f"steps.{restore['id']}.outputs.cache-hit != 'true'"
+    inputs = {"REF": "${{ inputs.ref }}", "BUILD_DIR": "${{ inputs.path }}", "MAKE_ARGS": "${{ inputs.make-args }}"}
+    assert build["env"] == inputs
+    assert 'fetch --quiet --depth 1 https://github.com/valkey-io/valkey.git "${REF}"' in build["run"]
+    assert "git clone" not in build["run"] and 'make -C "${BUILD_DIR}" -j"$(nproc)" ${MAKE_ARGS}' in build["run"]
 
 
 # The jobs that write: the one that posts the PR comment the read-only summarize job rendered, the two of a
@@ -199,25 +273,42 @@ def test_every_workflow_serializes_its_runs_and_bounds_every_job(name):
             assert isinstance(timeout, int), (name, job_name)
 
 
-OWNING_REPOSITORIES = ("valkey-io/valkey-fuzzer", "sarthakaggarwal97/valkey-fuzzer")
+UPSTREAM = "valkey-io/valkey-fuzzer"
+OWNING_REPOSITORIES = (UPSTREAM, "sarthakaggarwal97/valkey-fuzzer")
+# The repositories each schedule runs in: the four soaks in both, the bug zoo and the nightly model check upstream
+# only. A workflow moves between the two lists here and in its job's `if`; a dispatch runs anywhere.
+SCHEDULE_OWNERS = {
+    "fuzzer-run.yml": OWNING_REPOSITORIES,
+    "search-chaos.yml": OWNING_REPOSITORIES,
+    "tla-model-check-nightly.yml": (UPSTREAM,),
+    "valkey-builds.yml": OWNING_REPOSITORIES,
+    "valkey-experiments-live.yml": OWNING_REPOSITORIES,
+    "zoo.yml": (UPSTREAM,),
+}
 
 
-@pytest.mark.parametrize("name", [name for name in WORKFLOW_NAMES if "schedule" in _workflow(name)["on"]])
+def _schedule_guard(name):
+    """The one guard of every job of scheduled workflow ``name``."""
+
+    owners = "".join(f" || github.repository == '{repository}'" for repository in SCHEDULE_OWNERS[name])
+    return f"github.event_name != 'schedule'{owners}"
+
+
+def test_the_schedule_owner_table_names_every_scheduled_workflow_and_no_other():
+    assert sorted(SCHEDULE_OWNERS) == [name for name in WORKFLOW_NAMES if "schedule" in _workflow(name)["on"]]
+
+
+@pytest.mark.parametrize("name", sorted(SCHEDULE_OWNERS))
 def test_every_scheduled_workflow_runs_its_schedule_only_in_the_repositories_that_own_it(name):
     # A fork that enables Actions would otherwise run every schedule; a dispatch runs anywhere.
     for job_name, job in _workflow(name)["jobs"].items():
-        guard = job.get("if", "")
-        assert re.fullmatch(r"github\.event_name != 'schedule'( \|\| github\.repository == '[^']+')+", guard), (
-            name,
-            job_name,
-        )
-        assert set(re.findall(r"github\.repository == '([^']+)'", guard)) <= set(OWNING_REPOSITORIES), (name, job_name)
+        assert job.get("if") == _schedule_guard(name), (name, job_name)
 
 
-@pytest.mark.parametrize("name", WORKFLOW_NAMES)
+@pytest.mark.parametrize("name", GITHUB_FILES)
 def test_every_download_a_workflow_installs_is_checked_against_a_pinned_digest(name):
     # The jar and the .deb are run or installed as root: a release asset that changed must fail the step.
-    for script in _run_scripts(_workflow(name)):
+    for script in [step["run"] for step in _steps(name) if "run" in step]:
         if "curl " in script:
             assert "sha256sum -c" in script, (name, script)
         for install in re.findall(r"^\s*sudo dpkg -i (\S+)", script, re.M):
@@ -250,20 +341,21 @@ def test_the_pr_fuzzer_posts_its_comment_from_a_job_that_never_meets_the_prs_cod
     assert summary["RUNS_RESULT"] == "${{ needs.random-fuzzer.result }}"
 
 
-@pytest.mark.parametrize("name", WORKFLOW_NAMES)
+@pytest.mark.parametrize("name", GITHUB_FILES)
 def test_every_workflow_caches_the_pip_downloads_on_the_file_that_names_them(name):
-    for job in _workflow(name)["jobs"].values():
-        for step in job.get("steps", ()):
-            if step.get("uses", "").startswith("actions/setup-python@"):
-                assert step["with"]["cache"] == "pip", (name, step["name"])
-                assert step["with"]["cache-dependency-path"] == "pyproject.toml", (name, step["name"])
+    for step in _steps(name):
+        if step.get("uses", "").startswith("actions/setup-python@"):
+            assert step["with"]["cache"] == "pip", (name, step["name"])
+            assert step["with"]["cache-dependency-path"] == "pyproject.toml", (name, step["name"])
 
 
 def test_the_server_tests_build_valkey_only_when_the_pinned_commits_build_is_not_cached():
     steps = {step["name"]: step for step in _workflow("test.yml")["jobs"]["server-tests"]["steps"] if "name" in step}
-    restore = steps["Restore the Valkey build"]
-    assert restore["with"]["path"] == "/tmp/valkey" and "hashFiles('zoo/valkey-commit')" in restore["with"]["key"]
-    assert steps["Build Valkey at the pinned commit"]["if"] == f"steps.{restore['id']}.outputs.cache-hit != 'true'"
+    pin, build = steps["Read the pinned Valkey commit"], steps["Build Valkey at the pinned commit"]
+    assert "zoo/valkey-commit" in pin["run"] and 'echo "sha=' in pin["run"]
+    assert build["uses"] == "./.github/actions/build-valkey" and build["with"]["path"] == "/tmp/valkey"
+    assert build["with"]["ref"] == f"${{{{ steps.{pin['id']}.outputs.sha }}}}"
+    assert "hashFiles('zoo/valkey-commit')" in build["with"]["cache-key"]
     # On PATH whether the build was restored or made.
     assert "if" not in steps["Put Valkey on PATH"] and "/tmp/valkey/src" in steps["Put Valkey on PATH"]["run"]
 
@@ -287,12 +379,10 @@ def test_the_daily_live_workflow_builds_valkey_8_1_only_when_the_branch_tips_bui
     assert build["env"]["VALKEY_8_1_SHA"] == f"${{{{ steps.{tip['id']}.outputs.sha }}}}"
     assert 'fetch --quiet --depth 1 https://github.com/valkey-io/valkey.git "${VALKEY_8_1_SHA}"' in build["run"]
     assert "git clone" not in build["run"] and "--branch 8.1" not in build["run"]
-    # unstable moves daily and is still cloned and built every night, before the cache steps.
+    # unstable moves daily and is still fetched and built every night, uncached, before the cache steps.
     names = list(steps)
-    assert (
-        "git clone --depth 1 https://github.com/valkey-io/valkey.git /tmp/valkey-unstable"
-        in steps["Build Valkey unstable"]["run"]
-    )
+    assert steps["Build Valkey unstable"]["uses"] == "./.github/actions/build-valkey"
+    assert steps["Build Valkey unstable"]["with"] == {"ref": "unstable", "path": "/tmp/valkey-unstable"}
     assert (
         names.index("Build Valkey unstable")
         < names.index("Resolve the tip of Valkey 8.1")
@@ -892,18 +982,18 @@ def test_the_unit_tests_run_on_every_python_version_the_package_declares():
 
 def test_the_pr_gating_server_tests_build_the_pinned_valkey_commit():
     steps = _workflow("test.yml")["jobs"]["server-tests"]["steps"]
-    (build,) = [step["run"] for step in steps if "make -C" in step.get("run", "")]
+    (build,) = [step for step in steps if step.get("uses") == "./.github/actions/build-valkey"]
     # Unstable HEAD would let a Valkey regression fail an unrelated PR; the daily live workflow follows it instead.
-    assert "zoo/valkey-commit" in build and "git clone" not in build
+    assert build["with"]["ref"] != "unstable" and "zoo/valkey-commit" in build["with"]["cache-key"]
 
 
 def test_the_scheduled_soak_runs_a_build_of_valkey_unstable():
-    scripts = "\n".join(_run_scripts(_workflow("fuzzer-run.yml")))
+    workflow = _workflow("fuzzer-run.yml")
     # Without --valkey-binary the local deployment builds its fixed fallback release, never a new Valkey commit.
-    (binary,) = re.findall(r"--valkey-binary (\S+)", scripts)
-    source = binary.removesuffix("/src/valkey-server")
-    assert re.search(rf"git clone --depth 1 https://github.com/valkey-io/valkey.git {re.escape(source)}\n", scripts)
-    assert f"make -C {source} " in scripts
+    (binary,) = re.findall(r"--valkey-binary (\S+)", "\n".join(_run_scripts(workflow)))
+    (job,) = workflow["jobs"].values()
+    (build,) = [step for step in job["steps"] if step.get("uses") == "./.github/actions/build-valkey"]
+    assert build["with"] == {"ref": "unstable", "path": binary.removesuffix("/src/valkey-server")}
 
 
 def test_the_bug_zoo_runs_daily_and_on_dispatch_and_fails_a_case_below_its_rate():
@@ -913,7 +1003,7 @@ def test_the_bug_zoo_runs_daily_and_on_dispatch_and_fails_a_case_below_its_rate(
     assert workflow["concurrency"]["group"]
     (job,) = workflow["jobs"].values()
     # The schedule runs upstream only; a dispatch runs in any repository, so a fork can try it.
-    assert job["if"] == "github.event_name != 'schedule' || github.repository == 'valkey-io/valkey-fuzzer'"
+    assert job["if"] == _schedule_guard("zoo.yml")
     assert job["timeout-minutes"]
     scripts = "\n".join(_run_scripts(workflow))
     assert "zoo/build.sh" in scripts and "valkey-fuzzer batch --zoo" in scripts
@@ -960,7 +1050,7 @@ def test_the_nightly_spec_check_runs_every_bundles_raised_bounds():
     workflow = _workflow("tla-model-check-nightly.yml")
     assert "workflow_dispatch" in workflow["on"] and workflow["on"]["schedule"]
     (job,) = workflow["jobs"].values()
-    assert job["if"] == "github.event_name != 'schedule' || github.repository == 'valkey-io/valkey-fuzzer'"
+    assert job["if"] == _schedule_guard("tla-model-check-nightly.yml")
     scripts = "\n".join(_run_scripts(workflow))
     assert "for nightly in formal/*/nightly; do" in scripts
     (check,) = [args for args in _fuzzer_commands("tla-model-check-nightly.yml") if args.spec_command == "check"]
@@ -980,35 +1070,38 @@ TLC_JOBS = {
 }
 
 
+def test_the_tla_tools_action_pins_the_release_the_spec_bridge_knows():
+    # One pin, the action's: the hint the spec commands print without the jar names the same release, and `spec check
+    # --strict` (which the model-check workflows pass) knows the pinned jar by its digest. No workflow has one of its own.
+    java, download = _action("tla-tools")["runs"]["steps"]
+    assert java["uses"].startswith("actions/setup-java@")
+    assert download["env"]["TLA_TOOLS_VERSION"] == TLA_TOOLS_VERSION
+    assert TLA_TOOLS_RELEASES[download["env"]["TLA_TOOLS_SHA256"]] == TLA_TOOLS_VERSION
+    assert "${TLA_TOOLS_SHA256}  ${RUNNER_TEMP}/tla2tools.jar" in download["run"] and "sha256sum -c" in download["run"]
+    for name in WORKFLOW_NAMES:
+        assert "TLA_TOOLS_" not in (WORKFLOWS / name).read_text(encoding="utf-8"), name
+
+
 @pytest.mark.parametrize(("name", "job"), sorted(TLC_JOBS))
 def test_every_job_with_tlc_backed_tests_has_java_and_the_pinned_tla_tools(name, job):
     # Without them those tests skip, a batch skips the bundles that need TLC, and CI never checks the spec bridge
     # end to end.
-    workflow = _workflow(name)
-    pinned = {key: _workflow("tla-model-check.yml")["env"][key] for key in ("TLA_TOOLS_VERSION", "TLA_TOOLS_SHA256")}
-    assert {key: workflow.get("env", {}).get(key) for key in pinned} == pinned
-    # The hint the spec commands print without the jar names the same release, and `spec check --strict` (which the
-    # model-check workflows pass) knows the pinned jar by its digest.
-    assert pinned["TLA_TOOLS_VERSION"] == TLA_TOOLS_VERSION
-    assert TLA_TOOLS_RELEASES[pinned["TLA_TOOLS_SHA256"]] == TLA_TOOLS_VERSION
-    steps = workflow["jobs"][job]["steps"]
-    assert any(step.get("uses", "").startswith("actions/setup-java@") for step in steps)
-    (download,) = [step["run"] for step in steps if "tla2tools.jar" in step.get("run", "") and "curl" in step["run"]]
-    assert "${TLA_TOOLS_SHA256}" in download and "sha256sum -c" in download
+    steps = _workflow(name)["jobs"][job]["steps"]
+    (tools,) = [index for index, step in enumerate(steps) if step.get("uses") == "./.github/actions/tla-tools"]
     tests = [step for step in steps if "pytest" in step.get("run", "") or "valkey-fuzzer batch" in step.get("run", "")]
     with_jar = [
         step for step in tests if step.get("env", {}).get("TLA2TOOLS_JAR") == "${{ runner.temp }}/tla2tools.jar"
     ]
     assert len(with_jar) == TLC_JOBS[name, job], [step.get("name") for step in tests]
+    assert all(steps.index(step) > tools for step in with_jar)
 
 
-@pytest.mark.parametrize("name", WORKFLOW_NAMES)
+@pytest.mark.parametrize("name", GITHUB_FILES)
 def test_every_checkout_leaves_no_credentials_behind(name):
     # Later steps run scenario, fuzzer, and test code that has no use for the token.
-    for job in _workflow(name)["jobs"].values():
-        for step in job.get("steps", ()):
-            if step.get("uses", "").startswith("actions/checkout@"):
-                assert step.get("with", {}).get("persist-credentials") is False, (name, step.get("name"))
+    for step in _steps(name):
+        if step.get("uses", "").startswith("actions/checkout@"):
+            assert step.get("with", {}).get("persist-credentials") is False, (name, step.get("name"))
 
 
 def _step_env(workflow, command):

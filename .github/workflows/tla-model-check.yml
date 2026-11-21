@@ -27,16 +27,6 @@ concurrency:
   group: tla-model-check-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  # tla2tools.jar from https://github.com/tlaplus/tlaplus/releases (TLC 2.19).
-  # Update the version and the SHA-256 of the release asset together, here and
-  # in tla-model-check-nightly.yml, test.yml, valkey-experiments-live.yml and
-  # fuzzer-pr-batch.yml, and in valkey_fuzzer/spec/tla.py: the version (the
-  # download hint the spec commands print without the jar) and the SHA-256 in
-  # TLA_TOOLS_RELEASES (`spec check --strict` refuses a jar it does not know).
-  TLA_TOOLS_VERSION: v1.7.4
-  TLA_TOOLS_SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
-
 jobs:
   tlc:
     runs-on: ubuntu-latest
@@ -48,30 +38,15 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Java
-        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      - name: Set up Python and install project
+        uses: ./.github/actions/setup-fuzzer
         with:
           python-version: '3.12'
-          cache: pip
-          cache-dependency-path: pyproject.toml
+          extras: dev
 
-      - name: Install project
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e '.[dev]'
-
-      - name: Download tla2tools.jar
-        shell: bash
-        run: |
-          curl -fsSL --retry 3 -o "${RUNNER_TEMP}/tla2tools.jar" \
-            "https://github.com/tlaplus/tlaplus/releases/download/${TLA_TOOLS_VERSION}/tla2tools.jar"
-          echo "${TLA_TOOLS_SHA256}  ${RUNNER_TEMP}/tla2tools.jar" | sha256sum -c -
+      # The tla2tools.jar release CI pins lives in the action (and in valkey_fuzzer/spec/tla.py).
+      - name: Set up Java and tla2tools.jar
+        uses: ./.github/actions/tla-tools
 
       - name: spec check every bundle
         shell: bash
