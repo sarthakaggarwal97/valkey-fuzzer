@@ -1,12 +1,12 @@
 """The slot migration bundle (``formal/slot-migration``): its controls, how a run's log lines map onto its steps, and,
 with java and ``$TLA2TOOLS_JAR``, the counterexample of a cancel after the grant."""
 
-import json
 import re
 from unittest.mock import patch
 
 import pytest
 
+from tests.conform_support import events, write_trace
 from tests.conftest import needs_tlc
 from tests.fakes import FakeClient, FakeHandle, fake_instances
 from tests.valkey_experiments_support import evidence_values, fake_context, resolved, valkey_experiment
@@ -95,7 +95,7 @@ def test_the_target_losing_the_link_is_not_the_source_losing_it():
 
 
 def test_conform_maps_a_migration_run_onto_the_steps(tmp_path):
-    events = [
+    pairs = [
         ("slot-migration.started", {"instance_id": "valkey-0"}),
         ("slot-migration.import.created", {"instance_id": "valkey-1"}),
         ("slot-migration.tracking.created", {"instance_id": "valkey-2"}),
@@ -108,13 +108,9 @@ def test_conform_maps_a_migration_run_onto_the_steps(tmp_path):
         ("slot-migration.claimed", {"instance_id": "valkey-1"}),
         ("slot-migration.owner.learned", {"instance_id": "valkey-0"}),
     ]
-    records = [{"kind": "header", "scenario_id": "unit", "seed": 1, "nodes": {}}]
-    for index, (name, payload) in enumerate(events):
-        records.append({"kind": "event", "t": 1 + index / 10, "sequence": index, "name": name, "payload": payload})
-    path = tmp_path / "trace.jsonl"
-    path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+    path = write_trace(tmp_path / "trace.jsonl", events(pairs))
 
-    observed = ObservedRun(load_bundle("slot-migration").mapping, collect_runs([str(path)])[0])
+    observed = ObservedRun(load_bundle("slot-migration").mapping, collect_runs([path])[0])
     observed.replay()
 
     assert not observed.unapplied

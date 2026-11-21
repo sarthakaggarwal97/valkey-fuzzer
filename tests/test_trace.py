@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.conform_support import edit
 from tests.deployment_support import cluster_nodes_line, cluster_nodes_text
 from tests.fakes import FakeClient, FakeHandle, fake_instances
 from tests.support import FORMAL, wait_until
@@ -198,12 +199,6 @@ def test_a_bundle_that_samples_debug_digest_needs_the_debug_command_enabled():
     assert registration_for("valkey.observer.trace").resolve_config(spec, plan)["spec"] == "replication"
 
 
-def _edit(path, old, new):
-    text = path.read_text()
-    assert old in text, (path, old)
-    path.write_text(text.replace(old, new))
-
-
 @pytest.mark.parametrize(
     ("old", "new", "message"),
     [
@@ -222,7 +217,7 @@ def test_a_sample_evidence_reads_only_what_the_sample_section_records(tmp_path, 
         text = mapping.read_text()
         mapping.write_text(text[: text.index("sample:\n")] + text[text.index("evidence:\n") :])
     else:
-        _edit(mapping, old, new)
+        edit(mapping, old, new)
     with pytest.raises(SpecBundleError, match=message):
         load_bundle(str(bundle))
 

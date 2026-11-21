@@ -6,7 +6,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from tests.support import component_registration, deployment_identity
+from tests.support import component_registration, deployment_identity, deployment_registration
 from valkey_fuzzer.catalog import Catalog
 from valkey_fuzzer.documents import ABSENT, get_path
 from valkey_fuzzer.environment import EnvironmentSpec, PolicySpec
@@ -22,7 +22,6 @@ from valkey_fuzzer.plan import (
 )
 from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.references import EnvironmentKind
-from valkey_fuzzer.registrations import DeploymentProviderRegistration
 from valkey_fuzzer.registry import DuplicateRegistrationError, FrozenRegistryError, RegistrationError
 
 
@@ -105,7 +104,7 @@ def test_plans_take_deep_immutable_snapshots_and_round_trip_through_json():
         (lambda: InstanceSelector.parse([1]), ValueError, "an instance selector is one of"),
         (lambda: StartupOverlay("o", server_config={"appendonly": "no"}, conflict_policy="merge"), ValueError, "'merge' is not a valid ConflictPolicy"),
         # Entries are checked when the catalog registers them.
-        (lambda: Catalog().register(deployment_providers=(_deployment(),) * 2), DuplicateRegistrationError, "standalone"),
+        (lambda: Catalog().register(deployment_providers=(deployment_registration(),) * 2), DuplicateRegistrationError, "standalone"),
     ],
 )  # fmt: skip
 def test_a_malformed_spec_or_plan_is_rejected(build, error, message):
@@ -143,20 +142,16 @@ def test_the_event_bus_orders_subscribers_snapshots_payloads_and_commits_only_di
         bus.subscribe("late.event", calls.append)
 
 
-def _deployment(provider_id="example.deployment.fake"):
-    return DeploymentProviderRegistration(deployment_mode="standalone", provider_id=provider_id, factory=object)
-
-
 @pytest.mark.parametrize(
     ("existing", "entries", "error"),
     [
         (None, {"components": (component_registration("example.oracle_check", role=ComponentRole.ORACLE),)}, RegistrationError),
         ("frozen", {"components": (component_registration(),), "fragments": {"x.base": {}}}, FrozenRegistryError),
         ("action", {"components": (component_registration("new.oracle.fake"), component_registration())}, DuplicateRegistrationError),
-        ("frozen-providers", {"components": (component_registration(),), "deployment_providers": (_deployment(),)}, FrozenRegistryError),
+        ("frozen-providers", {"components": (component_registration(),), "deployment_providers": (deployment_registration(),)}, FrozenRegistryError),
         (None, {"components": (component_registration(),), "fragments": {"base": {}}}, ValueError),
         ("fragment", {"components": (component_registration(),), "fragments": {"x.base": {}}}, RegistrationError),
-        (None, {"components": (component_registration(),), "deployment_providers": (_deployment(),) * 2}, DuplicateRegistrationError),
+        (None, {"components": (component_registration(),), "deployment_providers": (deployment_registration(),) * 2}, DuplicateRegistrationError),
     ],
     ids=["misnamed-component", "frozen-catalog", "duplicate-component", "frozen-provider-registry", "misnamed-fragment", "duplicate-fragment", "duplicate-provider"],
 )  # fmt: skip

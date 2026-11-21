@@ -1,11 +1,11 @@
 """The persistence bundle (``formal/persistence``): its controls, how a run's log lines map onto its steps, and,
 with java and ``$TLA2TOOLS_JAR``, the counterexample of a manifest written before the base it names."""
 
-import json
 import re
 
 import pytest
 
+from tests.conform_support import events, write_trace
 from tests.conftest import needs_tlc
 from valkey_fuzzer.components import experiments
 from valkey_fuzzer.spec.bundle import load_bundle
@@ -52,20 +52,16 @@ def test_each_log_line_shows_one_step(line, evidence):
 
 
 def test_conform_maps_a_rewrite_and_a_kill_onto_the_steps(tmp_path):
-    events = [
+    pairs = [
         ("persistence.rewrite.started", {"instance_id": "valkey-0"}),
         ("persistence.rewrite.base.renamed", {"instance_id": "valkey-0"}),
         ("persistence.rewrite.finished", {"instance_id": "valkey-0"}),
         ("persistence.save.started", {"instance_id": "valkey-0"}),
         ("kill.injected", {"applied": True, "signal": "SIGKILL", "target": "valkey-0"}),
     ]
-    records = [{"kind": "header", "scenario_id": "unit", "seed": 1, "nodes": {}}]
-    for index, (name, payload) in enumerate(events):
-        records.append({"kind": "event", "t": 1 + index / 10, "sequence": index, "name": name, "payload": payload})
-    path = tmp_path / "trace.jsonl"
-    path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+    path = write_trace(tmp_path / "trace.jsonl", events(pairs))
 
-    observed = ObservedRun(load_bundle("persistence").mapping, collect_runs([str(path)])[0])
+    observed = ObservedRun(load_bundle("persistence").mapping, collect_runs([path])[0])
     observed.replay()
 
     assert not observed.unapplied

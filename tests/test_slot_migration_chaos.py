@@ -1,7 +1,6 @@
 """valkey.action.slot-migration-chaos against a fake cluster whose migrations walk a script: its waves, phases,
 kill and cancel of the endpoints, partitions, heal, slot-key validation, config checks, and the experiment."""
 
-import json
 import threading
 from dataclasses import replace
 from types import SimpleNamespace
@@ -11,6 +10,7 @@ import pytest
 import valkey
 from valkey.cluster import key_slot
 
+from tests.conform_support import events, write_trace
 from tests.fakes import FakeClient
 from tests.network_fakes import Iptables
 from tests.valkey_experiments_support import (
@@ -533,7 +533,7 @@ def test_conform_reads_a_chaos_runs_target_kill_as_the_models_crash_and_how_each
     from valkey_fuzzer.spec.bundle import load_bundle
     from valkey_fuzzer.spec.conform import ObservedRun, collect_runs
 
-    events = [
+    pairs = [
         ("slot-migration.started", {"instance_id": "valkey-0"}),
         ("slot-migration.import.created", {"instance_id": "valkey-2"}),
         ("slot-migration.snapshot.started", {"instance_id": "valkey-0"}),
@@ -549,15 +549,9 @@ def test_conform_reads_a_chaos_runs_target_kill_as_the_models_crash_and_how_each
         ("slot-migration.owner.learned", {"instance_id": "valkey-0"}),
         ("slot-migration.finished", {"instance_id": "valkey-0", "operation": "export", "state": "success"}),
     ]
-    records = [{"kind": "header", "scenario_id": "unit", "seed": 1, "nodes": {}}]
-    for index, (name, payload) in enumerate(events):
-        records.append(
-            {"kind": "event", "t": 1 + index / 10, "sequence": index, "name": name, "source": "x", "payload": payload}
-        )
-    path = tmp_path / "trace.jsonl"
-    path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+    path = write_trace(tmp_path / "trace.jsonl", events(pairs, source="x"))
 
-    observed = ObservedRun(load_bundle("slot-migration").mapping, collect_runs([str(path)])[0])
+    observed = ObservedRun(load_bundle("slot-migration").mapping, collect_runs([path])[0])
     observed.replay()
 
     assert not observed.unapplied

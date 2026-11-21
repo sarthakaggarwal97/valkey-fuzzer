@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conform_support import approved_register, register_service, scenario_file, stub_tlc
+from tests.conform_support import register_copy, register_service, scenario_file, stub_tlc
 from valkey_fuzzer.coverage import coverage_tuple
 from valkey_fuzzer.deployment.local.rerun import HOST_FIELDS, deployment_reductions
 from valkey_fuzzer.environment import EnvironmentSpec, PolicySpec
@@ -201,7 +201,7 @@ def test_minimize_keeps_a_conform_failure_only_while_the_same_claim_fails(tmp_pa
     # A run FAILs only through spec conform (an approved bundle's claimed violation, no oracle's FAIL): that is the
     # failed component spec-conform:register of its outcome, so the reference signature holds it, and each attempt's
     # own conform check (its report's conform section) decides whether the reduction kept it.
-    bundle = approved_register(tmp_path, monkeypatch, shrinkable=True)
+    bundle = register_copy(tmp_path, monkeypatch, approved=True, shrinkable=True)
     stub_tlc(monkeypatch)
     # The crash loses the acknowledged writes only when there are at least two of them.
     service = register_service(tmp_path, monkeypatch, bundle, lost=lambda plan: plan.inputs["writes"] >= 2)

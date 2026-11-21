@@ -14,7 +14,14 @@ from tests.deployment_support import cluster_nodes_line, cluster_nodes_text
 from tests.fakes import FakeClient, FakeHandle, fake_instances
 from tests.network_fakes import Iptables, Tc
 from tests.support import VirtualClock
-from tests.valkey_experiments_support import fake_context, registration_for, rejects_config, resolved, unit_plan
+from tests.valkey_experiments_support import (
+    fake_context,
+    injected_fault,
+    registration_for,
+    rejects_config,
+    resolved,
+    unit_plan,
+)
 from valkey_fuzzer import hoststate
 from valkey_fuzzer.components import capabilities, network, processes, providers, storage
 from valkey_fuzzer.components.faults import FAULT_INJECTED, HeldFault, ProcessSignalFault
@@ -55,12 +62,10 @@ def _owned(context):
     return [(item["owner"], item["kind"], item.get("undone_by")) for item in opened]
 
 
-def _fire(fault, handle, use, component_id="fault", **config):
-    context = fake_context(handle)
-    spec = resolved(
-        ComponentSpec(role=ComponentRole.FAULT, use=use, id=component_id, config={"when_event": "go", **config})
-    )
-    fault.inject(context, spec)
+def _fire(fault_cls, handle, use, component_id="fault", **config):
+    """:func:`injected_fault`, its event ``go`` published: the fault fires."""
+
+    context, spec, fault = injected_fault(fault_cls, use, handle, component_id=component_id, **config)
     context.event_bus.publish("go", source="test")
     return context, spec, fault
 
@@ -82,7 +87,7 @@ def test_a_fault_owns_its_change_until_its_recovery_undoes_it(monkeypatch, tmp_p
     handle = _Handle(root=str(tmp_path))
     os.makedirs(handle.data_dir("valkey-0"))
     os.chmod(handle.data_dir("valkey-0"), 0o750)
-    context, spec, fault = _fire(make(), handle, use, **config)
+    context, spec, fault = _fire(make, handle, use, **config)
     assert [item[:2] for item in _owned(context)] == [("fault", kind)]
     if make is network.PartitionFault:
         # Both directions between the isolated instance and each peer, in a private chain removed once.
@@ -125,15 +130,13 @@ def test_a_fault_owns_its_change_until_its_recovery_undoes_it(monkeypatch, tmp_p
 def _paused_without_resume(monkeypatch, tmp_path):
     handle = _Handle()
     handle.fail_resumes = 2
-    return _fire(ProcessSignalFault(), handle, "valkey.fault.process-signal", signal="SIGSTOP", pause_s=0)
+    return _fire(ProcessSignalFault, handle, "valkey.fault.process-signal", signal="SIGSTOP", pause_s=0)
 
 
 def _restart_never_ready(monkeypatch, tmp_path):
     handle = _Handle()
     handle.fail_restarts = 5
-    return _fire(
-        ProcessSignalFault(), handle, "valkey.fault.process-signal", signal="SIGKILL", restart_mode="immediate"
-    )
+    return _fire(ProcessSignalFault, handle, "valkey.fault.process-signal", signal="SIGKILL", restart_mode="immediate")
 
 
 def _partition(fail, heal=None):
@@ -150,7 +153,7 @@ def _partition(fail, heal=None):
         else:
             Iptables(fail).install(monkeypatch)
         context, spec, fault = _fire(
-            network.PartitionFault(), _Handle(), "valkey.fault.network-partition", isolate="valkey-0", heal_event="heal"
+            network.PartitionFault, _Handle(), "valkey.fault.network-partition", isolate="valkey-0", heal_event="heal"
         )
         if heal:
             context.event_bus.publish("heal", source="test")  # a failed heal must not raise into the dispatch
@@ -166,7 +169,7 @@ def _degrade(fail, heal=None, ingress=False):
     def setup(monkeypatch, tmp_path):
         tc = Tc(fail, ingress=ingress).install(monkeypatch, tmp_path)
         context, spec, fault = _fire(
-            network.DegradeFault(), _Handle(), "valkey.fault.network-degrade", instances="valkey-0", loss_pct=5,
+            network.DegradeFault, _Handle(), "valkey.fault.network-degrade", instances="valkey-0", loss_pct=5,
             heal_event="heal",
         )  # fmt: skip
         if heal:
@@ -383,7 +386,7 @@ def test_an_interrupt_while_a_fault_fires_leaves_a_record_recovery_reads_at_once
 
 def test_recovery_waits_for_a_firing_only_until_its_own_deadline(monkeypatch):
     handle = _Handle()
-    context, spec, fault = _fire(ProcessSignalFault(), handle, "valkey.fault.process-signal", occurrence=2)
+    context, spec, fault = _fire(ProcessSignalFault, handle, "valkey.fault.process-signal", occurrence=2)
     fault._fire_done.clear()  # a firing that never ends
     context.deadline = time.monotonic() + 0.2
     started = time.monotonic()
@@ -404,7 +407,7 @@ def test_a_kill_whose_target_never_exits_is_a_fault_error_and_announces_no_recov
 
     handle.wait_exit = wait_exit
     context, spec, fault = _fire(
-        ProcessSignalFault(), handle, "valkey.fault.process-signal", signal="SIGKILL", restart_mode=restart_mode
+        ProcessSignalFault, handle, "valkey.fault.process-signal", signal="SIGKILL", restart_mode=restart_mode
     )
     result = fault.recover(context, spec)
     assert result.status is ComponentStatus.ERROR, result.summary
@@ -518,7 +521,7 @@ def test_the_host_probe_skips_a_run_whose_partitions_cannot_work_here(monkeypatc
     with pytest.raises(ValueError, match="share an address"):
         handle = _Handle()
         handle.instances = tuple(SimpleNamespace(instance_id=f"valkey-{n}", host="127.0.0.1") for n in range(3))
-        _fire(network.PartitionFault(), handle, "valkey.fault.network-partition", isolate="valkey-0")
+        _fire(network.PartitionFault, handle, "valkey.fault.network-partition", isolate="valkey-0")
 
 
 def test_recovery_waits_for_a_background_restart_so_nothing_happens_after_it():
@@ -528,7 +531,7 @@ def test_recovery_waits_for_a_background_restart_so_nothing_happens_after_it():
     handle.restart = lambda instance_id, **options: restarts.append(time.monotonic()) or restart(instance_id, **options)
     started = time.monotonic()
     context, spec, fault = _fire(
-        ProcessSignalFault(), handle, "valkey.fault.process-signal", restart_mode="background", restart_delay_s=0.2
+        ProcessSignalFault, handle, "valkey.fault.process-signal", restart_mode="background", restart_delay_s=0.2
     )
     result = fault.recover(context, spec)
     assert result.status is ComponentStatus.PASS, result.summary
@@ -542,7 +545,7 @@ def test_a_degradation_takes_a_free_pref_and_leaves_lo_as_it_found_it(monkeypatc
     tc = Tc(ingress=True, taken=(10000, 10001)).install(monkeypatch, tmp_path)
     monkeypatch.setattr(network.secrets, "randbelow", lambda n: 0)
     context, spec, fault = _fire(
-        network.DegradeFault(), _Handle(), "valkey.fault.network-degrade", instances="valkey-1", peers="valkey-0",
+        network.DegradeFault, _Handle(), "valkey.fault.network-degrade", instances="valkey-1", peers="valkey-0",
         delay_ms=50, rate_kbit=1000, duration_s=60,
     )  # fmt: skip
     assert fault._record["pref"] == 10002 and sorted(tc.filters) == [10000, 10001, 10002]
@@ -560,10 +563,8 @@ def test_a_degradation_takes_a_free_pref_and_leaves_lo_as_it_found_it(monkeypatc
 def test_two_degradations_of_one_process_get_their_own_devices(monkeypatch, tmp_path):
     tc = Tc().install(monkeypatch, tmp_path)
     handle = _Handle()
-    first = _fire(network.DegradeFault(), handle, "valkey.fault.network-degrade", "a", instances="valkey-1", loss_pct=1)
-    second = _fire(
-        network.DegradeFault(), handle, "valkey.fault.network-degrade", "b", instances="valkey-2", delay_ms=5
-    )
+    first = _fire(network.DegradeFault, handle, "valkey.fault.network-degrade", "a", instances="valkey-1", loss_pct=1)
+    second = _fire(network.DegradeFault, handle, "valkey.fault.network-degrade", "b", instances="valkey-2", delay_ms=5)
     assert sorted(tc.devices) == [hoststate.netem_device_name(0), hoststate.netem_device_name(1)]
     assert first[2]._record["pref"] != second[2]._record["pref"] and tc.marked
     # The first to recover leaves the ingress qdisc: the second's filters still hang off it.
@@ -614,7 +615,7 @@ def test_an_install_against_five_peers_spawns_one_batch_for_its_filters_or_rules
     monkeypatch.setattr(network.secrets, "randbelow", lambda n: 0)
     handle = _Handle()
     handle.instances = fake_instances(6, host=lambda n: f"127.0.0.{n + 2}")
-    context, spec, fault = _fire(make(), handle, use, **config)
+    context, spec, fault = _fire(make, handle, use, **config)
     assert fault._record["applied"], fault._record
     assert [" ".join(command[:3]) for command in spawns] == spawned and len(spawns) == len(spawned)
     peers = [f"127.0.0.{n}" for n in range(3, 8)]
@@ -740,7 +741,7 @@ def test_netem_support_needs_tc_ip_and_cap_net_admin_and_never_sudo(
 def test_a_partition_timer_that_fires_once_recovery_began_does_nothing(monkeypatch):
     iptables = Iptables().install(monkeypatch)
     context, spec, fault = _fire(
-        network.PartitionFault(), _Handle(), "valkey.fault.network-partition", isolate="valkey-0", duration_s=60
+        network.PartitionFault, _Handle(), "valkey.fault.network-partition", isolate="valkey-0", duration_s=60
     )
     fault._quiesce()
     fault._heal("duration")
@@ -808,7 +809,7 @@ def test_a_disk_fill_whose_ballast_stayed_does_not_record_it_removed(monkeypatch
     monkeypatch.setattr(storage, "_tmpfs_limit", lambda path: 8192)
     monkeypatch.setattr(storage.os, "statvfs", lambda path: SimpleNamespace(f_bavail=0, f_frsize=4096))
     context, spec, fault = _fire(
-        storage.FillFilesystemFault(), _Handle(), "valkey.fault.disk-fill", path=str(tmp_path), chunk_bytes=4096
+        storage.FillFilesystemFault, _Handle(), "valkey.fault.disk-fill", path=str(tmp_path), chunk_bytes=4096
     )
     monkeypatch.setattr(storage.os, "remove", lambda path: (_ for _ in ()).throw(OSError("device busy")))
     result = fault.recover(context, spec)
@@ -820,7 +821,7 @@ def test_a_disk_fill_released_by_its_event_records_the_release_as_every_held_fau
     monkeypatch.setattr(storage, "_tmpfs_limit", lambda path: 8192)
     monkeypatch.setattr(storage.os, "statvfs", lambda path: SimpleNamespace(f_bavail=0, f_frsize=4096))
     context, spec, fault = _fire(
-        storage.FillFilesystemFault(), _Handle(), "valkey.fault.disk-fill", path=str(tmp_path), chunk_bytes=4096,
+        storage.FillFilesystemFault, _Handle(), "valkey.fault.disk-fill", path=str(tmp_path), chunk_bytes=4096,
         release_event="saved",
     )  # fmt: skip
     context.event_bus.publish("saved", source="bgsave")

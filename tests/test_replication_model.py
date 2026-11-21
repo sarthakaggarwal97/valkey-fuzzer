@@ -1,10 +1,9 @@
 """The replication bundle (``formal/replication``): its controls, how a run's log lines map onto its steps, and,
 with java and ``$TLA2TOOLS_JAR``, the counterexample of fuzzer issue #133."""
 
-import json
-
 import pytest
 
+from tests.conform_support import events, write_trace
 from tests.conftest import needs_tlc
 from valkey_fuzzer.components import experiments
 from valkey_fuzzer.spec.bundle import load_bundle
@@ -89,25 +88,17 @@ def _trace(tmp_path, records, dual_channel="no"):
     """A trace of ``records`` (``(t, name, payload)`` events, or observation records), with every node's channel."""
 
     nodes = {f"valkey-{n}": {"config": {"dual-channel-replication-enabled": dual_channel}} for n in range(3)}
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    path = tmp_path / "trace.jsonl"
-    lines = [{"kind": "header", "scenario_id": "unit", "seed": 1, "nodes": nodes}]
-    for index, record in enumerate(records):
-        if isinstance(record, tuple):
-            t, name, payload = record
-            record = {"kind": "event", "t": t, "sequence": index, "name": name, "payload": payload}
-        lines.append(record)
-    path.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
-    return str(path)
+    lines = [
+        {"kind": "event", "t": record[0], "sequence": index, "name": record[1], "payload": record[2]}
+        if isinstance(record, tuple)
+        else record
+        for index, record in enumerate(records)
+    ]
+    return write_trace(tmp_path / "trace.jsonl", lines, nodes=nodes)
 
 
-def _run(tmp_path, events):
-    observed = ObservedRun(
-        load_bundle("replication").mapping,
-        collect_runs(
-            [_trace(tmp_path, [(1 + index / 10, name, payload) for index, (name, payload) in enumerate(events)])]
-        )[0],
-    )
+def _run(tmp_path, pairs):
+    observed = ObservedRun(load_bundle("replication").mapping, collect_runs([_trace(tmp_path, events(pairs))])[0])
     observed.replay()
     return observed
 

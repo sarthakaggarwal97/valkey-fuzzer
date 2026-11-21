@@ -9,6 +9,7 @@ import pytest
 
 from tests.support import wait_until
 from tests.valkey_experiments_support import (
+    command_docs_reply,
     fake_context,
     registration_for,
     rejects_config,
@@ -30,19 +31,6 @@ from valkey_fuzzer.generator import generate
 from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.schema import plain_config
-
-
-def _flat(mapping):
-    """``mapping`` as RESP2 sends a map: ``[key, value, ...]``, nested maps too."""
-
-    flat = []
-    for key, value in mapping.items():
-        if key == "arguments":
-            value = [_flat(item) for item in value]
-        elif key == "subcommands":
-            value = _flat({name: _flat(doc) for name, doc in value.items()})
-        flat += [key, value]
-    return flat
 
 
 def _info(name, flags, subcommands=()):
@@ -112,7 +100,7 @@ _DOCS = {
     "multi": {"group": "transactions"},
     "exec": {"group": "transactions"},
 }
-_DOCS_REPLY = _flat({name: _flat(doc) for name, doc in _DOCS.items()})
+_DOCS_REPLY = command_docs_reply(_DOCS)
 
 
 def _table():

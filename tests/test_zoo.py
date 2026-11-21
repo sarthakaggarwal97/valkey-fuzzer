@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tests.conform_support import SCENARIO, approved_register, register_service, stub_tlc
+from tests.conform_support import SCENARIO, register_copy, register_service, stub_tlc
 from tests.support import fake_executable
 from tests.valkey_experiments_support import valkey_service
 from valkey_fuzzer import zoo
@@ -129,7 +129,7 @@ def test_a_case_pins_a_bug_only_spec_conform_catches(tmp_path, monkeypatch):
     # The broken build loses acknowledged writes in a way no oracle of the toy register experiment judges; the
     # register model's AckedDurable does. The case names that check as spec-conform:register, and a broken run
     # detects the bug because the run's own conform check FAILs it through that component.
-    bundle = approved_register(tmp_path, monkeypatch)
+    bundle = register_copy(tmp_path, monkeypatch, approved=True)
     stub_tlc(monkeypatch)
     for name in ("clean", "case"):
         fake_executable(tmp_path / "builds" / name / "src" / "valkey-server")
