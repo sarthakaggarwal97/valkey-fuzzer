@@ -8,8 +8,7 @@ from types import SimpleNamespace
 import pytest
 from valkey.crc import key_slot
 
-from tests.support import fake_executable
-from tests.test_command_sequence import (
+from tests.command_sequence_support import (
     BUILDS,
     CLOSE,
     DIE,
@@ -18,9 +17,10 @@ from tests.test_command_sequence import (
     Build,
     Error,
     FakeServer,
-    _nodes,
     fake_open_raw_connection,
+    nodes_of,
 )
+from tests.support import fake_executable
 from tests.test_command_table import _flat
 from tests.valkey_experiments_support import (
     fake_context,
@@ -122,7 +122,7 @@ class Commands(dict):
             self.state[name] += amount
 
     def get(self, command, default=None):
-        return lambda server: self.serve(_nodes(server.build).index(server), command, default)
+        return lambda server: self.serve(nodes_of(server.build).index(server), command, default)
 
     def serve(self, node, command, default):
         state = self.state
@@ -236,7 +236,7 @@ def _sent(node):
     """The commands of the fake build's table that node ``node`` received on its connections, in order."""
 
     [build] = BUILDS.values()
-    return [list(words) for words in _nodes(build)[node].sent if words[0] in build.replies.flags]
+    return [list(words) for words in nodes_of(build)[node].sent if words[0] in build.replies.flags]
 
 
 def _finding(result, value, reason):
@@ -286,7 +286,7 @@ def test_the_workloads_own_commands_run_again_on_two_private_servers_and_pass(bu
     assert f"keys {judged['keys']}, arity 0, readonly {judged['readonly']}" in result.summary
     # Two nodes of the deployment's build, with an AOF: a replica of node 0, or a cluster whose node 0 owns
     # every slot; stopped, their logs kept.
-    first, second = _nodes(BUILDS[builds])
+    first, second = nodes_of(BUILDS[builds])
     assert all(node.option("appendonly") == "yes" and node.stopped for node in (first, second))
     assert (first.option("cluster-enabled") == "yes") == cluster
     if cluster:
@@ -316,7 +316,7 @@ def test_the_private_servers_load_the_deployments_modules(builds, tmp_path, monk
     result, _ = _evaluate(context, oracle)
 
     assert result.status.value == "PASS", result.summary
-    for node in _nodes(BUILDS[builds]):
+    for node in nodes_of(BUILDS[builds]):
         arguments = list(zip(node.arguments[::2], node.arguments[1::2]))
         assert [value for name, value in arguments if name == "--loadmodule"] == ["/m/json.so", "/m/bloom.so"]
 
@@ -788,7 +788,7 @@ def test_after_a_pubsub_command_the_next_command_takes_a_new_connection(builds, 
     assert result.status.value == "PASS", result.summary
     # On each node: the connection the cluster formed on, and one more after the UNSUBSCRIBE (node 0 has the
     # oracle's own, too).
-    assert [len(node.wires) for node in _nodes(BUILDS[builds])] == [3, 2]
+    assert [len(node.wires) for node in nodes_of(BUILDS[builds])] == [3, 2]
 
 
 def test_a_connection_the_server_closed_opens_anew(builds, tmp_path, monkeypatch):

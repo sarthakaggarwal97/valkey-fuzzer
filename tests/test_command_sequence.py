@@ -4,21 +4,31 @@ connection, so arguments go out as bytes and replies come back as the server sen
 import hashlib
 import os
 import random
-import shutil
 import socket
-import subprocess
-import tempfile
 import threading
 import time
 from types import SimpleNamespace
 
-import libvalkey
 import pytest
-from valkey.exceptions import ConnectionError as ValkeyConnectionError
-from valkey.exceptions import InvalidResponse, ResponseError
-from valkey.exceptions import TimeoutError as ValkeyTimeoutError
+from valkey.exceptions import ResponseError
 
 from tests import fakes
+from tests.command_sequence_support import (
+    BUILDS,
+    CLOSE,
+    DIE,
+    EXIT,
+    SERVERS,
+    SILENT,
+    TIMEOUT,
+    Build,
+    ByResp,
+    Error,
+    FakeServer,
+    Wire,
+    fake_open_raw_connection,
+    nodes_of,
+)
 from tests.support import fake_executable
 from tests.valkey_experiments_support import registration_for, rejects_config, resolved, unit_plan
 from valkey_fuzzer import deadlines
@@ -28,219 +38,6 @@ from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.schema import load_yaml
 from valkey_fuzzer.testing import FakeContext
-
-# What a fake build does with a command (see Build).
-DIE, TIMEOUT, SILENT, CLOSE, EXIT = "<die>", "<timeout>", "<silent>", "<close>", "<exit>"
-
-
-class Error(str):
-    """An error reply."""
-
-
-class ByResp(dict):
-    """A reply by the protocol of the connection it goes to: ``{2: ..., 3: ...}``."""
-
-
-class Wire(bytes):
-    """A reply's bytes as the server sends them, which the client parses as valkey-py does, with libvalkey."""
-
-
-class Build:
-    """A fake valkey-server build: the options it rejects at start, and its reply to each command, keyed by
-    the arguments as sent (strings, or bytes for a binary argument; raw bytes as they are); an unlisted command
-    gets ``OK`` (CLUSTER MYID the server's ID, CLUSTER MYSHARDID it reversed, CLUSTER INFO a state ok knowing every server of the build;
-    SUBSCRIBE and PUBLISH work, on the connections of one server). A
-    reply may be an :class:`Error`, a :class:`Wire`, :data:`DIE` (the server exits without answering), :data:`CLOSE` (it closes the
-    connection without answering), :data:`TIMEOUT`,
-    :data:`SILENT` (no reply begins), or a function of the :class:`FakeServer` that returns the reply."""
-
-    def __init__(self, replies=None, rejects=()):
-        self.replies, self.rejects = dict(replies or {}), set(rejects)
-        # Its servers exit at a second start, as from a config file they cannot read.
-        self.restart_exits = False
-        # Its servers log a fatal RDB-read refusal and exit when started with a dump.rdb, as a build hardened
-        # to reject bad data does; not a crash.
-        self.rdb_load_exits = False
-        self.starts: list[list[str]] = []
-        self.sent: list[tuple] = []
-        self.connections = 0
-        # The connections (numbered from 1, across its servers) it closes in the handshake, as it opens them.
-        self.closes_at_connect: set[int] = set()
-
-
-BUILDS: dict[str, Build] = {}
-SERVERS: dict[str, "FakeServer"] = {}
-
-
-class FakeProcess:
-    def __init__(self):
-        self.returncode = None
-
-    def poll(self):
-        return self.returncode
-
-    def wait(self, timeout=None):
-        if self.returncode is None and timeout is not None:
-            raise subprocess.TimeoutExpired("valkey-server", timeout)
-        return self.returncode
-
-
-class FakeServer:
-    """Stands in for PrivateServer: starts unless its build rejects an option, and logs a line."""
-
-    def __init__(self, binary, arguments=(), *, timeout_s=15.0, prefix="x-", files=None, config_file=False):
-        self.binary, self.arguments, self.build = binary, list(arguments), BUILDS[binary]
-        self.files, self.config_file, self.shut_downs = dict(files or {}), config_file, 0
-        self.workdir = tempfile.mkdtemp(prefix=prefix)
-        # A node of a side, not a probe of whether the build starts.
-        self.node = prefix == "vfc-"
-        self.id = hashlib.sha1(self.workdir.encode()).hexdigest()
-        self.port = int(self.option("port") or 0)
-        self.sent: list[tuple] = []
-        self.wires: list[FakeWire] = []
-        self.socket_path = os.path.join(self.workdir, "s.sock")
-        self.log_path = os.path.join(self.workdir, "server.log")
-        self.output_path = os.path.join(self.workdir, "output.log")
-        self.process, self.client, self.stopped = FakeProcess(), None, False
-
-    def start(self, context=None):
-        self.build.starts.append(self.arguments)
-        if self.shut_downs and self.build.restart_exits:
-            with open(self.log_path, "a") as log:
-                log.write("1:M 03 Nov 2026 10:00:02.000 # Fatal error, can't open config file 'valkey.conf'\n")
-            self.process.returncode = 1
-            return "Fatal error, can't open config file 'valkey.conf'"
-        rejected = [name for name in self.arguments[::2] if name[2:] in self.build.rejects]
-        if rejected:
-            return f"*** FATAL CONFIG FILE ERROR *** Bad directive or wrong number of arguments: {rejected[0]}"
-        if self.build.rdb_load_exits and self.files.get("dump.rdb"):
-            with open(self.log_path, "a") as log:
-                if isinstance(self.build.rdb_load_exits, str):
-                    log.write(self.build.rdb_load_exits)
-                log.write("1:M 03 Nov 2026 10:00:03.000 # Terminating server after rdb file reading failure.\n")
-            self.process.returncode = 1
-            return "Terminating server after rdb file reading failure."
-        with open(self.log_path, "w") as log:
-            log.write(f"1:M 03 Nov 2026 10:00:00.000 * Ready to accept connections ({self.binary})\n")
-        with open(self.output_path, "w") as output:
-            output.write("")
-        SERVERS[self.socket_path] = self
-        return None
-
-    def shut_down(self, timeout_s):
-        self.shut_downs += 1
-        return True
-
-    def stop(self):
-        self.stopped = True
-        shutil.rmtree(self.workdir, ignore_errors=True)
-
-    def option(self, name):
-        names = self.arguments[::2]
-        return self.arguments[names.index(f"--{name}") * 2 + 1] if f"--{name}" in names else None
-
-    def die(self):
-        with open(self.log_path, "a") as log:
-            log.write("1:M 03 Nov 2026 10:00:01.000 # Valkey 9.0.0 crashed by signal: 11, si_code: 0\n")
-        self.process.returncode = -11
-
-    def exit_cleanly(self):
-        # A commanded SHUTDOWN: the server logs a normal goodbye and exits 0, no crash report.
-        with open(self.log_path, "a") as log:
-            log.write("1:M 03 Nov 2026 10:00:01.000 * Valkey is now ready to exit, bye bye...\n")
-        self.process.returncode = 0
-
-
-class FakeWire:
-    """A valkey-py connection to one fake server: ``send_command``, ``send_packed_command``, ``can_read``,
-    ``read_response``, ``disconnect``, and its own ``_sock``, which ``recv`` a :class:`Wire` reply's bytes."""
-
-    def __init__(self, server, resp=2):
-        self.server, self.pending, self.resp = server, None, resp
-        self._sock = self
-        # Its channels, and the messages published to them, waiting to be read.
-        self.channels: set[str] = set()
-        self.waiting: list = []
-        server.build.connections += 1
-        server.wires.append(self)
-
-    def send_command(self, *args):
-        self.pending = tuple(item if isinstance(item, bytes) else str(item) for item in args)
-        self.server.build.sent.append(self.pending)
-        self.server.sent.append(self.pending)
-
-    def send_packed_command(self, command, check_health=True):
-        self.pending = b"".join(command)
-        self.server.build.sent.append(self.pending)
-        self.server.sent.append(self.pending)
-
-    def can_read(self, timeout=0):
-        if self.pending is None:
-            return bool(self.waiting)
-        return self.server.build.replies.get(self.pending) != SILENT
-
-    def read_response(self, push_request=False):
-        # What was delivered before the command comes first, as on a socket.
-        if self.pending is None or self.waiting:
-            return self.waiting.pop(0)
-        pending, self.pending = self.pending, None
-        known = len(_nodes(self.server.build))
-        defaults = {
-            ("CLUSTER", "MYID"): self.server.id.encode(),
-            ("CLUSTER", "MYSHARDID"): self.server.id[::-1].encode(),
-            ("CLUSTER", "INFO"): f"cluster_state:ok\r\ncluster_known_nodes:{known}\r\n".encode(),
-        }
-        if pending[0] == "SUBSCRIBE":
-            self.channels.add(pending[1])
-            defaults[pending] = [b"subscribe", pending[1].encode(), len(self.channels)]
-        if pending[0] == "UNSUBSCRIBE":
-            self.channels.discard(pending[1])
-            defaults[pending] = [b"unsubscribe", pending[1].encode(), len(self.channels)]
-        if pending[0] == "PUBLISH":
-            receivers = [wire for wire in self.server.wires if pending[1] in wire.channels]
-            for wire in receivers:
-                wire.waiting.append([b"message", pending[1].encode(), pending[2].encode()])
-            defaults[pending] = len(receivers)
-        reply = self.server.build.replies.get(pending, defaults.get(pending, b"OK"))
-        if callable(reply):
-            reply = reply(self.server)
-        if isinstance(reply, ByResp):
-            reply = reply[self.resp]
-        if reply == DIE:
-            self.server.die()
-            raise ValkeyConnectionError("Connection closed by server.")
-        if reply == EXIT:
-            self.server.exit_cleanly()
-            raise ValkeyConnectionError("Connection closed by server.")
-        if reply == TIMEOUT:
-            raise ValkeyTimeoutError("Timeout reading from socket")
-        if reply == CLOSE:
-            raise ValkeyConnectionError("Connection closed by server.")
-        if isinstance(reply, Error):
-            raise ResponseError(str(reply))
-        if isinstance(reply, Wire):
-            reader = libvalkey.Reader(protocolError=InvalidResponse, replyError=ResponseError)
-            reader.feed(reply)
-            return reader.gets()
-        return reply
-
-    def settimeout(self, timeout):
-        pass
-
-    def recv(self, size):
-        pending, self.pending = self.pending, None
-        return bytes(self.server.build.replies.get(pending, b""))[:size] if pending is not None else b""
-
-    def disconnect(self):
-        pass
-
-
-def fake_open_raw_connection(resp, timeout_s, *, path=None, host=None, port=None):
-    server = SERVERS[path] if path is not None else SERVERS[f"{host}:{port}"]
-    wire = FakeWire(server, resp)
-    if server.build.connections in server.build.closes_at_connect:
-        raise ValkeyConnectionError("Connection closed by server.")
-    return command_sequence.RawConnection(wire)
 
 
 @pytest.fixture
@@ -788,12 +585,6 @@ def test_a_cluster_that_never_reaches_ok_leaves_the_run_untested(builds):
 # ---------------------------------------------------------------------------
 
 
-def _nodes(build):
-    """The fake servers of ``build`` in the order they started: its nodes."""
-
-    return [server for server in SERVERS.values() if server.build is build and server.node]
-
-
 def test_several_nodes_form_one_cluster_and_each_command_goes_to_its_node(builds):
     commands = [{"command": ["SET", "k", "v"]}, {"command": ["CLUSTER", "COUNTKEYSINSLOT", 1], "node": 2}]
     result, value = run(builds, commands, cluster=True, nodes=3)
@@ -802,7 +593,7 @@ def test_several_nodes_form_one_cluster_and_each_command_goes_to_its_node(builds
     assert value["nodes"] == 3
     ports = set()
     for build in BUILDS.values():
-        first, *others = nodes = _nodes(build)
+        first, *others = nodes = nodes_of(build)
         assert len(nodes) == 3 and all(node.option("cluster-enabled") == "yes" for node in nodes)
         ports |= {(node.option("port"), node.option("cluster-port")) for node in nodes}
         # Node 0 serves every slot, and the others meet it.
@@ -832,7 +623,7 @@ def test_placeholders_name_each_sides_own_nodes_and_replies_name_them_back(build
 
     assert result.status.value == "PASS", result.summary
     for build in BUILDS.values():
-        first, second = _nodes(build)
+        first, second = nodes_of(build)
         assert ("CLUSTER", "SETSLOT", "1", "NODE", second.id) in first.sent
         assert ("CLUSTER", "MEET", "127.0.0.1", str(second.port), second.option("cluster-port")) in first.sent
     # Each side's own IDs and ports, named back, so the sides compare equal.
@@ -846,7 +637,7 @@ def test_placeholders_name_each_sides_own_nodes_and_replies_name_them_back(build
 def test_replies_name_each_nodes_shard_id_back(builds):
     # fuzzer#89: CLUSTER SHARDS of two clusters differed by the random shard ID alone, a variant mismatch.
     for build in BUILDS.values():
-        build.replies = {("CLUSTER", "SHARDS"): lambda server: [[b"id", _nodes(server.build)[0].id[::-1].encode()]]}
+        build.replies = {("CLUSTER", "SHARDS"): lambda server: [[b"id", nodes_of(server.build)[0].id[::-1].encode()]]}
     result, value = run(builds, [{"command": ["CLUSTER", "SHARDS"], "node": 1}], cluster=True, nodes=2)
 
     assert result.status.value == "PASS", result.summary
@@ -859,7 +650,7 @@ def test_standalone_nodes_take_their_topology_from_the_sequence(builds):
 
     assert result.status.value == "PASS", result.summary
     for build in BUILDS.values():
-        first, second = _nodes(build)
+        first, second = nodes_of(build)
         assert first.option("cluster-enabled") is None and first.sent == []
         assert second.sent == [("REPLICAOF", "127.0.0.1", str(first.port))]
 
@@ -1055,7 +846,7 @@ def test_a_named_connection_opens_on_first_use_and_a_read_takes_what_waits_on_it
     assert result.status.value == "PASS", result.summary
     for build in BUILDS.values():
         assert build.connections == 3
-        (server,) = _nodes(build)
+        (server,) = nodes_of(build)
         main, sub, _ = server.wires
         assert sub.channels == {"news"} and not main.channels
     assert _replies(value["candidate"])[5] == {"reply": []}
@@ -1129,7 +920,7 @@ def test_a_restart_stops_the_node_and_starts_it_again_with_new_connections(build
     assert result.status.value == "PASS", result.summary
     assert _replies(value["candidate"])[2] == {"reply": "OK"}
     for build in BUILDS.values():
-        first, second = _nodes(build)
+        first, second = nodes_of(build)
         assert (first.shut_downs, second.shut_downs) == (0, 1)
         # The main and sub connections before the restart, a new main one after it.
         assert len(second.wires) == 3 and second.sent[-1] == ("CONFIG", "GET", "maxmemory")
@@ -1155,7 +946,7 @@ def test_a_restarted_cluster_node_answers_once_its_cluster_state_is_ok_again(bui
         assert result.status.value == "PASS", result.summary
         assert restarted == {"reply": "OK"}
         for build in BUILDS.values():
-            (node,) = _nodes(build)
+            (node,) = nodes_of(build)
             assert node.sent.count(info) == 4 and node.sent[-1] == ("SET", "k", "v") and node.sent[-2] == info
     else:
         # Both builds answer it alike: no crash, no hang, and the sequence goes on.
@@ -1764,7 +1555,7 @@ def test_a_replica_of_node_0_reaches_the_primarys_digest(builds):
 
     assert result.status.value == "PASS", result.summary
     assert _check(value, "replica") == {"outcome": "pass"}
-    primary, replica = _nodes(BUILDS[builds["candidate"]])[1:]
+    primary, replica = nodes_of(BUILDS[builds["candidate"]])[1:]
     assert primary.option("repl-diskless-sync-delay") == "0"
     assert ("REPLICAOF", "127.0.0.1", str(primary.port)) in replica.sent
     assert ("SET", "k", "v") in primary.sent and ("SET", "k", "v") not in replica.sent
@@ -1796,7 +1587,7 @@ def test_the_sequences_settings_are_made_on_the_replica_first(builds):
     result, _ = run(builds, commands, checks={"replica": True})
 
     assert result.status.value == "PASS", result.summary
-    replica = _nodes(BUILDS[builds["candidate"]])[2]
+    replica = nodes_of(BUILDS[builds["candidate"]])[2]
     assert ("DEBUG", "SET-SKIP-CHECKSUM-VALIDATION", "1") in replica.sent and (
         "CONFIG",
         "SET",
@@ -1813,7 +1604,7 @@ _PERSISTENT = b"# Keyspace\r\ndb0:keys=6,expires=0,avg_ttl=0,keys_with_volatile_
 def _faults_side(builds, nodes=1):
     """The faults check's servers: the candidate's nodes after the base run's ``nodes``."""
 
-    return _nodes(BUILDS[builds["candidate"]])[nodes:]
+    return nodes_of(BUILDS[builds["candidate"]])[nodes:]
 
 
 @pytest.mark.parametrize("fault", checks._FAULTS)
@@ -2314,7 +2105,7 @@ def test_a_sequence_that_writes_without_replicating_runs_no_replica(builds):
         "reason": "the sequence writes keys its node does not replicate (DEBUG POPULATE, or a script's set_repl)",
     }
     assert _check(value, "concurrency") == {"outcome": "pass"}
-    assert not any(sent[0] == "REPLICAOF" for server in _nodes(BUILDS[builds["candidate"]]) for sent in server.sent)
+    assert not any(sent[0] == "REPLICAOF" for server in nodes_of(BUILDS[builds["candidate"]]) for sent in server.sent)
     assert result.status.value != "FAIL", result.summary
 
 
@@ -2334,7 +2125,7 @@ def test_a_sequence_that_reverts_a_setting_runs_no_replica(builds):
         "reason": "the sequence sets a setting to several values, which the replica can hold only one of",
     }
     assert _check(value, "concurrency") == {"outcome": "pass"}
-    assert not any(sent[0] == "REPLICAOF" for server in _nodes(BUILDS[builds["candidate"]]) for sent in server.sent)
+    assert not any(sent[0] == "REPLICAOF" for server in nodes_of(BUILDS[builds["candidate"]]) for sent in server.sent)
     assert result.status.value != "FAIL", result.summary
 
 
@@ -2360,7 +2151,7 @@ def test_server_config_replica_auth_runs_no_replica(builds, setting):
     # rather than start one that cannot AUTH and error on its sync. (compat-load makes a node a replica of a port
     # nobody listens on, on purpose.)
     assert _check(value, "faults")["outcome"] == "pass"
-    servers = _nodes(BUILDS[builds["candidate"]])
+    servers = nodes_of(BUILDS[builds["candidate"]])
     ports = {str(server.port) for server in servers}
     assert not any(
         sent[:2] == ("REPLICAOF", "127.0.0.1") and sent[2] in ports for server in servers for sent in server.sent
@@ -2564,7 +2355,7 @@ def test_a_private_server_whose_port_was_taken_starts_again_on_fresh_ports(build
 
     if taken < command_sequence._START_ATTEMPTS:
         assert result.status.value == "PASS", result.summary
-        assert _nodes(BUILDS[builds["candidate"]])[0].option("port") not in failures
+        assert nodes_of(BUILDS[builds["candidate"]])[0].option("port") not in failures
     else:
         assert result.status.value == "ERROR" and "exited at startup" in result.summary
 
@@ -2608,7 +2399,7 @@ def test_concurrent_connections_each_run_the_whole_sequence(builds):
 
     assert result.status.value == "PASS", result.summary
     assert _check(value, "concurrency") == {"outcome": "pass"}
-    side = _nodes(BUILDS[builds["candidate"]])[1]
+    side = nodes_of(BUILDS[builds["candidate"]])[1]
     # Its main connection, and one per client.
     assert len(side.wires) == 4 and side.sent.count(("SET", "k", "v")) == side.sent.count(("INCR", "n")) == 3
 
@@ -2709,7 +2500,7 @@ def test_the_parents_data_loads_and_replicates_into_the_candidate(builds, monkey
     )
     rdb = next(path for path in result.evidence[0].artifacts if os.path.basename(path) == "parent.compat.rdb")
     # The candidate that loads it loads it again as a replica, which keeps keys expired since the parent saved.
-    (loaded,) = [server for server in _nodes(BUILDS[builds["candidate"]]) if server.files.get("dump.rdb")]
+    (loaded,) = [server for server in nodes_of(BUILDS[builds["candidate"]]) if server.files.get("dump.rdb")]
     assert [sent[0] for sent in loaded.sent] == ["INFO", "REPLICAOF", "DEBUG", "DEBUG"]
     assert loaded.sent[2] == ("DEBUG", "RELOAD", "NOSAVE")
     if reason is None:
