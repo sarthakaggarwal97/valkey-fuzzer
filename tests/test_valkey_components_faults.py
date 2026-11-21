@@ -10,6 +10,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from tests.deployment_support import cluster_nodes_line, cluster_nodes_text
 from tests.fakes import FakeClient, FakeHandle, fake_instances
 from tests.network_fakes import Iptables, Tc
 from tests.support import VirtualClock
@@ -27,37 +28,21 @@ class _Handle(FakeHandle):
     """valkey-0 (the primary) to valkey-2 on their own addresses; restarts and resumes fail as many times as set."""
 
     def __init__(self, root=""):
-        self.instances = fake_instances(3, host=lambda n: f"127.0.0.{n + 2}")
-        self.root, self.alive, self.signals, self.commands = root, True, [], []
+        super().__init__(fake_instances(3, host=lambda n: f"127.0.0.{n + 2}"), root)
+        self.commands = []
         self.fail_restarts = self.fail_resumes = 0
-
-    def pid(self, instance_id):
-        return 4242
-
-    def is_alive(self, instance_id):
-        return self.alive
 
     def send_signal(self, instance_id, signum):
         if signum == signal.SIGCONT and self.fail_resumes:
             self.fail_resumes -= 1
             raise OSError("resume refused")
-        self.signals.append(signum)
-        self.alive = self.alive and signum not in (signal.SIGKILL, signal.SIGTERM)
-
-    def wait_exit(self, instance_id, timeout=10.0):
-        return True
+        super().send_signal(instance_id, signum)
 
     def restart(self, instance_id, wait_ready=True, ready_timeout=30.0):
         if self.fail_restarts:
             self.fail_restarts -= 1
             raise RuntimeError("did not become ready")
-        self.alive = True
-
-    def started_at(self, instance_id):
-        return 0.0
-
-    def data_dir(self, instance_id):
-        return os.path.join(self.root, instance_id)
+        super().restart(instance_id, wait_ready, ready_timeout)
 
     def new_client(self, instance_id, timeout=5.0):
         return FakeClient(self.commands)
@@ -132,7 +117,8 @@ def test_a_fault_owns_its_change_until_its_recovery_undoes_it(monkeypatch, tmp_p
         assert all(call[1:3] != ("link", "show") for call in tc.calls)
     assert fault.recover(context, spec).status is ComponentStatus.PASS
     assert _owned(context) == [("fault", kind, "owner")]
-    assert handle.alive and os.stat(handle.data_dir("valkey-0")).st_mode & 0o777 == 0o750 and not iptables.chains
+    assert all(handle.alive.values()) and os.stat(handle.data_dir("valkey-0")).st_mode & 0o777 == 0o750
+    assert not iptables.chains
     assert not tc.devices and not tc.filters
 
 
@@ -348,7 +334,8 @@ def test_an_event_targeted_kill_records_the_cluster_vars_it_left_on_disk_and_nee
     handle = _Handle(root=str(tmp_path))
     os.makedirs(handle.data_dir("valkey-2"))
     (tmp_path / "valkey-2" / "nodes.conf").write_text(
-        f"{'2' * 40} 127.0.0.1:7002@17002 myself,master - 0 0 3 connected 0-100\nvars currentEpoch 8 lastVoteEpoch 6\n"
+        cluster_nodes_text(cluster_nodes_line("2" * 40, 7002, "master", epoch=3, slots="0-100", myself=True))
+        + "vars currentEpoch 8 lastVoteEpoch 6\n"
     )
     for target, status in (("valkey-2", ComponentStatus.PASS), ("valkey-9", ComponentStatus.ERROR)):
         context = fake_context(handle)
@@ -409,7 +396,7 @@ def test_recovery_waits_for_a_firing_only_until_its_own_deadline(monkeypatch):
 def test_a_kill_whose_target_never_exits_is_a_fault_error_and_announces_no_recovery(monkeypatch, restart_mode):
     clock = VirtualClock().install(monkeypatch, processes)
     handle = _Handle()
-    handle.send_signal = lambda instance_id, signum: handle.signals.append(signum)
+    handle.send_signal = lambda instance_id, signum: handle.signals.append((instance_id, signum))
 
     def wait_exit(instance_id, timeout=10.0):
         clock.sleep(timeout)

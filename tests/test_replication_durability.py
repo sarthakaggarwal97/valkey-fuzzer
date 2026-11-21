@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 import valkey
 
+from tests.deployment_support import cluster_nodes_line, cluster_nodes_text
 from tests.fakes import FakeClient, FakeHandle, fake_instances
 from tests.ledger_support import StoreClient, standalone
 from tests.support import VirtualClock, wait_until
@@ -210,12 +211,10 @@ class _Handle(FakeHandle):
         rows = []
         for instance in self.instances:
             primary = next(i for i in self.instances if i.role == "primary" and i.shard_id == instance.shard_id)
-            flags = ("myself," if instance.instance_id == me else "") + (
-                "master" if instance.role == "primary" else "slave"
-            )
-            follows = "-" if instance.role == "primary" else f"n{primary.instance_id}"
-            rows.append(f"n{instance.instance_id} 127.0.0.1:{instance.port}@1 {flags} {follows} 0 0 1 connected {slots[instance.instance_id]}".strip())  # fmt: skip
-        return "\n".join(rows)
+            flags, follows = ("master", "-") if instance.role == "primary" else ("slave", f"n{primary.instance_id}")
+            myself = instance.instance_id == me
+            rows.append(cluster_nodes_line(f"n{instance.instance_id}", instance.port, flags, follows, slots=slots[instance.instance_id], myself=myself))  # fmt: skip
+        return cluster_nodes_text(*rows)
 
 
 @functools.cache
@@ -655,10 +654,10 @@ def test_a_write_that_reached_no_server_was_not_applied():
 
 
 def test_a_replica_is_checked_for_the_keys_its_view_gives_its_primary():
-    nodes = (
-        "p0 127.0.0.1:7000@17000 master - 0 0 1 connected 0-8191\n"
-        "p1 127.0.0.1:7002@17002 master - 0 0 2 connected 8192-16383 [9000->-p0]\n"
-        "r1 127.0.0.1:7003@17003 slave p1 0 0 2 connected\n"
+    nodes = cluster_nodes_text(
+        cluster_nodes_line("p0", 7000, "master", slots="0-8191"),
+        cluster_nodes_line("p1", 7002, "master", epoch=2, slots="8192-16383 [9000->-p0]"),
+        cluster_nodes_line("r1", 7003, "slave", "p1", epoch=2),
     )
 
     def keys_of(view):

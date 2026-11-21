@@ -17,8 +17,10 @@ import valkey
 
 from tests.deployment_support import (
     PROCESSES,
-    FakeCluster,
+    FakeDeployment,
     client_context,
+    cluster_nodes_line,
+    cluster_nodes_text,
     fake_client,
     formed_cluster,
     instance,
@@ -660,7 +662,10 @@ _CL = {"cluster_enabled": 1}
 
 def _view(flags, primary="-"):
     """CLUSTER NODES as a node sees it: abc (the restarted node) with ``flags``, and its peer def."""
-    return f"abc 127.0.0.1:7000@17000 {flags} {primary} 0 0 1 connected\ndef 127.0.0.1:7001@17001 master - 0 0 2 connected 0-16383"
+    return cluster_nodes_text(
+        cluster_nodes_line("abc", 7000, flags, primary),
+        cluster_nodes_line("def", 7001, "master", epoch=2, slots="0-16383"),
+    )
 
 
 @pytest.mark.parametrize(
@@ -785,15 +790,15 @@ def test_a_cluster_is_formed_only_once_every_node_sees_each_replica_of_its_prima
         instance("valkey-0", cluster_node_id="n0"),
         instance("valkey-1", "replica", 7001, primary_id="valkey-0", cluster_node_id="n1"),
     ]
-    cluster = FakeCluster({7000: ("n0", None, "0-16383"), 7001: ("n1", 7000, "")})
+    cluster = FakeDeployment({7000: ("n0", None, "0-16383"), 7001: ("n1", 7000, "")})
     formation = Formation()
     formation.get_client = lambda node: cluster.client(port=node.port)
     assert formation._replica_view_problem(nodes) is None
 
-    seen_by_replica = cluster._cluster_nodes(7001)
+    seen_by_replica = cluster.cluster_nodes(7001)
     cluster.nodes[7001] = ("n1", None, "")  # valkey-0's view: valkey-1 still a primary
-    stale = cluster._cluster_nodes(7000)
-    cluster._cluster_nodes = lambda me: stale if me == 7000 else seen_by_replica
+    stale = cluster.cluster_nodes(7000)
+    cluster.cluster_nodes = lambda me: stale if me == 7000 else seen_by_replica
     assert formation._replica_view_problem(nodes) == "valkey-0 does not yet see valkey-1 as a replica of valkey-0"
 
 
@@ -840,12 +845,12 @@ def test_the_health_wait_outlasts_a_fail_state_window_a_loaded_host_stretches(cl
         instance("valkey-0", slot_start=0, slot_end=last_slot, cluster_node_id="n0"),
         instance("valkey-1", "replica", 7001, primary_id="valkey-0", cluster_node_id="n1"),
     ]
-    rows = FakeCluster({7000: ("n0", None, f"0-{last_slot}"), 7001: ("n1", 7000, "")})
+    rows = FakeDeployment({7000: ("n0", None, f"0-{last_slot}"), 7001: ("n1", 7000, "")})
 
     def client(me, cleared_at):
         def execute(*args):
             if args[:2] == ("CLUSTER", "NODES"):
-                return rows._cluster_nodes(me)
+                return rows.cluster_nodes(me)
             state = "ok" if clock.elapsed >= cleared_at else "fail"
             return (
                 f"cluster_state:{state}\r\ncluster_slots_assigned:{cluster_nodes.HASH_SLOTS}\r\n"

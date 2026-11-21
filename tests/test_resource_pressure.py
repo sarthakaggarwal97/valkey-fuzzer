@@ -123,11 +123,8 @@ def fake_cgroups(tmp_path, monkeypatch):
 
 class _Handle(FakeHandle):
     def __init__(self, pid=4242):
-        self.instances = fake_instances(2)
-        self._pid = pid
-
-    def pid(self, instance_id):
-        return self._pid
+        super().__init__(fake_instances(2))
+        self.process_id = pid
 
 
 def _fault(handle, **config):

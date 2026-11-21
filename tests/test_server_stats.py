@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.deployment_support import cluster_nodes_line, cluster_nodes_text
 from tests.fakes import FakeClient, fake_instances
 from tests.support import VirtualClock
 from tests.valkey_experiments_support import evidence_values, fake_context, resolved, unit_plan
@@ -361,9 +362,11 @@ def test_a_replication_link_must_be_up_unless_its_primary_is_down(clock):
 
 
 def _nodes(*lines):
-    return "\n".join(
-        f"{index:040x} 127.0.0.1:{7000 + index}@17000 {flags} - 0 0 1 {link}"
-        for index, (flags, link) in enumerate(lines)
+    return cluster_nodes_text(
+        *(
+            cluster_nodes_line(f"{index:040x}", 7000 + index, flags, link=link)
+            for index, (flags, link) in enumerate(lines)
+        )
     )
 
 
