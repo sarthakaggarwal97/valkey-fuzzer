@@ -79,9 +79,8 @@ as `valkey_fuzzer/formal/` so `spec: cluster-election` resolves in any install.
 `tool.setuptools.package-data` in `pyproject.toml` lists them.
 
 The sdist is the checkout: besides the package, `tests/` and the `.github/`
-workflows they read, `porcupine/` (the linearizability checker's Go sources),
-`zoo/`, `examples/`, `docs/`, `CHANGELOG.md`. `MANIFEST.in` lists them.
-`pytest`, `go -C porcupine build` and `zoo/build.sh` work from an unpacked
+workflows they read, `zoo/`, `examples/`, `docs/`, `CHANGELOG.md`.
+`MANIFEST.in` lists them. `pytest` and `zoo/build.sh` work from an unpacked
 sdist as from a clone.
 
 ## One-time setup
@@ -111,30 +110,3 @@ will own the project. Nothing in the repository holds a credential.
 
 After a release, PyPI shows the publisher under the project's *Publishing*
 settings; nothing else needs doing for the next one.
-
-## The porcupine checker binaries
-
-The `porcupine` checker is released apart from the package, under
-`porcupine-v*` tags, by the [Porcupine checker
-binaries](../.github/workflows/porcupine.yml) workflow;
-`valkey-fuzzer-fetch-porcupine` downloads from the release that
-`RELEASE_TAG` in `valkey_fuzzer/components/porcupine.py` names and checks
-each binary against `valkey_fuzzer/components/porcupine_sha256sums.txt`. The
-build is reproducible (one pinned Go version, `CGO_ENABLED=0 go build
--trimpath -buildvcs=false`), so the sums are committed before the tag exists
-and the workflow fails when a build does not reproduce them.
-
-To release new binaries, after a change to `porcupine/` or to the workflow's
-Go version:
-
-1. Open the change as a pull request. The workflow's build job fails on the
-   sums; download its `porcupine-binaries` artifact and replace
-   `valkey_fuzzer/components/porcupine_sha256sums.txt` with its `SHA256SUMS`.
-2. In the same pull request, move `RELEASE_TAG` to the new tag name
-   (`porcupine-v<Porcupine version>`, with a `-2`, `-3`, ... suffix when the
-   library version did not change) and update the docs that name it. The
-   build job now passes.
-3. After the merge, tag that commit `git tag -s <RELEASE_TAG>` and push the
-   tag. The publish job creates the GitHub release with the four binaries and
-   `SHA256SUMS` as its assets; `valkey-fuzzer-fetch-porcupine` works from then
-   on. Protect `porcupine-v*` tags as `v*` tags are.

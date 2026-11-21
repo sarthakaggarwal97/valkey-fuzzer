@@ -4,8 +4,8 @@ This page is for the maintainers of a Valkey module (valkey-json,
 valkey-bloom, valkey-search): how to run the fuzzer against the module from
 the module's repository with one short workflow, what the run uploads, and
 what to do with a `FAIL`. It replaces copying the fuzzer's own setup (build
-Valkey, build porcupine, install the fuzzer, write an experiment) into every
-module repository.
+Valkey, install the fuzzer, write an experiment) into every module
+repository.
 
 - [The caller workflow](#the-caller-workflow)
 - [The base file: the module's commands](#the-base-file-the-modules-commands)
@@ -39,8 +39,8 @@ jobs:
 ```
 
 The job checks out the module repository and the fuzzer at `fuzzer_ref`,
-builds Valkey (`valkey_version`, 9.1.3 by default) and the porcupine checker,
-runs `build` in the module's checkout, and runs a [batch](cli.md#batch) of
+builds Valkey (`valkey_version`, 9.1.3 by default), runs `build` in the
+module's checkout, and runs a [batch](cli.md#batch) of
 `seeds` random seeds of `experiment` with the module loaded into every
 server (`deployment.server_config.loadmodule`). A called workflow's
 `github.repository` and `github.sha` are the caller's, which is why
@@ -114,7 +114,7 @@ deployment:
 | `profile` | `pr-quick` | A [search profile](scenarios-and-experiments.md#legal-space-and-search-profiles): `pr-quick`, `nightly-soak`, `adversarial`. |
 | `run_timeout_s`, `timeout_minutes` | 900, 120 | One run's deadline, and the job's. |
 | `fail_on_error` | `false` | Fail the job on `ERROR` and `SKIP_UNSUPPORTED` too. |
-| `image` | none | Run in the [image](#the-image) instead of building Valkey and porcupine on the runner. |
+| `image` | none | Run in the [image](#the-image) instead of building Valkey on the runner. |
 | `valkey_version`, `valkey_make_args` | `9.1.3`, none | On the runner: the valkey-io/valkey tag, branch or commit to build, and `make` arguments (`SANITIZER=address CC=clang`). |
 | `fuzzer_repository` | `valkey-io/valkey-fuzzer` | Where `fuzzer_ref` is checked out from. |
 | `artifact_name` | `module-fuzz-<run id>` | The uploaded batch folder. Set it when one run calls the workflow twice. |
@@ -123,8 +123,7 @@ deployment:
 
 `ghcr.io/valkey-io/valkey-fuzzer:<tag>` ([`Dockerfile`](../Dockerfile)) holds
 the fuzzer, a pinned Valkey build (`valkey-server` and its tools on `PATH`,
-`/opt/valkey/COMMIT` names the commit), the porcupine checker, and what the
-faults call: `iptables`, `tc`, `libfaketime`, a C compiler. It is built by
+`/opt/valkey/COMMIT` names the commit), and what the faults call: `iptables`, `tc`, `libfaketime`, a C compiler. It is built by
 [`build-image.yml`](../.github/workflows/build-image.yml) on every pull
 request that touches it and pushed on a release tag; about 380 MB.
 
@@ -146,8 +145,8 @@ container cannot run makes the run `SKIP_UNSUPPORTED` or `ERROR`, never
 `FAIL`.
 
 In the workflow, `image:` runs the job in that container, so nothing is
-built: the job skips the Valkey and porcupine builds and installs the fuzzer
-at `fuzzer_ref` over the image's. The container has no `sudo`, `cmake` or
+built: the job skips the Valkey build and installs the fuzzer at
+`fuzzer_ref` over the image's. The container has no `sudo`, `cmake` or
 `clang`, so build the module in a job of your own, upload it, and pass
 `module_artifact`:
 

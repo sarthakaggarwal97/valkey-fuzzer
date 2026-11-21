@@ -22,10 +22,10 @@ scenario is in [Getting started](getting-started.md); every option is in the
 
 A disposable Linux host or VM (see [Safety](../README.md#safety) and the
 [threat model](threat-model.md)). The base needs are in the README's
-[Before you start](../README.md#before-you-start): Python 3.10 or later,
-a `valkey-server` build, `porcupine` on `PATH`. Each fault that touches the
-host checks for what it needs before anything starts, and a run without it
-ends as below rather than failing:
+[Before you start](../README.md#before-you-start): Python 3.10 or later
+and a `valkey-server` build. Each fault that touches the host checks for what
+it needs before anything starts, and a run without it ends as below rather
+than failing:
 
 | Experiment needs | For | Without it |
 | --- | --- | --- |

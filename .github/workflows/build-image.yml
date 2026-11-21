@@ -1,6 +1,6 @@
 name: Docker Image
 
-# The image of the Dockerfile: the fuzzer, a pinned Valkey build, porcupine, and the faults' tools
+# The image of the Dockerfile: the fuzzer, a pinned Valkey build, and the faults' tools
 # (docs/module-repos.md). A pull request that touches what the image is made of builds it and runs an experiment
 # in it, and pushes nothing. A tag (v1.2.3) builds it again and pushes ghcr.io/<owner>/valkey-fuzzer:<tag> and
 # :latest; nothing else ever pushes.
@@ -12,7 +12,6 @@ on:
       - .dockerignore
       - .github/workflows/build-image.yml
       - pyproject.toml
-      - porcupine/**
   push:
     tags: ['v*']
   workflow_dispatch:
@@ -37,8 +36,8 @@ jobs:
       - name: Build the image
         run: docker build --tag valkey-fuzzer:ci --build-arg "SOURCE_URL=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" .
 
-      # The history oracle needs porcupine and the deployment a valkey-server on PATH: one experiment proves both,
-      # as the non-root user the image runs as. A report folder is left in the container's /tmp, so none is uploaded.
+      # The deployment needs a valkey-server on PATH: one experiment proves it, as the non-root user the image
+      # runs as. A report folder is left in the container's /tmp, so none is uploaded.
       - name: Run an experiment in the image
         run: |
           docker run --rm valkey-fuzzer:ci --version

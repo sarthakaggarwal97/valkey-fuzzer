@@ -16,7 +16,7 @@
   `wheel` is no longer listed (setuptools builds wheels itself). The archives' metadata says
   `License-Expression: BSD-3-Clause`.
 - The sdist carries the checkout (`MANIFEST.in`): `tests/` with its fixtures and the `.github/` workflows they
-  read, `porcupine/`, `zoo/`, `examples/`, `docs/` and `CHANGELOG.md`, where it had the package, the test modules
+  read, `zoo/`, `examples/`, `docs/` and `CHANGELOG.md`, where it had the package, the test modules
   without their fixtures, and `formal/`. The wheel is unchanged: the package and the data it reads.
 - `tests/test_packaging.py` builds both archives and checks what they ship (every tracked file of those directories
   in the sdist; every data file and spec bundle file in the wheel, and nothing beyond the package), that

@@ -3,23 +3,18 @@
 Publishes ``<id>.seeded`` once the preload is written and, with
 ``max_ops``, ``<id>.drained`` once that many operations completed.
 
-With ``clients: 1`` (the default) one writer thread issues operations
-sequentially, so every key has a total order of client-visible operations. With
-``clients`` above 1, that many threads, each on its own connection, issue
-operations at once over the same keys, so operations on a key overlap and only
-the oracle's linearizability check (``valkey.oracle.history``) orders them; the
-ledger's ``id`` order is then the order in which operations were issued, not a
-total order of their effects.  Each ledger entry records what the client
+One writer thread issues operations sequentially, so every key has a total
+order of client-visible operations.  Each ledger entry records what the client
 observed: ``ok`` (acknowledged), ``error`` (an error reply: definitely not
 applied), or ``ambiguous`` (timeout/disconnect; may or may not be applied).
 Oracles reconstruct the set of acceptable final values from this ledger under
 an explicit durability policy instead of guessing.
 
 The ledger is the workload's history: each entry is invoked at ``t_start``
-and completes at ``t_end`` on connection ``process`` (numbered from 1 across
-all clients; a client opens a new one after any failure, as a Jepsen client
-process is retired after an indeterminate operation), and a GET's ``reply`` is
-the value it read.
+and completes at ``t_end`` on connection ``process`` (numbered from 1; the
+writer opens a new one after any failure, as a Jepsen client process is
+retired after an indeterminate operation), and a GET's ``reply`` is the value
+it read.
 
 A ``rename`` in the ``mix`` is ``RENAME src dst`` between two mutable keys of
 the same name length whose values the workload knows for certain (their last
@@ -37,7 +32,6 @@ digest go to ``lists.jsonl`` for the RDB snapshot oracle.
 """
 
 import hashlib
-import itertools
 import json
 import os
 import random
@@ -75,8 +69,6 @@ _WORKLOAD_FIELDS = {
     "stable_keys": ConfigField(int, default=0, minimum=0, maximum=5_000_000),
     "mutable_keys": ConfigField(int, default=100, minimum=0, maximum=1_000_000),
     "preload_mutable": ConfigField(bool, default=True),
-    # Writer threads, each on its own connection, over the same keys; ``rate`` is their total.
-    "clients": ConfigField(int, default=1, minimum=1, maximum=64),
     "rate": ConfigField(float, default=200.0, minimum=0, maximum=100_000),
     "value_size": ConfigField(int, default=64, minimum=1, maximum=1_048_576),
     "compressible": ConfigField(bool, default=False),
@@ -107,8 +99,6 @@ def _validate_workload(config: dict, spec: ComponentSpec, plan: ExecutionPlan) -
     mix = config["mix"]
     if sum(mix.values()) <= 0:
         raise ConfigError(f"mix needs a positive weight for one of {', '.join(OPERATIONS)}")
-    if config["clients"] > 1 and mix.get("rename", 0) > 0:
-        raise ConfigError("mix.rename needs clients: 1: it relies on knowing a key's value for certain")
     if mix.get("rename", 0) > 0:
         # RENAME needs both keys in one slot, and mutable keys are not hash-tagged.
         if plan.deployment_mode != "standalone":
@@ -184,14 +174,13 @@ def list_digest(elements: Iterable[str]) -> str:
 class _Target:
     """Routes commands to the current writable endpoint."""
 
-    def __init__(self, handle: Any, timeout: float, numbering: Optional[Iterator[int]] = None):
+    def __init__(self, handle: Any, timeout: float):
         self.handle = handle
         self.timeout = timeout
         self.cluster = is_cluster(handle)
         self.client: Any = None
         self.instance_id: Optional[str] = None
-        # The current connection's number, from ``numbering`` (shared by every client of a workload, so unique).
-        self._numbering = numbering if numbering is not None else itertools.count(1)
+        # Connections opened so far; the current one's number.
         self.connections = 0
         instances = getattr(handle, "instances", ()) if self.cluster else ()
         self._by_address = {(instance.host, int(instance.port)): instance.instance_id for instance in instances}
@@ -220,7 +209,7 @@ class _Target:
                 raise valkey.exceptions.ConnectionError("no reachable primary")
             self.instance_id = primaries[0]
             self.client = self.handle.new_client(self.instance_id, timeout=self.timeout)
-        self.connections = next(self._numbering)
+        self.connections += 1
         return self.client
 
     def served_by(self, key: str) -> Optional[str]:
@@ -284,7 +273,7 @@ class KeyValueWorkload:
     """Preload deterministic data, then mutate it continuously."""
 
     def __init__(self) -> None:
-        self._threads: list[StoppableThread] = []
+        self._thread: Optional[StoppableThread] = None
         self._ledger: list[dict[str, Any]] = []
         self._preload: dict[str, str] = {}
         # Per preloaded key: when its batch was acknowledged and which instance did.
@@ -297,14 +286,10 @@ class KeyValueWorkload:
         self._list_reads = {"ok": 0, "failed": 0}
         self._started_at = 0.0
         self._target: Optional[_Target] = None
-        # Every client's target; the first is ``_target``, which also loads the preload.
-        self._targets: list[_Target] = []
         self._config: dict[str, Any] = {}
         self._drained = threading.Event()
-        # Guards the operation counter and the ledger, which every client thread appends to.
-        self._lock = threading.Lock()
+        # Operations issued so far: the next one's id.
         self._sequence = 0
-        self._in_flight = 0
 
     def start(self, context: Any, spec: ComponentSpec):
         config = spec.config
@@ -313,9 +298,7 @@ class KeyValueWorkload:
         rng = context.rng(spec.id, "values")
         op_rng = context.rng(spec.id, "operations")
         prefix = key_prefix(spec, config)
-        numbering = itertools.count(1)
-        self._targets = [_Target(handle, config["op_timeout_s"], numbering) for _ in range(config["clients"])]
-        self._target = self._targets[0]
+        self._target = _Target(handle, config["op_timeout_s"])
         self._started_at = now()
 
         stable = {
@@ -348,56 +331,29 @@ class KeyValueWorkload:
         if config["rate"] > 0 and mutable_keys:
             ops = [name for name in OPERATIONS if config["mix"].get(name, 0) > 0]
             weights = [config["mix"][name] for name in ops]
-            # ``rate`` is the total over the clients.
-            interval = config["clients"] / config["rate"]
+            interval = 1.0 / config["rate"]
 
-            def client_loop(target: _Target, op_rng: random.Random, value_rng: random.Random):
-                def loop(stop_event) -> None:
-                    def step() -> bool:
-                        with self._lock:
-                            capped = config["max_ops"] is not None and self._sequence >= config["max_ops"]
-                            if not capped:
-                                self._sequence += 1
-                                self._in_flight += 1
-                            op_id = self._sequence
-                            # Drained once every operation issued has completed, not only issued.
-                            publish = capped and not self._in_flight and not self._drained.is_set()
-                            if publish:
-                                self._drained.set()
-                        if publish:
+            def loop(stop_event) -> None:
+                def step() -> bool:
+                    if config["max_ops"] is not None and self._sequence >= config["max_ops"]:
+                        # Every operation issued has completed: the one thread issues them in turn.
+                        if not self._drained.is_set():
+                            self._drained.set()
                             context.event_bus.publish(
-                                f"{spec.id}.drained", source=spec.id, payload={"operations": op_id}
+                                f"{spec.id}.drained", source=spec.id, payload={"operations": self._sequence}
                             )
-                        if capped:
-                            stop_event.wait(0.05)
-                            return False
-                        try:
-                            outcome = self._issue(
-                                op_id, target, op_rng, value_rng, ops, weights, mutable_keys, list_keys
-                            )
-                        finally:
-                            with self._lock:
-                                self._in_flight -= 1
-                        if outcome != "ok":
-                            stop_event.wait(0.02)
-                        return True
+                        stop_event.wait(0.05)
+                        return False
+                    self._sequence += 1
+                    outcome = self._issue(self._sequence, op_rng, rng, ops, weights, mutable_keys, list_keys)
+                    if outcome != "ok":
+                        stop_event.wait(0.02)
+                    return True
 
-                    paced_loop(stop_event, interval, step)
+                paced_loop(stop_event, interval, step)
 
-                return loop
-
-            for index, target in enumerate(self._targets):
-                # The first client keeps the streams a single-client run always drew from.
-                suffix = "" if index == 0 else f"-{index}"
-                loop = client_loop(
-                    target,
-                    context.rng(spec.id, f"operations{suffix}") if index else op_rng,
-                    context.rng(spec.id, f"values{suffix}") if index else rng,
-                )
-                thread = StoppableThread(f"workload-{spec.id}-{index}", loop)
-                self._threads.append(thread)
-            for thread in self._threads:
-                thread.start()
+            self._thread = StoppableThread(f"workload-{spec.id}", loop)
+            self._thread.start()
 
         return make_result(
             spec,
@@ -409,7 +365,6 @@ class KeyValueWorkload:
     def _issue(
         self,
         op_id: int,
-        target: _Target,
         op_rng: random.Random,
         value_rng: random.Random,
         ops: list[str],
@@ -417,27 +372,25 @@ class KeyValueWorkload:
         mutable_keys: list[str],
         list_keys: list[str],
     ) -> str:
-        """Choose and run one operation as ``op_id`` on ``target``'s connection; its outcome."""
+        """Choose and run one operation as ``op_id``; its outcome."""
 
         config = self._config
         op = op_rng.choices(ops, weights)[0]
         key = op_rng.choice(mutable_keys)
         if op in ("lrange", "lindex"):
-            return self._read_list(op, op_rng.choice(list_keys), op_rng, config, target)
+            return self._read_list(op, op_rng.choice(list_keys), op_rng, config)
         value = dst = None
         if op == "rename":
-            # Only with one client (see _validate_workload): no other client changes a known value meanwhile.
             value = self._known.get(key)
             peers = [peer for peer in self._known if len(peer) == len(key) and peer != key]
             if value is None or not peers:
                 op = "set"  # The source or a same-length destination is not known for certain.
             else:
                 dst = op_rng.choice(peers)
-                with self._lock:
-                    self._sequence += 1  # A rename is two ledger entries.
+                self._sequence += 1  # A rename is two ledger entries.
         if op == "set":
             value = make_value(value_rng, config["value_size"], config["compressible"], f"w{op_id}")
-        return self._execute(op_id, op, key, value, dst, target)
+        return self._execute(op_id, op, key, value, dst)
 
     def _load(self, context: Any, preload: dict[str, str], batch: int) -> None:
         items = list(preload.items())
@@ -479,12 +432,12 @@ class KeyValueWorkload:
             digest = list_digest(list_elements(index, length, size))
             self._lists.append({"key": key, "length": length, "digest": digest})
 
-    def _read_list(self, op: str, key: str, op_rng: random.Random, config: dict[str, Any], target: _Target) -> str:
+    def _read_list(self, op: str, key: str, op_rng: random.Random, config: dict[str, Any]) -> str:
         """Pipeline ``list_read_batch`` reads of ``key``; ``ok`` when every reply came back, else ``failed``."""
 
         length = config["list_length"]
         try:
-            client = target.connect()
+            client = self._target.connect()
             pipe = client.pipeline(transaction=False)
             for _ in range(config["list_read_batch"]):
                 start = op_rng.randrange(length)
@@ -494,29 +447,16 @@ class KeyValueWorkload:
                     pipe.lindex(key, start)
             pipe.execute()
         except _CLIENT_ERRORS as exc:
-            with self._lock:
-                self._list_reads["failed"] += 1
-            target.reset()
+            self._list_reads["failed"] += 1
+            self._target.reset()
             return f"failed: {type(exc).__name__}: {exc}"
-        with self._lock:
-            self._list_reads["ok"] += 1
+        self._list_reads["ok"] += 1
         return "ok"
 
-    def _execute(
-        self,
-        op_id: int,
-        op: str,
-        key: str,
-        value: Optional[str],
-        dst: Optional[str] = None,
-        target: Optional[_Target] = None,
-    ) -> str:
-        """Run one operation on ``target`` (the first client's by default) and record it.
+    def _execute(self, op_id: int, op: str, key: str, value: Optional[str], dst: Optional[str] = None) -> str:
+        """Run one operation and record it; a ``rename`` of ``key`` to ``dst`` records a ``del`` and a ``set``."""
 
-        A ``rename`` of ``key`` to ``dst`` records a ``del`` and a ``set``.
-        """
-
-        target = target or self._target
+        target = self._target
         entry: dict[str, Any] = {"id": op_id, "op": op, "key": key, "t_start": now()}
         if value is not None:
             entry["value"] = value
@@ -531,7 +471,7 @@ class KeyValueWorkload:
             client = target.connect()
         except Exception as exc:
             # Nothing was sent (e.g. no reachable primary): the operation was not applied.
-            return self._record(entries, "error", target, exc)
+            return self._record(entries, "error", exc)
         try:
             for item in entries:
                 item["instance_id"] = target.instance_id
@@ -552,38 +492,35 @@ class KeyValueWorkload:
             for item in entries:
                 item["instance_id"] = target.served_by(item["key"])
         except _CLIENT_ERRORS as exc:
-            return self._record(entries, _classify(exc), target, exc)
+            return self._record(entries, _classify(exc), exc)
         if op != "get" and self._config.get("wait_replicas"):
             # The write's own reply ends it; WAIT only adds how far it replicated.
             entry["t_end"] = now()
-            self._wait(client, entry, target)
+            self._wait(client, entry)
             for item in entries[1:]:
                 item.update({field: entry[field] for field in ("t_end", "wait", "wait_error") if field in entry})
-        return self._record(entries, "ok", target)
+        return self._record(entries, "ok")
 
-    def _record(
-        self, entries: list[dict[str, Any]], outcome: str, target: _Target, exc: Optional[BaseException] = None
-    ) -> str:
+    def _record(self, entries: list[dict[str, Any]], outcome: str, exc: Optional[BaseException] = None) -> str:
         if exc is not None:
             # Reconnect after any failure: an error reply such as READONLY means
             # the endpoint stopped being the writable primary (e.g. failover).
-            target.reset()
+            self._target.reset()
         t_end = now()
         for entry in entries:
             entry["outcome"] = outcome
             if exc is not None:
                 entry["error"] = f"{type(exc).__name__}: {exc}"
             entry.setdefault("t_end", t_end)
-            with self._lock:
-                self._counters[outcome] += 1
-                self._ledger.append(entry)
-                if entry["op"] == "set" and outcome == "ok":
-                    self._known[entry["key"]] = entry["value"]
-                elif entry["op"] != "get" and outcome != "error":
-                    self._known.pop(entry["key"], None)
+            self._counters[outcome] += 1
+            self._ledger.append(entry)
+            if entry["op"] == "set" and outcome == "ok":
+                self._known[entry["key"]] = entry["value"]
+            elif entry["op"] != "get" and outcome != "error":
+                self._known.pop(entry["key"], None)
         return outcome
 
-    def _wait(self, client: Any, entry: dict[str, Any], target: _Target) -> None:
+    def _wait(self, client: Any, entry: dict[str, Any]) -> None:
         """Record how many replicas acknowledged the write (WAIT's reply); a failed WAIT leaves the write ``ok``."""
 
         try:
@@ -592,27 +529,27 @@ class KeyValueWorkload:
             )
         except Exception as exc:
             entry["wait_error"] = f"{type(exc).__name__}: {exc}"
-            target.reset()
+            self._target.reset()
 
     def stop(self, context: Any, spec: ComponentSpec):
         drained = True
-        if self._config.get("drain_on_stop") and self._threads:
+        if self._config.get("drain_on_stop") and self._thread is not None:
             try:
                 poll_until(
-                    lambda: (self._drained.is_set() or not any(thread.is_alive() for thread in self._threads), None),
+                    lambda: (self._drained.is_set() or not self._thread.is_alive(), None),
                     timeout_s=self._config["drain_timeout_s"],
                     interval_s=0.05,
                     context=context,
                 )
             except WaitInterruptedError:
-                # Cancelled: stop draining, but still join the workers and write the ledger.
+                # Cancelled: stop draining, but still join the worker and write the ledger.
                 pass
             drained = self._drained.is_set()
-        problem, error = stop_or_error(spec, max(30.0, self._config.get("op_timeout_s", 2.0) * 3), *self._threads)
+        problem, error = stop_or_error(spec, max(30.0, self._config.get("op_timeout_s", 2.0) * 3), self._thread)
         if error is not None:
             return error
-        for target in {id(item): item for item in (self._target, *self._targets) if item is not None}.values():
-            target.reset()
+        if self._target is not None:
+            self._target.reset()
         directory = component_artifact_dir(context, spec)
         ledger_path = os.path.join(directory, "ledger.jsonl")
         preload_path = os.path.join(directory, "preload.jsonl")
@@ -640,8 +577,6 @@ class KeyValueWorkload:
             "ambiguous": self._counters["ambiguous"],
             "preloaded_keys": len(self._preload),
             "stable_keys": self._config.get("stable_keys", 0),
-            # How many clients issued operations at once: the history oracle needs it to word its verdict.
-            "clients": self._config.get("clients", 1),
             "prefix": key_prefix(spec, self._config) if self._config else None,
             "started_at": self._started_at,
             "stopped_at": now(),
@@ -719,7 +654,6 @@ _WORKLOAD_DECLARES = Declarations(
                     "ambiguous": INTEGER,
                     "preloaded_keys": INTEGER,
                     "stable_keys": INTEGER,
-                    "clients": INTEGER,
                     "prefix": nullable(str),
                     "started_at": NUMBER,
                     "stopped_at": NUMBER,

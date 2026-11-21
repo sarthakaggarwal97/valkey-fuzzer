@@ -45,7 +45,7 @@ def test_the_license_is_an_spdx_expression():
     # string needs setuptools 77, which the build-system pins and the dev extra installs (the tests build without
     # isolation).
     assert re.search(r'^license = "BSD-3-Clause"$', PYPROJECT, re.M)
-    assert re.search(r'^license-files = \["LICENSE", "THIRD_PARTY.md"\]$', PYPROJECT, re.M)
+    assert re.search(r'^license-files = \["LICENSE"\]$', PYPROJECT, re.M)
     assert "license = {" not in PYPROJECT
     assert re.search(r'^requires = \["setuptools>=77"\]$', PYPROJECT, re.M)
     assert re.search(r'^    "setuptools>=77",$', PYPROJECT, re.M)
@@ -84,11 +84,10 @@ def test_the_sdist_carries_the_checkout(built):
     with tarfile.open(sdist) as archive:
         names = {member.name.partition("/")[2] for member in archive.getmembers() if member.isfile()}
         metadata = archive.extractfile(f"valkey_fuzzer-{__version__}/PKG-INFO").read().decode()
-    # The runtime, the tests and what they read (.github for tests/test_ci_workflows.py), the porcupine checker's
-    # sources, the bug zoo, the examples and the docs: `pytest`, `zoo/build.sh` and `go -C porcupine build` work
-    # from an unpacked sdist as from a clone.
-    roots = ("valkey_fuzzer", "formal", "tests", ".github", "porcupine", "zoo", "examples", "docs")
-    files = ("CHANGELOG.md", "LICENSE", "THIRD_PARTY.md", "README.md", "pyproject.toml", "MANIFEST.in")
+    # The runtime, the tests and what they read (.github for tests/test_ci_workflows.py), the bug zoo, the examples
+    # and the docs: `pytest` and `zoo/build.sh` work from an unpacked sdist as from a clone.
+    roots = ("valkey_fuzzer", "formal", "tests", ".github", "zoo", "examples", "docs")
+    files = ("CHANGELOG.md", "LICENSE", "README.md", "pyproject.toml", "MANIFEST.in")
     missing = _tracked(*roots, *files) - names
     assert not missing, sorted(missing)
     # And nothing untracked beyond the metadata setuptools writes: not the __pycache__ a test run leaves under
@@ -98,7 +97,6 @@ def test_the_sdist_carries_the_checkout(built):
     assert not extra, sorted(extra)
     assert f"\nVersion: {__version__}\n" in metadata
     assert "\nLicense-Expression: BSD-3-Clause\n" in metadata and "\nLicense-File: LICENSE\n" in metadata
-    assert "\nLicense-File: THIRD_PARTY.md\n" in metadata, "the MIT notice of the vendored Porcupine module ships"
 
 
 def test_the_wheel_ships_the_data_the_runtime_reads(built):

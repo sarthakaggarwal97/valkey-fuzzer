@@ -1,7 +1,6 @@
 """The fuzzer's cache: ``$XDG_CACHE_HOME/valkey-fuzzer``, by default ``~/.cache/valkey-fuzzer``.
 
-What a host fetches or builds once and reuses lives here: the ``porcupine`` checker under ``bin/``
-(:mod:`valkey_fuzzer.components.porcupine`) and the Valkey builds under ``valkey/<commit>/``
+What a host fetches or builds once and reuses lives here: the Valkey builds under ``valkey/<commit>/``
 (:func:`valkey_fuzzer.deployment.local.processes.fetch_valkey`). It is the user's own: nothing in it is shared
 between users, and it is safe to delete.
 """

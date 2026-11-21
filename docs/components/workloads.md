@@ -9,18 +9,14 @@ fields the tables below use.
 
 Preloads `stable_keys`, which never change afterwards, and `mutable_keys`,
 then mutates the mutable keys at `rate` operations per second until teardown,
-from one writer thread, or from `clients` threads at once, each on its own
-connection. For every operation it records what the client
+from one writer thread. For every operation it records what the client
 observed in a ledger: `ok` (acknowledged, with the `instance_id` that
 acknowledged it), `error` (an error reply such as `OOM` or `READONLY`, or no
 reachable server, so never applied), or `ambiguous` (a timeout or connection error, which may or
 may not have applied). Oracles derive the acceptable final values from that
-ledger, and [`valkey.oracle.history`](oracles.md#valkeyoraclehistory) checks it as a
-history: each entry is invoked at `t_start` and completes at `t_end` on
-connection `process` (numbered from 1 across all clients; a client opens a
-new connection after any failure), and a `get` entry's `reply` is the value it
-read. With `clients` above 1 operations on a key overlap, and the `id` order
-is the order operations were issued, not the order the server applied them. The preload counts as acknowledged writes too: each preloaded key
+ledger: each entry is invoked at `t_start` and completes at `t_end` on
+connection `process` (numbered from 1; the writer opens a new connection after
+any failure), and a `get` entry's `reply` is the value it read. The preload counts as acknowledged writes too: each preloaded key
 records when its batch was acknowledged and by which instance, so a key
 preloaded inside a loss window may be lost like any other write. In cluster
 mode it writes through a cluster client that makes one
@@ -33,7 +29,6 @@ standalone mode it writes to the current primary. Keys are named
 | `stable_keys` | integer, 0 to 5,000,000 | 0 | Keys written once in the preload. |
 | `mutable_keys` | integer, 0 to 1,000,000 | 100 | Keys the writer mutates. At least one of the two counts must be above 0. |
 | `preload_mutable` | boolean | `true` | Also write an initial value for every mutable key in the preload. |
-| `clients` | integer, 1 to 64 | 1 | Writer threads, each on its own connection, over the same keys. `rate` is their total. Above 1 the workload makes overlapping operations, which `valkey.oracle.history` checks; `valkey.oracle.ledger` then judges the final values only (see [`valkey.oracle.ledger`](oracles.md#valkeyoracleledger)) and `mix.rename` and `valkey.oracle.rdb-snapshot`'s `workload` are refused. |
 | `rate` | number, 0 to 100,000 | 200 | Operations per second; 0 writes the preload only. |
 | `value_size` | integer, 1 to 1,048,576 | 64 | Value size in bytes. |
 | `compressible` | boolean | `false` | Repetitive values instead of random ones. |

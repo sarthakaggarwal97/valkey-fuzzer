@@ -4,14 +4,14 @@
 # replication links must ride out the degradation on TCP's retransmissions: no
 # full resync (no node logs "Full resync from primary", and sync_full stays
 # where it was on every instance), every replica's link is up again after the
-# heal, every replica converges byte-for-byte with the primary, no acknowledged
-# write is lost (there is no loss window: a degraded link loses nothing), and
-# the client history is linearizable (`history`). A reconnect that Valkey
-# resumes with a partial resync passes; one it answers with a full resync fails.
+# heal, every replica converges byte-for-byte with the primary, and no
+# acknowledged write is lost (there is no loss window: a degraded link loses
+# nothing). A reconnect that Valkey resumes with a partial resync passes; one
+# it answers with a full resync fails.
 #
 # Needs Linux, tc and ip with CAP_NET_ADMIN (the fuzzer never asks for sudo),
 # and deployment.addressing: per_instance_loopback.
-extends: [valkey.base, valkey.history, valkey.links-up]
+extends: [valkey.base, valkey.links-up]
 id: valkey.replication-degraded-link
 deployment:
   modes: [standalone]
@@ -19,7 +19,7 @@ deployment:
   # The degradation matches the instances' own addresses.
   addressing: {type: string, enum: [per_instance_loopback]}
 metadata:
-  description: Loss, delay, and reordering on the replication links under writes; PSYNC survives, replicas converge, the history is linearizable
+  description: Loss, delay, and reordering on the replication links under writes; PSYNC survives, replicas converge, no acknowledged write is lost
   generator:
     deployment:
       mode: [standalone]

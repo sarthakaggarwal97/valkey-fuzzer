@@ -7,7 +7,7 @@ first group.
 
 | Page | For | One line |
 | --- | --- | --- |
-| [Getting started](getting-started.md) | first-time users | install, choose a binary, build `porcupine`, first runs, the output and report files, troubleshooting |
+| [Getting started](getting-started.md) | first-time users | install, choose a binary, first runs, the output and report files, troubleshooting |
 | [Reading a FAIL](reading-a-fail.md) | anyone with a failed run | where the verdict, logs, and replay command are, and what to attach to a Valkey issue |
 | [Concepts and glossary](concepts.md) | everyone | scenarios, execution plans, component roles, events, evidence, and the terms the docs use |
 
@@ -38,7 +38,7 @@ first group.
 | --- | --- | --- |
 | [Adding tests](extending.md) | experiment and component authors | writing experiments, components, and providers, registering them, testing |
 | [Architecture](architecture.md) | framework contributors | code layout, the compiler and runner, the local deployment provider, the wave engine |
-| [Releasing](releasing.md) | maintainers | the version, the release steps, what the sdist and the wheel hold, the release workflow, the one-time PyPI setup, the porcupine checker binaries |
+| [Releasing](releasing.md) | maintainers | the version, the release steps, what the sdist and the wheel hold, the release workflow, the one-time PyPI setup |
 | [Spec bridge](spec-bridge.md) | model and experiment authors | TLA+ bundles: `spec check`, `spec translate`, `spec conform`, the assurance report |
 | [Cluster failover election](../formal/cluster-election/README.md) | Valkey cluster maintainers | the TLA+ model of the failover vote and its live counterpart |
 | [Atomic slot migration](../formal/slot-migration/README.md) | Valkey cluster maintainers | the TLA+ model of atomic slot migration |

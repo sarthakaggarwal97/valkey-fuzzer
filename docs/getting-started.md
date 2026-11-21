@@ -6,7 +6,6 @@ The terms it uses are defined in [Concepts and glossary](concepts.md).
 
 - [Install](#install)
 - [Choose a Valkey binary](#choose-a-valkey-binary)
-- [Get porcupine](#get-porcupine)
 - [Run an experiment](#run-an-experiment)
 - [Read the output](#read-the-output)
 - [Find the files a run leaves](#find-the-files-a-run-leaves)
@@ -84,42 +83,6 @@ then reports `FAIL`.
 Some experiments need features that only some builds have (such as
 `cluster-config-save-behavior`). They probe the binary first and report
 `SKIP_UNSUPPORTED` instead of failing when it lacks a feature they name.
-
-## Get porcupine
-
-Seven experiments check that the history of reads and writes is linearizable
-with [Porcupine](https://github.com/anishathalye/porcupine), through the
-`valkey.history` fragment: `valkey.aof-durability` (the quickstart),
-`valkey.cluster-partition`, `valkey.mixed-version-cluster`,
-`valkey.replication-chaos`, `valkey.replication-degraded-link`,
-`valkey.replication-full-resync`, and `valkey.rolling-upgrade`. The checker is a small Go program in `porcupine/`
-that pip does not build. Fetch the prebuilt binary once per host:
-
-```bash
-valkey-fuzzer-fetch-porcupine
-```
-
-It downloads `porcupine-<os>-<arch>` for your platform (Linux or macOS,
-x86_64 or arm64) from the `porcupine-v1.3.1` release of this repository over
-HTTPS, checks its SHA-256 against the sum pinned in
-`valkey_fuzzer/components/porcupine_sha256sums.txt`, and installs it as
-`~/.cache/valkey-fuzzer/bin/porcupine` (under `$XDG_CACHE_HOME` when set). A
-download whose sum differs is deleted and nothing is installed. The fuzzer
-looks there whenever `PATH` has no `porcupine`.
-
-Or build it yourself, with Go 1.21 or later, from the checkout onto `PATH`. The
-Porcupine module is vendored under `porcupine/vendor/`, so the build needs no
-network:
-
-```bash
-mkdir -p "$HOME/.local/bin"
-go -C porcupine build -o "$HOME/.local/bin/porcupine"
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-Without `porcupine` fetched or on `PATH`, `validate` of these experiments
-exits `2` and a run ends `ERROR` before it starts anything, with `porcupine is
-not on PATH` and both commands; the other experiments do not need it.
 
 ## Run an experiment
 
@@ -332,9 +295,6 @@ option and file is in [batch](cli.md#batch).
 | --- | --- |
 | `ERROR`, and `--verbose` shows `Cannot provision the local deployment, planned ports are in use: valkey-0: client port 7430 on 127.0.0.1 is unavailable (...)` | Another process holds the port, often a server left by an interrupted run. Stop it, or change `deployment.base_port`. |
 | `ERROR` with `valkey-server binary 'valkey-server' was not found` | One of the four experiments that probe the build before they start anything (see [Choose a Valkey binary](#choose-a-valkey-binary)); the probe does not build from source. Put `valkey-server` on `PATH` or pass `--valkey-binary`. |
-| `ERROR` (or `validate` exit `2`) with `porcupine is not on PATH or in ...` | The experiment checks linearizability and the checker is neither fetched nor built. See [Get porcupine](#get-porcupine). |
-| `the SHA-256 of https://.../porcupine-... is ..., not the pinned ...` while fetching `porcupine` | The download does not match the sum the fuzzer pins (a corrupt or tampered download, or a checkout whose pin is newer than the release). Nothing was installed; build the checker instead. |
-| `no release binary of porcupine for ...` while fetching `porcupine` | The release has no binary for this platform. Build the checker with Go 1.21 or later, as in [Get porcupine](#get-porcupine). |
 | `FAIL` with `crash report` in the component's diagnostics, right after start | The `valkey-server` cannot run where it is, often a binary copied away from its build tree. Run it in place. See [Reading a FAIL](reading-a-fail.md). |
 | `ERROR` with `Instance valkey-0 exited with code N after 0.5s`, or `FAIL` with `crash report (Lua engine initialization failed ...)` | The server died before its first `PING`. The error shows the last lines of its output; the full log is in the deployment directory. A crash signature in that output makes it a `FAIL`. A `valkey-server` copied away from its build tree cannot find its Lua module: run the binary from its build directory (`src/`), or from the full release tarball. |
 | A batch job is `ERROR` although its run report passed, and `batch.log` shows `LEAKED` | The run left a server, chain, mount, or directory behind; the batch removed it and lists it under `leaks`. See [Isolation, deadlines, and leaks](cli.md#isolation-deadlines-and-leaks). |

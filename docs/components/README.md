@@ -171,7 +171,6 @@ in CI; the one-line descriptions are written by hand in this file.
 | [`valkey.oracle.deployment-state`](oracles.md#valkeyoracledeployment-state) | any | the deployment's state validators pass, with a chaos action's kills and keys |
 | [`valkey.oracle.error-counters`](oracles.md#valkeyoracleerror-counters) | any | no error counter in INFO rose without a cause in the scenario |
 | [`valkey.oracle.evidence`](oracles.md#valkeyoracleevidence) | any | requires or forbids evidence |
-| [`valkey.oracle.history`](oracles.md#valkeyoraclehistory) | any | the workload's history, single- or multi-client, is linearizable (Porcupine) |
 | [`valkey.oracle.ledger`](oracles.md#valkeyoracleledger) | any | data matches the workload ledger |
 | [`valkey.oracle.liveness`](oracles.md#valkeyoracleliveness) | any | instances alive, no crash reports or forbidden log lines |
 | [`valkey.oracle.quiet-end`](oracles.md#valkeyoraclequiet-end) | any | every instance comes to rest: no blocked client or child process, links up, not spinning |
@@ -238,7 +237,6 @@ schemas.
 | `valkey.oracle.deployment-state` | none | `valkey.deployment.validated` | none |
 | `valkey.oracle.error-counters` | none | `valkey.error-counters.verified` | none |
 | `valkey.oracle.evidence` | none | none | none |
-| `valkey.oracle.history` | none | `valkey.data.linearizable` | none |
 | `valkey.oracle.ledger` | none | `valkey.data.ledger-verified` | none |
 | `valkey.oracle.liveness` | none | `valkey.liveness.verified` | none |
 | `valkey.oracle.quiet-end` | none | `valkey.quiet-end.verified` | none |
