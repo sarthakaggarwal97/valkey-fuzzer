@@ -1,97 +1,12 @@
 """Random scenarios for every experiment that declares what may be randomized.
 
 An experiment opts in with a ``metadata.generator`` block; the blocks of the
-fragments it extends merge into it like the rest of ``metadata``::
-
-    metadata:
-      generator:
-        hook: valkey.generator.tmpfs-data        # optional scenario hook
-        deployment:
-          mode: [standalone, cluster]            # default: every mode the experiment supports
-          replicas_per_primary: {minimum: 1, maximum: 2}
-          cluster: {primaries: {minimum: 3, maximum: 4}}   # fields drawn only in that mode
-        inputs:                                  # default: every input with enum, boolean, or min+max
-          value_size: {values: [1, 64, 4096]}
-          loss_window_s: fixed                   # never drawn; the input's default applies
-          waves: {hook: valkey.generator.waves}
-        server_config: [valkey.pool.persistence] # pools, from metadata.generator.pools of any fragment
-        reject:
-          - {server_config.repl-diskless-sync: "no", inputs.expect_disk_sync: false}
-
-A rule is ``fixed``, a list or ``{values: [...]}`` (drawn uniformly, the first and
-last value twice as often), ``{minimum, maximum}`` (40% of draws are the edges
-min, min+1, max-1, max, and 0 or 1 when in range; the rest uniform, or
-log-uniform when max/min exceeds 1000), the same with a ``default`` (one more
-edge), ``{hook: <id>}``, or a scalar (that value). Enums and booleans an
-experiment declares are drawn uniformly.
-
-A pool maps server config keys to value lists; its optional ``scope:
-[deployment, role]`` draws whether every instance shares one value
-(``deployment.server_config``) or the primary and the replicas each draw their
-own (``deployment.instance_configs``). A pool with ``default: true`` is drawn
-by every experiment without being listed, after the pools the experiment
-lists. A pool may name a ``hook`` instead of listing its keys: the hook
-returns the keys it offers for the scenario drawn so far, each with a rule
-(a value list is drawn uniformly), and the pool's ``share`` of them is drawn
-(the dimension ``pools.<id>.keys``, each key chosen by its name alone, so a
-key the hook adds changes no other key's draws); such a pool comes after the
-pools that list their keys. A pool's ``requires`` names the values a server
-accepts at its start only with other configs set, and what they need::
-
-    requires:
-      forkless-policy: {prefer-forkless: {forkless-infrastructure-enabled: "yes"}}
-
-once every pool is drawn, an instance config that drew such a value takes what
-it needs, whatever was drawn for it. A key one of the experiment's startup overlays
-sets is never drawn, since the overlay would override it, and neither is a
-key an earlier pool of the block already drew, so an experiment's listed
-pools win over the default ones; when the overlay sets it from an input
-(``{$ref: inputs.<name>}``), an exclusion of a ``server_config.<key>`` value
-also excludes it from that input's draws.
-
-An input written ``{pools: [<pool id>, ...]}`` is not drawn: it maps each
-server config key the scenario drew from those pools (pools that list their
-keys) to the values its pool lists, less the excluded ones. The config-churn
-workload takes it, to change those keys at run time to values the start could
-have drawn.
-
-Hooks are the catalog's generator registrations
-(:class:`~valkey_fuzzer.registrations.GeneratorRegistration`), each a
-``hook(rng, scenario)``: an input hook returns the input's value, a pool hook
-its keys and their rules, and the scenario hook returns a partial scenario
-merged over the draws. Each sees a copy of the scenario drawn so far, with
-the Valkey binary it runs.
-
-Every dimension draws from its own random stream
-``sha256("gen", seed, experiment, dimension, attempt)``, so adding an input
-never shifts another draw and one seed draws differently for each experiment;
-the experiment itself is drawn from ``sha256("gen", seed, "experiment", 0)``.
-Each candidate is compiled; one that fails to compile, matches a
-``reject`` rule, or holds an excluded value is redrawn with the next attempt,
-up to :data:`MAX_ATTEMPTS`. So is one whose deployment needs more cores than
-the run may use (``cores``, :mod:`~valkey_fuzzer.capacity`), so a host draws
-deployments of its size; when no attempt fits, the first that needed more is
-the scenario, with its ``shortfall``, and its run is skipped, saying why
-(:meth:`~valkey_fuzzer.service.RunService.execute`).
-
-The block above is the experiment's legal space. A **search profile**
-(:class:`Profile`, declared under ``metadata.generator.profiles`` of a fragment
-no experiment extends) only changes how hard that space is sampled: the share
-of range draws that are edges, narrower numeric ranges (clamped into the
-legal range, so never wider), other weights for listed values (never another
-value), and the batch budgets (a run deadline, seeds per experiment). It
-cannot add a value, change a ``reject`` rule, a hook, a pool, an input the
-block fixes, or anything the compiled plan's oracles check::
-
-    metadata:
-      generator:
-        profiles:
-          pr-quick:
-            description: Small deployments, edge-heavy values, short runs.
-            edge_probability: 0.6
-            ranges: {deployment.replicas_per_primary: {maximum: 1}, inputs.operations: {maximum: 1000}}
-            weights: {deployment.mode: {standalone: 3}}
-            budget: {seeds: 3, timeout_s: 600}
+fragments it extends merge into it like the rest of ``metadata``. The block's
+rules, pools, hooks, random streams, host-sized draws and search profiles are
+documented in docs/scenarios-and-experiments.md ("Declaring what may be
+randomized" to "Legal space and search profiles"), and the redraw of a candidate
+that does not compile, is rejected or excluded, or needs more cores than the run
+may use (up to :data:`MAX_ATTEMPTS`) in docs/cli.md ("Generated scenarios").
 """
 
 import copy
