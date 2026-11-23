@@ -47,7 +47,7 @@ the mechanics every test shares:
   registered deployment providers for other modes;
 - startup overlays by role or instance;
 - artifact and resource declarations, typed references, acquisition,
-  rollback, and cleanup; policies passed through uninterpreted;
+  rollback, and cleanup;
 - events, evidence, required events and evidence, and the verdict;
 - the [base contracts](contracts.md): the evidence contract, fault
   ownership, effective server config, legal space and search profiles,
@@ -56,8 +56,8 @@ the mechanics every test shares:
   checks, minimization, the batch runner, the sweep, the
   spec bridge, and the bug zoo.
 
-The engine does not interpret experiment IDs, component IDs, evidence IDs,
-or policy types. The components own what is specific to a test: capability
+The engine does not interpret experiment IDs, component IDs, or evidence
+IDs. The components own what is specific to a test: capability
 probes, inputs, workloads, transitions and faults, path evidence, oracles,
 and any external service or loss model.
 
@@ -92,7 +92,7 @@ they use directly (see [The Valkey components](#the-valkey-components)).
 | `valkey_fuzzer/deadlines.py` | The watchdog that runs a component call on its own thread and cancels it at its deadline, and the cancelled calls still running. |
 | `valkey_fuzzer/clock.py` | `now`: the run clock every compared timestamp (ledger operations, loss windows, fault times, evidence) is read from; monotonic, anchored to wall time at process start. |
 | `valkey_fuzzer/verdict.py` | The outcome rules. |
-| `valkey_fuzzer/environment/` | Artifact, resource, and policy specs; the environment provider protocol, registration, and registry; `EnvironmentProvisioner` and `EnvironmentLease`; `resolve_plan`, which binds a plan to what was acquired. |
+| `valkey_fuzzer/environment/` | Artifact and resource specs; the environment provider protocol, registration, and registry; `EnvironmentProvisioner` and `EnvironmentLease`; `resolve_plan`, which binds a plan to what was acquired. |
 | `valkey_fuzzer/deployment/local/` | The local deployment provider (see [below](#the-local-deployment-provider)). |
 | `valkey_fuzzer/service.py` | `RunService`: one frozen catalog with its compiler and runner; compile, execute, replay, and minimization, writing each run's report folder. |
 | `valkey_fuzzer/reports.py` | Report folders and their files (`plan.json`, `report.json`, `scenario.yaml`): writing and reading them, and the run report. |
@@ -114,7 +114,7 @@ they use directly (see [The Valkey components](#the-valkey-components)).
 ```text
 scenario YAML
   │  ScenarioCompiler, against the frozen Catalog
-  │    inputs, components, deployment, artifacts, resources, policies resolved
+  │    inputs, components, deployment, artifacts, resources resolved
   ▼
 ExecutionPlan (immutable; environment references stay symbolic)
   │  RunService.execute writes <folder>/plan.json
@@ -165,7 +165,7 @@ providers by deployment mode and provider ID. Fragment names must be unique.
 `ScenarioCompiler.compile` is pure. For one scenario it:
 
 1. reads the strict envelope (`scenario_id`, `seed`, `experiment`,
-   `deployment`, `artifacts`, `resources`, `policies`);
+   `deployment`, `artifacts`, `resources`);
 2. resolves the experiment by ID;
 3. checks the inputs against the experiment's `inputs` schema
    (read by `ConfigSchema.from_document` when the experiment is built) and

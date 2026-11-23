@@ -1,4 +1,4 @@
-"""Artifacts, resources, and policies a run acquires before its deployment starts.
+"""Artifacts and resources a run acquires before its deployment starts.
 
 :mod:`.specs` holds the declarations, :mod:`.providers` the provider
 contracts, registrations, and dependency graph, :mod:`.provisioner`
@@ -26,7 +26,7 @@ from .provisioner import (
     EnvironmentReport,
     UnsupportedEnvironmentError,
 )
-from .specs import EnvironmentSpec, PolicySpec, SupportDecision
+from .specs import EnvironmentSpec, SupportDecision
 
 __all__ = [
     "EnvironmentCleanupError",
@@ -40,7 +40,6 @@ __all__ = [
     "EnvironmentReport",
     "EnvironmentResult",
     "EnvironmentSpec",
-    "PolicySpec",
     "ProviderError",
     "SupportDecision",
     "UnsupportedEnvironmentError",

@@ -9,7 +9,7 @@ import pytest
 from tests.support import component_registration, deployment_identity, deployment_registration
 from valkey_fuzzer.catalog import Catalog
 from valkey_fuzzer.documents import ABSENT, get_path
-from valkey_fuzzer.environment import EnvironmentSpec, PolicySpec
+from valkey_fuzzer.environment import EnvironmentSpec
 from valkey_fuzzer.events import EventBus, EventBusQuiescedError, EventDispatchAbortedError, EventDispatchError
 from valkey_fuzzer.plan import (
     ComponentSpec,
@@ -67,6 +67,8 @@ def test_plans_take_deep_immutable_snapshots_and_round_trip_through_json():
     with pytest.raises(FrozenInstanceError):
         plan.seed = 7
     assert ExecutionPlan.from_data(json.loads(plan.to_json())) == plan
+    # A plan.json or report.json written before the ``policies`` scenario section was removed still loads.
+    assert ExecutionPlan.from_data({**json.loads(plan.to_json()), "policies": []}) == plan
 
 
 @pytest.mark.parametrize(
@@ -93,7 +95,6 @@ def test_plans_take_deep_immutable_snapshots_and_round_trip_through_json():
         (lambda: _plan(_staged(ComponentRole.FAULT, ComponentRole.ORACLE)), ValueError, "'dependent' cannot depend on post-execution oracle"),
         (lambda: _plan(artifacts=(EnvironmentSpec(EnvironmentKind.ARTIFACT, "b", "x.artifact"),) * 2), ValueError, "artifacts id contains duplicates"),
         (lambda: _plan(artifacts=(EnvironmentSpec(EnvironmentKind.RESOURCE, "b", "x.resource"),)), ValueError, "artifacts entry 'b' is a resources declaration"),
-        (lambda: _plan(policies=(PolicySpec("p", "x.policy"),) * 2), ValueError, "policy_id contains duplicates"),
         (lambda: _plan().rng("missing"), ValueError, "unknown component id"),
         (lambda: _experiment(deployment_requirements={"mode": {}}), ValueError, "must name a deployment field"),
         # An experiment's schemas are checked when it is built, not when a scenario first compiles against it.

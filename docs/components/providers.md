@@ -6,7 +6,7 @@ forms](README.md#common-config-forms) the selectors, predicates, and trigger
 fields the tables below use.
 
 Scenarios declare artifacts and resources with these providers; see
-[Artifacts, resources, and policies](../scenarios-and-experiments.md#artifacts-resources-and-policies).
+[Artifacts and resources](../scenarios-and-experiments.md#artifacts-and-resources).
 
 ## `valkey.artifact.local-binary`
 

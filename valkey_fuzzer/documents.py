@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from typing import Any
 
 # Scenario sections a batch matrix dimension may patch.
-SCENARIO_SECTIONS = ("experiment", "deployment", "artifacts", "resources", "policies")
+SCENARIO_SECTIONS = ("experiment", "deployment", "artifacts", "resources")
 
 
 def _copied(value: Any) -> Any:

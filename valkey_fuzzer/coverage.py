@@ -6,7 +6,7 @@ from the plan's generic structure: experiment, deployment provider, the
 planned instances (their roles, shards, and server config), the rest of the
 deployment document but for where it places the deployment on the host,
 inputs, the workload/action/fault/observer/oracle composition, and the
-artifact, resource, and policy declarations with their config. Nothing here
+artifact and resource declarations with their config. Nothing here
 interprets experiment or component IDs, or a provider's deployment document.
 """
 
@@ -70,18 +70,14 @@ def static_tuple(plan: ExecutionPlan, host_fields: Collection[str] = ()) -> dict
             )
         ),
         "resources": sorted(resource.provider_id for resource in plan.resources),
-        "policies": sorted(policy.policy_type for policy in plan.policies),
         "workloads": of_role(ComponentRole.WORKLOAD),
         "actions": of_role(ComponentRole.ACTION),
         "faults": of_role(ComponentRole.FAULT),
         "observers": of_role(ComponentRole.OBSERVER),
         "oracles": of_role(ComponentRole.ORACLE),
-        # A different tmpfs size or policy threshold is a different combination.
+        # A different tmpfs size is a different combination.
         "resource_mix": _digest(
             sorted((resource.provider_id, _digest(to_plain_data(resource.config))) for resource in plan.resources)
-        ),
-        "policy_mix": _digest(
-            sorted((policy.policy_type, _digest(to_plain_data(policy.config))) for policy in plan.policies)
         ),
     }
     return data

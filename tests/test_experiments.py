@@ -112,6 +112,8 @@ _ROLE_MISMATCH = ExperimentSpec(
     ("case", "error", "match"),
     [
         pytest.param(_bad(scenario=lambda s: s.update(unexpected=True)), ScenarioCompileError, "unknown fields", id="unknown-field"),
+        # ``policies`` was a scenario section nothing read; it is an unknown field like any other now.
+        pytest.param(_bad(scenario=lambda s: s.update(policies={"budget": {"use": "tests.latency"}})), ScenarioCompileError, r"scenario contains unknown fields: \['policies'\]", id="policies-section"),
         pytest.param(_bad(scenario=lambda s: s.update(seed=True)), ScenarioCompileError, "seed must be an integer", id="bool-seed"),
         # Names, folders, and ports derive from the seed: it is 0 to 2**64-1.
         pytest.param(_bad(scenario=lambda s: s.update(seed=-1)), ScenarioCompileError, r"seed must be from 0 to 2\*\*64-1, got -1", id="negative-seed"),

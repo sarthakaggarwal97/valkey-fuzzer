@@ -9,7 +9,7 @@ import pytest
 from tests.conform_support import register_copy, register_service, scenario_file, stub_tlc
 from valkey_fuzzer.coverage import coverage_tuple
 from valkey_fuzzer.deployment.local.rerun import HOST_FIELDS, deployment_reductions
-from valkey_fuzzer.environment import EnvironmentSpec, PolicySpec
+from valkey_fuzzer.environment import EnvironmentSpec
 from valkey_fuzzer.minimize import failure_signature, minimize, reduction_candidates, same_failure
 from valkey_fuzzer.plan import ComponentSpec, DeploymentProviderIdentity, EvidenceRequirement, ExecutionPlan
 from valkey_fuzzer.protocols import ComponentRole
@@ -17,8 +17,7 @@ from valkey_fuzzer.references import EnvironmentKind
 from valkey_fuzzer.results import ComponentResult, ComponentStatus, Evidence, OutcomeStatus, RunOutcome
 
 
-def _plan(inputs=None, deployment=None, size_mb=32, threshold=0.5, provider="valkey-fuzzer.deployment.local",
-          instances=None):  # fmt: skip
+def _plan(inputs=None, deployment=None, size_mb=32, provider="valkey-fuzzer.deployment.local", instances=None):  # fmt: skip
     return ExecutionPlan(
         instances=instances or {},
         scenario_id="c", experiment_id="tests.experiment", seed=1, deployment_mode="standalone",
@@ -26,7 +25,6 @@ def _plan(inputs=None, deployment=None, size_mb=32, threshold=0.5, provider="val
         components=(ComponentSpec(role=ComponentRole.ORACLE, use="valkey.oracle.evidence", id="check"),),
         required_evidence=(EvidenceRequirement("tests.path"),), deployment=deployment or {"mode": "standalone"},
         resources=(EnvironmentSpec(EnvironmentKind.RESOURCE, "disk", "valkey.resource.tmpfs", {"size_mb": size_mb}),),
-        policies=(PolicySpec("budget", "tests.latency", {"threshold": threshold}),),
     )  # fmt: skip
 
 
@@ -42,13 +40,11 @@ REPLICA = {"valkey-1": {"role": "replica", "shard": 0, "server_config": {"append
         ({"deployment": {"mode": "standalone", "valkey_binary": "/opt/b"}}, False),
         ({"provider": "tests.deployment.other"}, False),
         ({"size_mb": 64}, False),
-        ({"threshold": 0.9}, False),
         ({"deployment": {"mode": "standalone", "valkey_binary": "/opt/a", "base_port": 7000}}, True),
         ({"instances": {**PRIMARY, **REPLICA}}, False),
         ({"instances": {"valkey-0": {**PRIMARY["valkey-0"], "server_config": {"appendonly": "no"}}}}, False),
     ],
-    ids=["same-plan", "inputs", "build", "provider", "resource-config", "policy-config", "host-ports",
-         "instances", "instance-config"],
+    ids=["same-plan", "inputs", "build", "provider", "resource-config", "host-ports", "instances", "instance-config"],
 )  # fmt: skip
 def test_the_coverage_key_tells_apart_what_differs(other, same):
     first = {

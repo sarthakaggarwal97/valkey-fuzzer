@@ -28,7 +28,7 @@ from .providers import (
     resolve_environment_references,
     stable_environment_order,
 )
-from .specs import EnvironmentSpec, PolicySpec, SupportDecision
+from .specs import EnvironmentSpec, SupportDecision
 
 # Report statuses.
 ACQUIRED = "acquired"
@@ -269,7 +269,6 @@ class EnvironmentProvisioner:
         run_id: str,
         seed: int,
         deadline: Optional[float] = None,
-        policies: Sequence[PolicySpec] = (),
     ) -> EnvironmentLease:
         """Acquire every declaration, or unwind completely before raising."""
 
@@ -280,12 +279,7 @@ class EnvironmentProvisioner:
         acquired: dict[EnvironmentDependency, EnvironmentResult] = {}
         rollback_failures: list[tuple[str, str, BaseException]] = []
         try:
-            ordered = stable_environment_order(
-                artifacts,
-                resources,
-                registry=self.registry,
-                policies=policies,
-            )
+            ordered = stable_environment_order(artifacts, resources, registry=self.registry)
 
             def check(
                 spec: EnvironmentSpec,

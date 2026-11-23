@@ -1,8 +1,7 @@
 """Experiments and execution plans: the models the compiler builds and the runner executes.
 
 What an experiment tests lives entirely in registered components and
-providers; nothing here knows an individual experiment, evidence ID, or policy
-type.
+providers; nothing here knows an individual experiment or evidence ID.
 """
 
 import random
@@ -13,7 +12,7 @@ from functools import partial
 from typing import Any, Optional
 
 from ._data import canonical_json, derived_int, freeze_mapping, to_plain_data
-from .environment import EnvironmentSpec, PolicySpec
+from .environment import EnvironmentSpec
 from .fields import (
     as_tuple,
     model_from_data,
@@ -359,7 +358,6 @@ class ExecutionPlan:
     inputs: Mapping[str, Any] = field(default_factory=dict)
     artifacts: tuple[EnvironmentSpec, ...] = ()
     resources: tuple[EnvironmentSpec, ...] = ()
-    policies: tuple[PolicySpec, ...] = ()
     startup_overlays: tuple[StartupOverlay, ...] = ()
     required_events: tuple[str, ...] = ()
     required_evidence: tuple[EvidenceRequirement, ...] = ()
@@ -393,17 +391,13 @@ class ExecutionPlan:
         if self.mode is RunMode.EXPERIMENT and not self.required_evidence:
             raise ValueError("experiment mode requires at least one required_evidence requirement")
         object.__setattr__(self, "inputs", freeze_mapping(self.inputs, "inputs", references=True))
-        for name, spec_type, id_field in (
-            ("artifacts", EnvironmentSpec, "id"),
-            ("resources", EnvironmentSpec, "id"),
-            ("policies", PolicySpec, "policy_id"),
-        ):
+        for name in ("artifacts", "resources"):
             specs = as_tuple(getattr(self, name), name)
             for spec in specs:
-                require_type(spec, spec_type, f"{name} entry")
-                if spec_type is EnvironmentSpec and spec.kind is not EnvironmentKind(name):
+                require_type(spec, EnvironmentSpec, f"{name} entry")
+                if spec.kind is not EnvironmentKind(name):
                     raise ValueError(f"{name} entry {spec.id!r} is a {spec.kind.value} declaration")
-            unique_tuple([getattr(spec, id_field) for spec in specs], f"{name} {id_field}")
+            unique_tuple([spec.id for spec in specs], f"{name} id")
             object.__setattr__(self, name, specs)
         if not isinstance(self.deployment, Mapping):
             raise TypeError("deployment must be a mapping")
@@ -431,7 +425,6 @@ class ExecutionPlan:
         deployment: Optional[Mapping[str, Any]] = None,
         artifacts: Sequence[EnvironmentSpec] = (),
         resources: Sequence[EnvironmentSpec] = (),
-        policies: Sequence[PolicySpec] = (),
     ) -> "ExecutionPlan":
         require_type(spec, ExperimentSpec, "spec")
         return cls(
@@ -445,7 +438,6 @@ class ExecutionPlan:
             inputs={} if inputs is None else inputs,
             artifacts=tuple(artifacts),
             resources=tuple(resources),
-            policies=tuple(policies),
             startup_overlays=spec.startup_overlays,
             required_events=spec.required_events,
             required_evidence=spec.required_evidence,
@@ -494,15 +486,18 @@ class ExecutionPlan:
     def from_data(cls, value: Mapping[str, Any]) -> "ExecutionPlan":
         """Rebuild a validated plan from its canonical data form."""
 
+        data = references_from_data(value)
+        if isinstance(data, Mapping):
+            # Plans recorded before the ``policies`` scenario section was removed carry ``"policies": []``.
+            data.pop("policies", None)
         return model_from_data(
             cls,
-            references_from_data(value),
+            data,
             "execution plan",
             components=partial(models_from_data, ComponentSpec, location="components"),
             deployment_provider=partial(model_from_data, DeploymentProviderIdentity, location="deployment_provider"),
             artifacts=partial(models_from_data, EnvironmentSpec, location="artifacts"),
             resources=partial(models_from_data, EnvironmentSpec, location="resources"),
-            policies=partial(models_from_data, PolicySpec, location="policies"),
             startup_overlays=partial(
                 models_from_data, StartupOverlay, location="startup_overlays", selector=InstanceSelector.parse
             ),

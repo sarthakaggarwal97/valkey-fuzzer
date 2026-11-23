@@ -27,7 +27,6 @@ from valkey_fuzzer.environment import (
     EnvironmentProvisioner,
     EnvironmentResult,
     EnvironmentSpec,
-    PolicySpec,
     ProviderError,
     SupportDecision,
     resolve_environment_references,
@@ -56,7 +55,7 @@ RESOURCE = "tests.resource.fake"
 ARTIFACTS, RESOURCES = EnvironmentKind.ARTIFACT, EnvironmentKind.RESOURCE
 
 
-def _order(artifacts=(), resources=(), policies=(), *, check=None):
+def _order(artifacts=(), resources=(), *, check=None):
     registry = EnvironmentProviderRegistry()
     registry.register_many(
         (
@@ -64,7 +63,7 @@ def _order(artifacts=(), resources=(), policies=(), *, check=None):
             EnvironmentProviderRegistration(RESOURCES, RESOURCE, object, outputs=("endpoint",)),
         )
     )
-    return stable_environment_order(artifacts, resources, policies=policies, registry=registry)
+    return stable_environment_order(artifacts, resources, registry=registry)
 
 
 def _provisioner(tmp_path, *behaviors):
@@ -104,7 +103,6 @@ def _cancel(spec, config):
     [
         (lambda: _artifact("has.dot"), ValueError, "id must start"),
         (lambda: _resource("store", "unqualified"), ValueError, "namespaced"),
-        (lambda: PolicySpec("p", "tests.policy", config={"bad": object()}), TypeError, "JSON/YAML-safe"),
         (lambda: _resource("s", RESOURCE, depends_on=("resources.s",)), ValueError, "depend on itself"),
         (lambda: _artifact(config={"b": {REFERENCE_DATA_KEY: "artifacts.c.path"}}), EnvironmentReferenceError,
          "reserved"),
@@ -125,8 +123,6 @@ def _cancel(spec, config):
         (lambda: _order((_artifact(config={"e": ref("resources.s.endpoint")}),),
                         (_resource("s", RESOURCE, config={"b": ref("artifacts.c.path")}),)),
          DependencyCycleError, r"artifacts\.c.*resources\.s.*artifacts\.c"),
-        (lambda: _order((), (), (PolicySpec("p", "tests.p", config={"e": ref("resources.missing.endpoint")}),)),
-         EnvironmentReferenceError, r"policies\.p references unknown environment target"),
         (lambda: _order((_artifact("c", "missing.artifact.fake"),)), UnknownRegistrationError, "missing"),
         # Providers are registered per kind: a resource provider cannot back an artifact.
         (lambda: _order((_artifact("c", RESOURCE),)), UnknownRegistrationError,
