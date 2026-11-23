@@ -10,12 +10,6 @@ from valkey_fuzzer.deployment.local.cluster_nodes import parse_cluster_nodes, pa
 from valkey_fuzzer.deployment.local.queries import parse_info_text
 
 
-def parse_slots(tokens: Sequence[str]) -> list[list[int]]:
-    """``["0-5460", "5462"]`` -> ``[[0, 5460], [5462, 5462]]``; migration markers are skipped."""
-
-    return [list(item) for item in parse_slot_ranges(list(tokens))]
-
-
 def ranges_overlap(left: Sequence[Sequence[int]], right: Sequence[Sequence[int]]) -> bool:
     return any(a <= d and c <= b for a, b in left for c, d in right)
 
@@ -43,13 +37,13 @@ def parse_cluster_view(info_reply: Any, nodes_reply: Any) -> dict[str, Any]:
         "config_epoch": _epoch(myself),
         "role": "primary" if myself["is_primary"] else "replica",
         "primary_id": myself["primary_id"],
-        "slots": parse_slots(myself["slots"]),
+        "slots": parse_slot_ranges(myself["slots"]),
         "state": info.get("cluster_state"),
         "primaries": [
             {
                 "node_id": node["node_id"],
                 "config_epoch": _epoch(node),
-                "slots": parse_slots(node["slots"]),
+                "slots": parse_slot_ranges(node["slots"]),
                 "flags": node["flags"].split(","),
             }
             for node in nodes
