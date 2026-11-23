@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests.valkey_experiments_support import valkey_service
+from valkey_fuzzer import hoststate
 from valkey_fuzzer.components import experiments, providers
 from valkey_fuzzer.components.providers import ENVIRONMENT_PROVIDERS, LocalBinaryProvider
 from valkey_fuzzer.deployment.local.models import LocalDeploymentError
@@ -102,7 +103,7 @@ def test_mounted_tmpfs_bytes_reads_only_a_tmpfs_a_write_would_reach(tmp_path, mo
     mount_point.mkdir()
     escaped = os.path.realpath(mount_point).replace(" ", "\\040")
     mounts = tmp_path / "mounts"
-    monkeypatch.setattr(providers, "_PROC_MOUNTS", str(mounts))
+    monkeypatch.setattr(hoststate, "_PROC_MOUNTS", str(mounts))
     mounts.write_text(f"/dev/sda1 / ext4 rw 0 0\ntmpfs {escaped} tmpfs rw,size=2048k 0 0\n")
     stats = os.statvfs(mount_point)
     assert providers.mounted_tmpfs_bytes(str(mount_point)) == stats.f_blocks * stats.f_frsize
