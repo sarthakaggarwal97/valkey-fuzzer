@@ -1,4 +1,4 @@
-"""Environment declarations acquired before the deployment: artifacts, resources, and policies.
+"""Environment declarations acquired before the deployment: artifacts and resources.
 
 An artifact (a binary, module, dataset) or a resource (a filesystem, store,
 proxy) is acquired by a registered provider before the deployment
@@ -45,23 +45,6 @@ class EnvironmentSpec:
     @property
     def dependency(self) -> EnvironmentDependency:
         return EnvironmentDependency(self.kind, self.id)
-
-    def to_data(self) -> Mapping[str, Any]:
-        return to_plain_data(self)
-
-
-@dataclass(frozen=True)
-class PolicySpec:
-    """Opaque policy intent carried to providers and verdict components."""
-
-    policy_id: str
-    policy_type: str
-    config: Mapping[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        require_segment(self.policy_id, "policy_id")
-        require_qualified_id(self.policy_type, "policy_type")
-        object.__setattr__(self, "config", freeze_mapping(self.config, "policy config", references=True))
 
     def to_data(self) -> Mapping[str, Any]:
         return to_plain_data(self)

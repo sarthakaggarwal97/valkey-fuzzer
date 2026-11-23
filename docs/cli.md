@@ -293,7 +293,7 @@ sources:
 | Source | Flag | Jobs |
 | --- | --- | --- |
 | `random` | `--random EXPERIMENT` (repeatable, or `all`), `--seeds N`, `--first-seed N`, `--exclude PATH=VALUE`, `--base FILE` | `random-<experiment>-s<seed>`: seeds `first_seed` to `first_seed + seeds - 1` of each experiment, drawn under the batch's profile exactly as `run --seed N --experiment ID --profile P` draws them. `all` is every experiment that declares `metadata.generator`, less those an `experiment=` exclusion names. |
-| `matrix` | (spec only) | `matrix-<base scenario_id>-<combination>-<n>`: every combination of the dotted-path `dimensions` (paths start with `experiment`, `deployment`, `artifacts`, `resources`, or `policies`; under `experiment` only `experiment.inputs` and the paths below it; a `null` value removes a key), `seeds_per_case` times, each with a seed drawn from `seed`. A combination that does not compile is listed under `invalid` and not run, and counts as `ERROR` in the batch's status (exit `2`): a misspelt value never skips. |
+| `matrix` | (spec only) | `matrix-<base scenario_id>-<combination>-<n>`: every combination of the dotted-path `dimensions` (paths start with `experiment`, `deployment`, `artifacts`, or `resources`; under `experiment` only `experiment.inputs` and the paths below it; a `null` value removes a key), `seeds_per_case` times, each with a seed drawn from `seed`. A combination that does not compile is listed under `invalid` and not run, and counts as `ERROR` in the batch's status (exit `2`): a misspelt value never skips. |
 | `scenarios` | `--scenarios PATH` (repeatable) | `scenario-<file stem>`: each file, or each `*.yaml` and `*.yml` file of a directory, run as written. |
 | `zoo` | `--zoo BUILDS`, `--zoo-case ID` (repeatable) | `zoo-<case>-<file stem>-control`, and `-<n>` for the broken runs, numbered from 0 across the case: each [bug zoo](bug-zoo.md) case's clean control and broken runs, on the builds `zoo/build.sh` made in `BUILDS`. `directory` defaults to the repository's `zoo/`, which only a checkout has (an installed package does not ship it). Each build must name the pinned commit, or nothing runs. |
 | `failures` | `--failures BATCH` | `rerun-<job id>`: the jobs of an earlier batch whose result had one of `statuses` (default `FAIL` and `ERROR`), at most `per_signature` of each failure signature (default all), each as it ran: the same scenario, and for a random job the scenario its seed drew (its run's `scenario.yaml`), so a re-run after a code change runs what failed. A random job that never drew a scenario draws again. Zoo runs are left out. |
@@ -903,6 +903,6 @@ A coverage tuple holds:
 | `deployment_mix` | a digest of the deployment document but for its provider's host fields (the local deployment's `base_port`, `base_data_dir`, `instance_data_roots`, `loopback_block`, `enable_cleanup`), so another binary is another combination and other ports are not |
 | `inputs` | the resolved inputs |
 | `artifact_mix` | a digest of the artifact declarations with their config |
-| `resources`, `policies` | resource provider IDs and policy types |
+| `resources` | resource provider IDs |
 | `workloads`, `actions`, `faults`, `observers`, `oracles` | the component registration IDs of each role |
-| `resource_mix`, `policy_mix` | digests of the resource and policy config |
+| `resource_mix` | a digest of the resource config |

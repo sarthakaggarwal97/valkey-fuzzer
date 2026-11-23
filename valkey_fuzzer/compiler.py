@@ -21,7 +21,6 @@ from .documents import ABSENT, get_path, merge
 from .environment import (
     EnvironmentProviderRegistry,
     EnvironmentSpec,
-    PolicySpec,
     check_references,
     stable_environment_order,
 )
@@ -365,7 +364,7 @@ def validate_plan_environment(plan: ExecutionPlan, catalog: Catalog) -> None:
     """Validate the plan's declarations and every reference that consumes them."""
 
     registry = catalog.environment_providers
-    ordered = stable_environment_order(plan.artifacts, plan.resources, registry=registry, policies=plan.policies)
+    ordered = stable_environment_order(plan.artifacts, plan.resources, registry=registry)
     declarations = {spec.dependency: spec for spec in ordered}
     consumers = [("experiment.inputs", plan.inputs), ("deployment", plan.deployment)]
     consumers += [(f"components.{item.id}.config", item.config) for item in plan.components]
@@ -524,7 +523,7 @@ class ScenarioCompiler:
         envelope = strict_fields(
             value,
             "scenario",
-            allowed=("scenario_id", "seed", "experiment", "deployment", "artifacts", "resources", "policies"),
+            allowed=("scenario_id", "seed", "experiment", "deployment", "artifacts", "resources"),
             required=("scenario_id", "seed", "experiment", "deployment"),
             error=ExperimentDocumentError,
         )
@@ -600,7 +599,6 @@ class ScenarioCompiler:
                 deployment=document,
                 artifacts=declarations(EnvironmentKind.ARTIFACT),
                 resources=declarations(EnvironmentKind.RESOURCE),
-                policies=section("policies", PolicySpec, ("policy_id", "policy_type"), ("with",)),
             )
         except ExperimentError:
             raise

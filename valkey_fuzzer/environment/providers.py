@@ -22,7 +22,7 @@ from ..references import (
 )
 from ..registry import BaseRegistry, UnknownRegistrationError
 from ..schema import ConfigSchema, plain_config
-from .specs import EnvironmentSpec, PolicySpec, SupportDecision
+from .specs import EnvironmentSpec, SupportDecision
 
 
 class ProviderError(RuntimeError):
@@ -237,7 +237,6 @@ def stable_environment_order(
     resources: Sequence[EnvironmentSpec],
     *,
     registry: EnvironmentProviderRegistry,
-    policies: Sequence[PolicySpec] = (),
 ) -> tuple[EnvironmentSpec, ...]:
     """Validate the declarations against their providers and return them in dependency order.
 
@@ -245,7 +244,7 @@ def stable_environment_order(
     name declared outputs, and explicit ``depends_on`` plus references must form
     an acyclic graph. Among ready declarations, declaration order (artifacts,
     then resources) is preserved. The plan already holds well-typed, unique
-    declarations and policy IDs.
+    declarations.
     """
 
     specs: tuple[EnvironmentSpec, ...] = (*artifacts, *resources)
@@ -263,7 +262,5 @@ def stable_environment_order(
                     f"{spec.dependency.path} references unknown environment target {target.path!r}"
                 )
         edges[spec.dependency] = tuple(dict.fromkeys(targets))
-    for policy in policies:
-        check_references(f"policies.{policy.policy_id}", policy.config, declarations, registry)
 
     return tuple(declarations[node] for node in stable_order(tuple(declarations), edges, "environment"))

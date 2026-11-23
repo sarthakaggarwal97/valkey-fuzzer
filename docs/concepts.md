@@ -18,7 +18,7 @@ in [Base contracts](contracts.md), and the file formats in
 
 1. A **scenario** (a YAML file) names an **experiment** and its inputs, a
    **deployment**, and a seed. It can also declare **artifacts** (such as
-   binaries), **resources** (such as a tmpfs mount), and **policies**.
+   binaries) and **resources** (such as a tmpfs mount).
 2. The compiler checks the scenario against the installed experiment,
    component registrations, and providers, fills in every default (each
    instance's server config included, as its deployment provider will start
@@ -207,7 +207,6 @@ prints it.
 | observer | A component that records evidence (INFO samples, log lines) for the whole run; it never judges the server. |
 | oracle | A component that evaluates an invariant after the run, from evidence and the live deployment. |
 | outcome | The result of one run: its status (`PASS`, `FAIL`, `ERROR`, `SKIP_UNSUPPORTED`), every component result, evidence, and diagnostics. |
-| policy | An opaque declaration in a scenario that the core passes to components without interpreting it. |
 | provider | Code that acquires an artifact or resource, or provisions a deployment. |
 | replay | Running a recorded execution plan again, after checking the recorded provenance against what is installed. |
 | report folder | The folder a run writes `plan.json` and `report.json` into. |

@@ -21,7 +21,6 @@ def plan_has_references(plan: "ExecutionPlan") -> bool:
         plan.deployment,
         plan.instances,
         *(component.config for component in plan.components),
-        *(policy.config for policy in plan.policies),
         *(overlay.server_config for overlay in plan.startup_overlays),
     )
 
@@ -41,7 +40,6 @@ def resolve_plan(plan: "ExecutionPlan", lease: EnvironmentLease) -> "ExecutionPl
         deployment=lease.resolve(plan.deployment),
         instances=lease.resolve(plan.instances),
         components=tuple(replace(item, config=lease.resolve(item.config)) for item in plan.components),
-        policies=tuple(replace(item, config=lease.resolve(item.config)) for item in plan.policies),
         startup_overlays=tuple(
             replace(item, server_config=lease.resolve(item.server_config)) for item in plan.startup_overlays
         ),

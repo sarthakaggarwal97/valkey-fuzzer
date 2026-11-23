@@ -991,7 +991,6 @@ class _Execution:
                 run_id=uuid.uuid4().hex,
                 seed=plan.seed,
                 deadline=self.context.run_deadline,
-                policies=plan.policies,
             )
         except Exception as exc:
             report = getattr(exc, "environment_report", None)

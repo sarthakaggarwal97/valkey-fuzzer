@@ -10,7 +10,7 @@ experiments. The components that experiments use are in
 
 - [Scenarios](#scenarios)
 - [Input references](#input-references)
-- [Artifacts, resources, and policies](#artifacts-resources-and-policies)
+- [Artifacts and resources](#artifacts-and-resources)
 - [The local deployment](#the-local-deployment)
 - [Experiments](#experiments)
 - [Fragments](#fragments)
@@ -49,7 +49,7 @@ deployment:
 | `seed` | yes | Integer, 0 to 2**64-1. Seeds every component's random streams and names the instance log files. |
 | `experiment` | yes | `id` and optional `inputs`. |
 | `deployment` | yes | `mode`, optional `provider`, and the provider's own fields. |
-| `artifacts`, `resources`, `policies` | no | See [Artifacts, resources, and policies](#artifacts-resources-and-policies). |
+| `artifacts`, `resources` | no | See [Artifacts and resources](#artifacts-and-resources). |
 
 `experiment.id` names one installed experiment. `experiment.inputs` is
 checked against the experiment's [inputs schema](#inputs), and every input
@@ -72,14 +72,14 @@ appear in:
 
 - an experiment's component `config`, startup overlay `server_config`, and
   `metadata`;
-- a scenario's `deployment`, `artifacts`, `resources`, and `policies`.
+- a scenario's `deployment`, `artifacts`, and `resources`.
 
 A reference must be the whole value: `{$ref: ...}` with no sibling keys. A
 scenario's `experiment.inputs` may reference only artifact and resource
 outputs. To pass a mapping that looks like a reference through unchanged,
 wrap it: `{$valkey_fuzzer_literal: {$ref: "#/components/schemas/Request"}}`.
 
-## Artifacts, resources, and policies
+## Artifacts and resources
 
 Artifacts (such as binaries) and resources (such as filesystems) are acquired
 by registered providers before the deployment starts and released in reverse
@@ -115,10 +115,6 @@ runner executes a copy of the plan with each reference replaced by the
 acquired value. A provider that declines the host (for example
 `valkey.resource.tmpfs` on macOS) makes the run `SKIP_UNSUPPORTED` before
 anything starts.
-
-Policies have `use` (a policy type) and optional `with`. The core passes them
-to components without interpreting them; no Valkey component reads one
-today.
 
 The Valkey providers are listed under [Providers](components/providers.md).
 
