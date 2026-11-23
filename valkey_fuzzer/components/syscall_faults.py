@@ -38,8 +38,8 @@ from .schemas import NUMBER, TEXT, nullable, optional
 
 CALLS = ("write", "fsync", "fdatasync", "rename")
 ACTIONS = ("kill", "delay", "fail")
-# How often the fault looks for its rule's action.
-_POLL_S = 0.002
+# How often the fault looks for its action; the library reloads every 1 ms, and applied_at comes from its JSON line.
+_POLL_S = 0.01
 
 _FIELDS = {
     "instance": ConfigField(str, default="primary"),
