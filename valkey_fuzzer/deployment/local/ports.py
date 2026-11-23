@@ -5,13 +5,12 @@ import fcntl
 import os
 import socket
 import subprocess
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from typing import Any, NamedTuple, Optional
 
 from ...hoststate import open_shared_lock, shared_directory
-from .config import MAX_TCP_PORT, deployment_config_from_document
-from .models import CLUSTER_BUS_PORT_OFFSET, DeploymentMode
-from .planner import plan_deployment
+from .config import MAX_TCP_PORT
+from .models import CLUSTER_BUS_PORT_OFFSET
 
 # Host-wide, whatever TMPDIR a batch worker has: every run on this host locks the same files. It sits beside, not
 # inside, the default data directory: a root run creating that directory would leave it unwritable for other users.
@@ -176,15 +175,3 @@ def ensure_ports_free(instances: Iterable[Any], *, cluster: bool, action: str) -
             f"Cannot {action}, planned ports are in use: {'; '.join(map(str, busy))}. "
             "Stop the processes using them or choose a different base_port."
         )
-
-
-def busy_planned_ports(deployment: Mapping[str, Any]) -> list[BusyPort]:
-    """The ports that local ``deployment`` (a deployment document) plans and that are already in use.
-
-    The deployment is planned exactly as provisioning plans it, without starting
-    anything. An empty list means every planned port is free right now. Raises
-    ValueError or TypeError when the document is not a valid local deployment.
-    """
-    config = deployment_config_from_document(deployment)
-    plans = plan_deployment(config)
-    return busy_instance_ports(plans, cluster=config.mode is DeploymentMode.CLUSTER)

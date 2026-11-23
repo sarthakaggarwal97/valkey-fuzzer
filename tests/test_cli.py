@@ -219,7 +219,7 @@ def test_a_generated_scenario_moves_off_busy_ports_but_a_batch_workers_never_doe
         monkeypatch.setattr(local_config, "deployment_config_from_document", moved)
     service = valkey_service()
     busy = lambda deployment: [str(default)] if deployment.get("base_port", default) == default else []  # noqa: E731
-    monkeypatch.setattr("valkey_fuzzer.deployment.local.ports.busy_planned_ports", busy)
+    monkeypatch.setattr("valkey_fuzzer.deployment.local.rerun.busy_planned_ports", busy)
     if ephemeral:
         monkeypatch.setattr("valkey_fuzzer.deployment.local.ports.ephemeral_port_range", lambda: ephemeral)
     prepared = service.prepare_random(seed=1, experiment="valkey.aof-durability")

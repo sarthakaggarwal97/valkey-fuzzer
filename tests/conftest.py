@@ -105,7 +105,7 @@ def canned_runs(monkeypatch, catalog) -> CannedRuns:
     monkeypatch.setattr("valkey_fuzzer.runner.Runner.run", runs)
     monkeypatch.setattr("valkey_fuzzer.service.build_catalog", lambda **options: catalog)
     # Canned runs start no servers, so a generated scenario keeps its ports whatever this host is using.
-    monkeypatch.setattr("valkey_fuzzer.deployment.local.ports.busy_planned_ports", lambda deployment: [])
+    monkeypatch.setattr("valkey_fuzzer.deployment.local.rerun.busy_planned_ports", lambda deployment: [])
     return runs
 
 

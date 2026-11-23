@@ -38,7 +38,7 @@ import uuid
 from collections.abc import Mapping
 from typing import Any, Optional
 
-from valkey.cluster import key_slot
+from valkey.crc import key_slot
 
 from valkey_fuzzer.clock import now
 from valkey_fuzzer.deployment.local.queries import close_quietly

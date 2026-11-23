@@ -18,6 +18,11 @@ DEFAULT_BASE_PORT = 7000
 # Each instance's cluster bus port is this far above its client port.
 CLUSTER_BUS_PORT_OFFSET = 10000
 DEFAULT_BASE_DATA_DIR = "/tmp/valkey-fuzzer"
+# The Valkey a deployment without a configured binary runs when PATH has none: the release, and the commit it is
+# pinned to, which is what :func:`.processes.fetch_valkey` fetches and builds (a moved tag changes nothing), into
+# the cache. Here, not in :mod:`.processes`, so the ``fetch-valkey`` command's help names them without the client.
+VALKEY_SOURCE_REF = "9.1.3"
+VALKEY_SOURCE_SHA = "29173b67508b2de4c0f0ed551f3b47cf19fc3ca8"
 
 
 class DeploymentMode(str, Enum):

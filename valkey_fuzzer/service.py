@@ -63,7 +63,6 @@ from .reports import (
 from .results import OutcomeStatus, RunOutcome
 from .runner import PreflightError, Runner
 from .schema import plain_config
-from .spec.conform import conform_run, judge_run
 
 # The deadline of a run that names none and has no search-profile budget (seconds).
 DEFAULT_TIMEOUT_S = 1200.0
@@ -566,6 +565,8 @@ class RunService:
         if conform:
             results = self.conform(report_dir, outcome)
             if results:
+                from .spec.conform import judge_run
+
                 outcome = judge_run(outcome, results)
                 report = self.run_report(
                     outcome,
@@ -585,6 +586,9 @@ class RunService:
 
         if not any((component.config or {}).get("spec") for component in outcome.plan.components):
             return {}
+        # Imported here, so importing the service (and the CLI) never loads the spec bridge; a run names a bundle.
+        from .spec.conform import conform_run
+
         return conform_run(report_dir, self._conform_tlc_timeout_s)
 
     def run_report(

@@ -18,7 +18,7 @@ from ...minimize import smaller
 from ...plan import ExecutionPlan
 from . import config, ports
 from .models import DeploymentMode
-from .planner import instance_value
+from .planner import instance_value, plan_deployment
 from .processes import installed_valkey_binary, resolve_binary_path
 
 # How many other base ports a generated scenario may move to when its planned ports are taken.
@@ -31,6 +31,18 @@ def binary_override(path: str) -> dict[str, Any]:
     """The deployment fields that run the Valkey binary ``path`` on every instance without its own."""
 
     return {"valkey_binary": path}
+
+
+def busy_planned_ports(deployment: Mapping[str, Any]) -> list[ports.BusyPort]:
+    """The ports that local ``deployment`` (a deployment document) plans and that are already in use.
+
+    The deployment is planned exactly as provisioning plans it, without starting
+    anything. An empty list means every planned port is free right now. Raises
+    ValueError or TypeError when the document is not a valid local deployment.
+    """
+    resolved = config.deployment_config_from_document(deployment)
+    plans = plan_deployment(resolved)
+    return ports.busy_instance_ports(plans, cluster=resolved.mode is DeploymentMode.CLUSTER)
 
 
 def relocate_ports(plan: ExecutionPlan) -> tuple[dict[str, Any], Optional[str]]:
@@ -47,7 +59,7 @@ def relocate_ports(plan: ExecutionPlan) -> tuple[dict[str, Any], Optional[str]]:
     document = to_plain_data(plan.deployment)
     try:
         resolved = config.deployment_config_from_document(document)
-        busy = ports.busy_planned_ports(document)
+        busy = busy_planned_ports(document)
     except (TypeError, ValueError):
         return {}, None
     original, count = resolved.base_port, len(plan.instances)
@@ -62,7 +74,7 @@ def relocate_ports(plan: ExecutionPlan) -> tuple[dict[str, Any], Optional[str]]:
     # Free blocks above the original first, then below it, never past ``highest``.
     bases = [*range(original + count, highest + 1, count), *range(min(original - count, highest), 1023, -count)]
     for base in bases[:_BASE_PORT_TRIES]:
-        if not ports.busy_planned_ports({**document, "base_port": base}):
+        if not busy_planned_ports({**document, "base_port": base}):
             return {"base_port": base}, (
                 f"seed {plan.seed} plans base_port {original}, but {problem}; "
                 f"using base_port {base}, which the scenario records"

@@ -11,7 +11,6 @@ from ..capacity import usable_cores
 from ..generator import Exclusion, GeneratorError
 from ..reports import InputError
 from ..service import RunService
-from ..spec.conform import describe
 
 # ---------------------------------------------------------------------------
 # Common options and the service
@@ -188,5 +187,10 @@ def print_conform(report: Mapping[str, Any]) -> None:
     names none."""
 
     results = report.get("conform") or {}
+    if not results:
+        return
+    # Imported here, so a command that ran nothing (`list`, `validate`, `--help`) never loads the spec bridge.
+    from ..spec.conform import describe
+
     for name, entry in sorted(results.items()):
         print(f"Spec conform {describe(name, entry)}")

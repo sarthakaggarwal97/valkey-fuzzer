@@ -129,7 +129,7 @@ def register_service(tmp_path, monkeypatch, bundle: Path, *, lost) -> RunService
 
     monkeypatch.setattr(Runner, "run", run)
     # Canned runs start no servers, so the scenario keeps its port whatever this host is using.
-    monkeypatch.setattr("valkey_fuzzer.deployment.local.ports.busy_planned_ports", lambda deployment: [])
+    monkeypatch.setattr("valkey_fuzzer.deployment.local.rerun.busy_planned_ports", lambda deployment: [])
     return RunService(experiment_directories=[str(bundle / "experiments")], artifact_dir=str(tmp_path / "reports"))
 
 

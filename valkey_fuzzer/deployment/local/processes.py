@@ -37,6 +37,7 @@ from . import clock_faults, syscall_faults
 from .cluster_nodes import parse_cluster_nodes
 from .models import (
     DEFAULT_BASE_DATA_DIR,
+    VALKEY_SOURCE_SHA,
     DeploymentConfig,
     DeploymentMode,
     InstanceInfo,
@@ -54,11 +55,8 @@ logger = logging.getLogger(__name__)
 READY_TIMEOUT_S = 60.0
 # How long a source build (fetch and make) may take, at most.
 BUILD_TIMEOUT_S = 1800.0
-# The Valkey a deployment without a configured binary runs when PATH has none: the release, and the commit it is
-# pinned to, which is what :func:`fetch_valkey` fetches and builds (a moved tag changes nothing), into the cache.
+# Where :func:`fetch_valkey` fetches a ref from; the pinned release and commit are ``models.VALKEY_SOURCE_*``.
 VALKEY_REPOSITORY = "https://github.com/valkey-io/valkey.git"
-VALKEY_SOURCE_REF = "9.1.3"
-VALKEY_SOURCE_SHA = "29173b67508b2de4c0f0ed551f3b47cf19fc3ca8"
 
 # A full commit hash: fetched as it is; anything else is a tag or branch to resolve first.
 _COMMIT_RE = re.compile(r"[0-9a-f]{40}")
