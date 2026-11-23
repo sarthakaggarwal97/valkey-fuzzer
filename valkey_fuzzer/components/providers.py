@@ -38,7 +38,14 @@ from typing import Any, Optional
 from valkey_fuzzer._data import file_sha256
 from valkey_fuzzer.deployment.local.processes import parse_version_output, resolve_binary_path, version_output
 from valkey_fuzzer.environment import EnvironmentProviderRegistration, EnvironmentResult, SupportDecision
-from valkey_fuzzer.hoststate import mount_parent, release_mount_parent, run_bounded, tag_directory, untag_directory
+from valkey_fuzzer.hoststate import (
+    list_mounts,
+    mount_parent,
+    release_mount_parent,
+    run_bounded,
+    tag_directory,
+    untag_directory,
+)
 from valkey_fuzzer.references import EnvironmentKind
 from valkey_fuzzer.schema import ConfigError, ConfigField, ConfigSchema
 
@@ -194,7 +201,6 @@ def tmpfs_supported() -> tuple[bool, str]:
 # The valkey.resource.tmpfs mounts this process holds, as real path -> size in bytes.
 _TMPFS_MOUNTS: dict[str, int] = {}
 _TMPFS_MOUNTS_LOCK = threading.Lock()
-_PROC_MOUNTS = "/proc/mounts"
 MOUNT_TIMEOUT_S = 60.0
 # Pauses before each retry of a busy unmount (an instance may still be closing its files).
 _UMOUNT_RETRY_DELAYS_S = (0.5, 2.0)
@@ -207,23 +213,12 @@ def provisioned_tmpfs_bytes(path: str) -> Optional[int]:
         return _TMPFS_MOUNTS.get(os.path.realpath(path))
 
 
-def _mount_point(field: str) -> str:
-    """A /proc/mounts path field with its octal escapes (``\\040`` for a space) decoded."""
-
-    return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), field)
-
-
 def mounted_tmpfs_bytes(path: str) -> Optional[int]:
     """The size of the tmpfs mounted at ``path`` now, or None if ``path`` is not a tmpfs mount point."""
 
     target = os.path.realpath(path)
-    try:
-        with open(_PROC_MOUNTS, encoding="utf-8") as handle:
-            entries = [line.split() for line in handle]
-    except OSError:
-        return None
     # The last mount on a path is the visible one.
-    types = [fields[2] for fields in entries if len(fields) > 2 and _mount_point(fields[1]) == target]
+    types = [kind for mount_point, kind in list_mounts() if mount_point == target]
     if not types or types[-1] != "tmpfs":
         return None
     stats = os.statvfs(target)

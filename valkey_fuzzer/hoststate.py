@@ -78,6 +78,7 @@ CGROUP_PREFIX = "vf-"
 NETEM_PREFIX = "vf"
 NETEM_SUFFIXES = "0123456789abcdefghijklmnopqrstuvwxyz"
 MOUNT_ROOT_NAME = "valkey-fuzzer-mounts"
+_PROC_MOUNTS = "/proc/mounts"
 # Sticky and world-writable, like /tmp: see shared_directory.
 SHARED_MODE = 0o1777
 COMMAND_TIMEOUT_S = 30.0
@@ -871,7 +872,7 @@ def list_mounts() -> list[tuple[str, str]]:
     """``(mount point, filesystem type)`` of every mount; empty where ``/proc/mounts`` does not exist."""
 
     try:
-        with open("/proc/mounts", encoding="utf-8") as handle:
+        with open(_PROC_MOUNTS, encoding="utf-8") as handle:
             lines = handle.read().splitlines()
     except OSError:
         return []
