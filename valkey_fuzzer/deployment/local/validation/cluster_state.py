@@ -3,6 +3,7 @@
 import logging
 from collections.abc import Collection
 from itertools import chain
+from typing import Optional
 
 from ..cluster_nodes import (
     HASH_SLOTS,
@@ -195,8 +196,28 @@ def check_slot_coverage(
             "Found %s unassigned slots: %s", len(unassigned_slots), group_slots_into_ranges(unassigned_slots)
         )
 
-    success = True
-    error_message = None
+    def result(error_message: Optional[str] = None) -> SlotCoverageValidation:
+        """The result, logged: a failure with ``error_message`` (the first found wins), else a pass."""
+        success = error_message is None
+        if not success:
+            logger.error(error_message)
+        logger.log(
+            logging.INFO if success else logging.ERROR,
+            "Slot coverage validation %s: %s/%s slots assigned, %s unassigned, %s conflicts",
+            "passed" if success else "failed",
+            total_assigned,
+            HASH_SLOTS,
+            len(unassigned_slots),
+            len(conflicting_slots),
+        )
+        return SlotCoverageValidation(
+            success=success,
+            total_slots_assigned=total_assigned,
+            unassigned_slots=unassigned_slots,
+            conflicting_slots=conflicting_slots,
+            slot_distribution=slot_distribution,
+            error_message=error_message,
+        )
 
     # The slots of shards whose every member was stopped, including slots now unassigned that a view still
     # gives one of their nodes.
@@ -220,64 +241,36 @@ def check_slot_coverage(
     slots_on_stopped_nodes = [slot for node_id in stopped_node_ids for slot in slot_distribution.get(node_id, [])]
     unexpected_on_stopped = [slot for slot in slots_on_stopped_nodes if slot not in slots_on_stopped_shards]
     if unexpected_on_stopped:
-        success = False
-        error_message = (
+        return result(
             f"CRITICAL: {len(unexpected_on_stopped)} slots still assigned to stopped nodes. "
             f"Stopped nodes: {stopped}. "
             f"This indicates failover did not complete or slots were not reassigned. "
             f"Affected slots: {group_slots_into_ranges(unexpected_on_stopped)}"
         )
-        logger.error(error_message)
-    elif slots_on_stopped_nodes:
+    if slots_on_stopped_nodes:
         logger.info("%s slots on stopped nodes belong to fully stopped shards", len(slots_on_stopped_nodes))
 
-    if success:
-        unexpected_unassigned = [slot for slot in unassigned_slots if slot not in slots_on_stopped_shards]
-        if unexpected_unassigned:
-            success = False
-            error_message = (
-                f"{len(unexpected_unassigned)} slots are unassigned (expected all {HASH_SLOTS} slots to be assigned)"
+    unexpected_unassigned = [slot for slot in unassigned_slots if slot not in slots_on_stopped_shards]
+    if unexpected_unassigned:
+        return result(
+            f"{len(unexpected_unassigned)} slots are unassigned (expected all {HASH_SLOTS} slots to be assigned)"
+        )
+
+    # The union of the views can cover every slot while one node still misses some.
+    for node_address, view in sorted(views.items()):
+        covered = merge_slot_ranges(
+            slot_range for node in view if node["is_primary"] for slot_range in parse_slot_ranges(node["slots"])
+        )
+        node_missing = [slot for slot in _unassigned(covered) if slot not in slots_on_stopped_shards]
+        if node_missing:
+            return result(
+                f"Node {node_address} sees {len(node_missing)} unassigned slots "
+                f"(expected all {HASH_SLOTS} slots to be assigned): {group_slots_into_ranges(node_missing)}"
             )
-            logger.error(error_message)
 
-    if success:
-        # The union of the views can cover every slot while one node still misses some.
-        for node_address, view in sorted(views.items()):
-            covered = merge_slot_ranges(
-                slot_range for node in view if node["is_primary"] for slot_range in parse_slot_ranges(node["slots"])
-            )
-            node_missing = [slot for slot in _unassigned(covered) if slot not in slots_on_stopped_shards]
-            if node_missing:
-                success = False
-                error_message = (
-                    f"Node {node_address} sees {len(node_missing)} unassigned slots "
-                    f"(expected all {HASH_SLOTS} slots to be assigned): {group_slots_into_ranges(node_missing)}"
-                )
-                logger.error(error_message)
-                break
-
-    if success and conflicting_slots:
-        success = False
-        error_message = f"{len(conflicting_slots)} slots are served by two primaries at once"
-        logger.error(error_message)
-
-    logger.log(
-        logging.INFO if success else logging.ERROR,
-        "Slot coverage validation %s: %s/%s slots assigned, %s unassigned, %s conflicts",
-        "passed" if success else "failed",
-        total_assigned,
-        HASH_SLOTS,
-        len(unassigned_slots),
-        len(conflicting_slots),
-    )
-    return SlotCoverageValidation(
-        success=success,
-        total_slots_assigned=total_assigned,
-        unassigned_slots=unassigned_slots,
-        conflicting_slots=conflicting_slots,
-        slot_distribution=slot_distribution,
-        error_message=error_message,
-    )
+    if conflicting_slots:
+        return result(f"{len(conflicting_slots)} slots are served by two primaries at once")
+    return result()
 
 
 def _unassigned(covered: list[tuple[int, int]]) -> list[int]:
