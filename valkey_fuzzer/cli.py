@@ -36,7 +36,7 @@ def create_parser() -> argparse.ArgumentParser:
 
     parser = _Parser(
         prog="valkey-fuzzer",
-        description="Generic, experiment-driven fuzzing for standalone and cluster Valkey deployments",
+        description="Experiment-driven fuzzing for standalone and cluster Valkey deployments",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples (paths are relative to a checkout of the repository):

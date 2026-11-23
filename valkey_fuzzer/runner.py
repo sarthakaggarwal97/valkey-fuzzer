@@ -1,4 +1,4 @@
-"""The runner: a generic, deployment-neutral executor of compiled execution plans.
+"""The runner: the executor of compiled execution plans.
 
 Deployments and what an experiment tests enter only through provider and
 component registrations; the runner never dispatches on an individual experiment.
