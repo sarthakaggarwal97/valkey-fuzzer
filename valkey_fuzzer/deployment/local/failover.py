@@ -131,8 +131,7 @@ def failover_shard(
     stopped_ports = {node.port for node in connection.instances if node.instance_id in set(stopped_instances)}
     paused_ports = {node.port for node in connection.instances if node.instance_id in set(paused_instances)}
     # One view of the topology: after a previous failover the shard's primary may be a promoted replica.
-    skip = {"skip_ports": paused_ports} if paused_ports else {}
-    rows = connection.get_current_nodes(include_failed=True, **skip)
+    rows = connection.get_current_nodes(include_failed=True, skip_ports=paused_ports)
     if not rows:
         raise LocalDeploymentError(f"no cluster node answered CLUSTER NODES; shard {shard_id} was not failed over")
     # One node's PFAIL or lost link is no failure yet: a live primary only it suspects gets the command, and one
@@ -244,8 +243,7 @@ def _shard_settled(
     stopped_ports: Collection[int],
     paused_ports: Collection[int] = (),
 ) -> bool:
-    skip = {"skip_ports": paused_ports} if paused_ports else {}
-    live = connection.get_current_nodes(include_failed=False, **skip)
+    live = connection.get_current_nodes(include_failed=False, skip_ports=paused_ports)
     if not live:
         raise LocalDeploymentError("no cluster node answered CLUSTER NODES")
     members = [node for node in live if node.shard_id == shard_id and node.port not in stopped_ports]

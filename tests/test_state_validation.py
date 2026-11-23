@@ -900,7 +900,7 @@ def test_a_forced_failover_goes_only_to_a_replica_synced_with_the_shards_primary
         node_row("p", 12923, shard_id=1),
         *(node_row(f"r{port}", port, "replica", 1, primary_id="p") for port in infos),
     ]
-    connection = SimpleNamespace(get_current_nodes=lambda include_failed=True: nodes, instances=[])
+    connection = SimpleNamespace(get_current_nodes=lambda include_failed=True, skip_ports=(): nodes, instances=[])
     sent = []
 
     def connect(host, port, **kwargs):
@@ -968,7 +968,9 @@ def test_a_failover_that_cannot_be_observed_raises_instead_of_reporting_that_val
 
     def connection(*rows, live=None):
         nodes = Mock(instances=[])
-        nodes.get_current_nodes.side_effect = lambda include_failed=True: list(rows if include_failed else live or rows)
+        nodes.get_current_nodes.side_effect = lambda include_failed=True, skip_ports=(): list(
+            rows if include_failed else live or rows
+        )
         return nodes
 
     # No node answered, or the shard has nothing to promote: the failover was never tried.
@@ -1065,7 +1067,7 @@ def test_a_failover_tries_only_the_replicas_that_follow_the_shards_primary_in_on
         failover_shard(connection, 1, timeout=0.0, rng=random.Random(0))
 
     assert [call.args[0].port for call in sync.call_args_list] == [7003]
-    connection.get_current_nodes.assert_called_once_with(include_failed=True)
+    connection.get_current_nodes.assert_called_once_with(include_failed=True, skip_ports=set())
 
 
 @pytest.mark.parametrize(
@@ -1085,7 +1087,9 @@ def test_a_stopped_shard_has_nothing_to_fail_over_only_when_every_member_was_sto
         node_row("id-2", 7002, shard_id=1),
     ]
     connection = Mock(instances=[SimpleNamespace(instance_id=f"valkey-{i}", port=7000 + i) for i in range(3)])
-    connection.get_current_nodes.side_effect = lambda include_failed=True: rows if include_failed else rows[2:]
+    connection.get_current_nodes.side_effect = lambda include_failed=True, skip_ports=(): (
+        rows if include_failed else rows[2:]
+    )
 
     if expected is LocalDeploymentError:
         with pytest.raises(LocalDeploymentError, match="no replica of it is live"):
