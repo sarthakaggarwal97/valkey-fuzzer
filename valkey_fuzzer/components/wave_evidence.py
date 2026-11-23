@@ -1,4 +1,4 @@
-"""What both chaos actions declare and publish: their events, the schedule, and the loss windows."""
+"""What the three chaos actions declare and publish: their events, the schedule, and the loss windows."""
 
 from collections.abc import Mapping, Sequence
 from typing import Any, Optional
@@ -111,7 +111,7 @@ def wave_evidence(
     loss_windows: Sequence[Mapping[str, Any]] = (),
     pids: Optional[Mapping[str, int]] = None,
 ) -> tuple:
-    """The evidence both actions publish: the schedule, the instances down on purpose, the test keys, and
+    """The evidence the three actions publish: the schedule, the instances down on purpose, the test keys, and
     one ``valkey.data.loss-window`` per window (``valkey.oracle.ledger`` reads those). ``pids`` are the processes
     that were stopped, so a later process of the same instance is not taken for one stopped on purpose."""
 

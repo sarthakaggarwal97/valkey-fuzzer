@@ -7,8 +7,7 @@ data-only YAML documents under
 (``valkey.writes``, ``valkey.base``, the procedures they share, such as
 ``valkey.psync``), and every experiment extends ``valkey.liveness``, which adds
 the oracles that need no model of the feature under test (``valkey.oracle.liveness``,
-``valkey.oracle.error-counters``, ``valkey.oracle.quiet-end``). Data-only
-experiments elsewhere can ``extends`` the same fragments.
+``valkey.oracle.error-counters``, ``valkey.oracle.quiet-end``).
 """
 
 from collections.abc import Mapping
