@@ -640,7 +640,7 @@ metadata:
 | `fixed` | Nothing: an input keeps its default, a deployment field its provider default. |
 | a value | That value. |
 | `[a, b, c]` or `{values: [a, b, c]}` | One of them, the first and last twice as often as the others. |
-| `{minimum: a, maximum: b}` | 40% of the time an edge (a, a+1, b-1, b, and 0 or 1 when in range), otherwise uniform, or log-uniform when b/a exceeds 1000. Integers for an `integer` input and for deployment fields. |
+| `{minimum: a, maximum: b}`, with an optional `default: d` | 40% of the time an edge (a, a+1, b-1, b, d, and 0 or 1 when in range), otherwise uniform, or log-uniform when b/a exceeds 1000. Integers for an `integer` input and for deployment fields. |
 | `{hook: <id>}` | Whatever the generator hook returns (inputs only). |
 | `{pools: [<pool id>, ...]}` | Nothing drawn (inputs only): each server config key the scenario drew from those pools (pools that list their keys), mapped to the values its pool lists, less the excluded ones. |
 
