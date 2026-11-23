@@ -38,8 +38,7 @@ The batch folder::
     workers.json        the jobs running now and their worker processes (for resume)
     results/<id>.json   one finished job: status, failure signature, leaks, zoo observation
     runs/<id>/          the job's run folder: plan.json, report.json, scenario.yaml,
-                        components/, logs/ (instance logs), console.log, and conform.json
-                        for a run from before report.json's conform section
+                        components/, logs/ (instance logs), console.log
     conformance/<b>.json  the spec conform report of spec bundle <b> over the runs that exercised it
     summary.json        counts, failure signatures, serial re-runs, zoo verdicts, conformance, leaks, exit code
     findings.json       the failure signatures across batches (:mod:`valkey_fuzzer.findings`), unless the
@@ -61,8 +60,7 @@ Each run whose plan names a spec bundle (a component's ``spec``) checks
 itself against it as its report is written, as ``valkey-fuzzer spec conform``
 would (:func:`~valkey_fuzzer.spec.conform.conform_run`; TLC from
 ``$TLA2TOOLS_JAR``, bounded by the batch's ``conform_tlc_timeout_s``), and
-the batch reuses the report's ``conform`` section; a run from before that
-section is checked by its worker after the run. For a bundle whose claims
+the batch reuses the report's ``conform`` section. For a bundle whose claims
 are approved, a claimed property violated on the run's observed states fails
 the run, and a check that could not decide is an ERROR; a draft's findings
 are only reported. The batch's status is the worst of its runs, its

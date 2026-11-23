@@ -1375,7 +1375,7 @@ def test_conform_reports_a_trace_that_is_missing_or_unreadable_instead_of_checki
     # The run recorded a trace (its samples carry what the events do not) that is not there: not the events alone.
     missing = conform_folder(run, tools)["cluster-election"]
     assert missing["status"] == "error" and missing["error"].endswith(
-        f"is missing (a pruned run keeps its conform.json): {trace}"
+        f"is missing (a pruned run keeps only its report): {trace}"
     )
     # A trace that is there but is not one: the same, with what is wrong, and the batch's worker does not crash.
     trace.parent.mkdir(parents=True)

@@ -14,8 +14,7 @@ from ..outcomes import EXIT_HARNESS_ERROR, EXIT_INTERRUPTED, exit_code, print_ou
 from ..plan import ExecutionPlan
 from ..reports import load_document, write_document
 from ..service import PreparedRun, RunService
-from ..spec.conform import CONFORM_TIMEOUT_OPTION
-from . import hooks
+from ..spec.conform import CONFORM_TIMEOUT_OPTION, describe
 from .results import ERROR_FILE
 from .spec import PORT_BLOCK, BatchError
 
@@ -76,8 +75,8 @@ def run_worker(task_path: str) -> int:
         generated=prepared.generated,
     )
     print_outcome(record.outcome, verbose=True)
-    for plugin in hooks.PLUGINS:
-        plugin.after_run(report_dir, task)
+    for name, entry in (record.report.get("conform") or {}).items():
+        print(f"spec conform {describe(name, entry)}")
     return exit_code(record.outcome.status)
 
 

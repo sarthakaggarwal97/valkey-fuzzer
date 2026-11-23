@@ -29,9 +29,10 @@ from .spec import BatchError, BatchOptions, read_batch_file
 from .summary import summarize
 
 # A run's own deadline is cooperative; the batch stops its worker this much later
-# (or a quarter of the deadline later, if that is longer), plus what the plug-ins'
-# after-run steps may take, with SIGINT, then SIGTERM, then SIGKILL, STOP_GRACE_S
-# apart. Stopping a batch skips the wait.
+# (or a quarter of the deadline later, if that is longer), plus what the run's own
+# spec conform check may take after it (conform_tlc_timeout_s, the bound it gives
+# TLC), with SIGINT, then SIGTERM, then SIGKILL, STOP_GRACE_S apart. Stopping a
+# batch skips the wait.
 DEADLINE_GRACE_S = 60.0
 STOP_GRACE_S = (60.0, 30.0)
 POLL_S = 0.2
@@ -56,12 +57,6 @@ class _Running:
     timed_out: bool = False
 
 
-def _after_run_timeout_s(options: BatchOptions) -> float:
-    """How long a worker's after-run steps (spec conform, say) may take after its run, all plug-ins together."""
-
-    return sum(plugin.after_run_timeout_s(options) for plugin in hooks.PLUGINS)
-
-
 def _copy_experiments(folder: str, directories: Sequence[str]) -> None:
     """Copy the experiment documents of ``directories`` into ``<folder>/experiments``.
 
@@ -82,11 +77,10 @@ def _copy_experiments(folder: str, directories: Sequence[str]) -> None:
 
 
 def _prune(run_dir: str) -> None:
-    """Remove everything of a passing run's folder but its report, scenario, and what the plug-ins keep."""
+    """Remove everything of a passing run's folder but its report and scenario."""
 
-    kept = (REPORT_FILE, SCENARIO_FILE, *hooks.kept_when_pruned())
     for entry in os.listdir(run_dir):
-        if entry not in kept:
+        if entry not in (REPORT_FILE, SCENARIO_FILE):
             target = os.path.join(run_dir, entry)
             shutil.rmtree(target) if os.path.isdir(target) else os.remove(target)
 
@@ -422,7 +416,7 @@ class BatchRunner:
             started=now,
             deadline=now
             + self.timeout_s
-            + _after_run_timeout_s(self.options)
+            + self.options.conform_tlc_timeout_s
             + max(DEADLINE_GRACE_S, 0.25 * self.timeout_s),
             load_start=os.getloadavg()[0],
         )

@@ -214,7 +214,6 @@ def test_a_run_that_leaks_crashes_or_hangs_is_an_error_and_the_sweep_removes_wha
     tmp_path, workers, stub, monkeypatch
 ):
     monkeypatch.setattr(pool, "DEADLINE_GRACE_S", 0.0)
-    monkeypatch.setattr(conform_plugin.ConformancePlugin, "after_run_timeout_s", lambda self, options: 0.0)
     behaviors = {
         "0": "leak-server",
         "1": "leak-dir",
@@ -224,7 +223,8 @@ def test_a_run_that_leaks_crashes_or_hangs_is_an_error_and_the_sweep_removes_wha
         "5": "leak-private-server",
     }
     stub.behave(**behaviors)
-    summary = (runner := _batch(tmp_path, [_random(6)], workers=2, timeout_s=0.05)).run()
+    runner = _batch(tmp_path, [_random(6)], workers=2, timeout_s=0.05, conform_tlc_timeout_s=0.01)
+    summary = runner.run()
 
     server, directory, passed, crashed, hung, private = (_results(runner)[_id(seed)] for seed in range(6))
     assert summary["counts"] == {"ERROR": 5, "PASS": 1} and summary["exit_code"] == 2 and passed["status"] == "PASS"
@@ -868,79 +868,56 @@ def test_a_worker_checks_its_run_against_the_bundles_its_plan_names(tmp_path, wo
     assert summary["conformance"]["replication"]["status"] == "skipped"
 
 
-def test_a_run_whose_plan_names_a_bundle_but_whose_worker_wrote_no_conformance_is_an_error(tmp_path, monkeypatch):
+def test_a_run_whose_plan_names_a_bundle_but_whose_report_has_no_conform_section_is_an_error(monkeypatch):
+    # The run was stopped during its own check: its report was written before it, without the section.
     report = {"status": "PASS", "outcome": {"plan": _REPLICATION_PLAN}}
-    # The entry says whether the claims are approved, as the worker's would: replication's are a draft.
-    assert conform_plugin._conformance(str(tmp_path), report) == {
-        "replication": {
-            "status": "error",
-            "error": "no conform.json: the worker ended before spec conform checked the run",
-            "approved": False,
-        }
+    # The entry says whether the claims are approved, as the run's own would: replication's are a draft.
+    assert conform_plugin._conformance(report) == {
+        "replication": {"status": "error", "error": "report has no conform section", "approved": False}
     }
-    assert conform_plugin._conformance(str(tmp_path), {**report, "status": "ERROR"}) == {}
-    (tmp_path / "conform.json").write_text("{")
-    assert "conform.json cannot be read" in conform_plugin._conformance(str(tmp_path), report)["replication"]["error"]
-    # A report.json the plug-in cannot read is a run without one: checked now, nothing recorded for no bundle.
-    (tmp_path / "report.json").write_text("{")
-    monkeypatch.setattr(conform_plugin, "conform_run", lambda folder, timeout_s: {})
-    conform_plugin._conform(str(tmp_path), 300.0)
-    assert (tmp_path / "conform.json").read_text() == "{"
+    assert conform_plugin._conformance({**report, "conform": None}) == conform_plugin._conformance(report)
+    # A run that did not reach its verdict, or left no report, has nothing held against it.
+    assert conform_plugin._conformance({**report, "status": "ERROR"}) == {}
+    assert conform_plugin._conformance(None) == {}
     # A bundle that does not load is held against the run: nothing says its claims are a draft.
     assert conform.bundle_approved("no-such-bundle") is True
     monkeypatch.setattr(conform, "load_bundle", lambda name: Mock(claims=Mock(status="approved")))
     assert conform.bundle_approved("replication") is True
 
 
-def test_a_run_that_checked_itself_is_not_checked_again_and_its_verdict_stands(tmp_path, monkeypatch):
+def test_a_run_that_checked_itself_is_not_checked_again_and_its_verdict_stands(tmp_path):
     # The run's report carries its conform section and the verdict it gave (judge_run): the plug-in takes both as
-    # they are, runs no TLC, writes no conform.json, and leaves a run that predates the section to its own path.
+    # they are.
     recorded = {"replication": {"approved": True, **VIOLATED}}
     report = {"status": "FAIL", "summary": "spec conform replication: OneHistoryPerId violated; experiment passed",
               "outcome": {"plan": _REPLICATION_PLAN}, "conform": recorded}  # fmt: skip
-    (tmp_path / "report.json").write_text(json.dumps(report))
-    monkeypatch.setattr(conform_plugin, "conform_run", Mock(side_effect=AssertionError("TLC ran twice")))
-    conform_plugin._conform(str(tmp_path), 300.0)
-    assert not (tmp_path / "conform.json").exists()
-    assert conform_plugin._conformance(str(tmp_path), report) == recorded
+    assert conform_plugin._conformance(report) == recorded
     signature = {"crashes": [], "failures": {"spec-conform:replication": {"status": "FAIL", "verdict": ["x"]}}}
     verdict = results.Verdict("FAIL", report["summary"], signature)
     assert conform_plugin.ConformancePlugin().judge({}, str(tmp_path), report, verdict) == recorded
     assert (verdict.status, verdict.summary, verdict.signature) == ("FAIL", report["summary"], signature)
-    # A report without the section (an older run, or one that named no bundle) is checked by the worker.
-    older = {**report, "conform": None}
-    (tmp_path / "report.json").write_text(json.dumps(older))
-    monkeypatch.setattr(conform_plugin, "conform_run", lambda folder, timeout_s: recorded)
-    conform_plugin._conform(str(tmp_path), 300.0)
-    assert json.loads((tmp_path / "conform.json").read_text()) == {"format_version": 1, "bundles": recorded}
-    assert conform_plugin._conformance(str(tmp_path), older) == recorded
-    # A conform.json another version of the fuzzer wrote is an error naming the file and both versions.
-    (tmp_path / "conform.json").write_text(json.dumps({"format_version": 2, "bundles": recorded}))
-    (entry,) = conform_plugin._conformance(str(tmp_path), older).values()
-    assert entry["status"] == "error"
-    assert entry["error"] == (
-        f"{tmp_path / 'conform.json'} has format_version 2, which an older or newer valkey-fuzzer wrote; "
-        f"this one ({__version__}) reads format_version 1"
-    )
 
 
 def test_a_missing_conformance_is_held_against_the_run_only_for_approved_claims(tmp_path, workers, stub, monkeypatch):
-    # The worker wrote no conform.json: the batch's own error entry decides by the bundle's claims.
+    # The run's report has no conform section: the batch's own error entry decides by the bundle's claims.
     monkeypatch.setattr(conform, "conform_folder", lambda folder, tools, unavailable="": {})
     runner = _batch(tmp_path, [_random(1, experiments=[REPLICATION])])
     runner.run()
     (draft,) = _results(runner).values()
     assert draft["status"] == "PASS" and draft["signature"] is None
     assert draft["conformance"]["replication"]["approved"] is False
-    assert "no conform.json" in draft["conformance"]["replication"]["error"]
+    assert draft["conformance"]["replication"]["error"] == "report has no conform section"
 
     monkeypatch.setattr(conform_plugin, "bundle_approved", lambda name: True)
     runner = _batch(tmp_path, [_random(1, experiments=[REPLICATION])], name="approved")
     runner.run()
     (approved,) = _results(runner).values()
     assert approved["status"] == "ERROR"
-    assert approved["summary"].startswith("spec conform replication: no conform.json: the worker ended before")
-    assert approved["signature"]["failures"]["spec-conform:replication"]["status"] == "ERROR"
+    assert approved["summary"].startswith("spec conform replication: report has no conform section; ")
+    assert approved["signature"]["failures"]["spec-conform:replication"] == {
+        "status": "ERROR",
+        "verdict": ["report has no conform section"],
+    }
 
 
 def test_a_conform_entry_that_does_not_say_its_claims_are_approved_is_read_as_a_draft(
@@ -981,17 +958,16 @@ def test_the_conform_tlc_time_limit_is_a_batch_option_named_when_it_stops_a_chec
     assert BatchOptions().conform_tlc_timeout_s == 300.0
 
 
-def test_a_check_that_does_not_finish_still_writes_why_for_each_bundle(tmp_path, monkeypatch):
-    # Otherwise the batch sees only that conform.json is missing, and holds that against an approved bundle's run
-    # with no reason it could act on.
+def test_a_check_that_does_not_finish_still_says_why_for_each_bundle(tmp_path, monkeypatch):
+    # Otherwise the run's report says nothing of the bundle, and an approved bundle's run would be held to an
+    # error with no reason it could act on.
     (tmp_path / "report.json").write_text(json.dumps({"status": "PASS", "outcome": {"plan": _REPLICATION_PLAN}}))
 
     def broken(folder, tools, unavailable=""):
         raise ValueError("trace.jsonl does not start with a trace header")
 
     monkeypatch.setattr(conform, "conform_folder", broken)
-    conform_plugin._conform(str(tmp_path), 300.0)
-    assert json.loads((tmp_path / "conform.json").read_text())["bundles"] == {
+    assert conform.conform_run(str(tmp_path), 300.0) == {
         "replication": {
             "status": "error",
             "approved": False,
@@ -1003,11 +979,11 @@ def test_a_check_that_does_not_finish_still_writes_why_for_each_bundle(tmp_path,
 @pytest.mark.slow
 def test_real_workers_run_in_parallel_in_isolation_and_a_leaked_or_hung_one_is_cleaned_up(tmp_path, stub, monkeypatch):
     monkeypatch.setattr(pool, "DEADLINE_GRACE_S", 0.0)
-    monkeypatch.setattr(conform_plugin.ConformancePlugin, "after_run_timeout_s", lambda self, options: 0.0)
     monkeypatch.setattr(pool, "STOP_GRACE_S", (0.5, 0.5))
     stub.behave(**{"0": "sleep:0.6", "1": "sleep:0.6", "2": "sleep:0.6", "3": "leak-server", "4": "hang"})
     started = time.monotonic()
-    summary = (runner := _batch(tmp_path, [_random(5)], workers=3, timeout_s=3)).run()
+    runner = _batch(tmp_path, [_random(5)], workers=3, timeout_s=3, conform_tlc_timeout_s=0.01)
+    summary = runner.run()
 
     assert time.monotonic() - started < 60 and summary["counts"] == {"PASS": 3, "ERROR": 2}
     assert _results(runner)[_id(4)]["timed_out"] and _leaked_and_removed(stub) == 1
@@ -1128,7 +1104,6 @@ def test_a_plug_in_takes_part_at_every_point_of_the_batch_and_its_jobs_are_its_o
 
     class Toy(hooks.BatchPlugin):
         name = "toy"
-        kept_when_pruned = ("toy.txt",)
         source = hooks.BatchSource(
             "toy",
             ConfigSchema({"seeds": ConfigField(list, items=ConfigField(int))}),
@@ -1141,15 +1116,12 @@ def test_a_plug_in_takes_part_at_every_point_of_the_batch_and_its_jobs_are_its_o
             # Its own option rides into every worker's task, by a name of its own.
             return {"toy_limit": options.workers * 10}
 
-        def after_run(self, report_dir, task):
-            Path(report_dir, "toy.txt").write_text(f"checked under {task['toy_limit']}")
-
         def judge(self, job, run_dir, report, verdict):
             # Before the leaks count: the verdict of the batch's own jobs; the plug-in's are recorded instead.
             if "toy" in job:
                 return None
             verdict.summary = f"toy: {verdict.summary}"
-            return Path(run_dir, "toy.txt").read_text()
+            return f"judged {report['status']}"
 
         def record(self, job, run_dir, report, result):
             return result["status"] if "toy" in job else None
@@ -1173,13 +1145,7 @@ def test_a_plug_in_takes_part_at_every_point_of_the_batch_and_its_jobs_are_its_o
     summary = runner.run()
 
     results = _results(runner)
-    # The worker ran the plug-in after each run, and pruning kept what it wrote.
-    assert {item.name for item in Path(runner.folder, "runs", _id(0)).iterdir()} == {
-        "report.json",
-        "scenario.yaml",
-        "toy.txt",
-    }
-    assert results[_id(0)]["toy"] == "checked under 10" and results[_id(0)]["summary"] == "toy: PASS"
+    assert results[_id(0)]["toy"] == "judged PASS" and results[_id(0)]["summary"] == "toy: PASS"
     assert results["toy-7"]["toy"] == "FAIL" and results["toy-8"]["toy"] == "PASS"
     # Its jobs are neither counted, grouped, re-run serially, nor sampled by a later batch's failures source.
     assert summary["counts"] == {"PASS": 2} and summary["signatures"] == [] and runner.serial_jobs() == []
@@ -1305,17 +1271,9 @@ def test_a_verdict_with_leaks_is_an_error_that_names_them_first():
     assert (failed.status, failed.summary) == ("FAIL", "left 3 leftovers: dir, mount; data:FAIL")
 
 
-def test_a_workers_deadline_covers_the_plug_ins_after_run_steps(tmp_path, workers, stub, monkeypatch):
-    # A run that used its whole budget then conforms (TLC, up to CONFORM_TIMEOUT_S) must not be killed in that
-    # step and recorded ERROR: each plug-in's after_run_timeout_s is on top of the run's deadline and grace.
-    class Slow(hooks.BatchPlugin):
-        name = "slow"
-
-        def after_run_timeout_s(self, options):
-            return 1234.0
-
-    monkeypatch.setattr(hooks, "PLUGINS", list(hooks.PLUGINS))
-    hooks.register(Slow())
+def test_a_workers_deadline_covers_its_runs_spec_conform_check(tmp_path, workers, stub, monkeypatch):
+    # A run that used its whole budget then conforms (TLC, up to conform_tlc_timeout_s, the bound it gives TLC)
+    # must not be killed in that step and recorded ERROR: the option is on top of the run's deadline and grace.
     runner = _batch(tmp_path, [_random(1)], timeout_s=100, conform_tlc_timeout_s=77)
     started = []
     finish = runner._finish
@@ -1323,8 +1281,7 @@ def test_a_workers_deadline_covers_the_plug_ins_after_run_steps(tmp_path, worker
     runner.run()
 
     (item,) = started
-    # The conformance plug-in's budget is the batch's conform_tlc_timeout_s, the bound it gives TLC.
-    expected = 100 + 1234 + 77 + max(pool.DEADLINE_GRACE_S, 25)
+    expected = 100 + 77 + max(pool.DEADLINE_GRACE_S, 25)
     assert item.deadline - item.started == pytest.approx(expected)
 
 

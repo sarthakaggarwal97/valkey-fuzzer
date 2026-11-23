@@ -382,8 +382,7 @@ removed, the batch refuses to start. Dead runs' directories stay.
   jobs.json           every job, in order
   results/<id>.json   one finished job
   runs/<id>/          the job's run folder: plan.json, report.json, scenario.yaml,
-                      components/, logs/ (instance logs), console.log (or error.json),
-                      conform.json (a run from before report.json's conform section)
+                      components/, logs/ (instance logs), console.log (or error.json)
   experiments/        a copy of every --experiment-dir's documents (only with one)
   conformance/<b>.json  the spec conform report of bundle <b> over the runs checked against it
   summary.json        the summary, rewritten when the batch stops
@@ -413,9 +412,10 @@ missing, too, for a bundle that needs it; TLC stopped at
 `conform_tlc_timeout_s`; the trace the run recorded missing) makes it an
 `ERROR`; either is in the run's summary (`spec conform replication: ...`)
 and failure signature (the failing component `spec-conform:<bundle>`). A
-draft bundle's findings are reported and change nothing. A run from before
-the report carried the section is checked by its worker after the run
-instead, into the run's `conform.json`, with the same verdict.
+draft bundle's findings are reported and change nothing. A run that reached
+its verdict but whose report has no `conform` section (its worker was
+stopped during the check) is an `ERROR` for an approved bundle, with that as
+its reason, and reported only for a draft.
 
 `summary.json` has:
 
@@ -854,7 +854,7 @@ position.
 
 | Key | Contents |
 | --- | --- |
-| `format_version` | The version of the files the fuzzer writes, `1` (see [What is stable](stability.md)). `replay`, `minimize`, and `spec conform` refuse a report of another version, naming the file and both versions; a report without one is read as `1`. `plan.json` carries the same key, and so do a batch's `summary.json`, `batch.json`, and `conform.json`, and a `trace.jsonl` header. |
+| `format_version` | The version of the files the fuzzer writes, `1` (see [What is stable](stability.md)). `replay`, `minimize`, and `spec conform` refuse a report of another version, naming the file and both versions; a report without one is read as `1`. `plan.json` carries the same key, and so do a batch's `summary.json` and `batch.json`, and a `trace.jsonl` header. |
 | `status`, `summary` | The outcome and its one-line summary. |
 | `failed_components` | Each component that did not pass: `component_id`, `role`, `use`, `status`, `crash`, `summary`, `evidence_total`, and the first five `evidence` items (`evidence_id`, `value`). Text longer than 120 characters is cut and ends with its length and SHA-256; the full text is in `outcome`. Empty for a pass. A spec bundle's conform check that failed the run is the component `spec-conform:<bundle>` (no `role` or `use`: it is not a plan component), its `summary` the violated claims. |
 | `reproduce` | The `valkey-fuzzer replay <report>` command that replays this run; `null` when the report was not written to a file. |

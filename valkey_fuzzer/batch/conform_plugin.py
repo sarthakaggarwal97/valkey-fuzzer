@@ -1,14 +1,12 @@
-"""Spec conformance as a batch plug-in: each run checked against the spec bundles its plan names, as
-``valkey-fuzzer spec conform`` would, and a conform report per bundle over the batch's runs.
+"""Spec conformance as a batch plug-in: each run's own check against the spec bundles its plan names, and a
+conform report per bundle over the batch's runs.
 
 A run checks itself as its report is written (:meth:`~valkey_fuzzer.service.RunService.write_run_report`, under
 the batch's ``conform_tlc_timeout_s``): its ``report.json`` carries the results under ``conform`` and the verdict
-they give, so the plug-in reuses them rather than running TLC twice. For a run that predates that section, the
-worker writes ``conform.json`` into its run folder after the run (TLC from ``$TLA2TOOLS_JAR``, bounded the same
-way; without TLC a bundle that needs it is skipped, or an error if its claims are approved), and the verdict is
-formed here: for a bundle whose claims are approved, a claimed property violated on the run's observed states
-fails the run, and a check that could not decide is an ERROR; a draft's findings are only reported. The summary
-writes ``conformance/<bundle>.json`` and a digest of it, claimed violations first.
+they give, so the plug-in takes both as they are. A run that reached its verdict and whose plan names a bundle but
+whose report has no ``conform`` section (it was stopped during its check) is an error for that bundle, held
+against the run if the bundle's claims are approved and only reported for a draft's. The summary writes
+``conformance/<bundle>.json`` and a digest of it, claimed violations first.
 """
 
 import os
@@ -17,18 +15,9 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Optional
 
 from ..minimize import verdict_clauses
-from ..reports import FORMAT_VERSION, InputError, format_version_problem, load_document, write_document
+from ..reports import write_document
 from ..spec.bundle import SpecBundleError, load_bundle
-from ..spec.conform import (
-    CHECKED_RUN_STATUSES,
-    CONFORM_TIMEOUT_OPTION,
-    bundle_approved,
-    conform_run,
-    describe,
-    plan_bundles,
-    summarize,
-    violated_claims,
-)
+from ..spec.conform import CHECKED_RUN_STATUSES, CONFORM_TIMEOUT_OPTION, bundle_approved, plan_bundles, summarize
 from .hooks import BatchPlugin
 from .results import Verdict
 from .spec import BatchError, BatchOptions, worst
@@ -36,87 +25,44 @@ from .spec import BatchError, BatchOptions, worst
 if TYPE_CHECKING:
     from .pool import BatchRunner
 
-# What a worker writes in its run folder for a run whose report has no conform section: the run checked against
-# the spec bundles its plan names, as ``{"format_version": ..., "bundles": {<bundle>: <result>}}``.
-CONFORMANCE_FILE = "conform.json"
 CONFORMANCE_DIRECTORY = "conformance"
 
 
 def _recorded(report: Optional[Mapping[str, Any]]) -> Optional[dict[str, Any]]:
-    """The run's own conform results, from its report's ``conform`` section; None for a run that predates it (or
-    checked no bundle), whose check and verdict are the plug-in's."""
+    """The run's own conform results, from its report's ``conform`` section; None for a report without one (the
+    run checked no bundle, or was stopped during its check)."""
 
     recorded = (report or {}).get("conform")
     return dict(recorded) if isinstance(recorded, Mapping) and recorded else None
 
 
-def _conform(report_dir: str, timeout_s: float) -> None:
-    """Print the run's own conform results, or, for a run whose report has none, check it now and write
-    ``conform.json``: the run against every spec bundle its plan names, with TLC for at most ``timeout_s``
-    (:func:`~valkey_fuzzer.spec.conform.conform_run`)."""
-
-    try:
-        report = load_document(os.path.join(report_dir, "report.json"))
-    except InputError:
-        report = None
-    results = _recorded(report)
-    if results is None:
-        results = conform_run(report_dir, timeout_s)
-        if not results:
-            return
-        write_document(
-            os.path.join(report_dir, CONFORMANCE_FILE), {"format_version": FORMAT_VERSION, "bundles": results}
-        )
-    for name, entry in results.items():
-        print(f"spec conform {describe(name, entry)}")
-
-
-def _conformance(run_dir: str, report: Optional[Mapping[str, Any]]) -> dict[str, Any]:
-    """The run's own conform results (its report's ``conform``), else the worker's ``conform.json``; for a run
-    that reached its verdict and whose plan names spec bundles but that has neither, an error for each bundle,
-    saying whether its claims are approved (the batch holds only those against the run)."""
+def _conformance(report: Optional[Mapping[str, Any]]) -> dict[str, Any]:
+    """The run's own conform results (its report's ``conform``); for a run that reached its verdict and whose plan
+    names spec bundles but whose report has no such section, an error for each bundle, saying whether its claims
+    are approved (the batch holds only those against the run)."""
 
     recorded = _recorded(report)
     if recorded is not None:
         return recorded
-    path = os.path.join(run_dir, CONFORMANCE_FILE)
-    if os.path.exists(path):
-        try:
-            written = load_document(path)
-        except InputError as exc:
-            problem = f"{CONFORMANCE_FILE} cannot be read: {exc}"
-        else:
-            problem = format_version_problem(written, path)
-            if problem is None:
-                return written["bundles"]
-    else:
-        problem = f"no {CONFORMANCE_FILE}: the worker ended before spec conform checked the run"
     if report is None or report.get("status") not in CHECKED_RUN_STATUSES:
         return {}
     plan = (report.get("outcome") or {}).get("plan") or {}
     return {
-        name: {"status": "error", "error": problem, "approved": bundle_approved(name)} for name in plan_bundles(plan)
+        name: {"status": "error", "error": "report has no conform section", "approved": bundle_approved(name)}
+        for name in plan_bundles(plan)
     }
 
 
 class ConformancePlugin(BatchPlugin):
-    """Spec conformance: the run's own check is reused (or the worker checks a run that has none), the verdict
-    takes an approved bundle's claimed violation as a FAIL, and the summary reports each bundle over the runs that
-    exercised it."""
+    """Spec conformance: the run's own check and verdict are taken as they are, a run whose report has no check is
+    an ERROR for an approved bundle, and the summary reports each bundle over the runs that exercised it."""
 
     name = "conformance"
-    kept_when_pruned = (CONFORMANCE_FILE,)
-
-    def after_run_timeout_s(self, options: BatchOptions) -> float:
-        return options.conform_tlc_timeout_s
 
     def task_options(self, options: BatchOptions) -> dict[str, Any]:
         if options.conform_tlc_timeout_s <= 0:
             raise BatchError("batch.conform_tlc_timeout_s must be a number of seconds greater than zero")
         return {CONFORM_TIMEOUT_OPTION: options.conform_tlc_timeout_s}
-
-    def after_run(self, report_dir: str, task: Mapping[str, Any]) -> None:
-        _conform(report_dir, task[CONFORM_TIMEOUT_OPTION])
 
     def judge(self, job: Mapping[str, Any], run_dir: str, report: Optional[Mapping[str, Any]], verdict: Verdict) -> Any:
         recorded = _recorded(report)
@@ -124,25 +70,20 @@ class ConformancePlugin(BatchPlugin):
             # The run judged itself (spec.conform.judge_run): its status, summary and signature, formed from its
             # outcome, already carry an approved bundle's finding as the failed component spec-conform:<bundle>.
             return recorded
-        conformance = _conformance(run_dir, report)
+        conformance = _conformance(report)
         for name, entry in sorted(conformance.items()):
-            # A draft's findings are reported, not held against the run. Every entry says whether its claims are
-            # approved: the worker's (conform_folder), and the ones made here for a run whose worker wrote no
-            # conform.json (_conformance); a bundle that does not load is held against the run, since nothing
-            # says its claims are a draft. An entry that does not say is read as a draft: only an explicit
-            # approval decides a run.
-            if entry["status"] not in ("fail", "error") or not entry.get("approved", False):
+            # Every entry made here is an error. A draft's is reported, not held against the run; a bundle that
+            # does not load is held against the run, since nothing says its claims are a draft.
+            if not entry["approved"]:
                 continue
-            if entry["status"] == "fail":
-                violated = violated_claims(entry)
-                clauses, text = [f"{prop} violated" for prop in violated], f"{', '.join(violated)} violated"
-            else:
-                clauses, text = verdict_clauses(entry["error"]), entry["error"]
-            verdict.status = worst([verdict.status, entry["status"].upper()])
-            verdict.summary = f"spec conform {name}: {text}; {verdict.summary}"
+            verdict.status = worst([verdict.status, "ERROR"])
+            verdict.summary = f"spec conform {name}: {entry['error']}; {verdict.summary}"
             signature = verdict.signature
             if not signature["crashes"]:
-                signature["failures"][f"spec-conform:{name}"] = {"status": entry["status"].upper(), "verdict": clauses}
+                signature["failures"][f"spec-conform:{name}"] = {
+                    "status": "ERROR",
+                    "verdict": verdict_clauses(entry["error"]),
+                }
                 signature["failing_components"] = sorted(signature["failures"])
                 signature["status"] = verdict.status
         return conformance

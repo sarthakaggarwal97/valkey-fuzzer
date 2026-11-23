@@ -192,9 +192,9 @@ def _report_run(path: str, report: Mapping[str, Any]) -> RunEvidence:
         if str(artifact).endswith(TRACE_FILE)
     ]
     if recorded:
-        # The run recorded a trace that is gone (a pruned run keeps only its report, scenario, and conform.json):
-        # its events alone would miss the samples the trace carries, so the run is not checked on them.
-        problem = f"the trace the run recorded is missing (a pruned run keeps its conform.json): {recorded[0]}"
+        # The run recorded a trace that is gone (a pruned run keeps only its report and scenario): its events
+        # alone would miss the samples the trace carries, so the run is not checked on them.
+        problem = f"the trace the run recorded is missing (a pruned run keeps only its report): {recorded[0]}"
         return RunEvidence(source=path, header={}, records=[], meta=meta, problem=problem)
     events = sorted(
         (item for item in (outcome.get("diagnostics") or {}).get("events") or [] if item.get("committed")),
