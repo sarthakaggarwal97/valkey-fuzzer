@@ -14,4 +14,4 @@
   evidence (no component declares it; the replication model's `replication.replicaof` log event is a
   different thing and stays).
 - `Target.meaning` of a spec bundle's claims, read by nothing; `claims.yaml` still documents each target's
-  `meaning`, and the loader still requires it.
+  `meaning`, which the loader accepts as an optional field.

@@ -216,7 +216,7 @@ _CLAIMS = _record(
     },
     {
         "approved_by": str,
-        "targets": _list(_record({"name": str, "meaning": str})),
+        "targets": _list(_record({"name": str}, {"meaning": str})),
         "max_unobserved_steps": int,
         "transitions": _record({"excluded": str}),
     },
