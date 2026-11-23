@@ -4,14 +4,13 @@ A :class:`BatchSource` is one kind of entry in a batch's ``sources``: its schema
 (defaults filled in, paths made absolute), and how they expand to jobs. The built-in kinds (``random``, ``matrix``,
 ``scenarios``, ``failures``) are registered by :mod:`.sources`; a plug-in may bring its own (the bug zoo does).
 
-A :class:`BatchPlugin` takes part at fixed points of a batch and nowhere else: in the worker after the run
-(:meth:`~BatchPlugin.after_run`), when a finished job's verdict is formed (:meth:`~BatchPlugin.judge`), when its
-result is recorded (:meth:`~BatchPlugin.record`), in the summary (:meth:`~BatchPlugin.summarize`), and in the
-lines the command prints of it (:meth:`~BatchPlugin.describe`). A plug-in with a source also records what that
-source expanded to, in ``batch.json`` under its name. A job such a source adds carries the plug-in's name as a key
-(the plug-in's own record of the job) and is the plug-in's to judge: the batch neither counts it, groups it by
-failure signature, nor runs it again. The batch loop knows no plug-in by name; :mod:`valkey_fuzzer.batch`
-registers the bug zoo and spec conformance.
+A :class:`BatchPlugin` takes part at fixed points of a batch and nowhere else: when a finished job's verdict is
+formed (:meth:`~BatchPlugin.judge`), when its result is recorded (:meth:`~BatchPlugin.record`), in the summary
+(:meth:`~BatchPlugin.summarize`), and in the lines the command prints of it (:meth:`~BatchPlugin.describe`). A
+plug-in with a source also records what that source expanded to, in ``batch.json`` under its name. A job such a
+source adds carries the plug-in's name as a key (the plug-in's own record of the job) and is the plug-in's to
+judge: the batch neither counts it, groups it by failure signature, nor runs it again. The batch loop knows no
+plug-in by name; :mod:`valkey_fuzzer.batch` registers the bug zoo and spec conformance.
 """
 
 from collections.abc import Callable, Mapping, Sequence
@@ -48,28 +47,17 @@ class BatchPlugin:
     """A step of the batch other than running its jobs; override what the step needs.
 
     ``name`` keys the plug-in's record in ``batch.json`` (a plug-in with a ``source``), its field of a job's
-    result, and its entry of the summary. ``kept_when_pruned`` names the files of a run folder it writes that a
-    pruned PASS run keeps. ``after_run_timeout_s`` is how long ``after_run`` may take under the batch's options:
-    the batch adds it to each worker's deadline, so a run that used its whole budget is not killed in this step.
-    ``task_options`` is what the plug-in carries into every worker's task under the batch's options, by names of
-    its own (the batch knows none): the values ``after_run`` reads from the task. It is also where the plug-in
-    checks them: ``BatchOptions.check`` calls it, so a value the plug-in cannot run under raises
+    result, and its entry of the summary. ``task_options`` is what the plug-in carries into every worker's task
+    under the batch's options, by names of its own (the batch knows none). It is also where the plug-in checks
+    them: ``BatchOptions.check`` calls it, so a value the plug-in cannot run under raises
     :class:`~.spec.BatchError` before the batch starts.
     """
 
     name = ""
     source: Optional[BatchSource] = None
-    kept_when_pruned: tuple[str, ...] = ()
-
-    def after_run_timeout_s(self, options: "BatchOptions") -> float:
-        return 0.0
 
     def task_options(self, options: "BatchOptions") -> dict[str, Any]:
         return {}
-
-    def after_run(self, report_dir: str, task: Mapping[str, Any]) -> None:
-        """In the worker, after its run, in the run's report folder; ``task`` is the worker's task (the job and
-        the batch options the run ran under)."""
 
     def judge(
         self, job: Mapping[str, Any], run_dir: str, report: Optional[Mapping[str, Any]], verdict: "Verdict"
@@ -131,12 +119,6 @@ def plugin_job(job: Mapping[str, Any]) -> bool:
     """Whether ``job`` is a plug-in's to judge (it carries a plug-in's name)."""
 
     return any(plugin.name in job for plugin in PLUGINS)
-
-
-def kept_when_pruned() -> tuple[str, ...]:
-    """Every file the plug-ins keep in a pruned PASS run."""
-
-    return tuple(name for plugin in PLUGINS for name in plugin.kept_when_pruned)
 
 
 def task_options(options: "BatchOptions") -> dict[str, Any]:

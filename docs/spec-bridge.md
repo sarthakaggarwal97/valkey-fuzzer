@@ -723,14 +723,12 @@ during TLC leaves a report whose `conform` is `null`.
 A [batch](cli.md#batch) takes each run's own `conform` section as it is:
 its worker runs no second TLC, its verdict (status, summary, failure
 signature with the failing component `spec-conform:<bundle>`) is the run's,
-and the section is kept when a passing run's folder is pruned. A run from
-before the section (an older report) is checked by its worker after the run,
-into the run folder's `conform.json` (`format_version`, and the results by
-bundle under `bundles`), and judged by the batch under the same
-table; such a run whose worker ended before it checked it (no
-`conform.json`) is an `ERROR` for an approved bundle and reported only for a
-draft. So a soak or a per-merge batch checks every run that exercises a
-protocol, and an approved model is checked wherever its experiments run.
+and the section is kept when a passing run's folder is pruned. A run that
+reached its verdict but whose report has no `conform` section (its worker
+was stopped during the check) is an `ERROR` for an approved bundle and
+reported only for a draft. So a soak or a per-merge batch checks every run
+that exercises a protocol, and an approved model is checked wherever its
+experiments run.
 
 The batch's `summary.json` has a `conformance` entry per bundle, and
 `conformance/<protocol>.json` holds the full report over the runs checked

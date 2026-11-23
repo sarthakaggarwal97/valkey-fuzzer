@@ -40,7 +40,7 @@ from .results import ComponentStatus, RunOutcome
 from .schema import load_yaml, load_yaml_mapping, plain_config
 
 # The ``format_version`` of every file the fuzzer writes and reads back (``report.json``, ``plan.json``, a batch's
-# ``summary.json`` and ``batch.json``, ``conform.json``, and a ``trace.jsonl`` header). A reader accepts this
+# ``summary.json`` and ``batch.json``, and a ``trace.jsonl`` header). A reader accepts this
 # version, and a file without one (written before the field was), and refuses any other
 # (:func:`format_version_problem`): a key removed or renamed bumps it; a key added does not (docs/stability.md).
 FORMAT_VERSION = 1
