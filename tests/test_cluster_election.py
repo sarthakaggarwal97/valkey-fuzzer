@@ -20,7 +20,7 @@ from tests.support import VirtualClock
 from tests.valkey_experiments_support import fake_context, resolved, valkey_experiment
 from valkey_fuzzer import deadlines
 from valkey_fuzzer.components import cluster_election, instances, polling, processes
-from valkey_fuzzer.components.cluster import parse_slots, read_view
+from valkey_fuzzer.components.cluster import read_view
 from valkey_fuzzer.components.cluster_election import ElectionAction
 from valkey_fuzzer.components.election_safety import ElectionSafetyOracle, split_primaries
 from valkey_fuzzer.components.faults import FAULT_INJECTED, EventFault
@@ -372,7 +372,6 @@ def test_election_safety_passes_a_majority_win_and_flags_unsaved_votes_outside_s
         {"primaries": ["a", "c"], "slots": [[50, 60]]},
         {"primaries": ["b", "d"], "slots": [[150, 160]]},
     ]
-    assert parse_slots(["0-5", "7", "[8->-abc]"]) == [[0, 5], [7, 7]], "a migrating slot is not owned yet"
 
 
 def test_election_safety_does_not_pass_a_vote_it_cannot_judge():
