@@ -88,10 +88,7 @@ def check_cluster_status(
 
     validation_errors: list[str] = []
     degraded_reason = None
-    explicit_acceptable_states = {
-        str(state).strip().lower() for state in config.acceptable_states if str(state).strip()
-    }
-    effective_acceptable_states = explicit_acceptable_states
+    acceptable_states = {str(state).strip().lower() for state in config.acceptable_states if str(state).strip()}
 
     if missing_cluster_state_nodes:
         validation_errors.append(
@@ -105,9 +102,9 @@ def check_cluster_status(
     unacceptable_reports = {
         address: state
         for address, state in cluster_states.items()
-        if address not in missing_cluster_state_nodes and state not in effective_acceptable_states
+        if address not in missing_cluster_state_nodes and state not in acceptable_states
     }
-    if not cluster_states and "unknown" not in effective_acceptable_states:
+    if not cluster_states and "unknown" not in acceptable_states:
         validation_errors.append(f"Cluster state 'unknown' not in acceptable states: {config.acceptable_states}")
     elif unacceptable_reports:
         reports = ", ".join(f"{address}={state}" for address, state in sorted(unacceptable_reports.items()))
@@ -117,7 +114,7 @@ def check_cluster_status(
 
     # A mixed report is allowed only when every reported state is listed explicitly.
     if state_disagreement:
-        if not reported_states.issubset(explicit_acceptable_states):
+        if not reported_states.issubset(acceptable_states):
             reports = ", ".join(f"{address}={state}" for address, state in sorted(cluster_states.items()))
             validation_errors.append(f"Cluster state disagreement across reachable nodes: {reports}")
         elif not validation_errors:
