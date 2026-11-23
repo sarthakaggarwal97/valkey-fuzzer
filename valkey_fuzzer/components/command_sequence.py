@@ -1292,7 +1292,7 @@ class CommandsAction:
             if server.exited is not None:
                 record[server.label]["exited"] = server.exited
                 record[server.label]["exited_node"] = server.exited_node
-        record["violating"] = _violating(commands, candidate.replies)
+        record["violating"], violations, disputed = _judged(commands, candidate, parent, config["judge_replies"])
         checks: dict[str, dict[str, Any]] = {}
         check_logs: list[str] = []
         if config["checks"] is not None:
@@ -1313,17 +1313,6 @@ class CommandsAction:
                 artifacts=[*candidate.logs, *parent.logs, *check_logs],
             ),
         )
-        violations = _violations(commands, candidate.replies) if config["judge_replies"] else []
-        # A violated expect on which the parent replied the same is about behaviour the change did not touch:
-        # nearly always the test's own expectation, not the change. Recorded, never a FAIL.
-        disputed = [
-            index
-            for index in _violating(commands, candidate.replies)
-            if config["judge_replies"] and _same_on_parent(commands, index, candidate, parent)
-        ]
-        violations = [
-            text for index, text in zip(_violating(commands, candidate.replies), violations) if index not in disputed
-        ]
 
         def named(index: int) -> str:
             return f"{index} ({step_text(commands[index])})"
@@ -1384,22 +1373,13 @@ class CommandsAction:
                 diagnostics={"reason": "uncompared-change", "commands": unexamined},
             )
 
-        def both(index: int, **extra: Any) -> dict[str, Any]:
-            return {
-                "index": index,
-                "command": step_text(commands[index]),
-                **extra,
-                "candidate": reply_at(candidate.replies, index),
-                "parent": reply_at(parent.replies, index),
-            }
-
         return compared_verdict(
             spec,
             evidence,
             "command",
             named,
-            disputed=[both(index, expect=plain_config(commands[index]["expect"])) for index in disputed],
-            unexplained=[both(index) for index in unexplained],
+            disputed=disputed,
+            unexplained=[_both(commands, candidate, parent, index) for index in unexplained],
             unreached=unreached,
             differ="unmarked commands reply differently on the two builds: ",
             same="marked commands reply the same on both builds, so the sequence did not reach the change: ",
@@ -1521,14 +1501,50 @@ def _violating(commands: Sequence[Mapping[str, Any]], replies: Sequence[Mapping[
     ]
 
 
+def _violation(commands: Sequence[Mapping[str, Any]], replies: Sequence[Mapping[str, Any]], index: int) -> str:
+    return (
+        f"command {index} ({step_text(commands[index])}) replied "
+        f"{canonical_json(reply_at(replies, index))}, not {canonical_json(plain_config(commands[index]['expect']))}"
+    )
+
+
 def _violations(commands: Sequence[Mapping[str, Any]], replies: Sequence[Mapping[str, Any]]) -> list[str]:
     """The answered replies that violate their command's ``expect``, described, in the order of :func:`_violating`."""
 
-    return [
-        f"command {index} ({step_text(commands[index])}) replied "
-        f"{canonical_json(reply_at(replies, index))}, not {canonical_json(plain_config(commands[index]['expect']))}"
-        for index in _violating(commands, replies)
+    return [_violation(commands, replies, index) for index in _violating(commands, replies)]
+
+
+def _judged(
+    commands: Sequence[Mapping[str, Any]], candidate: Side, parent: Side, judge: bool
+) -> tuple[list[int], list[str], list[dict[str, Any]]]:
+    """The candidate's replies that violate their command's ``expect``: their indexes (recorded whether or not the
+    replies are judged), the violations described for a FAIL, and the disputed ones as :func:`compared_verdict`
+    items. A violated expect on which the parent replied the same is about behaviour the change did not touch:
+    nearly always the test's own expectation, not the change. Recorded, never a FAIL."""
+
+    violating = _violating(commands, candidate.replies)
+    if not judge:
+        return violating, [], []
+    disputed = [index for index in violating if _same_on_parent(commands, index, candidate, parent)]
+    violations = [_violation(commands, candidate.replies, index) for index in violating if index not in disputed]
+    items = [
+        _both(commands, candidate, parent, index, expect=plain_config(commands[index]["expect"])) for index in disputed
     ]
+    return violating, violations, items
+
+
+def _both(
+    commands: Sequence[Mapping[str, Any]], candidate: Side, parent: Side, index: int, **extra: Any
+) -> dict[str, Any]:
+    """Command ``index`` with both builds' replies to it: a :func:`compared_verdict` item."""
+
+    return {
+        "index": index,
+        "command": step_text(commands[index]),
+        **extra,
+        "candidate": reply_at(candidate.replies, index),
+        "parent": reply_at(parent.replies, index),
+    }
 
 
 def _same_on_parent(commands: Sequence[Mapping[str, Any]], index: int, candidate: Any, parent: Any) -> bool:
