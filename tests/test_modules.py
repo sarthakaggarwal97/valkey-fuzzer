@@ -12,8 +12,15 @@ from typing import ClassVar
 import pytest
 
 from tests.support import fake_executable
-from tests.test_valkey_components import FakeHandle, _spec
-from tests.valkey_experiments_support import evidence_values, fake_context, resolved, unit_plan, valkey_service
+from tests.valkey_experiments_support import (
+    FakeHandle,
+    evidence_values,
+    fake_context,
+    resolved,
+    spec_of,
+    unit_plan,
+    valkey_service,
+)
 from valkey_fuzzer.components import capabilities, providers, snapshots
 from valkey_fuzzer.components.keyspace import canonical_value, keyspace_digest, keyspace_snapshot
 from valkey_fuzzer.components.snapshots import NONDETERMINISTIC, DatasetDigestOracle
@@ -128,7 +135,7 @@ def _module_handle(keys, replica_keys=None):
 
 
 def _digest(context, **config):
-    spec = _spec("valkey.oracle.dataset-digest", "dataset", converge_timeout_s=0, **config)
+    spec = spec_of("valkey.oracle.dataset-digest", "dataset", converge_timeout_s=0, **config)
     return DatasetDigestOracle().evaluate(context, spec, ())
 
 
@@ -211,7 +218,7 @@ def test_the_rdb_reload_loads_the_saving_instances_modules_unless_load_config_lo
     monkeypatch.setattr(snapshots, "load_rdb", fake_load)
     evidence = (_bgsave(tmp_path),)
     for load_config, expected in (({}, ["--loadmodule", MODULE]), ({"loadmodule": "/x.so"}, ["--loadmodule", "/x.so"])):
-        spec = _spec("valkey.oracle.rdb-snapshot", "s", bgsave="bgsave", load_config=load_config)
+        spec = spec_of("valkey.oracle.rdb-snapshot", "s", bgsave="bgsave", load_config=load_config)
         context = _module_context(_module_handle({}), tmp_path)
         result = snapshots.RdbSnapshotOracle().evaluate(context, spec, evidence)
         assert result.status.value == "PASS", result.summary

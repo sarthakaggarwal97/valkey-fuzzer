@@ -15,11 +15,13 @@ from tests import fakes
 from tests.deployment_support import cluster_nodes_line, cluster_nodes_text
 from tests.support import VirtualClock, fake_executable
 from tests.valkey_experiments_support import (
+    FakeClient,
+    FakeHandle,
     evidence_values,
     fake_context,
     registration_for,
     rejects_config,
-    resolved,
+    spec_of,
     unit_plan,
 )
 from valkey_fuzzer import deadlines
@@ -141,59 +143,6 @@ def test_the_rdb_cut_check_accepts_components_that_lose_no_acknowledged_write(co
     assert registration_for(spec.use).resolve_config(spec, plan)["workload"] == "writes"
 
 
-class FakeClient(fakes.FakeClient):
-    """Replies ``reply`` to every command (or raises ``error``); INFO answers with the next of ``infos``."""
-
-    def __init__(self, error=None, reply="OK", infos=({"role": "master"},)):
-        self.error, self.reply, self.infos, self.commands, self.closed = error, reply, list(infos), [], False
-
-    def execute_command(self, *args):
-        self.commands.append(args)
-        if self.error is not None:
-            raise self.error
-        return self.reply
-
-    def info(self, section="all"):
-        return self.infos.pop(0) if len(self.infos) > 1 else self.infos[0]
-
-    def close(self):
-        self.closed = True
-
-
-class FakeHandle(fakes.FakeHandle):
-    """A primary valkey-0 and replicas of one shard, each with its own pid; a stopped instance stays down until
-    ``restart``."""
-
-    started = 5.0
-
-    def __init__(self, instances=("valkey-0", "valkey-1"), log_dir=None):
-        super().__init__(
-            SimpleNamespace(instance_id=node_id, role="replica" if index else "primary", pid=1000 + index, shard_id=0)
-            for index, node_id in enumerate(instances)
-        )
-        self.mode = SimpleNamespace(value="standalone")
-        self.log_dir, self.clients = log_dir, {}
-
-    def pid(self, node_id):
-        return self.instance(node_id).pid
-
-    def log_file(self, node_id):
-        return os.path.join(self.log_dir, f"{node_id}.log")
-
-    def process_output_file(self, node_id):
-        return os.path.join(self.log_dir, f"{node_id}.stdio.log")
-
-    def new_client(self, node_id, timeout=5.0, decode_responses=True):
-        return self.clients.setdefault(node_id, FakeClient())
-
-    def failover(self, shard, force, timeout, rng):
-        return True
-
-
-def _spec(component_id, component, **config):
-    return resolved(_component(component_id, component, **config))
-
-
 @pytest.fixture
 def clock(monkeypatch):
     """Time that passes only as the components wait: retries and timeouts take no real time."""
@@ -208,7 +157,7 @@ def test_the_log_observer_reads_only_its_window_and_reports_forbidden_lines(tmp_
     log = tmp_path / "valkey-0.log"
     log.write_text("forkless save complete\n")
     expect = [{"evidence_id": "t.complete", "pattern": "save complete"}]
-    spec = _spec("valkey.observer.log", "logs", expect=expect, forbidden=[{"pattern": "BUG REPORT"}])
+    spec = spec_of("valkey.observer.log", "logs", expect=expect, forbidden=[{"pattern": "BUG REPORT"}])
     context = fake_context(FakeHandle(("valkey-0",), log_dir=str(tmp_path)), artifact_dir=str(tmp_path / "artifacts"))
     observer = LogObserver()
     observer.start(context, spec)
@@ -249,7 +198,7 @@ def test_the_info_observer_judges_each_expectation_over_its_samples(tmp_path):
         {"evidence_id": "t.number", "field": "type", "max": 5},
     ]  # fmt: skip
     config = {"instances": "all", "sections": ["all"], "on_events": ["go"], "interval_s": 0}
-    spec = _spec("valkey.observer.info", "info", expectations=expectations, **config)
+    spec = spec_of("valkey.observer.info", "info", expectations=expectations, **config)
     context = fake_context(handle, artifact_dir=str(tmp_path))
     observer = InfoObserver()
     observer.start(context, spec)
@@ -274,7 +223,7 @@ def test_a_worker_thread_says_why_it_did_not_end_cleanly():
 
 
 def test_a_workload_stops_its_workers_and_errors_at_once_while_one_still_runs():
-    spec = _spec("valkey.workload.key-value", "writes")
+    spec = spec_of("valkey.workload.key-value", "writes")
     release = threading.Event()
     stuck = polling.StoppableThread("stuck", lambda stop_event: release.wait())
     crashed = polling.StoppableThread("crashes", lambda stop_event: 1 / 0)
@@ -316,7 +265,7 @@ def test_a_paced_loop_keeps_its_rate_and_spends_no_slot_on_a_step_that_issued_no
 def test_an_observer_whose_worker_crashed_does_not_pass_on_what_it_saw_before(tmp_path, observer_id):
     (tmp_path / "valkey-0.log").write_text("")
     config = {"interval_s": 0.001} if observer_id.endswith("info") else {"rules": [{"pattern": "x", "publish": "t.x"}]}
-    spec = _spec(observer_id, "watch", instances="valkey-0", **config)
+    spec = spec_of(observer_id, "watch", instances="valkey-0", **config)
     context = fake_context(FakeHandle(("valkey-0",), log_dir=str(tmp_path)), artifact_dir=str(tmp_path))
     observer = registration_for(observer_id).factory()
     observer.start(context, spec)
@@ -339,7 +288,7 @@ def test_overlapping_log_triggers_restore_the_switch_interval_only_when_the_last
     before = sys.getswitchinterval()
     first, second = LogTriggerObserver(), LogTriggerObserver()
     specs = [
-        _spec("valkey.observer.log-trigger", f"t{n}", instances="valkey-0", switch_interval_s=0.001 * n,
+        spec_of("valkey.observer.log-trigger", f"t{n}", instances="valkey-0", switch_interval_s=0.001 * n,
               rules=[{"pattern": "x", "publish": "t.x"}])
         for n in (1, 2)
     ]  # fmt: skip
@@ -399,7 +348,7 @@ def test_the_info_observer_tells_an_unmet_expectation_from_one_it_could_not_judg
     handle.clients = {"valkey-0": _FlakyClient(infos, timeouts), "valkey-1": _FlakyClient(({},), _ALL)}
     instances = "all" if expectation.get("instances") == "all" else "primaries"
     expectations = [{"evidence_id": "t.check", **expectation, "instances": "all", "required": True}]
-    spec = _spec("valkey.observer.info", "info", interval_s=0, instances=instances, expectations=expectations)
+    spec = spec_of("valkey.observer.info", "info", interval_s=0, instances=instances, expectations=expectations)
     context = fake_context(handle, artifact_dir=str(tmp_path))
     observer = InfoObserver()
     observer.start(context, spec)
@@ -461,7 +410,7 @@ def test_the_evidence_oracle_judges_what_an_observer_recorded(tmp_path, timeouts
 )  # fmt: skip
 def test_the_log_observer_does_not_judge_a_log_it_could_not_read(tmp_path, config, status, unmet, unchecked):
     (tmp_path / "valkey-0.log").write_text("")
-    spec = _spec("valkey.observer.log", "logs", **config)
+    spec = spec_of("valkey.observer.log", "logs", **config)
     context = fake_context(FakeHandle(log_dir=str(tmp_path)), artifact_dir=str(tmp_path / "artifacts"))
     observer = LogObserver()
     observer.start(context, spec)
@@ -487,7 +436,7 @@ def test_the_log_observer_does_not_judge_a_log_it_could_not_read(tmp_path, confi
 )  # fmt: skip
 def test_actions_report_what_they_did_to_the_deployment(component_id, config, status, evidence):
     handle = FakeHandle()
-    spec = _spec(component_id, "act", **config)
+    spec = spec_of(component_id, "act", **config)
     action = registration_for(component_id).factory()
     result = action.run(fake_context(handle, spec), spec)
     assert result.status.value == status, result.summary
@@ -516,7 +465,7 @@ def test_a_command_with_no_reply_leaves_the_run_untested_and_only_a_wrong_reply_
     if allow_unanswered and status == "ERROR":
         # A command that may kill its server (a crash point inside it) is answered or not: both pass.
         status = "PASS"
-    spec = _spec("valkey.action.command", "act", command=["PING"], instances="all", allow_unanswered=allow_unanswered)
+    spec = spec_of("valkey.action.command", "act", command=["PING"], instances="all", allow_unanswered=allow_unanswered)
     result = actions.CommandAction().run(fake_context(handle, spec), spec)
     assert result.status.value == status, result.summary
     replies = {reply["instance_id"]: reply for reply in result.evidence[0].value}
@@ -526,7 +475,7 @@ def test_a_command_with_no_reply_leaves_the_run_untested_and_only_a_wrong_reply_
 def test_a_failover_with_nothing_to_fail_over_leaves_the_run_untested():
     handle = FakeHandle()
     handle.failover = lambda shard, force, timeout, rng: None
-    spec = _spec("valkey.action.failover", "act", shard=None)
+    spec = spec_of("valkey.action.failover", "act", shard=None)
     result = actions.FailoverAction().run(fake_context(handle, spec), spec)
     assert (result.status.value, result.summary) == ("ERROR", "shard-0-primary has nothing to fail over")
 
@@ -535,7 +484,7 @@ def test_a_client_side_error_is_no_reply_from_valkey():
     # The client refused to encode the command: nothing reached Valkey, so nothing of it can fail the run.
     handle = FakeHandle()
     handle.clients["valkey-1"] = FakeClient(error=DataError("Invalid input of type: 'dict'"))
-    spec = _spec("valkey.action.command", "act", command=["PING"], instances="all")
+    spec = spec_of("valkey.action.command", "act", command=["PING"], instances="all")
     with pytest.raises(DataError):
         actions.CommandAction().run(fake_context(handle, spec), spec)
 
@@ -631,7 +580,7 @@ def test_a_rolling_upgrade_fails_only_on_what_valkey_did(monkeypatch, raised, st
     monkeypatch.setattr(actions.RollingUpgradeAction, "_upgrade", staticmethod(upgrade))
     handle = FakeHandle()
     handle.refresh_roles = handle.roles
-    spec = _spec("valkey.action.rolling-upgrade", "upgrade", to_binary="/new/valkey-server")
+    spec = spec_of("valkey.action.rolling-upgrade", "upgrade", to_binary="/new/valkey-server")
     result = actions.RollingUpgradeAction().run(fake_context(handle), spec)
     assert result.status.value == status and str(raised) in result.summary, result.summary
 
@@ -649,13 +598,13 @@ def test_a_rolling_upgrade_fails_only_on_what_valkey_did(monkeypatch, raised, st
 def test_a_poll_that_could_not_read_is_an_error_and_one_that_saw_the_wrong_value_fails(clock, errors, status, summary):
     handle = FakeHandle()
     handle.clients = {node_id: FakeClient(error=errors.get(node_id)) for node_id in ("valkey-0", "valkey-1")}
-    spec = _spec("valkey.action.poll", "poll", command=["PING"], predicate={"equals": "PONG"}, timeout_s=2)
+    spec = spec_of("valkey.action.poll", "poll", command=["PING"], predicate={"equals": "PONG"}, timeout_s=2)
     result = registration_for("valkey.action.poll").factory().run(clock.drive(fake_context(handle, spec)), spec)
     assert (result.status.value, result.summary) == (status, summary) and clock.elapsed >= 2 - 1e-6
 
 
 def test_an_event_that_never_came_is_an_error_of_the_wait_not_a_failure():
-    spec = _spec("valkey.action.wait-event", "drained", event="writes.drained", timeout_s=0.05)
+    spec = spec_of("valkey.action.wait-event", "drained", event="writes.drained", timeout_s=0.05)
     result = registration_for("valkey.action.wait-event").factory().run(fake_context(FakeHandle(), spec), spec)
     assert (result.status.value, result.summary) == ("ERROR", "writes.drained observed 0/1 times before timeout")
 
@@ -725,7 +674,7 @@ def test_bgsave_waits_out_a_save_another_child_is_running(clock, tmp_path, busy,
 
     handle = FakeHandle(("valkey-0",))
     handle.clients["valkey-0"] = client = _BusyClient(tmp_path, busy, error)
-    spec = _spec("valkey.action.bgsave", "save", instances="all", timeout_s=5)
+    spec = spec_of("valkey.action.bgsave", "save", instances="all", timeout_s=5)
     result = BgsaveAction().run(clock.drive(fake_context(handle, artifact_dir=str(tmp_path / "artifacts"))), spec)
     assert result.status.value == status, result.summary
     assert result.summary.startswith(summary)
@@ -771,7 +720,7 @@ def test_a_save_the_harness_could_not_follow_is_an_error_not_a_failed_save(clock
 
     handle = FakeHandle(("valkey-0",))
     handle.clients["valkey-0"] = _FlakyInfoClient(tmp_path, **client)
-    spec = _spec("valkey.action.bgsave", "save", instances="all", timeout_s=5)
+    spec = spec_of("valkey.action.bgsave", "save", instances="all", timeout_s=5)
     result = BgsaveAction().run(clock.drive(fake_context(handle, artifact_dir=str(tmp_path / "artifacts"))), spec)
     assert result.status.value == status and summary in result.summary, result.summary
 
@@ -797,7 +746,7 @@ def test_bgsave_follows_each_save_and_records_the_rdb_it_wrote(
         (tmp_path / node.instance_id).mkdir()
         failing = setup_error and node.instance_id == "valkey-1"
         handle.clients[node.instance_id] = _SaveClient(tmp_path / node.instance_id, rdb, status, failing)
-    spec = _spec("valkey.action.bgsave", "save", instances="all")
+    spec = spec_of("valkey.action.bgsave", "save", instances="all")
     context = fake_context(handle, artifact_dir=str(tmp_path / "artifacts"))
     if setup_error:
         with pytest.raises(RuntimeError, match="unknown command"):
@@ -829,7 +778,7 @@ def test_a_failed_restart_is_retried_and_the_kill_is_still_reported(restart_mode
 
     handle.restart = restart
     context = fake_context(handle)
-    spec = _spec("valkey.fault.process-signal", "kill", when_event="go", signal="SIGKILL", restart_mode=restart_mode)
+    spec = spec_of("valkey.fault.process-signal", "kill", when_event="go", signal="SIGKILL", restart_mode=restart_mode)
     fault = ProcessSignalFault()
     fault.inject(context, spec)
     context.event_bus.publish("go", source="test")
@@ -852,7 +801,7 @@ def test_a_kill_without_restart_is_down_on_purpose_for_every_oracle(clock, tmp_p
     handle.roles = lambda: {node.instance_id: node.role for node in handle.instances if handle.alive[node.instance_id]}
     handle.clients = {"valkey-0": _KeyspaceClient()}
     context = fake_context(handle, artifact_dir=str(tmp_path))
-    spec = _spec("valkey.fault.process-signal", "kill", when_event="go", instance="valkey-1", restart=False)
+    spec = spec_of("valkey.fault.process-signal", "kill", when_event="go", instance="valkey-1", restart=False)
     fault = ProcessSignalFault()
     fault.inject(context, spec)
     context.event_bus.publish("go", source="test")
@@ -860,7 +809,7 @@ def test_a_kill_without_restart_is_down_on_purpose_for_every_oracle(clock, tmp_p
     down = [dict(item.value) for item in recovered.evidence if item.evidence_id == "valkey.instances.expected-down"]
     assert down == [{"instances": ("valkey-1",)}] and not handle.alive["valkey-1"]
     # The digest oracle does not wait for, or ERROR on, an instance stopped on purpose.
-    digest = _spec("valkey.oracle.dataset-digest", "dataset", converge_timeout_s=5)
+    digest = spec_of("valkey.oracle.dataset-digest", "dataset", converge_timeout_s=5)
     result = DatasetDigestOracle().evaluate(clock.drive(context), digest, recovered.evidence)
     assert result.status is ComponentStatus.PASS and clock.elapsed < 5, result.summary
 
@@ -885,7 +834,7 @@ def test_disk_fill_writes_only_into_the_runs_tmpfs_and_never_past_its_size(
     monkeypatch.setattr(providers, "provisioned_tmpfs_bytes", lambda path: provisioned)
     monkeypatch.setattr(providers, "mounted_tmpfs_bytes", lambda path: mounted)
     context = fake_context(FakeHandle())
-    spec = _spec("valkey.fault.disk-fill", "fill", when_event="go", path=str(tmp_path), chunk_bytes=4096, **config)
+    spec = spec_of("valkey.fault.disk-fill", "fill", when_event="go", path=str(tmp_path), chunk_bytes=4096, **config)
     fault = FillFilesystemFault()
     fault.inject(context, spec)
     ballast, filled = tmp_path / ".ballast-fill", []
@@ -904,7 +853,7 @@ def test_a_disk_fill_release_that_fails_leaves_its_event_alone_and_recovery_repo
     monkeypatch.setattr(providers, "provisioned_tmpfs_bytes", lambda path: 8192)
     monkeypatch.setattr(providers, "mounted_tmpfs_bytes", lambda path: 8192)
     context = fake_context(FakeHandle())
-    spec = _spec(
+    spec = spec_of(
         "valkey.fault.disk-fill", "fill", when_event="go", path=str(tmp_path), chunk_bytes=4096, release_event="saved"
     )
     fault = storage.FillFilesystemFault()
@@ -942,7 +891,7 @@ def _item(evidence_id, source):
     ids=["required-observed", "too-few", "forbidden-observed", "other-source", "precondition-missing"],
 )
 def test_the_evidence_oracle_requires_and_forbids(evidence, status):
-    spec = _spec(
+    spec = spec_of(
         "valkey.oracle.evidence",
         "assert",
         require=[{"evidence_id": "a.b", "source": "x", "min_count": 2}],
@@ -1010,7 +959,7 @@ def test_liveness_fails_on_a_sanitizer_report_or_a_forbidden_log_line(tmp_path, 
     (tmp_path / "valkey-0.log").write_text("Ready to accept connections\n")
     (tmp_path / "valkey-0.stdio.log").write_text(output)
     handle = _LivenessHandle(("valkey-0",), log_dir=str(tmp_path))
-    result = LivenessOracle().evaluate(fake_context(handle), _spec("valkey.oracle.liveness", "liveness"), evidence)
+    result = LivenessOracle().evaluate(fake_context(handle), spec_of("valkey.oracle.liveness", "liveness"), evidence)
     assert result.status.value == ("PASS" if summary is None else "FAIL"), result.summary
     assert (summary or "") in result.summary
     # A sanitizer report is a crash, which stands after a failed teardown; a forbidden log line alone is not.
@@ -1053,7 +1002,7 @@ def test_the_binary_check_judges_only_servers_it_read(clock, monkeypatch, failur
     handle.clients = {"valkey-0": _ServerInfoClient(1000), "valkey-1": _ServerInfoClient(1001, failures, version)}
     for node_id in down:
         handle.alive[node_id] = False
-    spec = _spec("valkey.oracle.binary-check", "binaries")
+    spec = spec_of("valkey.oracle.binary-check", "binaries")
     result = oracles.BinaryCheckOracle().evaluate(clock.drive(fake_context(handle)), spec, ())
     assert result.status.value == status and result.summary.startswith(summary), result.summary
 
@@ -1116,7 +1065,7 @@ def test_the_digest_oracle_does_not_fail_a_key_held_by_both_sides_of_an_unfinish
         "valkey-0": _StringsClient({"a": "1", "b": "2"}, source_tokens),
         "valkey-1": _StringsClient({"a": "1"}, target_tokens),
     }
-    spec = _spec("valkey.oracle.dataset-digest", "dataset", converge_timeout_s=0)
+    spec = spec_of("valkey.oracle.dataset-digest", "dataset", converge_timeout_s=0)
     result = DatasetDigestOracle().evaluate(fake_context(handle, artifact_dir=str(tmp_path)), spec, ())
     assert result.status.value == status, result.summary
     if status == "PASS":
@@ -1148,7 +1097,7 @@ def test_the_digest_oracle_needs_a_primary_and_never_fails_valkey_for_a_read_it_
     handle.roles = lambda: {node.instance_id: node.role for node in handle.instances if node.role}
     handle.primaries = lambda: [node_id for node_id, role in handle.roles().items() if role == "primary"]
     handle.clients = {"valkey-0": _KeyspaceClient(failures), "valkey-1": _KeyspaceClient()}
-    spec = _spec("valkey.oracle.dataset-digest", "dataset", converge_timeout_s=5)
+    spec = spec_of("valkey.oracle.dataset-digest", "dataset", converge_timeout_s=5)
     result = DatasetDigestOracle().evaluate(clock.drive(fake_context(handle, artifact_dir=str(tmp_path))), spec, ())
     assert result.status.value == status, result.summary
     assert result.summary.startswith(summary)

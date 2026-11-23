@@ -6,6 +6,7 @@ import hashlib
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 
 import libvalkey
@@ -13,10 +14,42 @@ from valkey.exceptions import ConnectionError as ValkeyConnectionError
 from valkey.exceptions import InvalidResponse, ResponseError
 from valkey.exceptions import TimeoutError as ValkeyTimeoutError
 
-from valkey_fuzzer.components import command_sequence
+from valkey_fuzzer.components import capabilities, command_sequence
+from valkey_fuzzer.components.tools import TOOLS
 
 # What a fake build does with a command (see Build).
 DIE, TIMEOUT, SILENT, CLOSE, EXIT = "<die>", "<timeout>", "<silent>", "<close>", "<exit>"
+
+# A fake build's tools (``fake_builds(..., tools=True)``), one script. Each argument is a step: out:<text>,
+# err:<text>, label (the build's), cwd, stdin, env:<name>, cat:<file>, exit:<status>, and <step>@<label> runs the
+# step on that build alone; crash is SIGSEGV, hang sleeps, grow:<dir> leaves a file named by its pid in <dir>
+# (which the tests read as memory running away) and sleeps, write:<file> writes the arguments into a file;
+# node:<socket> and short:<socket> print the node ID of the fake server with that socket (see FakeServer), node:
+# in full and abbreviated, short: its first 8 digits.
+TOOL = """#!{python}
+import hashlib, os, signal, sys, time
+LABEL = {label!r}
+for step in sys.argv[1:]:
+    step, _, only = step.partition("@")
+    if only and only != LABEL:
+        continue
+    name, _, value = step.partition(":")
+    if name == "out": print(value)
+    elif name == "err": print(value, file=sys.stderr)
+    elif name == "label": print(LABEL)
+    elif name == "cwd": print(os.getcwd())
+    elif name == "stdin": sys.stdout.buffer.write(sys.stdin.buffer.read())
+    elif name == "env": print(os.environ.get(value, "-"))
+    elif name == "cat": sys.stdout.buffer.write(open(value, "rb").read())
+    elif name == "write": open(value, "w").write(" ".join(sys.argv[1:]))
+    elif name == "exit": sys.exit(int(value))
+    elif name == "crash": sys.stdout.flush(); os.kill(os.getpid(), signal.SIGSEGV)
+    elif name == "hang": time.sleep(30)
+    elif name == "grow": open(os.path.join(value, str(os.getpid())), "w").close(); time.sleep(30)
+    elif name in ("node", "short"):
+        node_id = hashlib.sha1(os.path.dirname(value).encode()).hexdigest()
+        print(f"{{node_id}} ({{node_id[:8]}}...)" if name == "node" else node_id[:8])
+"""
 
 
 class Error(str):
@@ -233,3 +266,25 @@ def nodes_of(build):
     """The fake servers of ``build`` in the order they started: its nodes."""
 
     return [server for server in SERVERS.values() if server.build is build and server.node]
+
+
+def fake_builds(monkeypatch, tmp_path, labels, *, tools=False):
+    """``{label: valkey-server path}`` of a fresh fake :class:`Build` per label, under ``tmp_path / label``, with
+    the private servers and raw connections of the components under test faked; a test sets each build's replies
+    in BUILDS. With ``tools``, the ``valkey-server`` and each of :data:`TOOLS` beside it is :data:`TOOL`."""
+
+    BUILDS.clear()
+    SERVERS.clear()
+    monkeypatch.setattr(command_sequence, "PrivateServer", FakeServer)
+    monkeypatch.setattr(capabilities, "PrivateServer", FakeServer)
+    monkeypatch.setattr(command_sequence, "open_raw_connection", fake_open_raw_connection)
+    paths = {}
+    for label in labels:
+        directory = tmp_path / label
+        directory.mkdir()
+        for name in ("valkey-server", *TOOLS) if tools else ("valkey-server",):
+            (directory / name).write_text(TOOL.format(python=sys.executable, label=label) if tools else "#!/bin/sh\n")
+            (directory / name).chmod(0o755)
+        paths[label] = str(directory / "valkey-server")
+        BUILDS[paths[label]] = Build()
+    return paths

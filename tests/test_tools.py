@@ -2,69 +2,24 @@
 steps its arguments name, and fake private servers behind the real private-server side, and the verdicts."""
 
 import os
-import sys
 
 import pytest
 
-from tests.command_sequence_support import BUILDS, SERVERS, Build, FakeServer, fake_open_raw_connection
+from tests.command_sequence_support import BUILDS, SERVERS, Build, fake_builds
 from tests.valkey_experiments_support import registration_for, rejects_config, resolved, unit_plan
 from valkey_fuzzer._data import to_plain_data
-from valkey_fuzzer.components import command_sequence, tools
+from valkey_fuzzer.components import tools
 from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.schema import load_yaml
 from valkey_fuzzer.testing import FakeContext
-
-# Each argument is a step: out:<text>, err:<text>, label (the build's), cwd, stdin, env:<name>,
-# cat:<file>, exit:<status>, and <step>@<label> runs the step on that build alone; crash is SIGSEGV, hang
-# sleeps, grow:<dir> leaves a file named by its pid in <dir> (which the tests read as memory running away) and
-# sleeps, write:<file> writes the arguments into a file; node:<socket> and short:<socket> print the node ID of
-# the fake server with that socket (see FakeServer), node: in full and abbreviated, short: its first 8 digits.
-TOOL = """#!{python}
-import hashlib, os, signal, sys, time
-LABEL = {label!r}
-for step in sys.argv[1:]:
-    step, _, only = step.partition("@")
-    if only and only != LABEL:
-        continue
-    name, _, value = step.partition(":")
-    if name == "out": print(value)
-    elif name == "err": print(value, file=sys.stderr)
-    elif name == "label": print(LABEL)
-    elif name == "cwd": print(os.getcwd())
-    elif name == "stdin": sys.stdout.buffer.write(sys.stdin.buffer.read())
-    elif name == "env": print(os.environ.get(value, "-"))
-    elif name == "cat": sys.stdout.buffer.write(open(value, "rb").read())
-    elif name == "write": open(value, "w").write(" ".join(sys.argv[1:]))
-    elif name == "exit": sys.exit(int(value))
-    elif name == "crash": sys.stdout.flush(); os.kill(os.getpid(), signal.SIGSEGV)
-    elif name == "hang": time.sleep(30)
-    elif name == "grow": open(os.path.join(value, str(os.getpid())), "w").close(); time.sleep(30)
-    elif name in ("node", "short"):
-        node_id = hashlib.sha1(os.path.dirname(value).encode()).hexdigest()
-        print(f"{{node_id}} ({{node_id[:8]}}...)" if name == "node" else node_id[:8])
-"""
 
 
 @pytest.fixture
 def builds(monkeypatch, tmp_path):
     """``{label: valkey-server path}`` of the ``candidate`` and ``parent`` fake builds, each with its tools."""
 
-    BUILDS.clear()
-    SERVERS.clear()
-    monkeypatch.setattr(command_sequence, "PrivateServer", FakeServer)
-    monkeypatch.setattr(command_sequence, "open_raw_connection", fake_open_raw_connection)
-    paths = {}
-    for label in ("candidate", "parent"):
-        src = tmp_path / label / "src"
-        src.mkdir(parents=True)
-        for name in ("valkey-server", *tools.TOOLS):
-            path = src / name
-            path.write_text(TOOL.format(python=sys.executable, label=label))
-            path.chmod(0o755)
-        paths[label] = str(src / "valkey-server")
-        BUILDS[paths[label]] = Build()
-    return paths
+    return fake_builds(monkeypatch, tmp_path, ("candidate", "parent"), tools=True)
 
 
 def _spec(**config):
