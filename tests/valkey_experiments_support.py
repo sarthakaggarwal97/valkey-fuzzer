@@ -1,12 +1,16 @@
 """Helpers for the Valkey components' tests: a run service with them, a shipped experiment, and what a unit test of
-one component needs: a plan, its registration, its resolved spec, and a fake run context."""
+one component needs: a plan, its registration, its resolved spec, a fake deployment handle whose clients answer as
+a test says, and a fake run context."""
 
+import os
 from collections.abc import Sequence
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
 
+from tests import fakes
 from valkey_fuzzer.catalog import Catalog, ExperimentDirectory, build_catalog
 from valkey_fuzzer.compiler import with_planned_instances
 from valkey_fuzzer.components import component_registrations
@@ -109,6 +113,12 @@ def spec_for(use, component_id, role, config):
     return resolved_spec(registration_for(use), spec)
 
 
+def spec_of(use, component_id, **config):
+    """The resolved spec of component ``use`` as ``component_id`` with ``config``, in the role its id names."""
+
+    return spec_for(use, component_id, ComponentRole(use.split(".")[1]), config)
+
+
 def rejects_config(use, config, match, *others, **plan_options):
     """Component ``use`` with ``config`` fails to compile with a ConfigError matching ``match``, in a unit plan
     of it, ``others``, and ``plan_options``."""
@@ -116,6 +126,55 @@ def rejects_config(use, config, match, *others, **plan_options):
     spec = ComponentSpec(role=ComponentRole(use.split(".")[1]), use=use, id="subject", config=config)
     with pytest.raises(ConfigError, match=match):
         registration_for(use).resolve_config(spec, unit_plan((spec, *others), **plan_options))
+
+
+class FakeClient(fakes.FakeClient):
+    """Replies ``reply`` to every command (or raises ``error``); INFO answers with the next of ``infos``."""
+
+    def __init__(self, error=None, reply="OK", infos=({"role": "master"},)):
+        self.error, self.reply, self.infos, self.commands, self.closed = error, reply, list(infos), [], False
+
+    def execute_command(self, *args):
+        self.commands.append(args)
+        if self.error is not None:
+            raise self.error
+        return self.reply
+
+    def info(self, section="all"):
+        return self.infos.pop(0) if len(self.infos) > 1 else self.infos[0]
+
+    def close(self):
+        self.closed = True
+
+
+class FakeHandle(fakes.FakeHandle):
+    """A primary valkey-0 and replicas of one shard, each with its own pid; a stopped instance stays down until
+    ``restart``. ``new_client`` hands out one :class:`FakeClient` per node, from ``clients``, which a test sets."""
+
+    started = 5.0
+
+    def __init__(self, instances=("valkey-0", "valkey-1"), log_dir=None):
+        super().__init__(
+            SimpleNamespace(instance_id=node_id, role="replica" if index else "primary", pid=1000 + index, shard_id=0)
+            for index, node_id in enumerate(instances)
+        )
+        self.mode = SimpleNamespace(value="standalone")
+        self.log_dir, self.clients = log_dir, {}
+
+    def pid(self, node_id):
+        return self.instance(node_id).pid
+
+    def log_file(self, node_id):
+        return os.path.join(self.log_dir, f"{node_id}.log")
+
+    def process_output_file(self, node_id):
+        return os.path.join(self.log_dir, f"{node_id}.stdio.log")
+
+    def new_client(self, node_id, timeout=5.0, decode_responses=True):
+        return self.clients.setdefault(node_id, FakeClient())
+
+    def failover(self, shard, force, timeout, rng):
+        return True
 
 
 def fake_context(handle, *components, **kwargs):

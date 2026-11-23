@@ -8,19 +8,7 @@ from types import SimpleNamespace
 import pytest
 from valkey.crc import key_slot
 
-from tests.command_sequence_support import (
-    BUILDS,
-    CLOSE,
-    DIE,
-    SERVERS,
-    TIMEOUT,
-    Build,
-    Error,
-    FakeServer,
-    fake_open_raw_connection,
-    nodes_of,
-)
-from tests.support import fake_executable
+from tests.command_sequence_support import BUILDS, CLOSE, DIE, SERVERS, TIMEOUT, Error, fake_builds, nodes_of
 from tests.valkey_experiments_support import (
     command_docs_reply,
     fake_context,
@@ -29,7 +17,7 @@ from tests.valkey_experiments_support import (
     valkey_service,
 )
 from valkey_fuzzer._data import to_plain_data
-from valkey_fuzzer.components import command_metadata, command_sequence, command_table
+from valkey_fuzzer.components import command_metadata, command_table
 from valkey_fuzzer.components.command_metadata import CommandMetadataOracle, range_positions, spec_positions
 from valkey_fuzzer.generator import generate
 from valkey_fuzzer.plan import ComponentSpec
@@ -168,13 +156,7 @@ class Commands(dict):
 def builds(monkeypatch, tmp_path):
     """The path of a fake ``valkey-server`` build, whose replies a test sets with :func:`run`."""
 
-    BUILDS.clear()
-    SERVERS.clear()
-    monkeypatch.setattr(command_sequence, "PrivateServer", FakeServer)
-    monkeypatch.setattr(command_sequence, "open_raw_connection", fake_open_raw_connection)
-    path = fake_executable(tmp_path / "valkey-server")
-    BUILDS[str(path)] = Build()
-    return str(path)
+    return fake_builds(monkeypatch, tmp_path, ("deployment",))["deployment"]
 
 
 def _one(*words):

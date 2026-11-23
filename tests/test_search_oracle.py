@@ -9,8 +9,7 @@ import struct
 import valkey
 
 from tests.support import VirtualClock
-from tests.test_valkey_components import FakeHandle, _spec
-from tests.valkey_experiments_support import fake_context
+from tests.valkey_experiments_support import FakeHandle, fake_context, spec_of
 from valkey_fuzzer import deadlines
 from valkey_fuzzer.components import polling
 from valkey_fuzzer.components.search import (
@@ -298,7 +297,7 @@ def _parse(text):
 
 
 def _oracle(handle, **config):
-    spec = _spec(
+    spec = spec_of(
         "valkey.oracle.search-results",
         "search",
         index="idx",

@@ -21,20 +21,18 @@ from tests.command_sequence_support import (
     SERVERS,
     SILENT,
     TIMEOUT,
-    Build,
     ByResp,
     Error,
     FakeServer,
     Wire,
-    fake_open_raw_connection,
+    fake_builds,
     nodes_of,
 )
 from tests.deployment_support import cluster_nodes_line, cluster_nodes_text
-from tests.support import fake_executable
 from tests.valkey_experiments_support import registration_for, rejects_config, resolved, unit_plan
 from valkey_fuzzer import deadlines
 from valkey_fuzzer._data import canonical_json, to_plain_data
-from valkey_fuzzer.components import capabilities, checks, command_sequence, server
+from valkey_fuzzer.components import checks, command_sequence, server
 from valkey_fuzzer.plan import ComponentSpec
 from valkey_fuzzer.protocols import ComponentRole
 from valkey_fuzzer.schema import load_yaml
@@ -45,17 +43,7 @@ from valkey_fuzzer.testing import FakeContext
 def builds(monkeypatch, tmp_path):
     """Executable paths for the ``candidate`` and ``parent`` builds, whose behaviour the test sets in BUILDS."""
 
-    BUILDS.clear()
-    SERVERS.clear()
-    monkeypatch.setattr(command_sequence, "PrivateServer", FakeServer)
-    monkeypatch.setattr(capabilities, "PrivateServer", FakeServer)
-    monkeypatch.setattr(command_sequence, "open_raw_connection", fake_open_raw_connection)
-    paths = {}
-    for label in ("candidate", "parent"):
-        path = fake_executable(tmp_path / f"{label}-valkey-server")
-        paths[label] = str(path)
-        BUILDS[str(path)] = Build()
-    return paths
+    return fake_builds(monkeypatch, tmp_path, ("candidate", "parent"))
 
 
 def _spec(**config):
