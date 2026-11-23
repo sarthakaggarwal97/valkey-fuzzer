@@ -1018,7 +1018,7 @@ def _stamps(path: Path, *names: str) -> tuple[tuple[int, int], ...]:
     try:
         return tuple(file_stamp(path / name) for name in names)
     except OSError as exc:
-        raise SpecBundleError(f"cannot read {path}: {exc}") from exc
+        raise SpecBundleError(f"cannot read {exc.filename}: {exc}") from exc
 
 
 def load_spec_mapping(reference: str) -> SpecMapping:

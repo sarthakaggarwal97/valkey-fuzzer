@@ -454,6 +454,13 @@ def test_a_mapping_broken_after_it_was_read_is_refused_not_served_from_the_cache
         load_spec_mapping(str(bundle))
 
 
+def test_a_bundle_file_that_cannot_be_read_is_named_not_only_its_bundle(tmp_path):
+    bundle = register_copy(tmp_path)
+    (bundle / "model.tla").unlink()
+    with pytest.raises(SpecBundleError, match=rf"^cannot read {re.escape(str(bundle / 'model.tla'))}: "):
+        load_spec_mapping(str(bundle))
+
+
 # ---------------------------------------------------------------------------
 # translate
 # ---------------------------------------------------------------------------
