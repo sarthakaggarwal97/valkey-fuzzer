@@ -14,6 +14,7 @@ import random
 import time
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
+from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 import valkey
@@ -199,6 +200,34 @@ def syncing_replicas(connection: DeploymentConnection) -> list[str]:
     return syncing
 
 
+@dataclass
+class _Attempt:
+    """One validation attempt's bookkeeping while its checks run: the time budget, what failed and why, each
+    check's result, and whether the attempt judged the deployment."""
+
+    deadline: float
+    budget: float
+    failed_checks: list[str] = field(default_factory=list)
+    error_messages: list[str] = field(default_factory=list)
+    results: dict[str, Any] = field(default_factory=dict)
+    log_result: Optional[LogValidationResult] = None
+    # Something was not judged (an instance did not answer, the time ran out, a check broke or could not read);
+    # the attempt is inconclusive unless a check saw Valkey do something wrong.
+    inconclusive: bool = False
+    judged_failure: bool = False
+
+    def out_of_time(self) -> bool:
+        """Whether the budget ran out, recorded as the failed check ``validation_timeout`` when it did."""
+        if time.monotonic() < self.deadline:
+            return False
+        message = f"Validation timeout ({self.budget}s) exceeded"
+        logger.error(message)
+        self.failed_checks.append("validation_timeout")
+        self.error_messages.append(message)
+        self.inconclusive = True
+        return True
+
+
 class DeploymentStateCheck:
     """One deployment's state checks, with its test keys and the instances stopped on purpose.
 
@@ -356,27 +385,7 @@ class DeploymentStateCheck:
         config = self.config
         started = time.monotonic()
         deadline = started + config.validation_timeout
-        failed_checks: list[str] = []
-        error_messages: list[str] = []
-        results: dict[str, Any] = {}
-        log_result = None
-        # Something was not judged (an instance did not answer, the time ran out, a check broke or could not
-        # read); the attempt is inconclusive unless a check saw Valkey do something wrong.
-        inconclusive = False
-        judged_failure = False
-
-        # The budget is enforced between checks: a check that starts runs to the end, bounded by its own
-        # per-query timeouts, so its result is never mistaken for a timeout or the other way round.
-        def out_of_time() -> bool:
-            nonlocal inconclusive
-            if time.monotonic() < deadline:
-                return False
-            message = f"Validation timeout ({config.validation_timeout}s) exceeded"
-            logger.error(message)
-            failed_checks.append("validation_timeout")
-            error_messages.append(message)
-            inconclusive = True
-            return True
+        attempt = _Attempt(deadline, config.validation_timeout)
 
         if config.stabilization_wait > 0:
             logger.info("Waiting %ss for cluster stabilization before validation", config.stabilization_wait)
@@ -399,59 +408,37 @@ class DeploymentStateCheck:
         )  # fmt: skip
         check_logs_now = config.check_logs and failover_shards is not None
         try:
-            if not out_of_time() and (check_logs_now or any(enabled for _, enabled, _, _ in checks)):
+            if not attempt.out_of_time() and (check_logs_now or any(enabled for _, enabled, _, _ in checks)):
                 snapshot = self._snapshot = take_snapshot(self._connection, self._snapshot_timeout(), self._context)
                 stopped_shards = self._stopped_shards(snapshot)
                 if snapshot.unanswered:
                     # The checks would judge instances the snapshot never saw.
-                    inconclusive = True
-                    failed_checks.append("unanswered")
-                    error_messages.append(
+                    attempt.inconclusive = True
+                    attempt.failed_checks.append("unanswered")
+                    attempt.error_messages.append(
                         "running instance(s) did not answer: "
                         + ", ".join(f"{address} ({why})" for address, why in sorted(snapshot.unanswered.items()))
                     )
-                    checks = ()
-                    check_logs_now = False
-                for name, enabled, result_type, check in checks:
-                    if enabled and out_of_time():
-                        break
-                    if enabled:
-                        result, judged = self._run_check(name, result_type, check, failed_checks, error_messages)
-                        results[name] = result
-                        inconclusive |= not judged
-                        judged_failure |= judged and not result.success
                 else:
-                    if check_logs_now and not out_of_time():
-                        log_result = self._check_logs(snapshot, failover_shards)
-                        if not log_result.success:
-                            failed_checks.append("log_validation")
-                            judged_failure = True
-                        for finding in log_result.findings:
-                            logger.log(
-                                logging.ERROR if finding.severity == "error" else logging.WARNING,
-                                "Log validation %s - Shard %s, Node %s: %s | Log: %s",
-                                finding.severity,
-                                finding.shard_id,
-                                finding.instance_id,
-                                finding.message,
-                                finding.log_line,
-                            )
+                    every_check_ran = self._run_checks(attempt, checks)
+                    if every_check_ran and check_logs_now and not attempt.out_of_time():
+                        self._check_logs(attempt, snapshot, failover_shards)
         except WaitInterruptedError:
             raise
         except Exception as e:
             logger.error("Unexpected error during validation: %s", e)
-            failed_checks.append("validation_framework")
-            error_messages.append(f"Unexpected validation error: {e!s}")
-            inconclusive = True
+            attempt.failed_checks.append("validation_framework")
+            attempt.error_messages.append(f"Unexpected validation error: {e!s}")
+            attempt.inconclusive = True
 
         result = StateValidationResult(
-            overall_success=not failed_checks,
+            overall_success=not attempt.failed_checks,
             validation_duration=time.monotonic() - started,
-            inconclusive=inconclusive and not judged_failure,
-            log_validation=log_result,
-            failed_checks=failed_checks,
-            error_messages=error_messages,
-            **results,
+            inconclusive=attempt.inconclusive and not attempt.judged_failure,
+            log_validation=attempt.log_result,
+            failed_checks=attempt.failed_checks,
+            error_messages=attempt.error_messages,
+            **attempt.results,
         )
         if result.overall_success:
             logger.info("State validation PASSED (duration: %.2fs)", result.validation_duration)
@@ -459,10 +446,26 @@ class DeploymentStateCheck:
             logger.error(
                 "State validation FAILED (duration: %.2fs, failed checks: %s%s)",
                 result.validation_duration,
-                ", ".join(failed_checks),
+                ", ".join(attempt.failed_checks),
                 "; critical" if result.is_critical_failure() else "",
             )
         return result
+
+    def _run_checks(self, attempt: _Attempt, checks: Sequence[tuple[str, bool, type, Callable[[], Any]]]) -> bool:
+        """Run the enabled ``checks`` in order on ``attempt``; whether every one ran before the budget ran out.
+
+        The budget is enforced between checks: a check that starts runs to the end, bounded by its own per-query
+        timeouts, so its result is never mistaken for a timeout or the other way round."""
+        for name, enabled, result_type, check in checks:
+            if not enabled:
+                continue
+            if attempt.out_of_time():
+                return False
+            result, judged = self._run_check(name, result_type, check, attempt.failed_checks, attempt.error_messages)
+            attempt.results[name] = result
+            attempt.inconclusive |= not judged
+            attempt.judged_failure |= judged and not result.success
+        return True
 
     @staticmethod
     def _run_check(
@@ -484,8 +487,9 @@ class DeploymentStateCheck:
         logger.info("%s validation: %s", display_name, "PASSED" if result.success else "FAILED")
         return result, judged
 
-    def _check_logs(self, snapshot: Snapshot, failover_shards: set[int]) -> LogValidationResult:
-        """The log check over each instance's log, with its live role and shard."""
+    def _check_logs(self, attempt: _Attempt, snapshot: Snapshot, failover_shards: set[int]) -> None:
+        """The log check over each instance's log, with its live role and shard, recorded on ``attempt`` with its
+        findings logged."""
         by_id = {info.instance_id: info for info in snapshot.instances}
         nodes = [
             LogNode(
@@ -500,7 +504,20 @@ class DeploymentStateCheck:
             for info in [by_id.get(row.instance_id)]
             if info is not None
         ]
-        return check_logs(nodes, failover_shards, set(self._stopped), self._shards_with_primary_stopped)
+        attempt.log_result = check_logs(nodes, failover_shards, set(self._stopped), self._shards_with_primary_stopped)
+        if not attempt.log_result.success:
+            attempt.failed_checks.append("log_validation")
+            attempt.judged_failure = True
+        for finding in attempt.log_result.findings:
+            logger.log(
+                logging.ERROR if finding.severity == "error" else logging.WARNING,
+                "Log validation %s - Shard %s, Node %s: %s | Log: %s",
+                finding.severity,
+                finding.shard_id,
+                finding.instance_id,
+                finding.message,
+                finding.log_line,
+            )
 
     # -- retries ----------------------------------------------------------------
 
