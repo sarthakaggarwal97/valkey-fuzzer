@@ -223,3 +223,11 @@ print(TOOLS_HINT)
     )
     hint = result.stdout.strip()
     assert result.stderr.strip() == f"Error: tla2tools.jar not found and java not found on PATH: {hint}"
+
+
+def test_the_cli_import_does_not_load_the_valkey_client():
+    # `valkey-fuzzer --help` (and a command that builds no catalog) starts without the client, 50 ms of the import:
+    # the commands and the zoo import the local deployment's processes module where they run it.
+    loaded = "import sys, valkey_fuzzer.cli; print('valkey' in sys.modules)"
+    result = subprocess.run([sys.executable, "-c", loaded], cwd=ROOT, capture_output=True, text=True, check=True)
+    assert result.stdout == "False\n"

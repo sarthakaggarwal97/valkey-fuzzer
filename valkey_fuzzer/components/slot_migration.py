@@ -17,7 +17,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Optional
 
 import valkey
-from valkey.cluster import key_slot
+from valkey.crc import key_slot
 
 from valkey_fuzzer._data import jsonable
 from valkey_fuzzer.clock import now

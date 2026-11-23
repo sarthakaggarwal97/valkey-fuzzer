@@ -32,9 +32,10 @@ from valkey_fuzzer.deployment.local.models import (
     LocalDeployment,
     LocalDeploymentError,
 )
-from valkey_fuzzer.deployment.local.ports import PortUnavailableError, busy_planned_ports
+from valkey_fuzzer.deployment.local.ports import PortUnavailableError
 from valkey_fuzzer.deployment.local.provider import LOCAL_DEPLOYMENT_PROVIDER_ID, LocalDeploymentProvider
 from valkey_fuzzer.deployment.local.queries import Replication
+from valkey_fuzzer.deployment.local.rerun import busy_planned_ports
 from valkey_fuzzer.deployment.local.service import VALKEY_DEPLOYMENT_SERVICE, ValkeyDeploymentService
 from valkey_fuzzer.deployment.local.topology import TopologyNode
 from valkey_fuzzer.deployment.local.validation.replication import _recorded_primary

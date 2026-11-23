@@ -49,7 +49,6 @@ from typing import Any, Optional
 
 from .catalog import Catalog
 from .compiler import with_valkey_binary
-from .deployment.local.processes import parse_version_output, version_output
 from .documents import merge
 from .reports import read_yaml_mapping
 from .schema import ConfigError, ConfigField, ConfigSchema
@@ -221,6 +220,10 @@ def binary(builds: Path, case: Optional[ZooCase] = None) -> str:
 
 def check_build(path: str, commit: str) -> None:
     """Refuse a build whose ``valkey-server --version`` names another commit than the pinned one."""
+
+    # Imported here, so importing the batch package (and the CLI) does not load the processes module and the
+    # valkey client it brings.
+    from .deployment.local.processes import parse_version_output, version_output
 
     version = version_output(path)
     sha = parse_version_output(version)["git_sha"]

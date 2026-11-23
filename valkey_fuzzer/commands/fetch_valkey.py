@@ -8,7 +8,7 @@ instead of building it on its first run. Only the binary's path goes to stdout, 
 import argparse
 from typing import Any
 
-from ..deployment.local.processes import VALKEY_SOURCE_REF, VALKEY_SOURCE_SHA, fetch_valkey
+from ..deployment.local.models import VALKEY_SOURCE_REF, VALKEY_SOURCE_SHA
 from ..outcomes import EXIT_SUCCESS
 
 
@@ -28,6 +28,9 @@ def register(subparsers: Any) -> None:
 
 def fetch_valkey_command(args: argparse.Namespace) -> int:
     """Fetch and build the ref unless the cache has it, and print the binary's path."""
+
+    # Imported here, so building the parser does not load the processes module and the valkey client it brings.
+    from ..deployment.local.processes import fetch_valkey
 
     _, binary = fetch_valkey(args.ref)
     print(binary)

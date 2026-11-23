@@ -30,10 +30,8 @@
   deployment's (`valkey-fuzzer.deployment.local`, for `standalone` and `cluster`) with its components, as
   `docs/extending.md` has packs do, and `valkey_fuzzer/catalog.py` no longer imports `valkey_fuzzer.deployment.local`.
   A catalog built without a pack has no provider; `build_catalog(deployment_providers=...)` and
-  `RunService(deployment_providers=...)` still register the caller's. Importing the core (`valkey_fuzzer.catalog`,
-  `.service`, the CLI parser) no longer pulls in the local deployment and the `valkey` client: `create_parser()`
-  and `import valkey_fuzzer.batch` import about 20 ms less; `build_catalog()` is unchanged, since the pack loads
-  them.
+  `RunService(deployment_providers=...)` still register the caller's. `build_catalog()` is unchanged, since the pack
+  loads them.
 - The spec bridge's tools are imported where they are used: `valkey_fuzzer/commands/spec.py` and
   `valkey_fuzzer/batch/conform_plugin.py` import `spec.check`, `spec.conform` and `spec.translate` at the top, and
   `valkey_fuzzer.spec` no longer resolves names on first use; import each from its module (`spec.bundle`,
