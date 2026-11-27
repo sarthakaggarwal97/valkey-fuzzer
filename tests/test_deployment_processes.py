@@ -112,6 +112,21 @@ exit 1""",
     assert arguments_for_build(str(binary), arguments) == ["--crash-memcheck-enabled", "no"]
 
 
+def test_a_build_older_than_dual_channel_replication_starts_without_it(tmp_path):
+    # valkey.pool.replication draws dual-channel-replication-enabled (8.0's): a build from before it answered
+    # the config file with FATAL CONFIG FILE ERROR and the test was skipped whole (fuzzer-walk, valkey #490).
+    binary = fake_executable(
+        tmp_path / "valkey-server",
+        r"""case "$1" in
+  --dual-channel-replication-enabled) echo ">>> 'dual-channel-replication-enabled \"$2\"'"; echo "Bad directive";;
+  *) echo ">>> 'port \"-1\"'";;
+esac
+exit 1""",
+    )
+    arguments = ["--repl-diskless-sync", "yes", "--dual-channel-replication-enabled", "yes"]
+    assert arguments_for_build(str(binary), arguments) == ["--repl-diskless-sync", "yes"]
+
+
 @pytest.mark.parametrize(
     ("failure", "error"),
     [

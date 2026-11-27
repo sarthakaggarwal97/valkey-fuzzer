@@ -212,9 +212,11 @@ def _probe_output(path: str, mtime_ns: int, size: int, name: str, value: str) ->
 # IO-thread configs are hidden ones that only some releases know: io-threads-always-active and the copy-avoiding
 # replies are 9.1's, events-per-io-thread 8.0's to 9.0's (9.1 accepts and ignores it), prefetch-batch-max-size
 # 8.0's and later, and io-threads-do-reads 7.2's and 8.0's (8.1 and later accept and ignore it). The debug
-# assertions (a provider default) are 8.0's and later.
+# assertions (a provider default) are 8.0's and later. Dual-channel replication (8.0's) changes how a full sync
+# is carried, not the data the replica ends with: a build from before it syncs the one old way.
 UNOBSERVABLE_CONFIGS = {
     "activedefrag": "no",
+    "dual-channel-replication-enabled": None,
     "enable-debug-assert": None,
     "events-per-io-thread": None,
     "io-threads-always-active": None,
